@@ -1,5 +1,25 @@
 # Engineering workspace implementation ledger
 
+## 2026-09-14 consolidated Team engineering regression
+
+Production image `odysseus:jetson-engineering-20260914-requirements-ui12` is
+healthy. The exact ARM candidate completed the isolated no-network regression
+with **6550 passed, 33 skipped, 128 warnings** in 394.81 seconds. This release
+includes durable Team recovery, endpoint-qualified model selection, project
+policies and runner-backed terminal/files/Git operations, bounded verified
+browser evidence, Russian Team/Engineering controls, configurable context
+policy, owner-scoped project memory, and owner-approved requirements supplied
+only to local Team models. A real Jetson-to-Mac runner smoke command completed
+with exit code 0 and its output was recovered through `terminal.poll`.
+
+The absence of a fixed participant count is intentional: Team workers are
+paged, and dispatch is constrained by explicit per-task concurrency settings,
+approved budget and shared backend resource groups rather than a number of
+models. The Jetson group remains serial by configuration. This is not a claim
+that every roadmap stage is complete: cross-host source transfer/worktrees,
+preview/trace UI, DAP/profiling and paid-provider execution still require their
+own implemented and verified release stages.
+
 ## 2026-09-14 versioned project memory
 
 Production image `odysseus:jetson-engineering-20260914-memory-ui9` is healthy.
