@@ -5,6 +5,7 @@ its own tables; old TeamStore can still operate on its own tasks. Project-bound
 execution must not be enabled on an older runtime without the policy gate.
 """
 import json
+import os
 import posixpath
 import threading
 import uuid
@@ -106,7 +107,7 @@ class EngineeringStore:
             raise PermissionError('Explicit project execution-mode confirmation required')
         if access_mode not in (None, 'trusted_host', 'isolated'):
             raise ValueError('Unknown access mode')
-        if access_mode == 'isolated':
+        if access_mode == 'isolated' and os.environ.get('ODYSSEUS_ISOLATED_RUNNER_ENABLED') != '1':
             raise PermissionError('Verified isolated runner is not available; trusted-host fallback is forbidden')
         self.initialize()
         with self.team._tx() as db:
@@ -125,7 +126,7 @@ class EngineeringStore:
             raise Conflict('Project policy changed before dispatch')
         if effect not in {'read', 'write', 'execute'}:
             raise PermissionError('This action needs a separate scoped permission')
-        if effect != 'read' and project['access_mode'] != 'trusted_host':
+        if effect != 'read' and project['access_mode'] not in {'trusted_host', 'isolated'}:
             raise PermissionError('Choose and approve a supported execution mode first')
         return project
 

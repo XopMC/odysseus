@@ -74,7 +74,8 @@ explicitly.
 - **Engineering controls** — project registration starts read-only, with
   reviewed check commands, acceptance criteria, tool availability diagnostics,
   configurable context-compaction policies, and a read-only LSP discovery
-  panel. Language-server availability is reported per execution host.
+  panel. Language-server availability is reported per execution host; the
+  Jetson release includes a user-level Python/Pyright toolchain.
 - **Russian UI** — the shipped Team, engineering and context-policy panels are
   localized; endpoint labels in model selectors are not truncated.
 
@@ -89,6 +90,8 @@ explicitly.
 его нельзя считать полной IDE-поддержкой только из-за наличия кнопки.
 Низкоуровневый изолированный запуск Linux уже проверен на Jetson, но до
 публичного UI-потока проекта он остаётся отдельной операторской возможностью.
+На Jetson также проверен Pyright: открытие документа и поиск символов работают
+через LSP-runner без замены системного Node.js.
 
 ### Important
 
@@ -100,6 +103,8 @@ The LSP bridge works only with language servers actually installed and verified
 on the selected host; its presence is not full IDE support.
 The low-level Linux isolated-runner operation has been verified on Jetson, but
 remains an operator capability until the project-facing UI flow is released.
+Pyright has also been verified on Jetson for document open and symbol lookup,
+using a user-level Node runtime rather than replacing the system Node.js.
 
 ## Demo
 

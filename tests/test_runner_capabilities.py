@@ -21,6 +21,7 @@ class CapabilityTests(unittest.TestCase):
                 self.assertTrue(result['ok'], result)
                 self.assertEqual(result['result']['protocol_version'], 1)
                 self.assertIn('terminal.create', result['result']['supported_ops'])
+                self.assertEqual(len(result['result']['supported_ops']), len(set(result['result']['supported_ops'])))
                 self.assertEqual(before, (Path(directory) / 'metadata.json').read_bytes())
                 self.assertTrue(runner.handle({**request, 'op': 'resource.snapshot'})['ok'])
             finally:

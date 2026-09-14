@@ -88,7 +88,7 @@ class EngineeringCheckRunner:
         workspace_hash = _digest(before.get('sha256'))
         with self.team._tx() as db:
             current = self.checks.projects._project(db, owner, project_id)
-            if current['revision'] != project['revision'] or current['access_mode'] != 'trusted_host':
+            if current['revision'] != project['revision'] or current['access_mode'] not in {'trusted_host', 'isolated'}:
                 raise Conflict('Project policy changed before check dispatch')
             profile = self.checks._profile(db, project_id, profile_id)
             existing = db.execute('SELECT * FROM engineering_check_runs WHERE id=?', (run_id,)).fetchone()
@@ -227,7 +227,8 @@ class EngineeringCheckRunner:
                         raise Conflict('Approved check command changed before dispatch')
                 self._active(check_active)
                 try:
-                    job = await self._rpc(owner, current, 'command.start', dispatch['request'])
+                    operation = 'sandbox.command.start' if current['access_mode'] == 'isolated' else 'command.start'
+                    job = await self._rpc(owner, current, operation, dispatch['request'])
                 except (RuntimeError, TimeoutError, OSError):
                     return {'run_id': run_id, 'job_id': None, 'status': 'dispatch_unknown'}
             job_id = job['id']

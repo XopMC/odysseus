@@ -79,7 +79,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
   policyForm.append(uiEl('h4', 'Host access policy'), uiEl('p', 'Trusted-host access permits tools to act on the real host under its configured permissions. It is not a sandbox. Review the selected host and folder before confirming.'));
   const policyMode = el('select', undefined, 'policy-mode');
   policyMode.append(option('', 'Choose an access mode', true), option('trusted_host', 'Trusted host — explicit confirmation required', true));
-  const isolated = option('isolated', 'Isolated — unavailable (runtime not verified)', true); isolated.disabled = true; isolated.dataset.engineering = 'isolated-option'; policyMode.append(isolated);
+  const isolated = option('isolated', 'Isolated — verified runner required', true); isolated.disabled = true; isolated.dataset.engineering = 'isolated-option'; policyMode.append(isolated);
   const consent = el('input', undefined, 'consent'); consent.type = 'checkbox'; consent.id = `${prefix}-consent`;
   const consentLabel = el('label', undefined, undefined, 'team-check'); consentLabel.htmlFor = consent.id;
   consentLabel.append(consent, uiEl('span', 'I trust this host and approve access for the selected project.'));
@@ -1431,11 +1431,14 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
     createButton.textContent = creating ? 'Creating project…' : 'Create read-only project';
     bindUiText(createButton, creating ? 'Creating project…' : 'Create read-only project');
     projectSelect.disabled = loading || !projects.length;
+    isolated.disabled = !feature('isolated_execution');
     policyMode.disabled = !feature('policy') || !current() || loading || applying;
     consent.disabled = policyMode.disabled || staleProjects.has(selectedId);
-    policyButton.disabled = consent.disabled || !consent.checked || policyMode.value !== 'trusted_host';
-    policyButton.textContent = applying ? 'Saving policy…' : 'Confirm trusted-host access';
-    bindUiText(policyButton, applying ? 'Saving policy…' : 'Confirm trusted-host access');
+    const selectedMode = policyMode.value;
+    policyButton.disabled = consent.disabled || !consent.checked || !['trusted_host', 'isolated'].includes(selectedMode);
+    const policyLabel = selectedMode === 'isolated' ? 'Confirm isolated access' : 'Confirm trusted-host access';
+    policyButton.textContent = applying ? 'Saving policy…' : policyLabel;
+    bindUiText(policyButton, applying ? 'Saving policy…' : policyLabel);
     section.setAttribute('aria-busy', String(loading || creating || applying));
   }
 
@@ -1460,7 +1463,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
     onProjectSelected(project ? { ...project } : null);
     if (disposed || generation !== toolsGeneration) return;
     if (!project) { projectDetails.append(uiEl('p', 'No Engineering project selected. New Team runs use legacy settings.')); return; }
-    const access = project.access_mode === 'trusted_host' ? 'Trusted host (not isolated)' : project.access_mode === 'isolated' ? 'Isolated policy saved; isolated runtime is unavailable in this foundation.' : 'Read-only — trusted-host access has not been approved';
+    const access = project.access_mode === 'trusted_host' ? 'Trusted host (not isolated)' : project.access_mode === 'isolated' ? 'Isolated runner: approved checks run only in a verification copy.' : 'Read-only — host access has not been approved';
     projectDetails.append(el('p', project.name));
     for (const [label, value, authored] of [['Host', hosts.find(host => host.id === project.host_id)?.name || project.host_id], ['Folder', project.root], ['Policy', access, true], ['Revision', project.revision]]) {
       const row = el('p'); row.append(uiEl('span', label), el('span', ': '), authored ? uiEl('span', value) : el('span', String(value))); projectDetails.append(row);
@@ -1551,15 +1554,16 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
   policyForm.addEventListener('submit', async event => {
     event.preventDefault();
     const project = current();
-    if (disposed || applying || loading || !feature('policy') || !project || !consent.checked || policyMode.value !== 'trusted_host' || staleProjects.has(selectedId)) return;
+    const accessMode = policyMode.value;
+    if (disposed || applying || loading || !feature('policy') || !project || !consent.checked || !['trusted_host', 'isolated'].includes(accessMode) || (accessMode === 'isolated' && !feature('isolated_execution')) || staleProjects.has(selectedId)) return;
     // Pin the exact project/revision the user reviewed; never retry a conflict automatically.
-    const projectId = String(project.id), body = { expected_revision: project.revision, access_mode: 'trusted_host', confirmation: true };
+    const projectId = String(project.id), body = { expected_revision: project.revision, access_mode: accessMode, confirmation: true };
     applying = true; updateControls(); notice('Saving the confirmed project policy…');
     try {
       const updated = await request(`${API}/projects/${encodeURIComponent(projectId)}/policy`, { method: 'POST', body });
       if (disposed) return;
       projects = projects.map(item => String(item.id) === projectId ? updated : item);
-      if (selectedId === projectId) { void showProject(); notice('Trusted-host policy saved. This is not an isolated environment.'); }
+      if (selectedId === projectId) { void showProject(); notice(accessMode === 'isolated' ? 'Isolated policy saved. Approved checks run in a verification copy.' : 'Trusted-host policy saved. This is not an isolated environment.'); }
     } catch (error) {
       if (disposed) return;
       const conflict = Number(error?.status || error?.statusCode || error?.response?.status) === 409;

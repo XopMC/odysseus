@@ -36,6 +36,13 @@ def discover():
     result = []
     for language, command in LANGUAGES.items():
         path = shutil.which(command[0]) if command else None
+        # User services often have a deliberately narrow PATH.  A per-user
+        # language server is still an operator-installed binary, so discover
+        # the conventional user bin directory without executing it.
+        if command and not path:
+            candidate = Path.home() / '.local' / 'bin' / command[0]
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                path = str(candidate)
         result.append({'language': language, 'available': bool(path),
                        'argv': [path, *command[1:]] if path else None,
                        'reason': None if path else ('no_lsp' if command is None else 'not_installed')})
@@ -110,8 +117,15 @@ class Broker:
                 raise RuntimeError('LSP process limit reached')
             self.slot = True
             try:
+                env = dict(os.environ)
+                # The runner can use this operator-owned user toolchain for
+                # language servers (not for task commands). It avoids replacing
+                # a distribution Node runtime just to satisfy a modern LSP.
+                user_node = Path.home() / '.local' / 'odysseus-node' / 'bin' / 'node'
+                if user_node.is_file() and os.access(user_node, os.X_OK):
+                    env['PATH'] = str(user_node.parent) + os.pathsep + env.get('PATH', '')
                 self.proc = subprocess.Popen(self.argv, cwd=self.workspace, stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, env=env)
                 os.set_blocking(self.proc.stdin.fileno(), False)
                 self.reader = threading.Thread(target=self._read, daemon=True)
                 self.reader.start()

@@ -47,7 +47,7 @@ def setup_engineering_routes():
             'requirements': True,
             'baseline_comparison': True,
             'context_policy': os.environ.get('ODYSSEUS_CONTEXT_POLICY_ENABLED') == '1',
-            'isolated_execution': False, 'cross_host_workspaces': False,
+            'isolated_execution': os.environ.get('ODYSSEUS_ISOLATED_RUNNER_ENABLED') == '1', 'cross_host_workspaces': False,
             # The server-owned LSP bridge is live. Individual language servers
             # remain discoverable capabilities of the selected execution host.
             'lsp': True, 'debug': False, 'experiments': False}}
@@ -205,6 +205,15 @@ def setup_engineering_routes():
         body = await body_object(request, 4096)
         if set(body) != {'expected_revision', 'access_mode', 'confirmation'}:
             raise HTTPException(400, 'Policy requires revision, access_mode and confirmation')
+        if body['access_mode'] == 'isolated':
+            # A feature flag alone is not proof of a runner.  Verify the fixed
+            # server-owned operation before persisting a policy that needs it.
+            project = store.get_project(owner, project_id)
+            from src.engineering_hosts import call
+            response = await call(project['host_id'], 'runner.capabilities', {}, owner=owner,
+                                  scope='engineering-policy-' + project_id)
+            if not response.get('ok') or 'sandbox.command.start' not in response.get('result', {}).get('supported_ops', []):
+                raise HTTPException(409, 'Verified isolated runner is unavailable on this host')
         return store.set_policy(owner, project_id, **body)
 
     @router.get('/projects/{project_id}/events')

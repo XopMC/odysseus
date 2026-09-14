@@ -46,6 +46,14 @@ class EngineeringStoreTests(unittest.TestCase):
             self.store.set_policy('alice', project['id'], 1, 'isolated', confirmation=True)
         self.assertIsNone(self.store.get_project('alice', project['id'])['access_mode'])
 
+    def test_enabled_isolation_is_an_explicit_distinct_policy(self):
+        project = self.project()
+        from unittest.mock import patch
+        with patch.dict('os.environ', {'ODYSSEUS_ISOLATED_RUNNER_ENABLED': '1'}):
+            saved = self.store.set_policy('alice', project['id'], 1, 'isolated', confirmation=True)
+            self.assertEqual(saved['access_mode'], 'isolated')
+            self.store.assert_access('alice', project['id'], effect='execute', revision=2)
+
     def test_concurrent_policy_updates_have_one_winner(self):
         project = self.project()
         def update(_):

@@ -186,9 +186,12 @@ class Runner:
             before = self.workspace_digest(cwd, owner, scope)['sha256']
             if before != args['expected_workspace_hash']:
                 raise ValueError('workspace changed before check dispatch')
+            toolchain = '/bin/bash sha256:' + hashlib.sha256(Path('/bin/bash').read_bytes()).hexdigest()
+            if isolated:
+                toolchain = 'docker image:' + ISOLATED_IMAGE + ' shell:/bin/sh'
             check_evidence = {'workspace_hash': before, 'workspace_hash_after': None,
                               'command_hash': hashlib.sha256(command.encode()).hexdigest(),
-                              'toolchain': '/bin/bash sha256:' + hashlib.sha256(Path('/bin/bash').read_bytes()).hexdigest(),
+                              'toolchain': toolchain,
                               'protocol': 1}
             if 'check_run_id' in args:
                 if not isinstance(args['check_run_id'], str) or not re.fullmatch(r'[0-9a-f]{32}', args['check_run_id']):
@@ -1253,10 +1256,10 @@ class Runner:
                     result = self.verification_copy(args, owner, scope)
                 elif op == 'runner.capabilities':
                     result = runner_platform.capabilities(self.platform_identity)
-                    result['supported_ops'] += ['lsp.discover', 'lsp.start', 'lsp.request', 'lsp.diagnostics', 'lsp.stop']
-                    result['supported_ops'].append('workspace.digest')
-                    result['supported_ops'].append('workspace.verification-copy')
-                    result['supported_ops'].append('sandbox.command.start')
+                    for supported in ('lsp.discover', 'lsp.start', 'lsp.request', 'lsp.diagnostics', 'lsp.stop',
+                                      'workspace.digest', 'workspace.verification-copy', 'sandbox.command.start'):
+                        if supported not in result['supported_ops']:
+                            result['supported_ops'].append(supported)
                 elif op.startswith('lsp.'):
                     result = self._lsp(op, args, owner, scope)
                 else:

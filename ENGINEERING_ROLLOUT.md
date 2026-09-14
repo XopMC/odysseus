@@ -1,5 +1,21 @@
 # Engineering workspace implementation ledger
 
+## 2026-09-14 isolated policy and Jetson Python LSP
+
+Production image `odysseus:jetson-engineering-20260914-isolation-ui` is
+healthy with restart policy `always`. An explicit isolated project policy now
+requires the enabled feature flag and an authenticated runner capability check;
+approved checks dispatch only to `sandbox.command.start` in the retained
+verification copy. The policy never falls back to trusted-host execution.
+Targeted ARM regression passed 74 tests (2 skipped).
+
+Jetson Python LSP is live: Pyright is installed under the `xopmc` user, and the
+broker uses a private Node 22 runtime only for language-server processes, not
+for system services or task commands. A real runner session opened a `/tmp`
+Python document, returned `textDocument/documentSymbol`, and was stopped.
+Other language servers remain accurately unavailable until installed and
+tested. This does not complete stages 4, 9 or the full IDE roadmap.
+
 ## 2026-09-14 isolated-runner primitive
 
 The Jetson user host runner now has `sandbox.command.start`. It accepts only a

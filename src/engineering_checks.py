@@ -108,7 +108,7 @@ class EngineeringChecks:
         self.initialize()
         with self.team._tx() as db:
             project = self.projects._project(db, owner, project_id)
-            if project['access_mode'] != 'trusted_host':
+            if project['access_mode'] not in {'trusted_host', 'isolated'}:
                 raise PermissionError('Project execution is not approved')
             profile = self._profile(db, project_id, profile_id)
             run_id = uuid.uuid4().hex
@@ -192,7 +192,7 @@ class EngineeringChecks:
             profile = self._profile(db, project_id, run['profile_id'])
             stale = (profile['revision'] != run['profile_revision'] or
                      project['revision'] != run['project_revision'] or
-                     project['access_mode'] != 'trusted_host' or
+                     project['access_mode'] not in {'trusted_host', 'isolated'} or
                      evidence['workspace_hash_after'] != run['workspace_hash'])
             status = (terminal_status if terminal_status in ('timed_out', 'cancelled') else
                       'stale' if stale else 'passed' if evidence['exit_code'] == 0 else 'failed')
@@ -251,7 +251,7 @@ class EngineeringChecks:
                     # prior success: an in-flight retry or failure blocks completion.
                     run = db.execute('SELECT * FROM engineering_check_runs WHERE project_id=? AND profile_id=? AND profile_revision=? AND project_revision=? AND workspace_hash=? AND kind=? ORDER BY started_at DESC,rowid DESC LIMIT 1',
                                      (project_id, profile_id, profile['revision'], project['revision'], workspace_hash, 'check')).fetchone()
-                    passed = bool(run and run['status'] == 'passed' and project['access_mode'] == 'trusted_host')
+                    passed = bool(run and run['status'] == 'passed' and project['access_mode'] in {'trusted_host', 'isolated'})
                     linked.append({'profile_id': profile_id, 'profile_revision': profile['revision'],
                                    'run_id': run['id'] if run else None,
                                    'passed': passed, 'status': run['status'] if run else 'missing_or_stale'})

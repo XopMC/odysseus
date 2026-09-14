@@ -76,7 +76,7 @@ class Operations:
                 if json.loads(existing['request']) != request:
                     raise Conflict('Check request identity reused with different arguments')
                 return self.public(existing)
-            if project['access_mode'] != 'trusted_host':
+            if project['access_mode'] not in {'trusted_host', 'isolated'}:
                 raise PermissionError('Project execution is not approved')
             profile = checks._profile(db, project['id'], request['profile_id'])
             if (project['revision'] != request['expected_project_revision'] or
