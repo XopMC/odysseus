@@ -190,10 +190,10 @@ def test_project_memory_api_owner_confirmation_and_revision(client):
     assert client.post(url, json=stale).status_code == 409
     client.cookies.set('odysseus_session', 'bob-cookie')
     assert client.get(url).status_code == 404
-    assert client.delete(url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': True}).status_code == 404
+    assert client.request('DELETE', url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': True}).status_code == 404
     client.cookies.set('odysseus_session', 'alice-cookie')
-    assert client.delete(url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': False}).status_code == 403
-    assert client.delete(url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': True}).status_code == 200
+    assert client.request('DELETE', url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': False}).status_code == 403
+    assert client.request('DELETE', url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': True}).status_code == 200
     assert client.get(url).json()['items'] == []
 
 
