@@ -82,6 +82,34 @@ class EngineeringStoreTests(unittest.TestCase):
         with self.assertRaises(NotFound):
             self.store.events('bob', project['id'])
 
+    def test_project_memory_is_owner_scoped_versioned_and_evented(self):
+        project = self.project()
+        with self.assertRaises(PermissionError):
+            self.store.save_memory('alice', project['id'], memory_id='', kind='architecture',
+                                   text='Use a broker', source='docs/design.md:1', state='verified',
+                                   expected_revision=0, confirmation=False)
+        first = self.store.save_memory('alice', project['id'], memory_id='', kind='architecture',
+                                       text='Use a broker', source='docs/design.md:1', state='verified',
+                                       expected_revision=0, confirmation=True)
+        self.assertEqual(first['revision'], 1)
+        self.assertEqual(self.store.list_memory('alice', project['id']), [first])
+        with self.assertRaises(NotFound):
+            self.store.list_memory('bob', project['id'])
+        with self.assertRaises(Conflict):
+            self.store.save_memory('alice', project['id'], memory_id=first['id'], kind='architecture',
+                                   text='Updated', source='docs/design.md:2', state='verified',
+                                   expected_revision=0, confirmation=True)
+        second = self.store.save_memory('alice', project['id'], memory_id=first['id'], kind='constraint',
+                                        text='No public endpoint', source='docs/design.md:2', state='stale',
+                                        expected_revision=1, confirmation=True)
+        self.assertEqual(second['revision'], 2)
+        with self.assertRaises(Conflict):
+            self.store.delete_memory('alice', project['id'], first['id'], expected_revision=1, confirmation=True)
+        self.store.delete_memory('alice', project['id'], first['id'], expected_revision=2, confirmation=True)
+        self.assertEqual(self.store.list_memory('alice', project['id']), [])
+        kinds = [event['type'] for event in self.store.events('alice', project['id'])]
+        self.assertEqual(kinds[-3:], ['project_memory_saved', 'project_memory_saved', 'project_memory_deleted'])
+
     def test_invalid_roots_rejected_without_normalization_surprises(self):
         for root in ['relative', '/', '/work/../secret', '/work/./demo', '/work\x00/demo', '/work\\demo']:
             with self.assertRaises(ValueError):

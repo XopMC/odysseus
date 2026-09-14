@@ -92,6 +92,23 @@ async def test_new_task_pins_project_root_host_and_revision(context, monkeypatch
         await runtime.create('owner', 'other-session', dict(body, execution_host_id='attacker'))
 
 
+def test_verified_project_memory_is_bounded_and_never_implicit_external_transfer(context, monkeypatch):
+    store, projects, project, runtime, _, _ = context
+    local = {'endpoint_id': 'local', 'model': 'coder', 'local': True, 'resource_group': 'local'}
+    remote = {'endpoint_id': 'remote', 'model': 'coder', 'local': False, 'resource_group': 'remote'}
+    projects.save_memory('owner', project['id'], memory_id='', kind='architecture', text='Verified local fact',
+                         source='README.md:1', state='verified', expected_revision=0, confirmation=True)
+    projects.save_memory('owner', project['id'], memory_id='', kind='hypothesis', text='Do not send this',
+                         source='notes', state='proposed', expected_revision=0, confirmation=True)
+    task = store.create_task('owner', 'Task', metadata={'engineering_project_id': project['id']})
+    worker = store.add_worker('owner', task['id'], 'Worker', profile={'endpoint_id': 'local', 'model': 'coder'})
+    monkeypatch.setattr(team_config, 'resolve', lambda owner, endpoint, model: local if endpoint == 'local' else remote)
+    assert runtime.verified_project_memory('owner', store.get_task('owner', task['id']), worker) == [
+        {'kind': 'architecture', 'text': 'Verified local fact', 'source': 'README.md:1'}]
+    worker['profile']['endpoint_id'] = 'remote'
+    assert runtime.verified_project_memory('owner', store.get_task('owner', task['id']), worker) == []
+
+
 @pytest.mark.asyncio
 async def test_disabled_feature_cannot_resume_project_host_work(context, monkeypatch):
     store, _, project, runtime, _, transport = context
