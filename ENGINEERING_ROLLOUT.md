@@ -1009,3 +1009,21 @@ Only application image changed; runner, engine and feature permissions unchanged
 Health recovered. Rollback procedure retains new databases rather than overwriting
 new chats. No claim of complete Russian coverage, full live-render parity or
 completion of the entire engineering roadmap; those acceptance gaps remain open.
+
+### 2026-09-14 isolated-check and browser runtime hotfix
+
+- Production now uses `odysseus:jetson-engineering-20260914-isolation-ui4`.
+  The prior image and compose override remain under `/home/xopmc/services/` for rollback.
+- A disposable isolated project ran an approved check through web container,
+  authenticated runner, verification copy and Docker sandbox. It passed; recorded
+  evidence confirms `sandbox.command.start`, network `none`, read-only root and
+  the 512 MiB memory cap. No user project, chat or task was modified.
+- The smoke revealed and fixed two wiring defects: the transport allow-list omitted
+  `sandbox.command.start`, and the runner rejected server-generated check bindings.
+  Those two bindings are fixed metadata only; images, mounts, network settings and
+  arbitrary Docker arguments remain rejected.
+- Browser MCP had an unwritable npm cache. Its cache is now pinned to
+  `/tmp/odysseus-npm-cache`; after restart the log confirms the built-in browser
+  MCP connected with 30 tools. Service health is `healthy`.
+- Local runner regressions passed: 22 tests across host-runner, verification-copy
+  and capability suites. This does not claim completion of the remaining roadmap.
