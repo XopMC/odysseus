@@ -44,6 +44,21 @@ async def test_project_host_dispatch_revocation_and_readback(context):
 
 
 @pytest.mark.asyncio
+async def test_isolated_project_never_falls_back_to_trusted_team_execution(context, monkeypatch):
+    store, projects, project, runtime, legacy, transport = context
+    monkeypatch.setenv('ODYSSEUS_ISOLATED_RUNNER_ENABLED', '1')
+    task = store.create_task('owner', 'Task', metadata={'engineering_project_id': project['id']})
+    worker = store.add_worker('owner', task['id'], 'Worker')
+    projects.set_policy('owner', project['id'], 1, 'isolated', confirmation=True)
+    with pytest.raises(PermissionError, match='approved verification check'):
+        await runtime.host_call('owner', worker['id'], 'command.start', {'command': 'pwd'})
+    transport.assert_not_awaited()
+    legacy.assert_not_awaited()
+    await runtime.host_call('owner', worker['id'], 'terminal.poll', {'id': 'existing-job'})
+    assert transport.call_args.args[1] == 'terminal.poll'
+
+
+@pytest.mark.asyncio
 async def test_legacy_host_route_unchanged(context):
     store, _, _, runtime, legacy, transport = context
     task = store.create_task('owner', 'Legacy')

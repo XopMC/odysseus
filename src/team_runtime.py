@@ -159,6 +159,13 @@ class TeamRuntime:
         stop_ops = {'terminal.stop', 'scope.cancel'}
         read = op in read_ops or op in stop_ops or (op == 'file.call' and args.get('tool') in team_tools.READ_TOOLS)
         project = EngineeringStore(self.store).assert_access(owner, project_id, effect='read' if read else 'execute')
+        # The Team tool protocol has no way to bind an arbitrary model action
+        # to a disposable verification copy.  Never reinterpret an isolated
+        # project as trusted-host access just because a worker requested bash or
+        # a file mutation.  The dedicated check runner is the only path that
+        # can construct that copy and invoke sandbox.command.start.
+        if project['access_mode'] == 'isolated' and not read:
+            raise PermissionError('Isolated projects allow read-only agent tools; use an approved verification check for sandboxed execution')
         return await call(project['host_id'], op, args, owner=owner, scope=scope)
 
     def workspace_host(self, owner, team_id, coordinator_token=None):
