@@ -206,6 +206,10 @@ def setup_engineering_routes():
         if set(body) != {'expected_revision', 'access_mode', 'confirmation'}:
             raise HTTPException(400, 'Policy requires revision, access_mode and confirmation')
         if body['access_mode'] == 'isolated':
+            if os.environ.get('ODYSSEUS_ISOLATED_RUNNER_ENABLED') != '1':
+                # Preserve the feature boundary before contacting any runner.
+                # A disabled isolated mode must not reveal or exercise host RPC.
+                return store.set_policy(owner, project_id, **body)
             # A feature flag alone is not proof of a runner.  Verify the fixed
             # server-owned operation before persisting a policy that needs it.
             project = store.get_project(owner, project_id)
