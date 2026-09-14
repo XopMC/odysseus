@@ -91,6 +91,16 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
         yield
         return
 
+    # Team workers retain a resource slot for their whole bounded attempt.
+    # Normal chat must use that same slot or it could evict a worker's model.
+    # Independent Jetson/Mac backends no longer serialize each other here.
+    from src.team_config import enabled as teams_enabled, resource_group
+    if teams_enabled():
+        from src.team_model import resource_slot
+        async with resource_slot(resource_group(target_url)):
+            yield
+        return
+
     global _LOCAL_MODEL_WAITING_FOREGROUND
     kind = _gate_workload(workload)
     current_task = asyncio.current_task()
@@ -2273,6 +2283,7 @@ async def llm_call_async(
     workload: str = "foreground",
     availability_only_transport: bool = False,
     return_model_metadata: bool = False,
+    require_answer_content: bool = False,
 ) -> str | tuple[str, str]:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
@@ -2294,6 +2305,8 @@ async def llm_call_async(
     cache_key = _get_cache_key(
         url, model, messages_copy, temperature, max_tokens, headers=headers,
     )
+    if require_answer_content:
+        cache_key += ":answer-content-only"
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -2357,7 +2370,7 @@ async def llm_call_async(
                     if isinstance(reported_model, str) and reported_model.strip():
                         actual_model = reported_model.strip()
                 delta = data.get("delta")
-                if isinstance(delta, str):
+                if isinstance(delta, str) and not (require_answer_content and data.get("thinking")):
                     parts.append(delta)
         response = "".join(parts)
         _set_cached_response(cache_key, response, actual_model=actual_model)
@@ -2453,12 +2466,16 @@ async def llm_call_async(
                         # Mistral structured content — extract thinking + text
                         # (same contract as llm_call / stream_llm; see #5435).
                         text_part, thinking_part = _normalize_mistral_content(content)
-                        if thinking_part:
+                        if require_answer_content:
+                            response = text_part or ""
+                        elif thinking_part:
                             response = thinking_part + "\n\n" + (text_part or "")
                         else:
                             response = text_part or msg.get("reasoning_content") or ""
                     else:
-                        response = content or msg.get("reasoning_content") or ""
+                        response = (content or "") if require_answer_content else (content or msg.get("reasoning_content") or "")
+                if require_answer_content and not response.strip():
+                    raise HTTPException(502, "Model returned reasoning but no answer content")
                 _set_cached_response(
                     cache_key,
                     response,

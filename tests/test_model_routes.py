@@ -1702,6 +1702,25 @@ def _route_request():
     )
 
 
+def test_api_models_preserves_identical_names_on_distinct_endpoints(monkeypatch):
+    shared = "same-coder-model"
+    rows = [
+        _route_ep("jetson", "http://192.168.50.6:11434/v1", cached_models=[shared], endpoint_kind="local"),
+        _route_ep("mac", "http://192.168.50.90:1234/v1", cached_models=[shared], endpoint_kind="local"),
+        _route_ep("remote-a", "https://models-a.example/v1", cached_models=[shared], endpoint_kind="api"),
+        _route_ep("remote-b", "https://models-b.example/v1", cached_models=[shared], endpoint_kind="api"),
+    ]
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: _RouteDb(rows))
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+    router = model_routes.setup_model_routes(model_discovery=None)
+    data = _route_endpoint(router, "/api/models")(_route_request())
+    assert {(item["endpoint_id"], model) for item in data["items"]
+            for model in item["models"]} == {(row.id, shared) for row in rows}
+    assert len(data["items"]) == 4
+    assert len({item["url"] for item in data["items"]}) == 4
+
+
 def test_api_models_rejects_api_token_without_chat_scope(monkeypatch):
     router = model_routes.setup_model_routes(model_discovery=None)
 

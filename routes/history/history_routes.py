@@ -4,6 +4,7 @@ import json
 import uuid
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Request, HTTPException, Depends
@@ -99,6 +100,45 @@ def _merge_continue_rows_to_delete(db_messages, db1, db2):
         if getattr(between, "role", "") == "user" and            "previous response was interrupted" in (getattr(between, "content", "") or ""):
             to_delete.append(between)
     return to_delete
+
+
+def _context_route_matches(snapshot, session):
+    from src.agent_context import context_endpoint_key
+    return (snapshot['model'] == session.model and
+            ('endpoint_key' not in snapshot or snapshot['endpoint_key'] == context_endpoint_key(session.endpoint_url)))
+
+
+def _last_request_context(session):
+    """Use only the final assistant's explicit snapshot, labeled as historical.
+
+    An appended user/tool message or a later manual summary invalidates it.
+    Older billing metadata (input_tokens/context_percent) is not occupancy.
+    """
+    from src.agent_runs import normalize_context_usage
+
+    history = session.history
+    if not history or _message_role(history[-1]) != "assistant":
+        return None
+    metadata = getattr(history[-1], "metadata", None) or {}
+    snapshot = normalize_context_usage(metadata.get("working_context"))
+    if snapshot is None or not _context_route_matches(snapshot, session):
+        return None
+
+    def timestamp(meta):
+        try:
+            value = datetime.fromisoformat(str(meta.get("timestamp", "")).replace("Z", "+00:00"))
+            return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+        except (ValueError, TypeError):
+            return None
+
+    measured_at = timestamp(metadata)
+    for message in history[:-1]:
+        meta = getattr(message, "metadata", None) or {}
+        if meta.get("compacted"):
+            compacted_at = timestamp(meta)
+            if measured_at is None or compacted_at is None or compacted_at >= measured_at:
+                return None
+    return snapshot
 
 
 def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
@@ -663,12 +703,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
     @router.get("/api/session/{session_id}/context")
     async def get_session_context_usage(request: Request, session_id: str) -> Dict[str, Any]:
-        """Return an estimated whole-chat context usage for the session's model.
-
-        Streaming footers report the prompt size for the last request. This
-        endpoint estimates the persisted session context so the header can show
-        when the whole chat is approaching compaction.
-        """
+        """Report working request occupancy separately from saved-chat estimates."""
         _verify_session_owner(request, session_id)
         try:
             session = session_manager.get_session(session_id)
@@ -677,10 +712,22 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
         try:
             from src.model_context import estimate_tokens, get_context_length
+            from src.agent_runs import get_context_usage, is_active
+            from src.agent_context import context_endpoint_key
 
             messages = session.get_context_messages()
-            used = int(estimate_tokens(messages))
-            ctx_len = int(get_context_length(session.endpoint_url, session.model) or 0)
+            stored_used = int(estimate_tokens(messages))
+            active = is_active(session_id)
+            snapshot = get_context_usage(session_id)
+            if snapshot and not _context_route_matches(snapshot, session):
+                snapshot = None
+            status = "active_request" if snapshot else "stored_chat"
+            if not active and snapshot is None:
+                snapshot = _last_request_context(session)
+                if snapshot:
+                    status = "last_request"
+            used = snapshot["used_tokens"] if snapshot else stored_used
+            ctx_len = snapshot["context_length"] if snapshot else int(get_context_length(session.endpoint_url, session.model) or 0)
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
             pct = max(0.0, min(100.0, pct))
             visible_messages = sum(
@@ -691,20 +738,47 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 1 for m in session.history
                 if (getattr(m, "metadata", None) or {}).get("compacted")
             )
-            can_compact = used > 0
+            can_compact = stored_used > 0 and not active
+            # Keep the observed request separate from newly saved settings. A
+            # settings edit cannot retroactively change an in-flight snapshot.
+            from src.context_policy_runtime import owner_policy
+            saved_policy = None
+            policy_error = False
+            try:
+                record = owner_policy(getattr(session, 'owner', None), session_id=session_id)
+                if record:
+                    saved_policy = {
+                        'auto_compact': record['effective']['auto_compact'],
+                        'trigger_percent': record['effective']['trigger_percent'],
+                        'target_percent': record['effective']['target_percent'],
+                        'revisions': record['revisions'], 'threshold_basis': 'input_budget',
+                    }
+            except ValueError:
+                policy_error = True
             return {
                 "session_id": session_id,
                 "model": session.model,
                 "endpoint_url": session.endpoint_url,
+                "current_endpoint_key": context_endpoint_key(session.endpoint_url),
                 "used_tokens": used,
                 "context_length": ctx_len,
                 "context_percent": pct,
+                "source": snapshot["source"] if snapshot else "estimated",
+                "context_status": status,
+                "active_run": active,
+                "stored_chat_tokens": stored_used,
+                "prompt_tokens": snapshot.get("prompt_tokens") if snapshot else None,
+                "round": snapshot.get("round") if snapshot else None,
+                "compactions": snapshot.get("compactions", 0) if snapshot else 0,
                 "messages": visible_messages,
                 "context_messages": len(messages),
                 "compacted_messages": compacted_messages,
                 "can_compact": can_compact,
                 "should_compact": pct >= 70,
-                "auto_compact_threshold": 85,
+                "auto_compact_threshold": snapshot.get("auto_compact_threshold", 85) if snapshot else 85,
+                "auto_compact_enabled": snapshot.get("auto_compact_enabled", True) if snapshot else True,
+                "saved_context_policy": saved_policy,
+                "context_policy_error": policy_error,
             }
         except Exception as e:
             logger.error(f"Context usage error {session_id}: {e}")
@@ -769,17 +843,18 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             summary = normalize_compaction_summary(summary)
 
             # Replace session history: summary as system message + recent messages
+            compacted_at = datetime.now(timezone.utc).isoformat()
             # System message holds the full summary for AI context
             system_summary = ChatMessage(
                 role="system",
                 content=f"[Conversation summary — {len(older)} earlier messages were compacted]\n\n{summary}",
-                metadata={"compacted": True, "hidden": True},
+                metadata={"compacted": True, "hidden": True, "timestamp": compacted_at},
             )
             # Visible assistant message just shows stats
             summary_msg = ChatMessage(
                 role="assistant",
                 content=f"**Conversation compacted** — {len(older)} messages summarized, {len(recent)} kept.",
-                metadata={"compacted": True, "messages_removed": len(older)},
+                metadata={"compacted": True, "messages_removed": len(older), "timestamp": compacted_at},
             )
             new_history = [system_summary, summary_msg] + list(recent)
             session.history = new_history
@@ -800,7 +875,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 # Insert system summary (hidden, for AI context) and visible summary
                 import json as _json
                 import uuid
-                from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
                 db_sys_summary = DbChatMessage(
                     id=str(uuid.uuid4()),

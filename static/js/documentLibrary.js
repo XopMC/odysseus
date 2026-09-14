@@ -12,6 +12,7 @@ import markdownModule from './markdown.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { langIcon } from './langIcons.js';
 import { registerMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { bindUiText } from './i18n.js';
 
 // ── Injected references from documentModule ──
 let API_BASE = '';
@@ -206,6 +207,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       const iconKey = item.icon || item.label.toLowerCase();
       const iconSvg = _LIB_DD_ICONS[iconKey] || '';
       row.innerHTML = (iconSvg ? '<span class="dropdown-icon">' + iconSvg + '</span>' : '') + '<span>' + item.label + '</span>';
+      bindUiText(row.lastElementChild, item.label);
       row.addEventListener('click', (e) => { e.stopPropagation(); teardown(); item.action(); });
       dd.appendChild(row);
     }
@@ -216,6 +218,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         '<span class="dropdown-icon"><span style="font-size:16px;line-height:1;position:relative;top:-2px;">●</span></span>'
         + '<span>Select</span>';
       sel.addEventListener('click', (e) => { e.stopPropagation(); teardown(); opts.onSelect(); });
+      bindUiText(sel.lastElementChild, 'Select');
       dd.appendChild(sel);
     }
     const cancel = document.createElement('div');
@@ -224,6 +227,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       '<span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>'
       + '<span>Cancel</span>';
     cancel.addEventListener('click', (e) => { e.stopPropagation(); teardown(); if (typeof opts.onCancel === 'function') opts.onCancel(); });
+    bindUiText(cancel.lastElementChild, 'Cancel');
     dd.appendChild(cancel);
     document.body.appendChild(dd);
     const rect = anchor.getBoundingClientRect();
@@ -681,6 +685,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     openItem.className = 'dropdown-item-compact';
     openItem.style.cssText = 'background:none;border:none;width:100%;';
     openItem.innerHTML = _di(_openIco) + '<span>Open</span>';
+    bindUiText(openItem.lastElementChild, 'Open');
     if (doc.session_id) {
       openItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryOpenInSession(doc); });
     } else {
@@ -697,6 +702,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     cloneItem.className = 'dropdown-item-compact';
     cloneItem.style.cssText = 'background:none;border:none;width:100%;';
     cloneItem.innerHTML = _di(_cloneIco) + '<span>Clone</span>';
+    bindUiText(cloneItem.lastElementChild, 'Clone');
     cloneItem.title = 'Clone to active session';
     cloneItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryImportDocument(doc); });
     dropdown.appendChild(cloneItem);
@@ -707,6 +713,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     exportItem.className = 'dropdown-item-compact';
     exportItem.style.cssText = 'background:none;border:none;width:100%;';
     exportItem.innerHTML = _di(_exportIco) + '<span>Export</span>';
+    bindUiText(exportItem.lastElementChild, 'Export');
     exportItem.addEventListener('click', async (e) => {
       e.stopPropagation();
       hideCardDropdown();
@@ -732,6 +739,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     archiveItem.className = 'dropdown-item-compact';
     archiveItem.style.cssText = 'background:none;border:none;width:100%;';
     archiveItem.innerHTML = _di(_archiveIco) + `<span>${_libraryArchivedView ? 'Restore' : 'Archive'}</span>`;
+    bindUiText(archiveItem.lastElementChild, _libraryArchivedView ? 'Restore' : 'Archive');
     archiveItem.title = _libraryArchivedView ? 'Restore to active documents' : 'Archive (hide from the main list)';
     archiveItem.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -754,6 +762,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     deleteItem.className = 'dropdown-item-compact dropdown-item-danger';
     deleteItem.style.cssText = 'background:none;border:none;width:100%;';
     deleteItem.innerHTML = _di(_deleteIco) + '<span>Delete</span>';
+    bindUiText(deleteItem.lastElementChild, 'Delete');
     deleteItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryDeleteSingle(doc.id, card); });
     dropdown.appendChild(deleteItem);
 
@@ -1814,6 +1823,10 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     // Tab switching — Chats / Documents / Archive / Research
     let _activeLibTab = (opts && opts.tab) || 'documents';
     const _tabBtns = modal.querySelectorAll('[data-doclib-tab]');
+    _tabBtns.forEach(button => {
+      const source = {chats: 'Chats', documents: 'Documents', research: 'Research', archive: 'Archive section'}[button.dataset.doclibTab];
+      if (source) bindUiText(button, source);
+    });
     const _tabPanels = modal.querySelectorAll('[data-doclib-panel]');
 
     // Client-side pagination for tabs whose API returns everything at once
@@ -1853,7 +1866,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
       },
       archive: {
-        label: 'Archive',
+        label: 'Archive section',
         svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>',
       },
     };
@@ -1874,7 +1887,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         const ico = document.getElementById('doclib-header-icon');
         const txt = document.getElementById('doclib-header-text');
         if (ico) ico.innerHTML = hdr.svg;
-        if (txt) txt.textContent = hdr.label;
+        if (txt) { txt.textContent = hdr.label; bindUiText(txt, hdr.label); }
       }
       if (tab === 'chats') _renderLibChats();
       else if (tab === 'archive') _renderLibArchive();

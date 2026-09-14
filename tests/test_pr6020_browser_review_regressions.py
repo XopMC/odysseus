@@ -114,6 +114,12 @@ export function __pr6020StreamStateSmoke() {
     module_uri = module_path.as_uri()
     script = f"""
       globalThis.window = globalThis;
+      // Browser modules read navigator at import. Node 20 has none, whereas
+      // newer Node versions expose a getter-only native navigator.
+      Object.defineProperty(globalThis, 'navigator', {{
+        value: {{ platform: 'Linux', userAgent: 'Odysseus runtime smoke' }},
+        configurable: true,
+      }});
       globalThis.addEventListener = () => {{}};
       globalThis.removeEventListener = () => {{}};
       globalThis.dispatchEvent = () => {{}};

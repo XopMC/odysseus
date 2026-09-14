@@ -19,6 +19,9 @@ _SHELL_URL = (_REPO / "static" / "js" / "startupShell.js").as_uri()
 _HAS_NODE = shutil.which("node") is not None
 
 _IMPORT_REWRITES = {
+    "import { bindUiText } from './i18n.js';": (
+        f"import {{ bindUiText }} from '{(_REPO / 'static/js/i18n.js').as_uri()}';"
+    ),
     "import Storage from './storage.js';": "import Storage from './storage.mjs';",
     "import uiModule, { autoResize, styledPrompt } from './ui.js';": (
         "import uiModule, { autoResize, styledPrompt } from './ui.mjs';"

@@ -2397,6 +2397,8 @@ def setup_chat_routes(
                                     "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "context_usage", "compacted", "tool_retry_blocked",
+                                    "agent_prep",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _event_round = data.get("round", 1)

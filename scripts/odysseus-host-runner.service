@@ -1,0 +1,17 @@
+[Unit]
+Description=Odysseus persistent user host runner
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/services/odysseus-host/host_runner.py
+Environment=ODYSSEUS_HOST_RUNNER_STATE=%h/.local/state/odysseus-host-runner
+Restart=always
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

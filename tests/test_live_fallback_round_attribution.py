@@ -132,13 +132,14 @@ def test_detached_resume_surfaces_fallback_then_provider_alias_before_reload():
         "const box = new Element('main');",
         "const document = { getElementById(id) { return id === 'chat-history' ? box : null; }, createElement(tag) { return new Element(tag); } };",
         "const window = {};",
-        "let selectCalls = 0; const labels = []; const toasts = [];",
-        "const sessionModule = { getSessions() { return [{id: 's1', model: 'selected-model'}]; }, getCurrentSessionId() { return 's1'; }, selectSession() { selectCalls += 1; }, loadSessions() {} };",
+        "let selectCalls = 0, canonicalRefreshes = 0; const labels = []; const toasts = [];",
+        "const sessionModule = { getSessions() { return [{id: 's1', model: 'selected-model'}]; }, getCurrentSessionId() { return 's1'; }, getSessionViewToken() { return 1; }, selectSession() { selectCalls += 1; }, async refreshSessionHistory(id) { if(id !== 's1') throw Error('wrong session'); canonicalRefreshes += 1; }, loadSessions() {} };",
         "const uiModule = { esc(value) { return String(value); }, scrollHistory() {}, showToast(value) { toasts.push(value); } };",
         "const spinnerModule = { create() { return { element: null, createElement() { this.element = new Element('spinner'); return this.element; }, start() {}, destroy() { if (this.element) this.element.remove(); } }; } };",
         "const markdownModule = { normalizeThinkingMarkup(v) { return v; }, mdToHtml(v) { return v; }, squashOutsideCode(v) { return v; } };",
         "const documentModule = null; const chatRenderer = { recordSessionMetricsCost() {}, addMessage() {} };",
-        "const _resumingStreams = new Set(); const _streamRunIds = new Map(); const API_BASE = '';",
+        "const _resumingStreams = new Map(); const _streamRunIds = new Map(); const _streamGenerations = new Map([['s1', 1]]); const API_BASE = '';",
+        "function refreshChatContextHeader() {}",
         "function hasActiveStream() { return false; } function _shortModel(v) { return v; } function _applyModelColor() {}",
         "function _setRoleModelLabel(role, requested, actual) { labels.push({requested, actual}); role.textContent = requested + ' -> ' + actual; }",
         "function _streamDisplayText(v) { return v; } function _showDocumentWritingStatus() {} function _finishDocumentWritingStatus() {} function _metricsCostRecordId() { return 'run'; }",
@@ -153,7 +154,7 @@ def test_detached_resume_surfaces_fallback_then_provider_alias_before_reload():
         "async function fetch() { return { ok:true, body:{getReader(){return reader;}}, headers:{get(){return 'run-1';}} }; }",
         _resume_function_source(),
         "await resumeStream('s1');",
-        "console.log(JSON.stringify({labels, toasts, selectCalls, holderCount: box.children.length}));",
+        "console.log(JSON.stringify({labels, toasts, selectCalls, canonicalRefreshes, holderCount: box.children.length, subscriptions: _resumingStreams.size}));",
     ])
 
     assert _run_node(source) == {
@@ -162,8 +163,11 @@ def test_detached_resume_surfaces_fallback_then_provider_alias_before_reload():
             {"requested": "selected-model", "actual": "provider/fallback-alias"},
         ],
         "toasts": ["Fallback: selected-model failed — answered by fallback-model"],
-        "selectCalls": 1,
+        # Canonical refresh preserves the unsent composer, unlike navigation.
+        "selectCalls": 0,
+        "canonicalRefreshes": 1,
         "holderCount": 0,
+        "subscriptions": 0,
     }
 
 
@@ -189,14 +193,15 @@ def test_detached_resume_renders_preoutput_error_without_empty_reload():
         "const box = new Element('main');",
         "const document = { getElementById(id) { return id === 'chat-history' ? box : null; }, createElement(tag) { return new Element(tag); } };",
         "const window = {};",
-        "let selectCalls = 0;",
-        "const sessionModule = { getSessions() { return [{id: 's1', model: 'selected'}]; }, getCurrentSessionId() { return 's1'; }, selectSession() { selectCalls += 1; }, loadSessions() {} };",
+        "let selectCalls = 0, canonicalRefreshes = 0;",
+        "const sessionModule = { getSessions() { return [{id: 's1', model: 'selected'}]; }, getCurrentSessionId() { return 's1'; }, getSessionViewToken() { return 1; }, selectSession() { selectCalls += 1; }, async refreshSessionHistory() { canonicalRefreshes += 1; }, loadSessions() {} };",
         "const uiModule = { esc(value) { return String(value); }, scrollHistory() {} };",
         "const spinnerModule = { create() { return { element: null, createElement() { this.element = new Element('spinner'); return this.element; }, start() {}, destroy() { if (this.element) this.element.remove(); } }; } };",
         "const markdownModule = { normalizeThinkingMarkup(v) { return v; }, mdToHtml(v) { return v; }, squashOutsideCode(v) { return v; } };",
         "const documentModule = null;",
         "const chatRenderer = { recordSessionMetricsCost() {}, addMessage() {} };",
-        "const _resumingStreams = new Set(); const _streamRunIds = new Map(); const API_BASE = '';",
+        "const _resumingStreams = new Map(); const _streamRunIds = new Map(); const _streamGenerations = new Map([['s1', 1]]); const API_BASE = '';",
+        "function refreshChatContextHeader() {}",
         "function hasActiveStream() { return false; } function _shortModel(v) { return v; } function _applyModelColor() {}",
         "function _streamDisplayText(v) { return v; } function _showDocumentWritingStatus() {} function _finishDocumentWritingStatus() {} function _metricsCostRecordId() { return 'run'; }",
         "const encoded = new TextEncoder().encode('event: error\\ndata: {\"status\":401,\"error\":\"invalid key <img src=x>\"}\\n\\n');",
@@ -205,14 +210,16 @@ def test_detached_resume_renders_preoutput_error_without_empty_reload():
         _resume_function_source(),
         "const result = await resumeStream('s1');",
         "const holder = box.children[0]; const errorNode = holder && holder._content.children.find(node => node.textContent.startsWith('[Error:'));",
-        "console.log(JSON.stringify({result, selectCalls, holderCount: box.children.length, errorText: errorNode && errorNode.textContent}));",
+        "console.log(JSON.stringify({result, selectCalls, canonicalRefreshes, holderCount: box.children.length, errorText: errorNode && errorNode.textContent, subscriptions: _resumingStreams.size}));",
     ])
 
     assert _run_node(source) == {
         "result": True,
         "selectCalls": 0,
+        "canonicalRefreshes": 0,
         "holderCount": 1,
         "errorText": "[Error: invalid key <img src=x>]",
+        "subscriptions": 0,
     }
 
 

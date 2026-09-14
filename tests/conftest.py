@@ -61,6 +61,13 @@ if "src.database" not in sys.modules:
 # collection, which breaks session import in subsequent tests).
 import core.models  # noqa: E402
 
+# Several legacy parser tests install a MagicMock for src.agent_tools if it has
+# not been imported yet. That turns the actual package into a non-package and
+# breaks web/session-tool collection when these tests are run as a smaller shard.
+# Load the real package first, just as for core.models above. Tool construction
+# registers handlers but does not execute them; tests still patch calls locally.
+import src.agent_tools  # noqa: E402
+
 def pytest_configure(config):
     """Register the dynamic taxonomy ``sub_*`` markers before collection.
 

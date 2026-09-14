@@ -9,6 +9,7 @@ import * as Modals from './modalManager.js';
 import spinnerModule from './spinner.js';
 import { registerMenuDismiss, dismissTopMenu, dismissOrRemove } from './escMenuStack.js';
 import { nextToolWindowZ, topToolWindowZ } from './toolWindowZOrder.js';
+import { bindUiText, unbindUiText } from './i18n.js';
 
 let toastEl = null;
 let autoScrollEnabled = true;
@@ -618,6 +619,9 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
     okBtn.textContent = confirmText;
     cancelBtn.textContent = cancelText;
     altBtn.textContent = alternateText || '';
+    for (const [button, label] of [[okBtn, confirmText], [cancelBtn, cancelText], [altBtn, alternateText || '']]) {
+      unbindUiText(button); bindUiText(button, label);
+    }
     okBtn.className = danger ? 'confirm-btn confirm-btn-danger' : 'confirm-btn confirm-btn-primary';
     cancelBtn.className = 'confirm-btn confirm-btn-secondary';
     altBtn.className = 'confirm-btn confirm-btn-secondary';
@@ -721,6 +725,9 @@ export function styledPrompt(message, {
     input.maxLength = maxLength;
     okBtn.textContent = confirmText;
     cancelBtn.textContent = cancelText;
+    for (const [button, label] of [[okBtn, confirmText], [cancelBtn, cancelText]]) {
+      unbindUiText(button); bindUiText(button, label);
+    }
 
     // Remember what had focus so we can restore it when the dialog closes.
     const _prevFocus = document.activeElement;

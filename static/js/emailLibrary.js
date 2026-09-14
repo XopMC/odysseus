@@ -4,6 +4,7 @@
  */
 
 import spinnerModule from './spinner.js';
+import { bindUiText, t } from './i18n.js';
 import { styledConfirm, showToast, emptyStateIcon } from './ui.js';
 import { folderDisplayName, sortedFolders } from './emailInbox.js?v=20260815approvalsave1';
 import settingsModule from './settings.js';
@@ -3714,6 +3715,7 @@ function _scoreFilterOption(opt, needle) {
     if (kw.includes(needle)) return 2;
   }
   if (opt.label.toLowerCase().includes(needle)) return 2;
+  if (t(opt.label).toLowerCase().includes(needle)) return 2;
   return 0;
 }
 
@@ -3885,11 +3887,17 @@ function _renderSearchPills() {
     </span>`;
   }).join('');
   wrap.querySelectorAll('.email-lib-pill-x').forEach(btn => {
+    bindUiText(btn, 'Remove', 'title');
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const idx = Number(btn.dataset.pillIdx);
       if (Number.isFinite(idx)) _removeSearchPillAt(idx);
     });
+  });
+  wrap.querySelectorAll('.email-lib-filter-pill').forEach(pill => {
+    const value = pills[Number(pill.dataset.pillIdx)]?.value;
+    const authored = _LIB_FILTER_OPTIONS.find(option => option.value === value);
+    if (authored) bindUiText(pill, authored.label, 'title');
   });
 }
 
@@ -4045,6 +4053,10 @@ function _renderSearchSuggestions(items) {
   }).join('');
   menu.style.display = '';
   menu.querySelectorAll('.email-lib-suggest-item').forEach(row => {
+    const suggestion = items[Number(row.dataset.idx)];
+    const authored = suggestion?.kind === 'filter'
+      ? _LIB_FILTER_OPTIONS.find(option => option.value === suggestion.value) : null;
+    if (authored) bindUiText(row.children[1], authored.label);
     row.addEventListener('mousedown', (e) => {
       // mousedown (not click) so we beat the input blur handler that hides the menu.
       e.preventDefault();
@@ -7896,6 +7908,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
     item.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
     const arrow = a.submenu ? '<span style="margin-left:auto;opacity:0.5;">›</span>' : '';
     item.innerHTML = _icon(a.icon) + `<span>${a.label}</span>${arrow}`;
+    bindUiText(item.children[1], a.label);
     item.addEventListener('click', (e) => {
       e.stopPropagation();
       if (a.submenu === 'remind') {
@@ -7917,6 +7930,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
   const cancelItem = document.createElement('div');
   cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
   cancelItem.innerHTML = _icon(_cancelIco) + '<span>Cancel</span>';
+  bindUiText(cancelItem.lastElementChild, 'Cancel');
   cancelItem.addEventListener('click', (e) => {
     e.stopPropagation();
     close();
@@ -8107,6 +8121,7 @@ function _showCardMenu(em, anchor) {
     item.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
     const arrow = a.submenu ? '<span style="margin-left:auto;opacity:0.5;">›</span>' : '';
     item.innerHTML = _icon(a.icon) + `<span>${a.label}</span>${arrow}`;
+    bindUiText(item.children[1], a.label);
     item.addEventListener('click', (e) => {
       e.stopPropagation();
       if (a.submenu === 'remind') {
@@ -8124,6 +8139,7 @@ function _showCardMenu(em, anchor) {
   const cancelItem = document.createElement('div');
   cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
   cancelItem.innerHTML = _icon(_cancelIco) + '<span>Cancel</span>';
+  bindUiText(cancelItem.lastElementChild, 'Cancel');
   cancelItem.addEventListener('click', (e) => {
     e.stopPropagation();
     close();
@@ -8157,6 +8173,7 @@ function _showBulkActionsMenu(anchor) {
     const it = document.createElement('div');
     it.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
     it.innerHTML = `<span class="dropdown-icon">${a.icon}</span><span>${a.label}</span>`;
+    bindUiText(it.lastElementChild, a.label);
     it.addEventListener('click', (e) => { e.stopPropagation(); close(); a.action(); });
     dropdown.appendChild(it);
   }
@@ -8165,6 +8182,7 @@ function _showBulkActionsMenu(anchor) {
   const cancelIt = document.createElement('div');
   cancelIt.className = 'dropdown-item-compact dropdown-cancel-mobile';
   cancelIt.innerHTML = `<span class="dropdown-icon">${_cancelIco2}</span><span>Cancel</span>`;
+  bindUiText(cancelIt.lastElementChild, 'Cancel');
   cancelIt.addEventListener('click', (e) => {
     e.stopPropagation();
     close();
@@ -8548,6 +8566,7 @@ function _showEmailTranslateSubmenu(reader, parentDropdown) {
   header.className = 'dropdown-item-compact';
   header.style.cssText = 'opacity:0.5;font-size:10px;pointer-events:none;text-transform:uppercase;letter-spacing:0.5px;padding-top:6px;';
   header.innerHTML = '<span>Translate to</span>';
+  bindUiText(header.lastElementChild, 'Translate to');
   parentDropdown.appendChild(header);
 
   const customRow = document.createElement('div');
@@ -8560,6 +8579,8 @@ function _showEmailTranslateSubmenu(reader, parentDropdown) {
   parentDropdown.appendChild(customRow);
   const input = customRow.querySelector('.email-translate-custom-input');
   const go = customRow.querySelector('.email-translate-custom-go');
+  bindUiText(go, 'Go');
+  bindUiText(input, 'Write language...', 'placeholder');
   const runCustom = async () => {
     const language = (input?.value || '').trim();
     if (!language) {
@@ -8590,6 +8611,7 @@ function _showEmailTranslateSubmenu(reader, parentDropdown) {
     const item = document.createElement('div');
     item.className = 'dropdown-item-compact';
     item.innerHTML = `<span>${language}</span>`;
+    bindUiText(item.lastElementChild, language);
     item.addEventListener('click', async (e) => {
       e.stopPropagation();
       parentDropdown.remove();
@@ -8606,6 +8628,7 @@ function _showLibRemindSubmenu(em, parentDropdown) {
   header.className = 'dropdown-item-compact';
   header.style.cssText = 'opacity:0.5;font-size:10px;pointer-events:none;text-transform:uppercase;letter-spacing:0.5px;padding-top:6px;';
   header.innerHTML = '<span>Remind me</span>';
+  bindUiText(header.lastElementChild, 'Remind me');
   parentDropdown.appendChild(header);
 
   const now = new Date();
@@ -8626,6 +8649,7 @@ function _showLibRemindSubmenu(em, parentDropdown) {
     const item = document.createElement('div');
     item.className = 'dropdown-item-compact';
     item.innerHTML = `<span>${p.label}</span><span style="margin-left:auto;opacity:0.5;font-size:10px;">${p.sub}</span>`;
+    bindUiText(item.firstElementChild, p.label);
     item.addEventListener('click', async (e) => {
       e.stopPropagation();
       parentDropdown.remove();
@@ -8636,6 +8660,7 @@ function _showLibRemindSubmenu(em, parentDropdown) {
   const customItem = document.createElement('div');
   customItem.className = 'dropdown-item-compact';
   customItem.innerHTML = '<span>Pick date and time…</span>';
+  bindUiText(customItem.lastElementChild, 'Pick date and time…');
   customItem.addEventListener('click', (e) => {
     e.stopPropagation();
     parentDropdown.remove();
@@ -8660,6 +8685,7 @@ function _showLibRemindSubmenu(em, parentDropdown) {
   const noteItem = document.createElement('div');
   noteItem.className = 'dropdown-item-compact';
   noteItem.innerHTML = '<span>Note</span>';
+  bindUiText(noteItem.lastElementChild, 'Note');
   noteItem.addEventListener('click', (e) => {
     e.stopPropagation();
     parentDropdown.remove();

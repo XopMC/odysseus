@@ -125,11 +125,11 @@ def _safesearch_for(provider: str) -> Optional[str]:
 
 _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "idag")
 
-# Default general engines (google/duckduckgo/brave/startpage/wikipedia) are
-# routinely rate-limited / CAPTCHA-blocked on this instance and return nothing.
-# Pin engines that actually respond so non-news queries get results without any
-# third-party API fallback. Override via SEARXNG_GENERAL_ENGINES.
-_GENERAL_ENGINES = os.environ.get("SEARXNG_GENERAL_ENGINES", "bing,mojeek,presearch")
+# Let the instance choose its defaults unless the administrator pins engines.
+# Availability and relevance vary by deployment; a hardcoded "working" list can
+# silently route every query to an unhealthy engine. Preserve an explicit list
+# through fallbacks rather than re-enabling engines the administrator excluded.
+_GENERAL_ENGINES = os.environ.get("SEARXNG_GENERAL_ENGINES", "").strip()
 
 
 def searxng_search_api(query: str, count: Optional[int] = None, categories: str = "general",
@@ -167,8 +167,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             params["time_range"] = "week" if time_filter in ("day", "week") else time_filter
     else:
         params["categories"] = categories
-        # Route general queries to engines that aren't blocked (default general
-        # set returns 0 on this instance — see _GENERAL_ENGINES).
+        # An explicit deployment selection overrides the instance defaults.
         if categories == "general" and _GENERAL_ENGINES:
             params["engines"] = _GENERAL_ENGINES
     try:
@@ -198,7 +197,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         parsed, data = _run(active_params)
         if not parsed and is_news and categories == "general":
             # Some self-hosted SearXNG configs have no working news engines.
-            # Fall back to the known-good general engines before reporting an
+            # Fall back to the configured general engines before reporting an
             # empty search, otherwise common queries like "Canada news" fail.
             fallback = {
                 "q": query,
@@ -224,14 +223,6 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             )
             active_params = fallback
             parsed, data = _run(active_params)
-        if not parsed and active_params.get("engines"):
-            fallback = dict(active_params)
-            fallback.pop("engines", None)
-            logger.info(
-                "SearXNG pinned engines returned 0 results for %r; retrying default engines",
-                query,
-            )
-            parsed, data = _run(fallback)
         logger.info(f"SearXNG JSON API returned {len(parsed)} results for: {query}")
         if not parsed:
             unresponsive = data.get("unresponsive_engines") if isinstance(data, dict) else None
@@ -240,23 +231,28 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         return parsed
     except Exception as e:
         logger.warning(f"SearXNG JSON API search failed: {e}")
-        html_results = searxng_search(query, max_results=count)
+        html_results = searxng_search(query, max_results=count, search_params=active_params)
         if html_results:
             logger.info(f"SearXNG HTML fallback returned {len(html_results)} results for: {query}")
         return html_results
 
 
-def searxng_search(query, max_results=10):
+def searxng_search(query, max_results=10, *, search_params=None):
     """Search using SearXNG instance - parsing HTML."""
     instance = _get_search_instance()
     api_key = ""
     req_headers = {"User-Agent": WEB_FETCH_USER_AGENT}
     if api_key:
         req_headers["Authorization"] = f"Bearer {api_key}"
+    params = dict(search_params or {})
+    if search_params is None and _GENERAL_ENGINES:
+        params["engines"] = _GENERAL_ENGINES
+    params.update({"q": query, "safesearch": _safesearch_for("searxng")})
+    params.pop("format", None)
     try:
         response = httpx.get(
             f"{instance}/search",
-            params={"q": query, "safesearch": _safesearch_for("searxng")},
+            params=params,
             headers=req_headers,
             timeout=10,
         )

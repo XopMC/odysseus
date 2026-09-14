@@ -9,7 +9,10 @@ Fix: (1) Read from JSON body as fallback.
 """
 
 import ast
+import json
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -321,24 +324,48 @@ def test_explicit_false_disables_even_for_admin():
     assert "bash" in disabled
 
 
-# ── Frontend source-level guards ──────────────────────────────
+# ── Frontend form serialization ───────────────────────────────
 
 _CHAT_JS = Path(__file__).resolve().parent.parent / "static" / "js" / "chat.js"
 
 
-def test_frontend_always_sends_explicit_allow_bash():
+def _frontend_tool_form(*, bash, web, mode="agent"):
+    """Execute the shipped serialization block with a captured per-send choice.
+
+    Full async-submit/preflight coverage lives in test_chat_send_tool_choices_js;
+    this focused boundary additionally exercises both true and false permissions.
+    """
+    if not shutil.which("node"):
+        pytest.skip("node binary not on PATH")
+    source = _CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("// Web toggle: pre-search in Chat mode only.")
+    end = source.index("if (!choicesForSend.rag)", start)
+    script = "\n".join([
+        "const fd = new FormData();",
+        "const choicesForSend = " + json.dumps({"bash": bash, "web": web, "mode": mode}) + ";",
+        "const isIncognitoForSend = false, msg = 'Hello', documentModule = null;",
+        "const activeDocIdForSend = null, approvalForSend = false;",
+        "let _pendingApprovedPlan = '';",
+        source[start:end],
+        "console.log(JSON.stringify(Object.fromEntries(fd)));",
+    ])
+    result = subprocess.run(
+        ["node", "--input-type=module"], input=script, text=True,
+        capture_output=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_frontend_always_sends_explicit_allow_bash(enabled):
     """chat.js must always send allow_bash (both true and false), not only on toggle ON."""
-    source = _CHAT_JS.read_text(encoding="utf-8")
-    # Must not only append 'true' — must also handle the false case
-    assert "allow_bash', el('bash-toggle').checked ? 'true' : 'false'" in source or \
-           "allow_bash', 'false'" in source, (
-        "Frontend must send explicit allow_bash=false when toggle is off"
-    )
+    assert _frontend_tool_form(bash=enabled, web=False)["allow_bash"] == str(enabled).lower()
 
 
-def test_frontend_sends_explicit_allow_web_search_false_in_agent_mode():
-    """chat.js must send allow_web_search=false when web toggle is off in agent mode."""
-    source = _CHAT_JS.read_text(encoding="utf-8")
-    assert "fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false')" in source, (
-        "Frontend must send explicit allow_web_search=false in agent mode when toggle is off"
-    )
+@pytest.mark.parametrize("enabled", [False, True])
+def test_frontend_sends_explicit_allow_web_search_false_in_agent_mode(enabled):
+    """Agent permission is explicit in either state; Chat pre-search stays separate."""
+    form = _frontend_tool_form(bash=False, web=enabled)
+    assert form["allow_web_search"] == str(enabled).lower()
+    assert "use_web" not in form

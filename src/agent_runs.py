@@ -11,20 +11,28 @@ completion, so reopening the session shows the finished result even if nobody
 was connected when it finished. Reconnecting mid-run replays the buffer + streams
 live (pick up where it is).
 
-Durability scope: in-memory, survives as long as the server process runs (tab
-close / navigation / refresh). It does NOT survive a server restart.
+With ODYSSEUS_DURABLE_CHAT_REPLAY=1, events are disk-backed with bounded storage.
+Replay survives process restart, execution does not: unfinished runs are exposed
+as interrupted and their commands are never replayed automatically.
 """
 import asyncio
 import json
 import logging
+import math
+import os
 import uuid
 from typing import AsyncGenerator, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 
+def replay_root():
+    from src.constants import DATA_DIR
+    return os.path.join(DATA_DIR, 'chat-replay')
+
+
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "context_usage")
 
     def __init__(self) -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
@@ -35,6 +43,7 @@ class _Run:
         # Stable across every subscription/replay of this exact detached run.
         # The browser uses it to make local cost accounting replay-idempotent.
         self.run_id: str = uuid.uuid4().hex
+        self.context_usage: Optional[dict] = None
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -48,11 +57,23 @@ _EVICT_GRACE_S = 180
 
 def _publish(run: _Run, ev: str) -> None:
     """Append one SSE event and fan it out to every live subscriber."""
+    # Bind measurements to this exact run, not a session lookup: a cancelled
+    # predecessor can still publish while its replacement is being started.
+    try:
+        payload = json.loads("\n".join(
+            line[5:].lstrip() for line in ev.splitlines() if line.startswith("data:")
+        ))
+        if isinstance(payload, dict) and payload.get("type") == "context_usage":
+            snapshot = normalize_context_usage(payload.get("data"))
+            if snapshot is not None:
+                run.context_usage = snapshot
+    except (TypeError, ValueError):
+        pass  # Other SSE events, comments and [DONE] are not measurements.
     run.buffer.append(ev)
     seq = len(run.buffer) - 1
     for q in list(run.subscribers):
         try:
-            q.put_nowait((seq, ev))
+            q.put_nowait(True)
         except Exception:
             pass
 
@@ -61,7 +82,7 @@ def _wake_run_subscribers(run: _Run) -> None:
     """Close subscribers even when the drain task never reached its body."""
     for q in list(run.subscribers):
         try:
-            q.put_nowait((None, None))
+            q.put_nowait(True)
         except Exception:
             pass
 
@@ -112,6 +133,40 @@ def get_active_run(session_id: str) -> Optional[_Run]:
     return r if r and r.status == "running" else None
 
 
+def normalize_context_usage(data) -> Optional[dict]:
+    """Validate a request measurement; never infer occupancy from billing totals."""
+    if not isinstance(data, dict):
+        return None
+    used, window = data.get("used_tokens"), data.get("context_length")
+    if (type(used) is not int or used < 0 or type(window) is not int or window <= 0
+            or data.get("source") not in ("backend", "estimated")
+            or not isinstance(data.get("model"), str) or not data["model"]):
+        return None
+    result = {key: data[key] for key in ("used_tokens", "context_length", "model", "source")}
+    endpoint_key = data.get('endpoint_key')
+    if endpoint_key is not None:
+        if not isinstance(endpoint_key, str) or len(endpoint_key) != 64 or any(c not in '0123456789abcdef' for c in endpoint_key):
+            return None
+        result['endpoint_key'] = endpoint_key
+    for key in ("prompt_tokens", "round", "compactions"):
+        value = data.get(key)
+        if type(value) is int and value >= 0:
+            result[key] = value
+    threshold = data.get("auto_compact_threshold")
+    if type(threshold) in (int, float) and 0 <= threshold <= 100 and math.isfinite(threshold):
+        result["auto_compact_threshold"] = threshold
+    if type(data.get('auto_compact_enabled')) is bool:
+        result['auto_compact_enabled'] = data['auto_compact_enabled']
+    result["context_percent"] = min(100.0, round(used / window * 100, 1))
+    return result
+
+
+def get_context_usage(session_id: str) -> Optional[dict]:
+    """Copy the active run's latest measurement; terminal history is read separately."""
+    run = get_active_run(session_id)
+    return dict(run.context_usage) if run and run.context_usage is not None else None
+
+
 async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
                  prev_task: Optional[asyncio.Task] = None) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning
@@ -157,13 +212,27 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
     except Exception as e:
         logger.error("[agent-run] %s failed: %s", session_id, e, exc_info=True)
         run.status = "error"
-        _publish(
-            run,
-            "event: error\n"
-            f"data: {json.dumps({'error': 'Agent run failed before completion.', 'status': 500})}\n\n",
-        )
-        _publish(run, "data: [DONE]\n\n")
+        try:
+            await agen.aclose()
+        except Exception:
+            pass
+        try:
+            _publish(
+                run,
+                "event: error\n"
+                f"data: {json.dumps({'error': 'Agent run failed before completion.', 'status': 500})}\n\n",
+            )
+            _publish(run, "data: [DONE]\n\n")
+        except OSError:
+            # Disk full/limit must terminate the producer, not recursively try
+            # to persist another error or silently continue effectful tools.
+            logger.error('[agent-run] replay storage unavailable; run stopped')
     finally:
+        if hasattr(run.buffer, 'checkpoint'):
+            try:
+                run.buffer.checkpoint(run.status)
+            except OSError:
+                logger.error('[agent-run] replay checkpoint unavailable')
         # Wake every subscriber with the end sentinel so their SSE closes.
         _wake_subscribers()
         # Run is terminal — arm the grace timer so it (and its buffer) is
@@ -175,6 +244,12 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
 def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
+    # Allocate storage before cancelling the current run. An unavailable disk
+    # must not destroy a still-running predecessor on a failed replacement.
+    run = _Run()
+    if os.getenv('ODYSSEUS_DURABLE_CHAT_REPLAY') == '1':
+        from src.chat_replay_log import ReplayLog
+        run.buffer = ReplayLog(replay_root(), run.run_id, session_id, create=True)
     prev = _RUNS.get(session_id)
     prev_task: Optional[asyncio.Task] = None
     if prev:
@@ -191,7 +266,6 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run()
     _RUNS[session_id] = run
     run.task = asyncio.create_task(_drain(session_id, run, agen, prev_task))
     return run
@@ -212,7 +286,9 @@ async def subscribe(
     run = expected_run or _RUNS.get(session_id)
     if run is None:
         return
-    q: asyncio.Queue = asyncio.Queue()
+    # A queue carries only a coalesced wake-up, never duplicate token payloads.
+    # Slow/disconnected clients read their own cursor from the replay artifact.
+    q: asyncio.Queue = asyncio.Queue(maxsize=1)
     run.subscribers.add(q)            # register BEFORE replaying so nothing is missed
     # A live subscriber is connected — don't let a pending grace timer evict
     # the run out from under it mid-replay.
@@ -228,7 +304,7 @@ async def subscribe(
         heartbeat_idx = 0
         while True:
             try:
-                seq, ev = await asyncio.wait_for(q.get(), timeout=10.0)
+                await asyncio.wait_for(q.get(), timeout=10.0)
             except asyncio.TimeoutError:
                 # Keep slow local models/proxies alive while they prefill before
                 # the first token. SSE comments are ignored by the UI but reset
@@ -238,15 +314,11 @@ async def subscribe(
                     heartbeat_idx += 1
                     yield f": heartbeat {heartbeat_idx}\n\n"
                     continue
-                seq, ev = (None, None)
-            if seq is None:            # end sentinel
-                while next_seq < len(run.buffer):   # flush any tail the sentinel raced
-                    yield run.buffer[next_seq]
-                    next_seq += 1
+            while next_seq < len(run.buffer):
+                yield run.buffer[next_seq]
+                next_seq += 1
+            if run.status != 'running':
                 break
-            if seq >= next_seq:        # skip events already replayed from the buffer
-                yield ev
-                next_seq = seq + 1
     finally:
         run.subscribers.discard(q)
         # Last subscriber gone on a finished run — (re)arm eviction so the

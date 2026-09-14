@@ -9,18 +9,9 @@ That is an intended tool call in non-native/textual tool mode, but older parsing
 only recognized fenced blocks, [TOOL_CALL], XML invoke, and tool_code markup.
 """
 import json
-import sys
-from unittest.mock import MagicMock
 
-for mod in ['src.agent_tools', 'src.tool_parsing', 'src.tool_schemas', 'src.tool_execution']:
-    sys.modules.pop(mod, None)
-for mod in [
-    'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
-    'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
-    'src.database', 'core.models', 'core.database', 'core.auth'
-]:
-    if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
+# Use the real package initialized by conftest without replacing modules or
+# leaking database/auth stubs into unrelated tests during collection.
 
 import src.agent_tools  # noqa: E402, F401
 from src.tool_parsing import parse_tool_blocks, strip_tool_blocks  # noqa: E402

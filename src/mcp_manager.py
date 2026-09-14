@@ -25,10 +25,11 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
     lower_command = command_line.lower()
 
     if "@playwright/mcp" in lower_command:
+        from src.browser_runtime import PLAYWRIGHT_MCP_PACKAGE
         return (
             f"{raw_error}\n\n"
             "Browser MCP could not start. On fresh installs, cache the Playwright MCP package once before connecting:\n\n"
-            "npx -y @playwright/mcp@latest --version\n\n"
+            f"npx -y {PLAYWRIGHT_MCP_PACKAGE} --version\n\n"
             "Then restart Odysseus and reconnect the Browser MCP server."
         )
 
@@ -483,26 +484,21 @@ class McpManager:
         try:
             result = await self._do_call(session, tool_name, arguments)
         except Exception as e:
-            # Auto-reconnect for builtin servers whose subprocess may have died
+            # A missing reply is not evidence that the action did not happen.
+            # Restore transport for future requests, but never replay this call:
+            # browser clicks, email sends and third-party tools may mutate state.
+            logger.warning("MCP outcome unknown for %s (%s); not replaying", qualified_name, type(e).__name__)
+            reconnected = False
             if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
-                reconnected = await self._reconnect_builtin(server_id)
-                if reconnected:
-                    session = self._sessions.get(server_id)
-                    if session:
-                        try:
-                            result = await self._do_call(session, tool_name, arguments)
-                        except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
-                    else:
-                        return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
-                else:
-                    logger.error(f"MCP reconnect failed for {server_id}")
-                    return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
-            else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+                try:
+                    reconnected = bool(await self._reconnect_builtin(server_id))
+                except Exception as reconnect_error:
+                    logger.warning("MCP reconnect failed for %s (%s)", server_id, type(reconnect_error).__name__)
+            return {
+                "error": "MCP reply was lost or invalid. The action may have completed; inspect its result before retrying. This call was not repeated.",
+                "exit_code": 1, "outcome_unknown": True, "retryable": False,
+                "transport_reconnected": reconnected,
+            }
 
         return result
 

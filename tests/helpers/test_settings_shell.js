@@ -352,6 +352,7 @@ function moduleSource(relativePath) {
     WeakSet,
   };
   vm.createContext(context);
+  vm.runInContext(moduleSource('../i18n.js'), context, { filename: 'i18n.js' });
   vm.runInContext(moduleSource('registry.js'), context, { filename: 'registry.js' });
   vm.runInContext(moduleSource('search.js'), context, { filename: 'search.js' });
   vm.runInContext(moduleSource('sidebar.js'), context, { filename: 'sidebar.js' });

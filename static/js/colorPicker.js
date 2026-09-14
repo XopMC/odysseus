@@ -3,6 +3,7 @@
 // Non-invasive: wraps existing <input type="color"> elements —
 // their .value stays the source of truth, and we dispatch 'input'
 // events so existing listeners keep working.
+import { bindUiText } from './i18n.js';
 
 const LS_RECENT = 'odysseus-recent-colors';
 const MAX_RECENT = 12;
@@ -123,6 +124,8 @@ function buildPopover() {
     <div class="cp-swatches cp-recent"></div>
   `;
   document.body.appendChild(p);
+  p.querySelectorAll('.cp-section-label').forEach(node => bindUiText(node, node.textContent));
+  bindUiText(p.querySelector('.cp-eyedropper'), 'Eyedropper', 'title');
   wireHandlers(p);
   return p;
 }
@@ -155,6 +158,9 @@ function syncUI() {
   sContainer.innerHTML = sugs.map(s =>
     `<button class="cp-swatch" title="${s.label}: ${s.hex}" data-hex="${s.hex}" style="background:${s.hex}"></button>`
   ).join('');
+  sContainer.querySelectorAll('.cp-swatch').forEach((node, index) => {
+    bindUiText(node, sugs[index].label, 'title', ': ' + sugs[index].hex);
+  });
 
   // Recents
   const rContainer = _popover.querySelector('.cp-recent');
@@ -162,6 +168,7 @@ function syncUI() {
   rContainer.innerHTML = recs.length
     ? recs.map(h => `<button class="cp-swatch" title="${h}" data-hex="${h}" style="background:${h}"></button>`).join('')
     : '<div class="cp-recent-empty">(none yet)</div>';
+  bindUiText(rContainer.querySelector('.cp-recent-empty'), '(none yet)');
 }
 
 function applyToInput(pushChange) {

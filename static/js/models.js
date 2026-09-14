@@ -12,6 +12,7 @@ import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
+import { modelRouteKey, isRouteFavorite, toggleRouteFavorite } from './model/routeIdentity.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
@@ -43,16 +44,16 @@ function _loadFavorites() {
 function _saveFavorites(list) {
   Storage.setJSON(FAVORITES_KEY, list);
 }
-function _isFavorite(mid) {
-  return _loadFavorites().includes(mid);
+function _isFavorite(mid, url, endpointId) {
+  return isRouteFavorite(_loadFavorites(), { mid, url, endpointId });
 }
-function _toggleFavorite(mid) {
+function _toggleFavorite(mid, url, endpointId) {
   const favs = _loadFavorites();
-  const idx = favs.indexOf(mid);
-  if (idx >= 0) favs.splice(idx, 1);
-  else favs.push(mid);
-  _saveFavorites(favs);
-  return idx < 0; // returns true if now favorited
+  const route = { mid, url, endpointId };
+  const catalog = _cachedItems.flatMap(item => (item.models || []).concat(item.models_extra || [])
+    .map(model => ({ mid: model, url: item.url, endpointId: item.endpoint_id })));
+  _saveFavorites(toggleRouteFavorite(favs, route, catalog));
+  return !isRouteFavorite(favs, route);
 }
 
 // ── Usage tracking ──
@@ -104,16 +105,16 @@ function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
   const _favColor = modelColor(mid);
   const _logo = providerLogo(mid);
   if (_logo) {
-    fav.className = 'model-fav-btn provider-logo' + (_isFavorite(mid) ? ' active' : '');
+    fav.className = 'model-fav-btn provider-logo' + (_isFavorite(mid, url, endpointId) ? ' active' : '');
     fav.innerHTML = _logo;
     fav.style.opacity = '0.4';
   } else {
-    fav.className = 'model-fav-btn' + (_isFavorite(mid) ? ' active' : '');
+    fav.className = 'model-fav-btn' + (_isFavorite(mid, url, endpointId) ? ' active' : '');
   }
   fav.title = 'Toggle favorite';
   fav.addEventListener('click', (e) => {
     e.stopPropagation();
-    const nowFav = _toggleFavorite(mid);
+    const nowFav = _toggleFavorite(mid, url, endpointId);
     fav.classList.toggle('active', nowFav);
     uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
     refreshModels();
@@ -272,7 +273,7 @@ export async function refreshModels(force = false, opts = {}) {
       for (const cat of ['local', 'api']) {
         for (const [epName, epModels] of Object.entries(groups[cat])) {
           for (const m of epModels) {
-            if (favs.includes(m.mid)) {
+            if (isRouteFavorite(favs, m)) {
               favModels.push(m);
             }
           }
@@ -289,7 +290,8 @@ export async function refreshModels(force = false, opts = {}) {
         const usage = _loadUsage();
         favModels.sort((a, b) => ((usage[b.mid] || {}).count || 0) - ((usage[a.mid] || {}).count || 0));
       } else {
-        favModels.sort((a, b) => favs.indexOf(a.mid) - favs.indexOf(b.mid));
+        const position = model => favs.indexOf(favs.includes(modelRouteKey(model)) ? modelRouteKey(model) : model.mid);
+        favModels.sort((a, b) => position(a) - position(b));
       }
 
       if (favModels.length > 0) {

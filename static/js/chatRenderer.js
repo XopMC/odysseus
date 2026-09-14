@@ -12,6 +12,7 @@ import { bindMenuDismiss } from './escMenuStack.js';
 import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
 import { getTools } from './appConfig.js';
+import { bindUiText } from './i18n.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -38,6 +39,16 @@ export function safeToolScreenshotSrc(raw) {
   return '';
 }
 
+// Call only with an authored tool node, never a model-content container. The
+// direct-child selectors exclude command/output text, tool IDs and diff paths.
+export function localizeToolNode(node) {
+  const status = node?.querySelector(':scope > .agent-thread-header > .agent-thread-status');
+  if (status) bindUiText(status, status.textContent.trim());
+  node?.querySelectorAll(':scope > .agent-thread-content > details.agent-tool-output:not(.agent-tool-diff) > summary').forEach(summary => {
+    if (!summary.children.length) bindUiText(summary, summary.textContent.trim());
+  });
+}
+
 export function safeDisplayImageSrc(raw) {
   const src = String(raw || '').trim();
   if (!src) return '';
@@ -58,6 +69,7 @@ function _makeActionBtn(className, title, text, handler) {
   btn.className = className;
   btn.type = 'button';
   btn.title = title;
+  bindUiText(btn, title, 'title');
   btn.textContent = text;
   btn.addEventListener('click', handler);
   return btn;
@@ -166,7 +178,9 @@ export function buildAttachCards(attachments) {
           ocrBtn.type = 'button';
           ocrBtn.className = 'attach-ocr-btn';
           ocrBtn.title = 'View / edit OCR text';
+          bindUiText(ocrBtn, 'View / edit OCR text', 'title');
           ocrBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg><span class="attach-ocr-label">Caption</span>';
+          bindUiText(ocrBtn.querySelector('.attach-ocr-label'), 'Caption');
           ocrBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             _openVisionEditor(att, ocrBtn.closest('.msg'));
@@ -307,14 +321,17 @@ function _openVisionEditor(att, userMsgEl) {
   // this text originates.
   title.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7;flex-shrink:0"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span>Vision text</span>';
   panel.appendChild(title);
+  bindUiText(title.querySelector('span'), 'Vision text');
   const desc = document.createElement('div');
   desc.className = 'vision-editor-desc';
   desc.textContent = 'Edit text and save, new chats will have the new context. Regenerate or continue from there.';
+  bindUiText(desc, desc.textContent);
   panel.appendChild(desc);
   const ta = document.createElement('textarea');
   ta.className = 'vision-editor-text';
   ta.rows = 10;
   ta.placeholder = 'Loading…';
+  bindUiText(ta, 'Loading…', 'placeholder');
   ta.disabled = true;
   panel.appendChild(ta);
   const actions = document.createElement('div');
@@ -323,6 +340,7 @@ function _openVisionEditor(att, userMsgEl) {
   closeBtn.type = 'button';
   closeBtn.className = 'vision-editor-btn';
   closeBtn.innerHTML = '<span class="vision-btn-label">Close</span>';
+  bindUiText(closeBtn.querySelector('.vision-btn-label'), 'Close');
   closeBtn.addEventListener('click', _closeVisionEditor);
   const _saveVisionText = async () => {
     const res = await fetch(`/api/upload/${att.id}/vision`, {
@@ -337,10 +355,12 @@ function _openVisionEditor(att, userMsgEl) {
   saveBtn.type = 'button';
   saveBtn.className = 'vision-editor-btn vision-editor-btn-primary';
   saveBtn.innerHTML = '<span class="vision-btn-label">Save</span>';
+  bindUiText(saveBtn.querySelector('.vision-btn-label'), 'Save');
   saveBtn.disabled = true;
   saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true;
     saveBtn.innerHTML = '<span class="vision-btn-label">Saving…</span>';
+    bindUiText(saveBtn.querySelector('.vision-btn-label'), 'Saving…');
     try {
       await _saveVisionText();
       if (uiModule?.showToast) uiModule.showToast('Saved');
@@ -348,6 +368,7 @@ function _openVisionEditor(att, userMsgEl) {
     } catch (e) {
       saveBtn.disabled = false;
       saveBtn.innerHTML = '<span class="vision-btn-label">Save</span>';
+      bindUiText(saveBtn.querySelector('.vision-btn-label'), 'Save');
       if (uiModule?.showError) uiModule.showError('Failed to save OCR text');
     }
   });
@@ -357,8 +378,10 @@ function _openVisionEditor(att, userMsgEl) {
   regenBtn.type = 'button';
   regenBtn.className = 'vision-editor-btn vision-editor-btn-primary';
   regenBtn.title = 'Save and regenerate the message';
+  bindUiText(regenBtn, 'Save and regenerate the message', 'title');
   regenBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.74 9.74 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span class="vision-btn-label">Regenerate message</span>';
   regenBtn.disabled = true;
+  bindUiText(regenBtn.querySelector('.vision-btn-label'), 'Regenerate message');
   regenBtn.addEventListener('click', async () => {
     regenBtn.disabled = true;
     saveBtn.disabled = true;
@@ -1476,6 +1499,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   copyBtn.className = 'footer-copy-btn';
   copyBtn.type = 'button';
   copyBtn.title = 'Copy prompt';
+  bindUiText(copyBtn, 'Copy prompt', 'title');
   copyBtn.innerHTML = COPY_ICON;
   copyBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1489,6 +1513,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   dlBtn.className = 'footer-copy-btn';
   dlBtn.type = 'button';
   dlBtn.title = 'Download image';
+  bindUiText(dlBtn, 'Download image', 'title');
   dlBtn.textContent = '\u2913';
   dlBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -1512,6 +1537,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   reuseBtn.className = 'footer-copy-btn';
   reuseBtn.type = 'button';
   reuseBtn.title = 'Attach image to new prompt';
+  bindUiText(reuseBtn, 'Attach image to new prompt', 'title');
   reuseBtn.innerHTML = PAPERCLIP_ICON;
   reuseBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -1548,6 +1574,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   editBtn.className = 'footer-copy-btn';
   editBtn.type = 'button';
   editBtn.title = 'Edit in image editor';
+  bindUiText(editBtn, 'Edit in image editor', 'title');
   editBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
   editBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -1583,7 +1610,9 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     galleryBtn.className = 'footer-copy-btn footer-open-gallery-btn';
     galleryBtn.type = 'button';
     galleryBtn.title = 'Open in gallery';
+    bindUiText(galleryBtn, 'Open in gallery', 'title');
     galleryBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg><span>Open in gallery</span>';
+    bindUiText(galleryBtn.querySelector('span'), 'Open in gallery');
     galleryBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
@@ -1601,6 +1630,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   delBtn.className = 'footer-copy-btn footer-delete-btn';
   delBtn.type = 'button';
   delBtn.title = 'Delete image';
+  bindUiText(delBtn, 'Delete image', 'title');
   delBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
   delBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -1795,6 +1825,7 @@ export function createMsgFooter(msgElement) {
     moreBtn.className = 'msg-action-btn msg-more-btn';
     moreBtn.type = 'button';
     moreBtn.title = 'More actions';
+    bindUiText(moreBtn, 'More actions', 'title');
     moreBtn.textContent = '\u00B7\u00B7\u00B7';
     moreBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1815,6 +1846,8 @@ export function createMsgFooter(msgElement) {
         item.type = 'button';
         item.title = a.title;
         item.innerHTML = `<span class="overflow-icon">${a.icon}</span> ${a.title}`;
+        bindUiText(item, a.title);
+        bindUiText(item, a.title, 'title');
         item.addEventListener('click', (ev) => {
           ev.stopPropagation();
           _trackAction(a.id);
@@ -1870,6 +1903,7 @@ export function createMsgFooter(msgElement) {
         row.className = 'memory-used-row';
         row.style.cursor = 'pointer';
         row.title = 'Click to open memory manager';
+        bindUiText(row, 'Click to open memory manager', 'title');
         const badge = document.createElement('span');
         badge.className = 'memory-used-badge ' + (m.type === 'pinned' ? 'pinned' : 'recalled');
         badge.textContent = m.type === 'pinned' ? '\u25CF' : '\u21BB';
@@ -1986,6 +2020,7 @@ export function createUserMsgFooter(msgElement) {
     moreBtn.className = 'msg-action-btn msg-more-btn';
     moreBtn.type = 'button';
     moreBtn.title = 'More actions';
+    bindUiText(moreBtn, 'More actions', 'title');
     moreBtn.textContent = '\u00B7\u00B7\u00B7';
     moreBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -2004,6 +2039,8 @@ export function createUserMsgFooter(msgElement) {
         item.type = 'button';
         item.title = a.title;
         item.innerHTML = `<span class="overflow-icon">${a.icon}</span> ${a.title}`;
+        bindUiText(item, a.title);
+        bindUiText(item, a.title, 'title');
         item.addEventListener('click', (ev) => {
           ev.stopPropagation();
           _trackUserAction(a.id);
@@ -2074,6 +2111,7 @@ export function displayMetrics(messageElement, metrics) {
   metricsContainer.textContent = metricsLabel;
   metricsContainer.style.cursor = 'pointer';
   metricsContainer.title = 'Click for details';
+  bindUiText(metricsContainer, 'Click for details', 'title');
   const metricsDivider = document.createElement('span');
   metricsDivider.className = 'metrics-divider';
   metricsDivider.textContent = ' | ';
@@ -2105,7 +2143,7 @@ export function displayMetrics(messageElement, metrics) {
     const popup = document.createElement('div');
     popup.className = 'ctx-popup';
     popup.innerHTML = `
-      <div style="font-weight:600;margin-bottom:6px;color:var(--fg);">Message Stats</div>
+      <div class="ctx-heading" style="font-weight:600;margin-bottom:6px;color:var(--fg);">Message Stats</div>
       <div><span class="ctx-label">Model</span> ${model.split('/').pop()}</div>
       <div><span class="ctx-label">Input</span> ${inputTokens.toLocaleString()} tokens${isReal ? '' : '~'}</div>
       <div><span class="ctx-label">Output</span> ${outputTokens.toLocaleString()} tokens${isReal ? '' : '~'}</div>
@@ -2117,7 +2155,7 @@ export function displayMetrics(messageElement, metrics) {
       ${costRows}
       ${sessionCostStr}
       ${prepDetails ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);font-size:0.85em;opacity:0.8;">
-        <div style="font-weight:600;margin-bottom:4px;color:var(--fg);">Agent prep</div>
+        <div class="ctx-heading" style="font-weight:600;margin-bottom:4px;color:var(--fg);">Agent prep</div>
         ${prepDetails}
       </div>` : ''}
       ${ctxPct !== undefined && ctxPct > 0 ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);">
@@ -2125,6 +2163,7 @@ export function displayMetrics(messageElement, metrics) {
       </div>` : ''}
       ${isReal ? '' : '<div style="margin-top:4px;font-size:0.8em;opacity:0.4;">~ estimated token count</div>'}
     `;
+    popup.querySelectorAll('.ctx-label, .ctx-heading').forEach(node => bindUiText(node, node.textContent));
 
     const rect = metricsContainer.getBoundingClientRect();
     popup.style.left = rect.left + 'px';
@@ -2162,6 +2201,7 @@ export function displayMetrics(messageElement, metrics) {
     ctxRing = document.createElement('span');
     ctxRing.className = 'ctx-ring';
     ctxRing.title = `${ctxPct}% context used — click for details`;
+    bindUiText(ctxRing, 'Click for details', 'title', ` (${ctxPct}%)`);
     ctxRing.style.cursor = 'pointer';
     ctxRing.style.setProperty('--ctx-color', ctxColor);
     ctxRing.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14">
@@ -2183,24 +2223,27 @@ export function displayMetrics(messageElement, metrics) {
       const popup = document.createElement('div');
       popup.className = 'ctx-detail-popup';
       popup.innerHTML = `
-        <div style="font-weight:600;margin-bottom:8px;color:var(--fg);">Context Window</div>
+        <div class="ctx-heading" style="font-weight:600;margin-bottom:8px;color:var(--fg);">Context Window</div>
         <div class="ctx-bar-wrap">
           <div class="ctx-bar-fill" style="width:${Math.min(ctxPct, 100)}%;background:${ctxColor};"></div>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:0.75rem;margin-top:4px;opacity:0.6;">
-          <span>${fmtNum(usedTokens)} used</span>
-          <span>${fmtNum(totalCtx)} total</span>
+          <span>${fmtNum(usedTokens)} <span class="ctx-unit">used</span></span>
+          <span>${fmtNum(totalCtx)} <span class="ctx-unit">total</span></span>
         </div>
         <div style="margin-top:8px;font-size:0.8rem;">
           <div><span class="ctx-label">Model</span> ${modelShort}</div>
           <div><span class="ctx-label">Usage</span> <span style="color:${ctxColor};font-weight:600;">${ctxPct}%</span></div>
-          <div><span class="ctx-label">Window</span> ${fmtNum(totalCtx)} tokens</div>
+          <div><span class="ctx-label">Window</span> ${fmtNum(totalCtx)} <span class="ctx-unit">tokens</span></div>
         </div>
         ${ctxPct >= 70 ? `<button class="ctx-compact-btn" title="Summarize older messages to free up context">Compact context</button>` : ''}
       `;
+      popup.querySelectorAll('.ctx-heading, .ctx-label, .ctx-unit').forEach(node => bindUiText(node, node.textContent));
 
       const compactBtn = popup.querySelector('.ctx-compact-btn');
       if (compactBtn) {
+        bindUiText(compactBtn, 'Compact context');
+        bindUiText(compactBtn, 'Summarize older messages to free up context', 'title');
         compactBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
           const sid = window.sessionModule && window.sessionModule.getCurrentSessionId();
@@ -2218,6 +2261,7 @@ export function displayMetrics(messageElement, metrics) {
           const compactBody = document.createElement('div');
           compactBody.className = 'body';
           compactBody.innerHTML = 'Compacting context <span class="compact-wave">▁▂▃▅▂▁</span>';
+          bindUiText(compactBody, 'Compacting context');
           compactMsg.appendChild(compactRole);
           compactMsg.appendChild(compactBody);
           chatBox.appendChild(compactMsg);
@@ -2398,6 +2442,7 @@ export function renderAskUserCard(payload, options) {
   closeBtn.type = 'button';
   closeBtn.className = 'modal-close ask-user-close';
   closeBtn.setAttribute('aria-label', 'Dismiss question');
+  bindUiText(closeBtn, 'Dismiss question', 'aria-label');
   closeBtn.addEventListener('click', () => {
     card.remove();
     const input = uiModule.el('message');
@@ -2473,6 +2518,9 @@ export function renderAskUserCard(payload, options) {
     const labelText = document.createElement('span');
     labelText.className = 'ask-user-option-label';
     labelText.innerHTML = emojiText(label);
+    // Ordinary choices are model/user content. Only sealed permission actions
+    // have authored UI labels; retain the original label/value in submission.
+    if (isToolApproval) bindUiText(labelText, label);
     row.appendChild(labelText);
     if (description) {
       const descriptionText = document.createElement('span');
@@ -2519,11 +2567,15 @@ export function renderAskUserCard(payload, options) {
   otherInput.className = 'styled-prompt-input ask-user-other-input';
   otherInput.placeholder = multi ? 'Other (added to selection)…' : 'Other… (type your own answer)';
   otherInput.setAttribute('aria-label', multi ? 'Add a custom option' : 'Type a custom answer');
+  bindUiText(otherInput, multi ? 'Other (added to selection)…' : 'Other… (type your own answer)', 'placeholder');
+  bindUiText(otherInput, multi ? 'Add a custom option' : 'Type a custom answer', 'aria-label');
   const otherSend = document.createElement('button');
   otherSend.type = 'button';
   otherSend.className = 'confirm-btn confirm-btn-primary ask-user-other-send';
   otherSend.setAttribute('aria-label', 'Send answer');
   otherSend.textContent = multi ? 'Send selection' : 'Send';
+  bindUiText(otherSend, multi ? 'Send selection' : 'Send');
+  bindUiText(otherSend, 'Send answer', 'aria-label');
   const submit = () => {
     const freeText = otherInput.value.trim();
     if (multi) {
@@ -2725,6 +2777,7 @@ export function addMessage(role, content, modelName, metadata) {
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
             node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            localizeToolNode(node);
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
@@ -2942,6 +2995,7 @@ export function addMessage(role, content, modelName, metadata) {
         const continueBtn = document.createElement('button');
         continueBtn.className = 'continue-btn';
         continueBtn.title = 'Continue';
+        bindUiText(continueBtn, 'Continue', 'title');
         continueBtn.textContent = '\u25B8';
         continueBtn.addEventListener('click', () => {
           stoppedIndicator.remove();
@@ -3107,6 +3161,7 @@ const chatRenderer = {
   stripToolBlocks,
   copyMessageText,
   safeToolScreenshotSrc,
+  localizeToolNode,
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,

@@ -393,6 +393,49 @@ def _proxy_catalog_context(endpoint_url: str, model: str) -> Optional[int]:
     return None
 
 
+def _lmstudio_loaded_context(base: str, model: str) -> Optional[int]:
+    """Read the serving window, not the architecture maximum, from native v1.
+
+    OpenAI /v1/models does not expose LM Studio's loaded instance config.
+    A family-name fallback can therefore both undercount a 256K instance and
+    dangerously overbudget an instance deliberately loaded with only 8K.
+    Probe only at an already selected local model endpoint; never load a model.
+    """
+    try:
+        response = httpx.get(f"{base}/api/v1/models", timeout=REQUEST_TIMEOUT)
+        if not response.is_success:
+            return None
+        payload = response.json()
+        entries = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(entries, list):
+            return None
+        exact, by_key = [], []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            instances = entry.get("loaded_instances")
+            if not isinstance(instances, list):
+                continue
+            for instance in instances:
+                if not isinstance(instance, dict):
+                    continue
+                config = instance.get("config")
+                size = config.get("context_length") if isinstance(config, dict) else None
+                if type(size) is not int or size <= 0:
+                    continue
+                if instance.get("id") == model:
+                    exact.append(size)
+                if entry.get("key") == model:
+                    by_key.append(size)
+        # A key can route to several instances. Their common safe window is
+        # the minimum unless the request names one exact loaded instance.
+        sizes = exact or by_key
+        return min(sizes) if sizes else None
+    except Exception as exc:
+        logger.debug("LM Studio loaded-context probe unavailable: %s", exc)
+        return None
+
+
 def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Query the model API for context length. Returns (context_length, known) where
     ``known`` is False only for the bare DEFAULT_CONTEXT fallback."""
@@ -419,8 +462,12 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
 
     # Try llama.cpp /slots endpoint first — reports actual serving context
     if is_local_endpoint(endpoint_url):
+        base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rsplit("/", 1)[0]
+        loaded_context = _lmstudio_loaded_context(base, model)
+        if loaded_context:
+            logger.info("LM Studio loaded instance reports context=%s for %s", loaded_context, model)
+            return loaded_context, True
         try:
-            base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rsplit("/", 1)[0]
             r = httpx.get(f"{base}/slots", timeout=REQUEST_TIMEOUT)
             if r.is_success:
                 slots = r.json()

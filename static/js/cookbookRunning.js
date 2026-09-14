@@ -5,6 +5,7 @@
 // ============================================
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
 import { registerMenuDismiss } from './escMenuStack.js';
 import { computeProgressSignal } from './cookbookProgressSignal.js';
@@ -2780,6 +2781,7 @@ export function _renderRunningTab() {
           if (item.tooltip) div.title = item.tooltip;
           const ic = _MENU_ICONS[item.action] || '';
           div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ic}</svg></span><span>${item.label}</span>`;
+          bindUiText(div.lastElementChild, item.label);
           div.addEventListener('click', () => {
             _cleanup();
             if (item.custom) { item.custom(); return; }

@@ -3,6 +3,7 @@
  */
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import spinnerModule from './spinner.js';
 import * as Modals from './modalManager.js';
 import { topPortalZ } from './toolWindowZOrder.js';
@@ -544,6 +545,7 @@ function _showEventMoreMenu(ev, anchor) {
     const it = document.createElement('div');
     it.className = 'dropdown-item-compact' + (danger ? ' dropdown-item-danger' : '');
     it.innerHTML = `<span class="dropdown-icon">${icon}</span><span>${label}</span>`;
+    bindUiText(it.lastElementChild, label);
     it.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     return it;
   };

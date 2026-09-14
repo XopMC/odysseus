@@ -3,6 +3,7 @@
  */
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import markdownModule from './markdown.js';
 import * as spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
@@ -1103,6 +1104,7 @@ function _showTaskDropdown(anchor, items) {
     } else {
       btn.textContent = item.label;
     }
+    bindUiText(item.icon ? btn.lastElementChild : btn, item.label);
     btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
     btn.addEventListener('mouseleave', () => { btn.style.background = 'none'; });
     btn.addEventListener('click', (e) => { e.stopPropagation(); close(); item.action(); });

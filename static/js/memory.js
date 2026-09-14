@@ -2,6 +2,7 @@
 // This module handles all memory-related operations
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import sessionModule from './sessions.js';
 import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
@@ -830,16 +831,19 @@ export function renderMemoryList() {
       const pinItem = document.createElement('div');
       pinItem.className = 'dropdown-item-compact';
       pinItem.innerHTML = `<span class="dropdown-icon">${_pinSvg}</span><span>${memory.pinned ? 'Unpin' : 'Pin'}</span>`;
+      bindUiText(pinItem.querySelector(':scope > span:not(.dropdown-icon)'), memory.pinned ? 'Unpin' : 'Pin');
       pinItem.addEventListener('click', () => { dropdown.style.display = 'none'; togglePin(memory.id, !memory.pinned); });
 
       const editItem = document.createElement('div');
       editItem.className = 'dropdown-item-compact';
       editItem.textContent = '✎ Edit';
+      bindUiText(editItem, '✎ Edit');
       editItem.addEventListener('click', () => { dropdown.style.display = 'none'; startInlineEdit(item, memory); });
 
       const deleteItem = document.createElement('div');
       deleteItem.className = 'dropdown-item-compact memory-dropdown-delete';
       deleteItem.textContent = '✕ Delete';
+      bindUiText(deleteItem, '✕ Delete');
       deleteItem.addEventListener('click', () => { dropdown.style.display = 'none'; deleteMemory(memory.id); });
 
       // Select — enters bulk-select mode and pre-selects this memory. Same
@@ -847,6 +851,7 @@ export function renderMemoryList() {
       const selectItem = document.createElement('div');
       selectItem.className = 'dropdown-item-compact';
       selectItem.innerHTML = '<span class="dropdown-icon"><span style="font-size:16px;line-height:1;">●</span></span><span>Select</span>';
+      bindUiText(selectItem.querySelector(':scope > span:not(.dropdown-icon)'), 'Select');
       selectItem.addEventListener('click', (e) => {
         e.stopPropagation();
         if (dropdown.parentNode) dropdown.remove();
@@ -862,6 +867,7 @@ export function renderMemoryList() {
       const cancelItem = document.createElement('div');
       cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
       cancelItem.textContent = '✕ Cancel';
+      bindUiText(cancelItem, '✕ Cancel');
       cancelItem.addEventListener('click', (e) => { e.stopPropagation(); if (dropdown.parentNode) dropdown.remove(); });
 
       dropdown.appendChild(pinItem);

@@ -17,6 +17,7 @@ import { openLibrary, closeLibrary, isLibraryOpen, initLibrary } from './documen
 import signatureModule from './signature.js';
 import * as Modals from './modalManager.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { bindUiText } from './i18n.js';
 
   let API_BASE = '';
   let isOpen = false;
@@ -5422,6 +5423,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       return e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
     };
 
+    for (const [id, label] of [['doc-email-draft-btn', 'Save Draft'],
+      ['doc-email-schedule-btn', 'Schedule Send...'], ['doc-email-unread-btn', 'Mark Unread']]) {
+      bindUiText(document.getElementById(id), label);
+    }
     const handleSendIntent = (e) => {
       if (e && e.__odysseusEmailSendHandled) return;
       const rawTarget = e && e.target;
@@ -9237,6 +9242,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     items += `<div class="dropdown-item-compact doc-tab-action doc-tab-action-delete" data-action="delete">${_di(_deleteIco)}<span>Delete</span></div>`;
 
     _docTabMenu.innerHTML = items;
+    // Only authored action labels, never the document title/content.
+    _docTabMenu.querySelectorAll('.doc-tab-action > span:last-child').forEach(label => {
+      bindUiText(label, label.textContent);
+    });
     _docTabMenu.style.display = 'block';
     _docTabMenu._docId = docId;
 
@@ -9668,6 +9677,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const item = document.createElement('button');
       item.className = 'doc-overflow-item';
       item.textContent = opt.label;
+      bindUiText(item, opt.label);
       item.addEventListener('click', (ev) => { ev.stopPropagation(); close(); opt.fn(); });
       menu.appendChild(item);
       if (opt._divider) {

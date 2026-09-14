@@ -5,6 +5,7 @@
 // ============================================
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { modelColor } from './chatRenderer.js';
@@ -1256,6 +1257,7 @@ function _rerenderCachedModels() {
         const div = document.createElement('div');
         div.className = 'dropdown-item-compact' + (opt.danger ? ' dropdown-item-danger' : '');
         div.innerHTML = _di(opt.icon) + '<span>' + opt.label + '</span>';
+        bindUiText(div.lastElementChild, opt.label);
         div.addEventListener('click', () => {
           closeDropdown();
           if (opt.action === 'serve') item.click();
@@ -1305,6 +1307,7 @@ function _rerenderCachedModels() {
       const cancelDiv = document.createElement('div');
       cancelDiv.className = 'dropdown-item-compact dropdown-cancel-mobile';
       cancelDiv.innerHTML = _di(_cancelIco) + '<span>Cancel</span>';
+      bindUiText(cancelDiv.lastElementChild, 'Cancel');
       cancelDiv.addEventListener('click', () => { closeDropdown(); });
       dropdown.appendChild(cancelDiv);
       const rect = btn.getBoundingClientRect();

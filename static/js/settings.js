@@ -27,10 +27,28 @@ import { providerLogo } from './providers.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { invalidateSettings } from './appConfig.js';
+import { initUiLanguagePreference, bindUiText, unbindUiText, t } from './i18n.js';
 
 let initialized = false;
 let modalEl = null;
 let _authPolicy = { password_min_length: 8 };
+
+// Only call for forms authored by this module. Never scan integration names,
+// provider/model lists, credential values or generated setup snippets.
+function localizeSettingsForm(form) {
+  form.querySelectorAll('.settings-label, .uf-scope-action, h2, h3, .uf-email-save-label, button[id^="uf-"], button[id^="eaf-"]').forEach(node => {
+    const label = Array.from(node.childNodes).filter(child => child.nodeType === 3).map(child => child.nodeValue).join('').trim();
+    if (label) bindUiText(node, label);
+  });
+  form.querySelectorAll('#uf-api-auth option, #uf-smtp-security option, #eaf-smtp-security option, #uf-mcp-transport option').forEach(node => bindUiText(node, node.textContent));
+  form.querySelectorAll('.ufapi-option[data-value=""] > span:last-child, #uf-api-preset option[value=""]').forEach(node => bindUiText(node, 'Custom (no preset)'));
+}
+
+// Language belongs to the signed-in user's preferences, not global AI settings.
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => initUiLanguagePreference(), { once: true });
+  else initUiLanguagePreference();
+}
 
 /**
  * POST a settings patch, then drop the shared snapshot in appConfig.js.
@@ -345,7 +363,7 @@ function _bindFallbackWidget(opts) {
       var rm = document.createElement('button');
       rm.type = 'button';
       rm.className = 'settings-fallback-remove';
-      rm.title = 'Remove fallback';
+      bindUiText(rm, 'Remove fallback', 'title');
       rm.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
       rm.addEventListener('click', function() {
         current.splice(idx, 1);
@@ -416,9 +434,9 @@ async function initDefaultChat() {
         default_endpoint_id: epSel.value,
         default_model: modelSel.value
       });
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
 
   _registerAiEndpointRefresh(function(endpoints) {
@@ -473,9 +491,9 @@ async function initUtilityModel() {
         utility_endpoint_id: epSel.value || '',
         utility_model: modelSel.value || ''
       });
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 1500);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
 
   epSel.addEventListener('change', function() { refreshModels(''); saveUtility(); });
@@ -568,7 +586,7 @@ async function initTeacherModel() {
       msg.textContent = enabled ? (spec ? 'Saved' : 'Pick an endpoint + model') : 'Disabled';
       msg.style.color = enabled && !spec ? 'var(--red)' : 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
 
   if (enabledToggle) {
@@ -641,8 +659,8 @@ async function initImageSettings() {
     try {
       const res = await _postSettings({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value });
       if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
   modelSel.addEventListener('change', saveSettings);
   qualSel.addEventListener('change', saveSettings);
@@ -714,8 +732,8 @@ async function initVisionSettings() {
   async function saveSettings() {
     try {
       await _postSettings({ vision_enabled: enabledToggle ? enabledToggle.checked : true, vision_model: vlSel.value });
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
   vlSel.addEventListener('change', saveSettings);
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncVisionDisabled(); saveSettings(); });
@@ -795,9 +813,9 @@ async function initTtsSettings() {
   async function saveTTS() {
     try {
       await _postSettings({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' });
-      ttsMsg.textContent = 'Saved'; ttsMsg.style.color = 'var(--fg)'; setTimeout(() => { ttsMsg.textContent = ''; }, 2000);
+      ttsMsg.textContent = t('Saved'); ttsMsg.style.color = 'var(--fg)'; setTimeout(() => { ttsMsg.textContent = ''; }, 2000);
       if (window.aiTTSManager) window.aiTTSManager.checkAvailability();
-    } catch (e) { ttsMsg.textContent = 'Failed to save'; ttsMsg.style.color = 'var(--red)'; }
+    } catch (e) { ttsMsg.textContent = t('Failed to save'); ttsMsg.style.color = 'var(--red)'; }
   }
 
   async function saveAndClearCache() {
@@ -809,7 +827,7 @@ async function initTtsSettings() {
     var prov = provSel.value;
     if (prov === 'local') voiceInput.value = 'af_heart';
     else if (isEndpoint()) { voiceSelect.value = 'alloy'; modelSelect.value = 'tts-1'; }
-    else if (prov === 'browser') { voiceInput.value = ''; voiceInput.placeholder = 'OS default voice'; }
+    else if (prov === 'browser') { voiceInput.value = ''; bindUiText(voiceInput, 'OS default voice', 'placeholder'); }
     updateVisibility();
     saveTTS();
   });
@@ -835,7 +853,7 @@ async function initTtsSettings() {
       }
       var prov = provSel.value;
       if (prov === 'disabled') {
-        ttsMsg.textContent = 'Select a provider first'; ttsMsg.style.color = 'var(--red, #e55)';
+        ttsMsg.textContent = t('Select a provider first'); ttsMsg.style.color = 'var(--red, #e55)';
         setTimeout(function() { ttsMsg.textContent = ''; }, 2000); return;
       }
       var testText = 'Hello, this is a test of text to speech.';
@@ -877,7 +895,7 @@ async function initTtsSettings() {
           });
         }
       } catch (e) {
-        ttsMsg.textContent = 'Preview failed: ' + e.message; ttsMsg.style.color = 'var(--red, #e55)';
+        ttsMsg.textContent = t('Preview failed:') + ' ' + t(e.message); ttsMsg.style.color = 'var(--red, #e55)';
         setTimeout(function() { ttsMsg.textContent = ''; }, 3000);
       } finally {
         resetPreview();
@@ -956,11 +974,11 @@ async function initSttSettings() {
     try {
       var enabled = sttEnabledToggle ? sttEnabledToggle.checked : false;
       await _postSettings({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() });
-      sttMsg.textContent = 'Saved'; sttMsg.style.color = 'var(--fg)'; setTimeout(() => { sttMsg.textContent = ''; }, 2000);
+      sttMsg.textContent = t('Saved'); sttMsg.style.color = 'var(--fg)'; setTimeout(() => { sttMsg.textContent = ''; }, 2000);
       // Notify voiceRecorder of effective provider and update send button icon
       if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = effectiveProvider();
       if (window._updateSendBtnIcon) window._updateSendBtnIcon();
-    } catch (e) { sttMsg.textContent = 'Failed to save'; sttMsg.style.color = 'var(--red)'; }
+    } catch (e) { sttMsg.textContent = t('Failed to save'); sttMsg.style.color = 'var(--red)'; }
   }
 
   provSel.addEventListener('change', function() { updateVisibility(); saveSTT(); });
@@ -1112,10 +1130,10 @@ async function initSearchSettings() {
         _settings[kf] = keyInput.value.trim();
       }
       await _postSettings(payload);
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(refreshStatus, 2000);
       if (searchModule && searchModule.refresh) searchModule.refresh();
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
 
   provSel.addEventListener('change', function() { updateVisibility(); saveSearch(); _syncSearchPicker(); });
@@ -1264,9 +1282,9 @@ async function initSearchSettings() {
     _settings.search_fallback_chain = chain;
     try {
       await _postSettings({ search_fallback_chain: chain });
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(refreshStatus, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
     _renderFallbackChain();
   }
   _renderFallbackChain();
@@ -1428,9 +1446,9 @@ async function initResearchSettings() {
     }
     try {
       await _postSettings(payload);
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(showStatus, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
 
   epSel.addEventListener('change', async function() {
@@ -1492,9 +1510,9 @@ async function initResearchSearchSettings() {
   async function saveResearchSearch() {
     try {
       await _postSettings({ research_search_provider: searchSel.value });
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
 
   searchSel.addEventListener('change', function() { updateSearchLogo(); saveResearchSearch(); });
@@ -1538,7 +1556,7 @@ async function initAgentSettings() {
         (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
   }
 
   toolsInput.addEventListener('change', save);
@@ -2821,6 +2839,7 @@ async function initEmailAccountsSettings() {
     `;
 
     // Show/hide OAuth section and password fields based on provider selection.
+    localizeSettingsForm(formEl);
     function _syncOauthUI(providerKey) {
       const p = PROVIDERS[providerKey];
       const isOauth = !!(p && p.oauth);
@@ -3609,16 +3628,17 @@ async function initUnifiedIntegrations() {
     });
   }
 
-  function showForm(type, editId) {
+  async function showForm(type, editId) {
     formEl.style.display = '';
-    if (type === 'api') showApiForm(editId);
-    else if (type === 'caldav') showCalDavForm(editId);
-    else if (type === 'contacts' || type === 'carddav') showCardDavForm();
-    else if (type === 'email') showEmailForm(editId);
-    else if (type === 'mcp') showMcpForm(editId);
-    else if (type === 'codex') showAgentForm('codex', editId);
-    else if (type === 'claude') showAgentForm('claude', editId);
-    else if (type === 'vault') showVaultForm();
+    if (type === 'api') await showApiForm(editId);
+    else if (type === 'caldav') await showCalDavForm(editId);
+    else if (type === 'contacts' || type === 'carddav') await showCardDavForm();
+    else if (type === 'email') await showEmailForm(editId);
+    else if (type === 'mcp') await showMcpForm(editId);
+    else if (type === 'codex') await showAgentForm('codex', editId);
+    else if (type === 'claude') await showAgentForm('claude', editId);
+    else if (type === 'vault') await showVaultForm();
+    localizeSettingsForm(formEl);
   }
 
   // ── API form ──
@@ -3705,9 +3725,11 @@ async function initUnifiedIntegrations() {
       const lbl = trig.querySelector('.ufapi-label');
       const ico = trig.querySelector('.ufapi-icon');
       const _setFromKey = (k) => {
-        const row = menu.querySelector(`.ufapi-option[data-value="${k}"]`);
-        const text = row?.querySelector('span')?.textContent || 'Custom (no preset)';
-        if (lbl) lbl.textContent = text;
+        const text = k ? (presets[k]?.name || k) : 'Custom (no preset)';
+        if (lbl) {
+          unbindUiText(lbl); lbl.textContent = text;
+          if (!k) bindUiText(lbl, 'Custom (no preset)');
+        }
         if (ico) ico.innerHTML = _apiIconFor(k);
       };
       // Menu is reused (hidden, not recreated). close() hides it and tears down
@@ -5119,7 +5141,7 @@ async function initUnifiedIntegrations() {
         <label class="settings-row" style="align-items:center;gap:8px;display:flex;min-height:30px;padding:2px 0;">
           <span style="opacity:0.7;display:inline-flex;align-items:center;justify-content:center;width:16px;flex-shrink:0;">${icon}</span>
           <span class="settings-label" style="width:75px;flex-shrink:0;padding:0;">${esc(niceLabel)}</span>
-          <span style="font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding:1px 7px;border-radius:999px;flex-shrink:0;min-width:44px;text-align:center;margin-left:-3px;box-sizing:border-box;${_pillStyle(action)}">${esc(action)}</span>
+          <span class="uf-scope-action" style="font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding:1px 7px;border-radius:999px;flex-shrink:0;min-width:44px;text-align:center;margin-left:-3px;box-sizing:border-box;${_pillStyle(action)}">${esc(action)}</span>
           <span style="font-size:11px;line-height:1.35;opacity:0.62;flex:1;min-width:0;">${esc(scope.detail)}</span>
           <label class="admin-switch" style="margin-left:auto;flex-shrink:0;"><input type="checkbox" class="uf-codex-scope" data-token-id="${esc(t.id)}" data-scope="${esc(scope.key)}" ${scopes.has(scope.key) ? 'checked' : ''}><span class="admin-slider"></span></label>
         </label>`;
@@ -5246,7 +5268,7 @@ async function initUnifiedIntegrations() {
             });
             const d = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(d.detail || 'Failed');
-            if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; setTimeout(() => { msg.textContent = ''; }, 1200); }
+            if (msg) { msg.textContent = t('Saved'); msg.style.color = 'var(--green, #50fa7b)'; setTimeout(() => { msg.textContent = ''; }, 1200); }
             notifyIntegrationsChanged();
           } catch (err) {
             cb.checked = !cb.checked;
@@ -5287,7 +5309,7 @@ async function initUnifiedIntegrations() {
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || 'Failed');
-        if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; }
+        if (msg) { msg.textContent = t('Saved'); msg.style.color = 'var(--green, #50fa7b)'; }
         await renderList();
         setTimeout(() => { formEl.style.display = 'none'; }, 350);
       } catch (err) {
@@ -5378,6 +5400,7 @@ async function initUnifiedIntegrations() {
               ${scopeToggles(uiToken)}
               <div class="uf-codex-scope-msg" data-token-id="${esc(uiToken.id)}" style="font-size:11px;min-height:14px;"></div>
             </div>`;
+          localizeSettingsForm(inlineEl);
           // No auto-PATCH: scope toggles only persist on Save click below.
         }
         // Now that the token exists, surface the Save button.
@@ -5490,7 +5513,7 @@ async function initUnifiedIntegrations() {
             });
             const d = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(d.detail || 'Failed');
-            if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; }
+            if (msg) { msg.textContent = t('Saved'); msg.style.color = 'var(--green, #50fa7b)'; }
             await renderList();
           } catch (err) {
             cb.checked = !cb.checked;
@@ -5537,6 +5560,10 @@ async function initUnifiedIntegrations() {
       const menu = document.createElement('div');
       menu.className = 'uf-add-menu';
       menu.innerHTML = _rowsHtml;
+      menu.querySelectorAll('.uf-type-option').forEach(button => {
+        const label = _typeOptions.find(([value]) => value === button.dataset.value)?.[1];
+        if (label) bindUiText(button.lastElementChild, label);
+      });
       menu.style.cssText = 'position:absolute;right:0;z-index:1000;background:var(--panel);border:1px solid var(--border);border-radius:6px;max-height:340px;overflow-y:auto;box-shadow:0 6px 18px rgba(0,0,0,0.25);min-width:220px;';
       addBtn.parentElement.appendChild(menu);
       _menuEl = menu;

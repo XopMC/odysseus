@@ -4,6 +4,7 @@
  */
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import { spawnConfetti } from './compare/vote.js';
 import * as Modals from './modalManager.js';
 import { attachColorPicker } from './colorPicker.js';
@@ -3233,7 +3234,7 @@ function _buildForm(note = null) {
     // before committing.
     let nthDraft = { n: 0, w: -1 };
 
-    const DAY_SHORT = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+    const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
     function getNorm() {
       if (!dueInput.value) return 'none';
@@ -3329,7 +3330,7 @@ function _buildForm(note = null) {
         html += '<div class="note-reminder-menu-title">Monthly on…</div>';
         // Day N — uses the chosen date's day. Always offered.
         const dayVal = `monthly:day:${dayN}`;
-        html += `<button class="note-reminder-menu-item${norm === dayVal ? ' active' : ''}" data-action="set" data-val="${dayVal}"><span>Day ${dayN} every month</span>${norm === dayVal ? '<span class="note-reminder-menu-check">✓</span>' : ''}</button>`;
+        html += `<button class="note-reminder-menu-item${norm === dayVal ? ' active' : ''}" data-action="set" data-val="${dayVal}"><span><span data-note-ui>Day</span> ${dayN} <span data-note-ui>every month</span></span>${norm === dayVal ? '<span class="note-reminder-menu-check">✓</span>' : ''}</button>`;
         // Nth weekday →
         {
           const isNth = norm.startsWith('monthly:nth:');
@@ -3354,11 +3355,30 @@ function _buildForm(note = null) {
         html += '</div>';
         html += '<div class="note-reminder-menu-divider"></div>';
         const ready = nthDraft.n > 0 && nthDraft.w >= 0;
-        const lbl = ready ? `Save: ${_ORDINALS[nthDraft.n - 1]} ${_DAYS[nthDraft.w]}` : 'Pick week and weekday';
+        const lbl = ready ? `<span data-note-ui>Save</span>: <span data-note-ui>${_ORDINALS[nthDraft.n - 1]}</span> <span data-note-ui>${_DAYS[nthDraft.w]}</span>` : 'Pick week and weekday';
         html += `<button class="note-reminder-menu-item note-reminder-menu-confirm${ready ? '' : ' disabled'}" data-action="nth-save" ${ready ? '' : 'disabled'}><span>${lbl}</span></button>`;
       }
 
       menu.innerHTML = html;
+      // This menu is assembled solely from authored recurrence actions; never
+      // traverse note bodies, titles, entered dates or editable input values.
+      menu.querySelectorAll('[data-note-ui], .note-reminder-menu-title, .note-reminder-menu-sublabel, .note-reminder-menu-back, .note-reminder-menu-item > span:first-child, .note-reminder-day-chip').forEach(label => {
+        const text = Array.from(label.childNodes).filter(n => n.nodeType === 3).map(n => n.nodeValue).join('').trim();
+        bindUiText(label, text);
+        if (label.title) bindUiText(label, label.title, 'title');
+      });
+      const recurrenceWords = new Set([..._DAYS, ...DAY_SHORT, ..._ORDINALS, 'Day', 'Last']);
+      menu.querySelectorAll('.note-reminder-menu-sub').forEach(label => {
+        const words = label.textContent.trim().split(/\s+/);
+        if (!words.some(word => recurrenceWords.has(word)) || !words.every(word => recurrenceWords.has(word) || /^\d+$/.test(word))) return;
+        label.replaceChildren();
+        words.forEach((word, index) => {
+          if (index) label.appendChild(document.createTextNode(' '));
+          const part = document.createElement('span'); part.textContent = word;
+          if (recurrenceWords.has(word)) bindUiText(part, word);
+          label.appendChild(part);
+        });
+      });
       reposition();
       wire();
     }
@@ -3468,6 +3488,8 @@ function _buildForm(note = null) {
       </button>
     `;
     document.body.appendChild(menu);
+    bindUiText(menu.querySelector('.note-reminder-menu-title'), 'Pick date and time');
+    bindUiText(menu.querySelector('.note-reminder-menu-confirm > span'), 'Save');
     // Position next to the bell button
     const anchor = remindBtn || form.querySelector('.note-form-reminder-tags');
     const rect = anchor.getBoundingClientRect();

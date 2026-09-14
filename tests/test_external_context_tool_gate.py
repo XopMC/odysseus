@@ -1060,6 +1060,7 @@ def test_tainted_native_route_keeps_action_schema_for_exact_approval(monkeypatch
             "gpt-test",
             messages,
             max_rounds=1,
+            context_length=131072,  # known fixture window; this test isolates the approval gate
             relevant_tools={"update_document"},
         )
     )
@@ -1363,7 +1364,7 @@ def test_frontend_tool_approval_uses_opaque_id_and_fixed_decisions():
     assert "const approvalForSend = _pendingToolApproval" in chat
     assert "!approvalForSend && fileHandlerModule.getPendingCount()" in chat
     assert "if (!approvalForSend) _pendingRegenAttachments = null" in chat
-    assert "!approvalForSend && el('research-toggle').checked" in chat
+    assert "!approvalForSend && choicesForSend.research" in chat
     assert "approvalForSend ? (approvalForSend.draft || '') : ''" in chat
     assert "if (approvalForSend && documentSaved === false)" in chat
     assert "if (!approvalForSend) {\n          try {\n            _sendPerf.mark('doc_silent_save_begin')" in chat

@@ -14,6 +14,7 @@ const SETTINGS_JS = path.join(JS, 'settings.js');
 
 const REAL_MODULES = new Set([
   SETTINGS_JS,
+  path.join(JS, 'i18n.js'),
   path.join(JS, 'settings/dom.js'),
   path.join(JS, 'settings/registry.js'),
   path.join(JS, 'settings/search.js'),

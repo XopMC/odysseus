@@ -7,6 +7,7 @@ import { initColorPickers, attachColorPicker } from './colorPicker.js';
 import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
+import { bindUiText, uiTextSource, cloneWithUiText } from './i18n.js';
 
 export const THEMES = {
   dark:       { bg:'#282c34', fg:'#9cdef2', panel:'#111111', border:'#355a66', red:'#e06c75' },
@@ -522,6 +523,18 @@ function syncAdvancedPickers(colors) {
 
 export function initThemeUI() {
   const themePopup = document.getElementById('theme-popup');
+  // These selectors contain authored controls only, not saved theme names,
+  // font names, hex values or custom user input.
+  themePopup?.querySelectorAll('.color-row > label, .theme-adv-group-label, label.theme-fd-label, #theme-adv-toggle, .admin-card > h2, .modal-header > h4').forEach(node => {
+    const ownText = [...node.childNodes].filter(child => child.nodeType === 3).map(child => child.nodeValue).join('').trim();
+    bindUiText(node, node.hasAttribute('data-ui-i18n') ? uiTextSource(node) : ownText);
+  });
+  themePopup?.querySelectorAll('.color-reset-btn, .color-row > label[title], #theme-bg-effect-color').forEach(node => {
+    for (const attribute of ['title', 'aria-label']) {
+      if (node.hasAttribute(attribute)) bindUiText(node, node.getAttribute(attribute), attribute);
+    }
+  });
+  bindUiText(document.getElementById('theme-save-name'), 'Theme name...', 'placeholder');
   const themeHeader = document.getElementById('theme-popup-header');
   if (themePopup && themeHeader && !themePopup.dataset.dragWired) {
     themePopup.dataset.dragWired = '1';
@@ -887,9 +900,9 @@ export function initThemeUI() {
   const saveGoBtnOld = document.getElementById('theme-save-go');
   const saveError = document.getElementById('theme-save-error');
   if (saveGoBtnOld && saveNameInputOld) {
-    const newGoBtn = saveGoBtnOld.cloneNode(true);
+    const newGoBtn = cloneWithUiText(saveGoBtnOld);
     saveGoBtnOld.parentNode.replaceChild(newGoBtn, saveGoBtnOld);
-    const newNameInput = saveNameInputOld.cloneNode(true);
+    const newNameInput = cloneWithUiText(saveNameInputOld);
     saveNameInputOld.parentNode.replaceChild(newNameInput, saveNameInputOld);
     const doSave = () => {
       saveError.style.display = 'none';
@@ -931,7 +944,7 @@ export function initThemeUI() {
   // Reset button
   const resetBtn = document.getElementById('theme-reset-btn');
   if (resetBtn) {
-    const newReset = resetBtn.cloneNode(true);
+    const newReset = cloneWithUiText(resetBtn);
     resetBtn.parentNode.replaceChild(newReset, resetBtn);
     newReset.addEventListener('click', () => {
       Storage.remove(LS_KEY);
@@ -956,7 +969,7 @@ export function initThemeUI() {
   const advToggle = document.getElementById('theme-adv-toggle');
   const advSection = document.getElementById('themeAdvanced');
   if (advToggle && advSection) {
-    const newToggle = advToggle.cloneNode(true);
+    const newToggle = cloneWithUiText(advToggle);
     advToggle.parentNode.replaceChild(newToggle, advToggle);
     newToggle.addEventListener('click', () => {
       advSection.classList.toggle('hidden');
@@ -1033,7 +1046,7 @@ export function initThemeUI() {
   // Clear advanced overrides button
   const advClearBtn = document.getElementById('theme-adv-clear');
   if (advClearBtn) {
-    const newClear = advClearBtn.cloneNode(true);
+    const newClear = cloneWithUiText(advClearBtn);
     advClearBtn.parentNode.replaceChild(newClear, advClearBtn);
     newClear.addEventListener('click', () => {
       const base = readCurrentColors();
@@ -1047,7 +1060,7 @@ export function initThemeUI() {
 
   // Per-picker reset buttons (base colors)
   document.querySelectorAll('.color-reset-btn[data-reset]').forEach(btn => {
-    const newBtn = btn.cloneNode(true);
+    const newBtn = cloneWithUiText(btn);
     btn.parentNode.replaceChild(newBtn, btn);
     newBtn.addEventListener('click', () => {
       const key = newBtn.dataset.reset;
@@ -1061,7 +1074,7 @@ export function initThemeUI() {
 
   // Effect color reset button
   document.querySelectorAll('.color-reset-btn[data-reset-effect]').forEach(btn => {
-    const newBtn = btn.cloneNode(true);
+    const newBtn = cloneWithUiText(btn);
     btn.parentNode.replaceChild(newBtn, btn);
     newBtn.addEventListener('click', () => {
       const ec = document.getElementById('theme-bg-effect-color');
@@ -1076,7 +1089,7 @@ export function initThemeUI() {
 
   // Per-picker reset buttons (advanced colors)
   document.querySelectorAll('.color-reset-btn[data-reset-adv]').forEach(btn => {
-    const newBtn = btn.cloneNode(true);
+    const newBtn = cloneWithUiText(btn);
     btn.parentNode.replaceChild(newBtn, btn);
     newBtn.addEventListener('click', () => {
       const key = newBtn.dataset.resetAdv;
@@ -1115,7 +1128,7 @@ export function initThemeUI() {
   const patternSelect = document.getElementById('theme-bg-pattern-select');
 
   if (fontSelect) {
-    const nf = fontSelect.cloneNode(true); fontSelect.parentNode.replaceChild(nf, fontSelect);
+    const nf = cloneWithUiText(fontSelect); fontSelect.parentNode.replaceChild(nf, fontSelect);
     nf.value = _initFont;
     nf.addEventListener('change', () => {
       applyFontDensity(nf.value, document.getElementById('theme-density-select').value);
@@ -1141,7 +1154,7 @@ export function initThemeUI() {
       .catch(e => console.warn('Custom fonts fetch failed:', e));
   }
   if (densitySelect) {
-    const nd = densitySelect.cloneNode(true); densitySelect.parentNode.replaceChild(nd, densitySelect);
+    const nd = cloneWithUiText(densitySelect); densitySelect.parentNode.replaceChild(nd, densitySelect);
     nd.value = _initDensity;
     nd.addEventListener('change', () => {
       applyFontDensity(document.getElementById('theme-font-select').value, nd.value);
@@ -1150,7 +1163,7 @@ export function initThemeUI() {
   }
   const textSizeSelect = document.getElementById('theme-text-size-select');
   if (textSizeSelect) {
-    const nts = textSizeSelect.cloneNode(true); textSizeSelect.parentNode.replaceChild(nts, textSizeSelect);
+    const nts = cloneWithUiText(textSizeSelect); textSizeSelect.parentNode.replaceChild(nts, textSizeSelect);
     let initScale = DEFAULT_UI_SCALE;
     try { initScale = localStorage.getItem(UI_SCALE_KEY) || DEFAULT_UI_SCALE; } catch (e) {}
     nts.value = initScale;
@@ -1161,7 +1174,7 @@ export function initThemeUI() {
     });
   }
   if (patternSelect) {
-    const np = patternSelect.cloneNode(true); patternSelect.parentNode.replaceChild(np, patternSelect);
+    const np = cloneWithUiText(patternSelect); patternSelect.parentNode.replaceChild(np, patternSelect);
     np.value = _initPattern;
     np.addEventListener('change', () => {
       applyBgPattern(np.value);
@@ -1225,7 +1238,8 @@ export function initThemeUI() {
     });
   }
   if (harmonyGenBtnEl) {
-    const newGen = harmonyGenBtnEl.cloneNode(true);
+    const newGen = cloneWithUiText(harmonyGenBtnEl);
+    bindUiText(newGen, 'Generate');
     harmonyGenBtnEl.parentNode.replaceChild(newGen, harmonyGenBtnEl);
     newGen.addEventListener('click', () => {
       const accent = document.getElementById('harmony-accent').value;
@@ -1241,7 +1255,7 @@ export function initThemeUI() {
     });
   }
   if (harmonyAccentEl) {
-    const newAcc = harmonyAccentEl.cloneNode(true);
+    const newAcc = cloneWithUiText(harmonyAccentEl);
     harmonyAccentEl.parentNode.replaceChild(newAcc, harmonyAccentEl);
     // Re-attach the in-house color picker to the fresh clone. cloneNode
     // copies the data-cp-attached="1" flag but NOT the listeners, so we
@@ -1270,7 +1284,7 @@ export function initThemeUI() {
   const importCancelEl = document.getElementById('theme-import-cancel');
 
   if (exportBtnEl) {
-    const newExp = exportBtnEl.cloneNode(true);
+    const newExp = cloneWithUiText(exportBtnEl);
     exportBtnEl.parentNode.replaceChild(newExp, exportBtnEl);
     newExp.addEventListener('click', () => {
       const colors = readCurrentColors();
@@ -1296,7 +1310,7 @@ export function initThemeUI() {
   }
 
   if (importBtnEl && importAreaEl && importActionsEl) {
-    const newImp = importBtnEl.cloneNode(true);
+    const newImp = cloneWithUiText(importBtnEl);
     importBtnEl.parentNode.replaceChild(newImp, importBtnEl);
     newImp.addEventListener('click', () => {
       importAreaEl.classList.toggle('hidden');
@@ -1307,7 +1321,7 @@ export function initThemeUI() {
   }
 
   if (importGoEl && importAreaEl) {
-    const newGo = importGoEl.cloneNode(true);
+    const newGo = cloneWithUiText(importGoEl);
     importGoEl.parentNode.replaceChild(newGo, importGoEl);
     newGo.addEventListener('click', () => {
       saveError.style.display = 'none';
@@ -1344,7 +1358,7 @@ export function initThemeUI() {
   }
 
   if (importCancelEl && importAreaEl && importActionsEl) {
-    const newCancel = importCancelEl.cloneNode(true);
+    const newCancel = cloneWithUiText(importCancelEl);
     importCancelEl.parentNode.replaceChild(newCancel, importCancelEl);
     newCancel.addEventListener('click', () => {
       importAreaEl.classList.add('hidden');

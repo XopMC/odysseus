@@ -1,0 +1,15 @@
+# Build on the verified Jetson image: preserve its ARM dependencies and entrypoint.
+# Override BASE_IMAGE only after independently verifying the replacement image.
+ARG BASE_IMAGE=odysseus:jetson-host-20260913-v2
+FROM ${BASE_IMAGE}
+COPY src /app/src
+COPY routes /app/routes
+COPY services /app/services
+COPY static /app/static
+COPY scripts /app/scripts
+COPY app.py /app/app.py
+# The preserved base can contain AppleDouble transfer metadata. These are not
+# source files and must not survive an overlay COPY into the release image.
+RUN find /app -maxdepth 1 -type f -name '._*' -delete && \
+    find /app/src /app/routes /app/services /app/static /app/scripts -type f -name '._*' -delete && \
+    if [ -d /app/tests ]; then find /app/tests -type f -name '._*' -delete; fi

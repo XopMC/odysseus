@@ -3,9 +3,10 @@
 
 Reliability is the whole point: completion → agent re-invocation must never
 silently no-op. The monitor drains `bg_jobs.pending_followups()` every tick and
-only calls `mark_followed_up()` AFTER the agent run succeeds — so a transient
-failure is simply retried on the next tick. A timed-out/dead job still produces
-a follow-up ("the job failed/timed out"), so the user always hears back.
+only calls `mark_followed_up()` AFTER the outcome is persisted. This means
+delivered, not necessarily task-complete: an unfinished/error/approval outcome
+is saved explicitly and is not blindly replayed on the next tick. A timed-out
+or dead job still produces a follow-up, so the user always hears back.
 """
 
 from __future__ import annotations
@@ -21,9 +22,21 @@ logger = logging.getLogger(__name__)
 
 _monitor_task = None
 POLL_INTERVAL_S = 5
-# The follow-up agent run is allowed a few rounds to actually continue the task
-# (e.g. after `pip install` finishes, run the transcription).
-_FOLLOWUP_MAX_ROUNDS = 12
+
+def _followup_limits():
+    """Honor the same configured budgets as foreground Agent turns."""
+    from src.agent_tools import MAX_AGENT_ROUNDS
+    from src.settings import get_setting
+
+    try:
+        rounds = int(get_setting("agent_max_rounds", MAX_AGENT_ROUNDS) or MAX_AGENT_ROUNDS)
+    except (TypeError, ValueError):
+        rounds = MAX_AGENT_ROUNDS
+    try:
+        tool_calls = int(get_setting("agent_max_tool_calls", 0))
+    except (TypeError, ValueError):
+        tool_calls = 0
+    return max(1, min(rounds, 200)), max(0, tool_calls)
 
 
 def _background_result_message(rec):
@@ -36,26 +49,40 @@ def _background_result_message(rec):
     return untrusted_context_message("background job output", inject)
 
 
-async def _drain_agent(sess, messages):
+async def _drain_agent(sess, messages, *, outcome=None):
     """Run the agent loop headless against a session. Returns
     (final_prose, tool_events) — tool_events in the same shape the live chat
-    saves, so the frontend rebuilds them as standard agent-thread tool cards."""
+    saves, so the frontend rebuilds them as standard agent-thread tool cards.
+    The optional outcome dict distinguishes a completed stream from a safety
+    stop, provider failure, or required user input without changing the tuple
+    returned to existing callers.
+    """
     from src.agent_loop import stream_agent_loop
     full = ""
     tool_events = []
     round_num = 1
+    terminal = None
+    saw_done = False
+    max_rounds, max_tool_calls = _followup_limits()
     async for chunk in stream_agent_loop(
         sess.endpoint_url, sess.model, messages,
         headers=getattr(sess, "headers", None),
         context_length=getattr(sess, "context_length", 0) or 0,
         session_id=sess.id,
-        max_rounds=_FOLLOWUP_MAX_ROUNDS,
+        max_rounds=max_rounds,
+        max_tool_calls=max_tool_calls,
         owner=getattr(sess, "owner", None),
     ):
-        if not chunk.startswith("data: "):
+        # Provider errors have an `event: error` prelude rather than starting
+        # with data. Ignoring those used to turn a failed stream into success.
+        if chunk.startswith("event: error"):
+            terminal = {"status": "failed", "reason": "provider_error"}
+        body = "\n".join(line[5:].lstrip() for line in chunk.splitlines()
+                         if line.startswith("data:")).strip()
+        if body == "[DONE]":
+            saw_done = True
             continue
-        body = chunk[6:].strip()
-        if not body or body == "[DONE]":
+        if not body:
             continue
         try:
             d = json.loads(body)
@@ -63,6 +90,19 @@ async def _drain_agent(sess, messages):
             continue
         if not isinstance(d, dict):
             continue
+        event_type = d.get("type")
+        if event_type in {
+            "rounds_exhausted", "budget_exceeded", "loop_breaker_triggered",
+            "intent_nudge_exhausted",
+        }:
+            if not terminal or terminal["status"] != "failed":
+                terminal = {"status": "unfinished", "reason": event_type}
+        elif event_type in {"context_compaction_failed", "agent_terminal"} or d.get("error"):
+            terminal = {"status": "failed", "reason": event_type or "provider_error"}
+        elif (event_type == "ask_user"
+              or (event_type == "tool_output" and isinstance(d.get("ask_user"), dict))):
+            if not terminal or terminal["status"] != "failed":
+                terminal = {"status": "waiting_user", "reason": "ask_user"}
         if "delta" in d:
             delta = d.get("delta")
             if isinstance(delta, str):
@@ -86,13 +126,21 @@ async def _drain_agent(sess, messages):
                 # the next foreground turn instead of losing it headlessly.
                 tool_event["ask_user"] = d["ask_user"]
             tool_events.append(tool_event)
+    if outcome is not None:
+        outcome.update(terminal or {
+            "status": "completed" if saw_done else "unfinished",
+            "reason": "normal_finish" if saw_done else "stream_incomplete",
+        })
     return full, tool_events
 
 
 async def _run_followup(rec: dict) -> bool:
-    """Re-invoke the agent in the job's session with the result. Returns True
-    if the follow-up completed (or there's nothing to do) — i.e. it's safe to
-    mark followed_up. Returns False to retry on the next tick."""
+    """Return True when the outcome was delivered, not when the task is done.
+
+    A saved pause/failure is handled once: blindly rerunning the same job result
+    can repeat already completed effectful actions. Only a busy/not-ready
+    session is deferred without consuming the result.
+    """
     from src.ai_interaction import get_session_manager
     from core.models import ChatMessage
 
@@ -121,7 +169,17 @@ async def _run_followup(rec: dict) -> bool:
     context = sess.get_context_messages()
     context.append(_background_result_message(rec))
 
-    full, tool_events = await _drain_agent(sess, context)
+    outcome = {}
+    full, tool_events = await _drain_agent(sess, context, outcome=outcome)
+    if outcome["status"] == "waiting_user":
+        note = ("[Background continuation is waiting for your answer or approval. "
+                "The task is not completed.]")
+        full = f"{full}\n\n{note}".strip()
+    elif outcome["status"] != "completed":
+        note = (f"[Background continuation not completed ({outcome['reason']}). "
+                "Progress was saved; continue the task from this chat. "
+                "The background command will not be replayed automatically.]")
+        full = f"{full}\n\n{note}".strip()
 
     # Persist ONLY the assistant continuation so it renders as a normal agent
     # turn — a standard chat bubble plus `tool_events` that the frontend
@@ -135,11 +193,12 @@ async def _run_followup(rec: dict) -> bool:
             "model": sess.model,
             "bg_job_id": rec["id"],
             "bg_result": bg_jobs.result_text(rec)[:4000],
+            "bg_followup": outcome,
         },
     ))
     sm.save_sessions()
-    logger.info("bg-followup: auto-continued session %s for job %s (%d chars, %d tools)",
-                sess.id, rec["id"], len(full), len(tool_events))
+    logger.info("bg-followup: delivered session %s job %s status=%s (%d chars, %d tools)",
+                sess.id, rec["id"], outcome["status"], len(full), len(tool_events))
     return True
 
 

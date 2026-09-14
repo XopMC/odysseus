@@ -3282,8 +3282,8 @@ def test_agent_builds_backup_prompt_and_tool_transport_before_attempt(monkeypatc
 @pytest.mark.parametrize(
     ("primary_context", "backup_context", "expected_fallback_message_count"),
     [
-        (1000, 100, 2),
-        (100, 1000, 22),
+        (65536, 16384, 3),
+        (16384, 65536, 22),
     ],
 )
 def test_agent_fallback_request_uses_candidate_context_budget(
@@ -3295,6 +3295,7 @@ def test_agent_fallback_request_uses_candidate_context_budget(
     requests_by_round = []
     context_lookups = []
     trim_budgets = []
+    checkpoint_limits = []
     round_number = 0
     primary = ("https://selected.example/v1", "selected-model", {})
     backup = ("https://backup.example/v1", "backup-model", {})
@@ -3306,7 +3307,7 @@ def test_agent_fallback_request_uses_candidate_context_budget(
 
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda messages: len(messages) * 10)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda messages: len(messages) * 1000)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
@@ -3335,9 +3336,12 @@ def test_agent_fallback_request_uses_candidate_context_budget(
         return candidate_context
 
     def fake_trim(messages, effective_budget, reserve_tokens=0):
-        trim_budgets.append(effective_budget)
-        if effective_budget != 100:
-            return list(messages)
+        # The legacy preflight estimate must reserve the complete output, but
+        # runtime checkpoints now own history shaping, not destructive trim.
+        trim_budgets.append((effective_budget, reserve_tokens))
+        return list(messages)
+
+    async def fake_checkpoint(messages, limit, summarize):
         route_prompt = next(
             message for message in messages
             if message.get("_agent_injected") == "prompt"
@@ -3346,12 +3350,19 @@ def test_agent_fallback_request_uses_candidate_context_budget(
             message for message in reversed(messages)
             if message.get("role") == "user"
         )
-        return [route_prompt, current_user]
+        checkpoint_limits.append((route_prompt["content"], limit))
+        if len(messages) * 1000 < limit:
+            return list(messages), "unchanged"
+        return [route_prompt, {
+            "role": "system", "content": "Verified earlier work checkpoint",
+            "_agent_working_summary": True,
+        }, current_user], "compacted"
 
     monkeypatch.setattr(model_context, "budget_context_for_model", fake_context)
     monkeypatch.setattr(context_budget, "compute_input_token_budget", fake_compute)
     monkeypatch.setattr(context_budget, "budget_is_explicit", lambda value: False)
     monkeypatch.setattr(context_compactor, "trim_for_context", fake_trim)
+    monkeypatch.setattr(agent_loop, "compact_working_context", fake_checkpoint)
 
     async def fake_stream(candidates, messages, **kwargs):
         nonlocal round_number
@@ -3385,6 +3396,7 @@ def test_agent_fallback_request_uses_candidate_context_budget(
             primary[1],
             history,
             headers=primary[2],
+            max_tokens=4096,
             max_rounds=2,
             relevant_tools={"bash"},
             fallbacks=[backup],
@@ -3395,14 +3407,18 @@ def test_agent_fallback_request_uses_candidate_context_budget(
         )
     )
 
-    assert [(url, model) for url, model, _fallback in context_lookups] == [
-        (primary[0], primary[1]),
-        (backup[0], backup[1]),
-        (backup[0], backup[1]),
-    ]
-    assert trim_budgets == [primary_context, backup_context, backup_context]
+    assert {(url, model) for url, model, _fallback in context_lookups} == {
+        (primary[0], primary[1]), (backup[0], backup[1]),
+    }
+    assert trim_budgets == [(primary_context, 4096)]
     fallback_messages = requests_by_round[0][1]["messages"]
+    # Each candidate has its own window and full output/schema reservation.
+    # Compaction keeps a checkpoint plus the goal, not just the latest user.
+    backup_schema = requests_by_round[0][1]["kwargs"]["tools"]
+    expected_limit = int(backup_context * .85) - 4096 - agent_loop.schema_token_estimate(backup_schema)
+    assert ("route prompt for backup-model", expected_limit) in checkpoint_limits
     assert len(fallback_messages) == expected_fallback_message_count
+    assert any(message.get("_agent_working_summary") for message in fallback_messages) == (backup_context == 16384)
     assert fallback_messages[0]["content"] == "route prompt for backup-model"
     assert any(
         message == {"role": "user", "content": latest_user}
@@ -3421,94 +3437,132 @@ def test_agent_fallback_request_uses_candidate_context_budget(
     assert metrics["context_length"] == backup_context
 
 
-def test_agent_persists_only_answering_route_compaction(monkeypatch):
+def test_agent_fallback_checkpoint_preserves_goal_without_rewriting_history(monkeypatch):
     primary = ("https://selected.example/v1", "selected-model", {})
+    failed_backup = ("https://failed.example/v1", "failed-backup-model", {})
     backup = ("https://backup.example/v1", "backup-model", {})
     applied = []
+    checkpoint_routes = []
+    requests = []
+    goal = {"role": "user", "content": "Run a command after checking the route."}
+    history_session = SimpleNamespace(history=[dict(goal)])
 
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "budget_context_for_model", lambda url, model, fallback=0: {
+        "selected-model": 32768, "failed-backup-model": 16384, "backup-model": 65536,
+    }[model])
 
-    async def fake_compact(
-        session, url, model, messages, headers=None, owner=None,
-        *, persist=True, compaction_state=None,
-    ):
-        assert persist is False
-        compaction_state.update({"route": model, "applied": False})
-        return (list(messages), 1000, True)
+    def fake_build(messages, model, *args, **kwargs):
+        return ([{"role": "system", "content": model, "_agent_injected": "prompt"}] + list(messages), [])
+
+    async def fake_checkpoint(messages, limit, summarize):
+        route = messages[0]["content"]
+        checkpoint_routes.append(route)
+        return [messages[0], {
+            "role": "system", "content": f"checkpoint for {route}",
+            "_agent_working_summary": True,
+        }, goal], "compacted"
+
+    async def legacy_compact(*args, **kwargs):
+        pytest.fail("Agent runtime must not use persisted-history compaction offsets")
 
     def fake_apply(session, state):
         if not state or state.get("applied"):
             return False
-        state["applied"] = True
-        applied.append(state["route"])
+        applied.append(state)
         return True
 
     async def fake_stream(candidates, messages, **kwargs):
         factory = kwargs["candidate_request_factory"]
         for index, candidate in enumerate(candidates):
-            await factory(index, *candidate)
-        yield f'data: {json.dumps({"type": "fallback", "selected_model": primary[1], "answered_by": backup[1], "candidate_index": 1})}\n\n'
+            requests.append(await factory(index, *candidate))
+        yield f'data: {json.dumps({"type": "fallback", "selected_model": primary[1], "answered_by": backup[1], "candidate_index": 2})}\n\n'
         yield 'data: {"delta": "backup answer"}\n\n'
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(agent_loop, "maybe_compact", fake_compact)
+    monkeypatch.setattr(agent_loop, "_build_system_prompt", fake_build)
+    monkeypatch.setattr(agent_loop, "compact_working_context", fake_checkpoint)
+    monkeypatch.setattr(agent_loop, "maybe_compact", legacy_compact)
     monkeypatch.setattr(agent_loop, "apply_compaction_state", fake_apply)
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    _collect(
+    chunks = _collect(
         agent_loop.stream_agent_loop(
             primary[0],
             primary[1],
-            [{"role": "user", "content": "Run a command after checking the route."}],
+            [dict(goal)],
             headers=primary[2],
-            history_session=object(),
+            history_session=history_session,
+            context_length=32768,
+            max_tokens=1024,
             max_rounds=1,
             relevant_tools={"bash"},
-            fallbacks=[backup],
+            fallbacks=[failed_backup, backup],
             fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
             fallback_on_empty=False,
             _is_teacher_run=True,
         )
     )
 
-    assert applied == ["backup-model"]
+    assert checkpoint_routes == ["failed-backup-model", "backup-model"]
+    assert applied == []
+    assert history_session.history == [goal]
+    assert not any(m.get("_agent_working_summary") for m in requests[0]["messages"])
+    assert any(m.get("content") == "checkpoint for failed-backup-model" for m in requests[1]["messages"])
+    assert any(m.get("content") == "checkpoint for backup-model" for m in requests[2]["messages"])
+    assert goal in requests[2]["messages"]
+    metrics = json.loads(next(chunk for chunk in chunks if '"type": "metrics"' in chunk)[6:])["data"]
+    assert metrics["working_context"]["model"] == "backup-model"
+    assert metrics["working_context"]["context_length"] == 65536
+    assert metrics["working_context"]["compactions"] == 1
+    expected_limit = int(65536 * .85) - 1024 - agent_loop.schema_token_estimate(requests[2]["kwargs"]["tools"])
+    assert metrics["working_context"]["auto_compact_threshold"] == round(100 * expected_limit / 65536, 1)
+    snapshots = [json.loads(chunk[6:])["data"] for chunk in chunks if '"type": "context_usage"' in chunk]
+    assert not any(s["model"] == "failed-backup-model" for s in snapshots)
+    assert snapshots[-1]["model"] == "backup-model"
 
 
 def test_agent_deferred_compaction_survives_duplicate_primary_fallback(monkeypatch):
     primary = ("https://selected.example/v1", "selected-model", {})
-    compacted_routes = []
+    checkpoints = []
+    goal = {"role": "user", "content": "Investigate this."}
+    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"old-{i}"} for i in range(20)] + [goal]
 
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda messages: len(messages) * 1000)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
 
-    async def fake_compact(
-        session, url, model, messages, headers=None, owner=None,
-        *, persist=True, compaction_state=None,
-    ):
-        assert persist is False
-        compacted_routes.append((url, model))
-        return (list(messages), 1000, False)
+    def fake_build(messages, model, *args, **kwargs):
+        return ([{"role": "system", "content": model, "_agent_injected": "prompt"}] + list(messages), [])
+
+    async def fake_checkpoint(messages, limit, summarize):
+        checkpoints.append((messages[0]["content"], limit))
+        return [messages[0], {"role": "system", "content": "Earlier work checkpoint", "_agent_working_summary": True}, goal], "compacted"
 
     async def fake_stream(candidates, messages, **kwargs):
         assert candidates == [primary]
         request = await kwargs["candidate_request_factory"](0, *primary)
-        assert request["messages"]
+        assert goal in request["messages"]
+        assert any(m.get("_agent_working_summary") for m in request["messages"])
         yield 'data: {"delta": "answer"}\n\n'
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(agent_loop, "maybe_compact", fake_compact)
+    monkeypatch.setattr(agent_loop, "_build_system_prompt", fake_build)
+    monkeypatch.setattr(agent_loop, "compact_working_context", fake_checkpoint)
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
     chunks = _collect(agent_loop.stream_agent_loop(
         primary[0],
         primary[1],
-        [{"role": "user", "content": "Investigate this."}],
+        history,
         headers=primary[2],
+        context_length=16384,
+        max_tokens=1024,
         relevant_tools={"bash"},
         fallbacks=[primary],
         defer_context_shaping=True,
@@ -3518,7 +3572,10 @@ def test_agent_deferred_compaction_survives_duplicate_primary_fallback(monkeypat
         _is_teacher_run=True,
     ))
 
-    assert compacted_routes == [(primary[0], primary[1])]
+    assert len(checkpoints) == 1
+    assert checkpoints[0][0] == primary[1]
+    assert 3000 < checkpoints[0][1] < 16384
+    assert sum('"type": "compacted"' in chunk for chunk in chunks) == 1
     assert any('"delta": "answer"' in chunk for chunk in chunks)
 
 
@@ -3618,6 +3675,8 @@ def test_skill_activation_reaches_later_fallback_request_and_pinned_round(monkey
             primary[1],
             [{"role": "user", "content": "Load runtime-skill, then use it."}],
             headers=primary[2],
+            context_length=32768,
+            max_tokens=1024,
             max_rounds=3,
             relevant_tools={"manage_skills"},
             fallbacks=[backup],

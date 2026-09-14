@@ -465,7 +465,7 @@ def test_empty_or_missing_history():
     assert _session_is_research_spinoff(SimpleNamespace()) is False
 
 
-async def _build_context_owner_probe(monkeypatch, request_state):
+async def _build_context_owner_probe(monkeypatch, request_state, **context_options):
     captured = {
         "prefs_owner": None,
         "preface_owner": None,
@@ -497,6 +497,7 @@ async def _build_context_owner_probe(monkeypatch, request_state):
         return {"memory_enabled": True, "skills_enabled": True}
 
     def fake_build_context_preface(**kwargs):
+        captured['use_web'] = kwargs['use_web']
         captured["preface_owner"] = kwargs["owner"]
         return [], [], []
 
@@ -532,17 +533,27 @@ async def _build_context_owner_probe(monkeypatch, request_state):
     sess.get_context_messages = lambda: list(sess.messages)
 
     request = SimpleNamespace(state=SimpleNamespace(**request_state))
+    probe_message=context_options.pop("message", "hello")
     ctx = await build_chat_context(
         sess=sess,
         request=request,
         chat_handler=SimpleNamespace(),
         chat_processor=SimpleNamespace(build_context_preface=fake_build_context_preface),
-        message="hello",
+        **context_options,
+        message=probe_message,
         session_id="session-1",
         incognito=True,
     )
 
     return ctx, captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('value,expected', [(None,False),('false',False),(False,False),('0',False),('',False),('true',True),(True,True)])
+async def test_web_prefetch_requires_explicit_true_not_truthy_form_string(monkeypatch,value,expected):
+    _,captured=await _build_context_owner_probe(monkeypatch, {'current_user':'alice'},
+        use_web=value,message='Summarize synthetic evidence without inventing facts.')
+    assert captured['use_web'] is expected
 
 
 @pytest.mark.asyncio
@@ -561,6 +572,7 @@ async def test_build_chat_context_uses_api_token_owner_for_compaction_scope(monk
         "prefs_owner": "alice",
         "preface_owner": "alice",
         "compact_owner": "alice",
+        "use_web": False,
     }
 
 
@@ -579,4 +591,5 @@ async def test_build_chat_context_keeps_cookie_user_owner_scope(monkeypatch):
         "prefs_owner": "bob",
         "preface_owner": "bob",
         "compact_owner": "bob",
+        "use_web": False,
     }

@@ -3,6 +3,7 @@ import {
   getSettingsPanel,
   searchSettingsPanels,
 } from './registry.js';
+import { bindUiText, t } from '../i18n.js';
 
 const _boundModals = new WeakSet();
 
@@ -88,12 +89,13 @@ export function bindSettingsSearch(modalEl, options = {}) {
 
     const matches = searchSettingsPanels(query, {
       isAdmin: isAdmin(),
+      translate: t,
     });
 
     if (!matches.length) {
       const empty = document.createElement('div');
       empty.className = 'settings-search-empty';
-      empty.textContent = 'No settings found';
+      empty.textContent = 'No settings found'; bindUiText(empty, 'No settings found');
       resultsEl.appendChild(empty);
       resultsEl.classList.remove('hidden');
       return;
@@ -109,11 +111,11 @@ export function bindSettingsSearch(modalEl, options = {}) {
 
       const label = document.createElement('span');
       label.className = 'settings-search-result-label';
-      label.textContent = panel.label;
+      label.textContent = panel.label; bindUiText(label, panel.label);
 
       const group = document.createElement('span');
       group.className = 'settings-search-result-group';
-      group.textContent = groupLabelFor(panel);
+      group.textContent = groupLabelFor(panel); bindUiText(group, groupLabelFor(panel));
 
       button.append(label, group);
       button.addEventListener('click', () => activateResult(button));

@@ -3393,7 +3393,8 @@ body.bg-pattern-sparkles {
       top: 1px;
     }
     .model-picker-list .model-switch-item {
-      display: flex;
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) 30px;
       align-items: center;
       padding: 5px 8px;
       border-radius: 4px;
@@ -3425,6 +3426,8 @@ body.bg-pattern-sparkles {
     }
     /* Model name takes the slack so the endpoint label + favorite dot sit on the right. */
     .model-picker-list .model-switch-item .mp-model-name {
+      grid-column: 2;
+      grid-row: 1;
       flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
@@ -3432,11 +3435,14 @@ body.bg-pattern-sparkles {
       white-space: nowrap;
     }
     .model-picker-list .model-switch-item .model-switch-ep {
+      grid-column: 2;
+      grid-row: 2;
       flex: 0 1 auto;
       min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      overflow: visible;
+      text-overflow: clip;
+      white-space: normal;
+      overflow-wrap: anywhere;
       font-size: 0.9em;
       opacity: 0.45;
     }
@@ -3446,6 +3452,8 @@ body.bg-pattern-sparkles {
     }
     /* Inline favorite dot — always visible (works on touch), active when on. */
     .model-picker-list .mp-fav-dot {
+      grid-column: 3;
+      grid-row: 1 / span 2;
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;

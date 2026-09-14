@@ -3,6 +3,7 @@
  */
 
 import uiModule from './ui.js';
+import { bindUiText, t } from './i18n.js';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
 import { attachColorPicker } from './colorPicker.js';
@@ -381,7 +382,7 @@ function _matchAiCommandSuggestions(query) {
   if (!q) return [];
   return _AI_COMMAND_SUGGESTIONS
     .map((item) => {
-      const hay = [item.label, item.insert, ...(item.aliases || [])].map(v => String(v || '').toLowerCase());
+      const hay = [item.label, t(item.label), item.insert, ...(item.aliases || [])].map(v => String(v || '').toLowerCase());
       const starts = hay.some(v => v.startsWith(q));
       const contains = hay.some(v => v.includes(q));
       if (!starts && !contains) return null;
@@ -427,6 +428,7 @@ function _wireAiCommandBox() {
         <span class="ge-ai-command-suggestion-hint">${_escapeAiCommandText(item.hint || item.insert)}</span>
       </button>
     `).join('');
+    suggestions.querySelectorAll('.ge-ai-command-suggestion-main').forEach((label, index) => bindUiText(label, suggestionItems[index].label));
   };
   const pickSuggestion = (idx, run = false) => {
     const item = suggestionItems[idx];
@@ -2639,6 +2641,10 @@ function _filterSliderPrompt(title, params, onPreview) {
       </div>
     `;
     state.container.appendChild(overlay);
+    bindUiText(overlay.querySelector('.ge-filter-modal-head'), title);
+    overlay.querySelectorAll('.ge-filter-row > label').forEach((node, index) => bindUiText(node, params[index].label));
+    bindUiText(overlay.querySelector('[data-action="cancel"]'), 'Cancel');
+    bindUiText(overlay.querySelector('[data-action="apply"]'), 'Apply');
     const values = {};
     for (const p of params) values[p.key] = p.value;
     // Initial preview render.

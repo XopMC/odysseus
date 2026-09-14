@@ -68,6 +68,15 @@ class WebSearchTool:
                 "exit_code": 1,
                 "untrusted_content": True,
             }
+        if not sources:
+            # HTTP 200 / a completed provider call is not research evidence.
+            # Surface the provider explanation to the agent and loop guard so a
+            # disabled, empty, or failed search is not shown as a green success.
+            return {
+                "error": "web_search returned no sources. " + text[:MAX_OUTPUT_CHARS],
+                "exit_code": 1,
+                "untrusted_content": True,
+            }
         if progress_cb:
             await progress_cb({
                 "elapsed_s": 30,

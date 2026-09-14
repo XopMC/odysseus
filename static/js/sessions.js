@@ -2,6 +2,7 @@
 // This module handles all session-related operations
 
 import Storage from './storage.js';
+import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
 import chatRenderer from './chatRenderer.js?v=20260815toolapproval4';
 import { providerLogo } from './providers.js';
@@ -33,6 +34,61 @@ const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key 
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
 let _historyPager = null;
+const LIVE_SESSION_POLL_MS = 3000;
+const LIVE_SESSION_READ_TIMEOUT_MS = 15000;
+let _liveSessionTimer = null;
+const _liveSessionChecks = new Map();
+let _loadingSessionToken = null;
+const _syncedHistory = new Map();
+
+function _historyStamp(data) {
+  return JSON.stringify([data.model || null, data.total ?? null, (data.history || []).slice(-1)]);
+}
+
+async function _readLiveSession(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LIVE_SESSION_READ_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal, credentials: 'same-origin', cache: 'no-store' });
+    return { ok: res.ok, status: res.status, data: res.ok ? await res.json() : null };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Refresh canonical messages without navigating: do not clear a draft, switch
+// tools/presets, focus the composer, or detach another local send.
+export async function refreshSessionHistory(sessionId) {
+  const navToken = _sessionNavToken;
+  const canRender = () => currentSessionId === sessionId && _sessionNavToken === navToken
+    && !window.__odysseusChatBusy && !window.chatModule?.hasActiveStream?.(sessionId)
+    && _loadingSessionToken !== navToken;
+  if (!canRender()) return false;
+  const res = await _readLiveSession(_historyUrl(sessionId, { limit: _historyPageLimit() }));
+  if (!res.ok) return false;
+  const data = res.data;
+  if (!canRender() || !Array.isArray(data.history)) return false;
+  const box = document.getElementById('chat-history');
+  if (!box) return false;
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  const oldTop = box.scrollTop;
+  const oldHeight = box.scrollHeight;
+  _clearHistoryPager();
+  chatRenderer.hideWelcomeScreen?.();
+  box.innerHTML = '';
+  for (const msg of data.history) _renderHistoryMessage(msg, data.model || null);
+  _installHistoryPager(sessionId, data, data.model || null);
+  const meta = sessions.find(s => s.id === sessionId);
+  if (meta && data.model && meta.model !== data.model) {
+    meta.model = data.model;
+    updateModelPicker();
+  }
+  _syncedHistory.set(sessionId, _historyStamp(data));
+  if (nearBottom) uiModule.scrollHistoryInstant();
+  else box.scrollTop = Math.max(0, oldTop + box.scrollHeight - oldHeight);
+  window.refreshChatContextHeader?.('remote-history');
+  return true;
+}
 
 function _shouldPreserveStartupComposer(msgInput) {
   if (!msgInput || !msgInput.value) return false;
@@ -338,8 +394,21 @@ function _normalizeSessionsList(fetched) {
   return unique;
 }
 
-// Initialize dependencies from app.js (no-op: dependencies now imported directly)
-export function initDependencies() {}
+// Dependencies are imported directly; app initialization starts live discovery.
+export function initDependencies() { _ensureLiveSessionSync(); }
+
+function _ensureLiveSessionSync() {
+  if (_liveSessionTimer !== null) return;
+  const check = () => {
+    if (document.visibilityState === 'hidden' || !currentSessionId) return;
+    return _checkServerStream(currentSessionId);
+  };
+  _liveSessionTimer = setInterval(check, LIVE_SESSION_POLL_MS);
+  document.addEventListener('visibilitychange', check);
+  window.addEventListener('focus', check);
+  window.addEventListener('online', check);
+  window.addEventListener('pageshow', check);
+}
 
 // ── Folder state persistence ──
 const FOLDER_STATE_KEY = 'odysseus-folder-state';
@@ -385,6 +454,7 @@ function buildFolderSubmenu(sessionId, currentFolder, dropdown) {
   moveItem.style.position = 'relative';
   const _folderIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
   moveItem.innerHTML = '<span class="dropdown-icon">' + _folderIcon + '</span><span>Move to folder</span>';
+  bindUiText(moveItem.querySelector('span:not(.dropdown-icon)'), 'Move to folder');
 
   const sub = document.createElement('div');
   sub.className = 'dropdown session-folder-submenu';
@@ -394,6 +464,7 @@ function buildFolderSubmenu(sessionId, currentFolder, dropdown) {
   noneOpt.className = 'dropdown-item-compact';
   if (!currentFolder) noneOpt.style.opacity = '0.5';
   noneOpt.textContent = '(No folder)';
+  bindUiText(noneOpt, '(No folder)');
   noneOpt.addEventListener('click', async (e) => {
     e.stopPropagation();
     await moveToFolder(sessionId, '');
@@ -425,6 +496,7 @@ function buildFolderSubmenu(sessionId, currentFolder, dropdown) {
   newOpt.className = 'dropdown-item-compact';
   newOpt.style.color = 'var(--accent-primary)';
   newOpt.textContent = '+ New Folder';
+  bindUiText(newOpt, '+ New Folder');
   newOpt.addEventListener('click', async (e) => {
     e.stopPropagation();
     const name = await styledPrompt('Name this folder:', {
@@ -685,14 +757,17 @@ function createSessionItem(s) {
   const renameItem = document.createElement('div');
   renameItem.className = 'dropdown-item-compact';
   renameItem.innerHTML = _icon(_renameIcon) + '<span>Rename</span>';
+  bindUiText(renameItem.querySelector('span:not(.dropdown-icon)'), 'Rename');
 
   const archiveItem = document.createElement('div');
   archiveItem.className = 'dropdown-item-compact';
   archiveItem.innerHTML = _icon(_archiveIcon) + '<span>Archive</span>';
+  bindUiText(archiveItem.querySelector('span:not(.dropdown-icon)'), 'Archive');
 
   const deleteItem = document.createElement('div');
   deleteItem.className = 'dropdown-item-compact dropdown-item-danger';
   deleteItem.innerHTML = _icon(_deleteIcon) + '<span>Delete</span><span class="dropdown-shortcut">' + _mod + '+Alt+D</span>';
+  bindUiText(deleteItem.querySelector('span:not(.dropdown-icon)'), 'Delete');
 
 
 
@@ -706,6 +781,7 @@ function createSessionItem(s) {
     const starItem = document.createElement('div');
     starItem.className = 'dropdown-item-compact';
     starItem.innerHTML = _icon(_favIcon) + '<span>' + (s.is_important ? 'Unfavorite' : 'Favorite') + '</span><span class="dropdown-shortcut">' + _mod + '+Alt+F</span>';
+    bindUiText(starItem.querySelector('span:not(.dropdown-icon)'), s.is_important ? 'Unfavorite' : 'Favorite');
     starItem.addEventListener('click', async (e) => {
       e.stopPropagation();
       const newVal = !s.is_important;
@@ -722,6 +798,7 @@ function createSessionItem(s) {
   const copyItem = document.createElement('div');
   copyItem.className = 'dropdown-item-compact';
   copyItem.innerHTML = _icon(_copyIcon) + '<span>Copy Chat</span>';
+  bindUiText(copyItem.querySelector('span:not(.dropdown-icon)'), 'Copy Chat');
   copyItem.addEventListener('click', async (e) => {
     e.stopPropagation();
     dropdown.style.display = 'none';
@@ -764,6 +841,7 @@ function createSessionItem(s) {
     const selectMoreItem = document.createElement('div');
     selectMoreItem.className = 'dropdown-item-compact';
     selectMoreItem.innerHTML = _icon('<span style="font-size:16px;line-height:1;">●</span>') + '<span>Select</span>';
+    bindUiText(selectMoreItem.querySelector(':scope > span:not(.dropdown-icon)'), 'Select');
     selectMoreItem.addEventListener('click', (e) => {
       e.stopPropagation();
       dropdown.style.display = 'none';
@@ -799,6 +877,7 @@ function createSessionItem(s) {
   const cancelItem = document.createElement('div');
   cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
   cancelItem.innerHTML = _icon(_cancelIcon) + '<span>Cancel</span>';
+  bindUiText(cancelItem.querySelector('span:not(.dropdown-icon)'), 'Cancel');
   cancelItem.addEventListener('click', (e) => {
     e.stopPropagation();
     dropdown.style.display = 'none';
@@ -1833,6 +1912,7 @@ export async function loadSessions() {
 }
 
 export async function selectSession(id, { keepSidebar = false, showLoading = true, immediateLoading = false } = {}) {
+  let loadingToken = null;
   // Exit compare mode cleanly if active
   if (window.compareModule && window.compareModule.isActive()) {
     window.compareModule.deactivate(true);
@@ -1840,6 +1920,8 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
   }
   try {
     const navToken = ++_sessionNavToken;
+    loadingToken = navToken;
+    _loadingSessionToken = navToken;
     const prevSessionId = currentSessionId;
     // Selecting a real persisted chat cancels any deferred "New Chat" model
     // pick. Otherwise the next send can materialize that pending chat instead
@@ -1953,7 +2035,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     // declaration had been removed while leaving the references in
     // place, producing a ReferenceError every selectSession.)
     const isOC = meta && (meta.is_openclaw || id === 'openclaw');
-    let msgHistory = [], modelName = null, pageInfo = null;
+    let msgHistory = [], modelName = null, pageInfo = null, historySnapshot = null;
     let paintedLoading = false;
     let loadingTimer = null;
     let loadingPaintReady = Promise.resolve();
@@ -1969,6 +2051,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       }
       const res = await fetch(_historyUrl(id, { limit: _historyPageLimit() }));
       const data = await res.json();
+      historySnapshot = data;
       if (loadingTimer) {
         clearTimeout(loadingTimer);
         loadingTimer = null;
@@ -2060,6 +2143,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       }
     }
     uiModule.scrollHistoryInstant();
+    if (historySnapshot) _syncedHistory.set(id, _historyStamp(historySnapshot));
     if (!isOC && msgHistory.length) {
       _installHistoryPager(id, pageInfo, modelName);
     }
@@ -2144,6 +2228,10 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     }
     uiModule.showError('Failed to load session: ' + error.message);
   } finally {
+    if (_loadingSessionToken === loadingToken) {
+      _loadingSessionToken = null;
+      if (currentSessionId === id) _checkServerStream(id);
+    }
     // Memory warmup must not block chat switching. The memories panel can load
     // on demand; this is only a delayed cache refresh when the foreground chat
     // is idle.
@@ -2378,6 +2466,8 @@ export function getCurrentSessionId() {
   return currentSessionId;
 }
 
+export function getSessionViewToken() { return _sessionNavToken; }
+
 export function isCurrentSessionIncognito() {
   return !!(currentSessionId && _isIncognitoSession(currentSessionId));
 }
@@ -2403,6 +2493,7 @@ export function getCurrentEndpointUrl() {
 }
 
 export function setCurrentSessionId(id) {
+  if (currentSessionId) window.chatModule?.cancelResumedStream?.(currentSessionId);
   _sessionNavToken++;
   currentSessionId = id;
   try { window.__odysseusLastSelectedSessionId = id || ''; } catch (_) {}
@@ -2687,24 +2778,45 @@ function _updateRailNotifs() {
 }
 
 /**
- * Check server for an active stream (survives page refresh).
- * If the server is still streaming for this session, show a spinner
- * and poll until done, then reload the session.
+ * Discover remote turns in the visible chat and reconcile saved history.
+ * One probe/replay chain per selected view; navigation invalidates late reads.
  */
 async function _checkServerStream(sessionId) {
+  const navToken = _sessionNavToken;
+  const isCurrent = () => currentSessionId === sessionId && _sessionNavToken === navToken;
+  if (!isCurrent() || _liveSessionChecks.get(sessionId) === navToken) return;
+  _liveSessionChecks.set(sessionId, navToken);
   try {
+    if (_loadingSessionToken === navToken) return;
+    if (_isIncognitoSession(sessionId) || document.getElementById('incognito-toggle')?.checked) return;
     // Skip if research is running — it has its own progress UI
     if (_researchingSessions.has(sessionId)) return;
 
     // Skip if the SSE reader is still actively connected — it handles rendering
     if (window.chatModule && window.chatModule.hasActiveStream && window.chatModule.hasActiveStream(sessionId)) return;
+    if (window.__odysseusChatBusy) return;
 
-    const res = await fetch(`${API_BASE}/api/chat/stream_status/${sessionId}`);
+    const res = await _readLiveSession(`${API_BASE}/api/chat/stream_status/${encodeURIComponent(sessionId)}`);
+    if (!isCurrent()) return;
     if (!res.ok) {
       _clearRunningState(sessionId);
-      return; // 404 = no active stream
+      if (res.status !== 404) return;
     }
-    const info = await res.json();
+    const info = res.ok ? res.data : { status: 'idle' };
+    if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId) || window.__odysseusChatBusy) return;
+    // A remote turn can finish between status probes. Compare a one-message
+    // history page, then fetch/render the canonical tail only when it changed.
+    const tail = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
+    if (!tail.ok || !isCurrent()) return;
+    const latest = tail.data;
+    if (!isCurrent()) return;
+    if (Array.isArray(latest.history) && _syncedHistory.get(sessionId) !== _historyStamp(latest)) {
+      const refreshed = await refreshSessionHistory(sessionId);
+      // limit=1 can contain only a hidden system message, unlike the visible
+      // last row in a larger page. Retain the probe stamp to avoid reload loops.
+      if (refreshed && isCurrent()) _syncedHistory.set(sessionId, _historyStamp(latest));
+    }
+    if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId) || window.__odysseusChatBusy) return;
     if (info.status !== 'streaming') {
       _clearRunningState(sessionId);
       return;
@@ -2714,67 +2826,14 @@ async function _checkServerStream(sessionId) {
     if (info.mode === 'research' || info.is_research) return;
 
     // Live-resume the detached run: replay its buffer then stream live tokens
-    // (#2539). Falls back to the spinner+poll path below if unavailable.
+    // (#2539). If unavailable or disconnected, the next visible tick retries.
     if (window.chatModule && window.chatModule.resumeStream) {
-      const attached = await window.chatModule.resumeStream(sessionId);
-      if (attached) return;
+      await window.chatModule.resumeStream(sessionId);
     }
-
-    // Fallback: server is still streaming, show spinner and poll.
-    const box = document.getElementById('chat-history');
-    if (!box) return;
-
-    const holder = document.createElement('div');
-    holder.className = 'msg msg-ai';
-    holder.innerHTML = '<div class="body"></div>';
-    const bodyDiv = holder.querySelector('.body');
-
-    const spinnerMod = await import('./spinner.js');
-    const spinner = spinnerMod.default.create('Generating response...', 'right');
-    bodyDiv.appendChild(spinner.createElement());
-    spinner.start();
-    box.appendChild(holder);
-    uiModule.scrollHistory();
-
-    // sessions.js executes before chat.js in module order, so window.chatModule
-    // may not be set yet when _checkServerStream first runs. Retry resumeStream
-    // on the first poll tick where it becomes available.
-    let _resumeRetried = false;
-    const pollId = setInterval(async () => {
-      if (getCurrentSessionId() !== sessionId) {
-        clearInterval(pollId);
-        spinner.destroy();
-        if (holder.parentNode) holder.remove();
-        return;
-      }
-      if (!_resumeRetried && window.chatModule && window.chatModule.resumeStream) {
-        _resumeRetried = true;
-        const attached = await window.chatModule.resumeStream(sessionId);
-        if (attached) {
-          clearInterval(pollId);
-          spinner.destroy();
-          if (holder.parentNode) holder.remove();
-          return;
-        }
-      }
-      try {
-        const r = await fetch(`${API_BASE}/api/chat/stream_status/${sessionId}`);
-        if (!r.ok || (await r.json()).status !== 'streaming') {
-          clearInterval(pollId);
-          spinner.destroy();
-          if (holder.parentNode) holder.remove();
-          // Reload session to show the completed response + docs
-          selectSession(sessionId);
-        }
-      } catch (_) {
-        clearInterval(pollId);
-        spinner.destroy();
-        if (holder.parentNode) holder.remove();
-        selectSession(sessionId);
-      }
-    }, 1500);
   } catch (_) {
-    // No stream active — nothing to do
+    // Network loss is not task completion. Retry on the next visible tick.
+  } finally {
+    if (_liveSessionChecks.get(sessionId) === navToken) _liveSessionChecks.delete(sessionId);
   }
 }
 
@@ -3662,6 +3721,8 @@ const sessionModule = {
   hasPendingChat,
   getPendingChat,
   getCurrentSessionId,
+  getSessionViewToken,
+  refreshSessionHistory,
   getSessions,
   getCurrentModel,
   getCurrentEndpointUrl,

@@ -49,6 +49,58 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
 - **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
 
+## Engineering extension / Инженерное расширение
+
+This fork adds an opt-in, self-hosted foundation for longer coding and agent
+workflows. It keeps the existing single-chat mode intact and does not send data
+to an external provider unless that endpoint and its task permission are chosen
+explicitly.
+
+- **Team workspace** — a simple mode with one lead model and an unlimited,
+  user-selected worker pool; advanced controls remain available for detailed
+  assignments. Identically named models stay separate because choices include
+  their endpoint identity.
+- **Durable work** — Team tasks, events, checkpoints and replay data are kept
+  server-side so reconnecting clients can recover the saved state.
+- **Host runner** — explicitly approved trusted-host terminal, file and Git
+  operations use a persistent runner. A command with unknown outcome is not
+  silently repeated; privileged or destructive actions still require explicit
+  confirmation.
+- **Verified isolation primitive** — the Linux runner can execute a command
+  only in a retained verification copy using a server-pinned image digest,
+  disabled network, no Docker socket, a read-only container root, dropped Linux
+  capabilities and CPU/memory/process limits. It is not exposed as a general
+  Docker command and is not a claim of complete hostile-code containment.
+- **Engineering controls** — project registration starts read-only, with
+  reviewed check commands, acceptance criteria, tool availability diagnostics,
+  configurable context-compaction policies, and a read-only LSP discovery
+  panel. Language-server availability is reported per execution host.
+- **Russian UI** — the shipped Team, engineering and context-policy panels are
+  localized; endpoint labels in model selectors are not truncated.
+
+### Важно
+
+Это расширение предназначено для доверенных машин, которыми владеет оператор.
+Доступ к shell, файлам и сети не равен песочнице: включайте его только после
+явного выбора проекта и хоста. Изоляция контейнеров, полнофункциональные
+межмашинные worktree, DAP, эксперименты между моделями и полная сквозная
+приёмка остаются отдельными этапами разработки. LSP-мост работает только для
+языковых серверов, фактически установленных и проверенных на выбранном хосте;
+его нельзя считать полной IDE-поддержкой только из-за наличия кнопки.
+Низкоуровневый изолированный запуск Linux уже проверен на Jetson, но до
+публичного UI-потока проекта он остаётся отдельной операторской возможностью.
+
+### Important
+
+The extension is for operator-owned, trusted machines. Shell, file and network
+access are not a sandbox: enable them only after explicitly choosing the
+project and host. Container isolation, full cross-host worktrees, DAP, model
+experiments and end-to-end release acceptance remain separate delivery stages.
+The LSP bridge works only with language servers actually installed and verified
+on the selected host; its presence is not full IDE support.
+The low-level Linux isolated-runner operation has been verified on Jetson, but
+remains an operator capability until the project-facing UI flow is released.
+
 ## Demo
 
 A full hover-to-play tour lives on the [Odysseus landing page](https://odysseus-dev.github.io/odysseus/). Its source lives under [`website/`](website/).

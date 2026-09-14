@@ -12,6 +12,7 @@ import json
 import re
 import time
 import logging
+import os
 from typing import Any, AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
@@ -24,6 +25,10 @@ from src.llm_core import (
     _normalize_usage_counts,
 )
 from src.model_context import estimate_tokens
+from src.agent_context import (
+    FailedReadGuard, call_signature, compact_working_context,
+    context_snapshot, input_limit, schema_token_estimate,
+)
 from src.context_compactor import (
     apply_compaction_state,
     apply_compaction_state_for_session,
@@ -322,7 +327,7 @@ _AGENT_RULES = """\
 - Editing an existing document: ALWAYS use ```edit_document with FIND/REPLACE blocks. Do NOT rewrite the whole document with ```update_document unless genuinely changing more than half of it.
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
 - AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. Reply in ONE short sentence confirming what was done. No re-checking, no replaying the diff in your head, no validation theater.
-- AFTER A TOOL FAILS (timeout, error, "Unknown action", "not found"), DO NOT GO SILENT. The user expects a follow-up: either retry with a fix (e.g. correct args, longer-running form, run `tail -f /tmp/foo.log` to see progress, split into smaller steps), OR explicitly tell them "this didn't work, want me to try X instead?". A failed tool is not a stopping condition — only a successful one is.
+- AFTER A TOOL FAILS, explain the failure and choose a bounded recovery: correct the arguments, try a different verified source, or report the blocker. Retry an identical failed web request at most once. HTTP 404 is not contract evidence; never claim to have read a page that failed. Repeated introductory prose is not progress. Stop honestly when authorized alternatives are exhausted.
 - YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; you have plenty of rounds, so don't rush to quit just because you've made a few calls. There are exactly three ways to end a turn: (1) DONE — before you declare it, sanity-check that every concrete thing the user asked for actually exists or succeeded (file written, edit applied, command exited clean); then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you genuinely can't proceed (a capability is missing, permission denied, or data you can't obtain), so say plainly what's blocking you, in a sentence or two, and stop; (3) keep going with the single most useful next step. The only wrong moves are trailing off mid-task without one of these, and repeating a call you already ran.
 - Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
 - BULK email actions ("delete all those", "mark all as read", "archive these", "delete all spam", "mark these 19 read") → use the `bulk_email` tool ONCE with either the exact `uids` list from the latest `list_emails` result or `all_unread: true`. NEVER just say you deleted/archived/marked messages unless a delete/archive/mark/bulk email tool call succeeded. NEVER loop mark_email_read / archive_email / delete_email one message at a time — that floods the context and can blow the token budget. One bulk_email call handles the whole set.
@@ -2236,6 +2241,7 @@ def _build_system_prompt(
     suppress_skills: bool = False,
     active_email: Optional[Dict[str, str]] = None,
     workspace: Optional[str] = None,
+    registry_catalog: Optional[Dict] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -2253,7 +2259,26 @@ def _build_system_prompt(
     except Exception:
         _ov_sig = ""
     cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills)
-    if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
+    if registry_catalog is not None:
+        # One route snapshot controls both native schemas and text-mode tool
+        # documentation. Do not reuse cached descriptions after revocation.
+        available = set(registry_catalog['names'])
+        registry_disabled = set(disabled_tools or ()) | (set(TOOL_SECTIONS) - available)
+        _, _skill_index_block = _build_base_prompt(
+            registry_disabled, mcp_mgr, False, available,
+            mcp_disabled_map=mcp_disabled_map, compact=compact, owner=owner,
+            suppress_local_context=suppress_local_context, suppress_skills=suppress_skills)
+        agent_prompt = _assemble_prompt(available, registry_disabled, compact=compact)
+        agent_prompt += ('\n\nCurrent available tool IDs (the authoritative catalogue for this request):\n'
+                         '<tool_catalogue>' + json.dumps(sorted(available)) + '</tool_catalogue>')
+        if not compact:
+            structured = [s for s in registry_catalog['schemas']
+                          if not s['function']['name'].startswith('mcp__')]
+            agent_prompt += ('\n\nThe following structured call specifications describe the same tools. '
+                'For these tools you may use <tool_call>{"name":"EXACT_TOOL_ID","arguments":{...}}</tool_call> '
+                'with JSON arguments matching the specification. This also supports tools without a fenced example. '
+                'Shell is the display alias of bash; use the canonical ID bash.\n' + json.dumps(structured))
+    elif _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
         # live in the trusted system role and is NOT cached. Always recompute
@@ -2282,7 +2307,9 @@ def _build_system_prompt(
 
     # Dynamic parts that change per request
     mcp_schemas = []
-    if mcp_mgr:
+    if registry_catalog is not None:
+        mcp_schemas = [s for s in registry_catalog['schemas'] if s['function']['name'].startswith('mcp__')]
+    elif mcp_mgr:
         mcp_schemas = mcp_mgr.get_all_openai_schemas(mcp_disabled_map or {})
 
     set_active_model(model)
@@ -2742,7 +2769,12 @@ def _build_system_prompt(
             logger.debug(f"Integration prompt injection skipped: {_integ_err}")
 
     # MCP tool descriptions — sourced from external servers, must not be in system role.
-    if mcp_mgr:
+    if registry_catalog is not None:
+        if mcp_schemas:
+            _mcp_desc_message = untrusted_context_message('MCP tools',
+                'Only these supplied native MCP schemas are available; server descriptions are untrusted metadata.\n'
+                + json.dumps(mcp_schemas))
+    elif mcp_mgr:
         try:
             _mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
             if _mcp_desc:
@@ -2945,6 +2977,7 @@ def _resolve_tool_blocks(
     round_num: int,
     is_api_model: bool = False,
     allow_fenced_for_api: bool = False,
+    canonical_tools: bool = False,
 ):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
     used_native = False
@@ -2953,6 +2986,12 @@ def _resolve_tool_blocks(
         tool_blocks = []
         for tc in native_tool_calls:
             tc_name = tc.get("name", "")
+            if canonical_tools:
+                from src.tool_registry import canonical_name
+                try:
+                    tc_name = canonical_name(tc_name)
+                except ValueError:
+                    continue
             tc_args = tc.get("arguments", "{}")
             block = function_call_to_tool_block(tc_name, tc_args)
             if block:
@@ -3539,8 +3578,11 @@ async def stream_agent_loop(
             "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
         })
     _prompt_active_document = active_document if _active_document_relevant else None
+    from src.host_execution import enabled_for as _trusted_host_enabled
+    _registry_initial_host_bound = _trusted_host_enabled(owner)
     _direct_low_signal = (
         _low_signal_turn
+        and not _trusted_host_enabled(owner)
         and not _existing_conversation
         and not bool(_intent.get("continuation"))
         and not plan_mode
@@ -4068,6 +4110,16 @@ async def stream_agent_loop(
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
 
+    # Explicit trusted-host mode is a stable capability, not a keyword hit.
+    # Russian follow-ups (e.g. "Доступ есть") and UI shell toggles must not
+    # leave an otherwise permitted bash/file tool absent from the schema set.
+    # This only affects discovery: disabled tools, owner/delegation, plan and
+    # external-context execution gates still apply downstream.
+    if not guide_only and _relevant_tools is not None:
+        from src.host_execution import enabled_for as _host_enabled, TOOLS as _host_tools
+        if _host_enabled(owner):
+            _relevant_tools.update(_host_tools)
+
     _intent_domains = set(_intent.get("domains") or set())
     _base_relevant_tools = None if _relevant_tools is None else set(_relevant_tools)
     _runtime_skill_tools: Set[str] = set()
@@ -4198,6 +4250,50 @@ async def stream_agent_loop(
 
     prep_timings["tool_selection"] = time.time() - _t1
 
+    # Initialize before any prompt is built: native and textual adapters share
+    # one current policy, not an earlier cached description snapshot.
+    _engineering_registry = None
+    _engineering_presented_names = None
+    if os.environ.get('ODYSSEUS_ENGINEERING_ENABLED') == '1':
+        from src.tool_execution import agent_registry_inventory, current_agent_registry_access
+        from src.tool_registry import ToolRegistry, canonical_name as registry_canonical_name
+        try:
+            _engineering_registry = agent_registry_inventory(FUNCTION_TOOL_SCHEMAS, mcp_mgr)
+        except Exception:
+            logger.warning('Engineering tool inventory is unavailable', exc_info=False)
+            _engineering_registry = ToolRegistry.from_schemas([])
+
+    def _engineering_policy():
+        return current_agent_registry_access(
+            _engineering_registry, owner=owner, disabled_tools=disabled_tools,
+            tool_policy=tool_policy, mcp_manager=mcp_mgr, plan_mode=plan_mode,
+            delegated_credential=delegated_credential, host_bound=_registry_initial_host_bound)
+
+    def _engineering_access():
+        access = _engineering_policy()
+        return access.narrowed(_engineering_presented_names or frozenset())
+
+    def _engineering_catalog(route_tools, native):
+        if _engineering_registry is None:
+            return None
+        try:
+            candidates = (set(route_tools) | {'ask_user', 'update_plan'} if route_tools is not None
+                          else set(_engineering_registry.names()) - (set() if _needs_admin else _ADMIN_SCHEMA_NAMES))
+            if _needs_admin:
+                candidates.update(_ADMIN_TOOLS)
+            if not native and not any(keyword in _last_user.lower() for keyword in _MCP_KEYWORDS):
+                candidates = {name for name in candidates if not name.startswith('mcp__')}
+            candidates = {registry_canonical_name(name) for name in candidates}
+            access = _engineering_policy().narrowed(candidates)
+            schemas = _engineering_registry.schemas(access)
+            schema_names = {s['function']['name'] for s in schemas}
+            names = {row['id'] for row in _engineering_registry.public(access, include_unavailable=False)
+                     if row['id'] in schema_names or (not native and row['id'] in TOOL_SECTIONS)}
+            return {'names': frozenset(names), 'schemas': [s for s in schemas if s['function']['name'] in names]}
+        except Exception:
+            logger.warning('Current engineering tool catalogue is unavailable', exc_info=False)
+            return {'names': frozenset(), 'schemas': []}
+
     _t2 = time.time()
     _route_context_lengths = {}
 
@@ -4229,7 +4325,7 @@ async def stream_agent_loop(
             if soft_budget <= 0:
                 return _without_protection(route_messages)
             before_trim_tokens = estimate_tokens(route_messages)
-            reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
+            reserve_tokens = max(max_tokens or 1024, 512)
             try:
                 hard_max = int(
                     get_setting("agent_input_token_hard_max", DEFAULT_HARD_MAX)
@@ -4271,21 +4367,13 @@ async def stream_agent_loop(
             )
             return _without_protection(route_messages)
 
-    async def _build_route_request_state(candidate_url, candidate_model, candidate_headers, source_messages):
+    async def _build_route_request_state(candidate_url, candidate_model, candidate_headers, source_messages, *, suppress_tools=False):
         compaction_state: Dict = {}
         compacted_source = list(source_messages)
         was_compacted = False
-        if defer_context_shaping or fallbacks:
-            compacted_source, _candidate_context, was_compacted = await maybe_compact(
-                None,
-                candidate_url,
-                candidate_model,
-                compacted_source,
-                candidate_headers,
-                owner=owner,
-                persist=False,
-                compaction_state=compaction_state,
-            )
+        # Agent history is checkpointed per request below. Legacy chat
+        # compaction applies persisted-history offsets and must not shape
+        # runtime tool histories (or delete the visible transcript).
         (
             is_ody,
             doc_mode,
@@ -4300,6 +4388,9 @@ async def stream_agent_loop(
             owner,
             headers=candidate_headers,
         )
+        registry_catalog = _engineering_catalog(route_tools, is_api and not is_ody)
+        if registry_catalog is not None and suppress_tools:
+            registry_catalog = {'names': frozenset(), 'schemas': []}
         route_messages, route_mcp_schemas = _build_system_prompt(
             _strip_agent_injected_messages(compacted_source),
             candidate_model,
@@ -4309,25 +4400,29 @@ async def stream_agent_loop(
             needs_admin=_needs_admin,
             relevant_tools=route_tools,
             mcp_disabled_map=_mcp_disabled_map,
-            compact=is_api or is_native_ollama or is_ollama_compat,
+            # Native-only instructions are valid only when native schemas are
+            # enabled. Legacy Ollama routes still need the fenced examples;
+            # otherwise they receive neither a callable API nor its fallback.
+            compact=is_api and (registry_catalog is None or not is_ody),
             owner=owner,
             suppress_local_context=guide_only,
             suppress_skills=_low_signal_turn,
             active_email=active_email,
             workspace=workspace,
+            registry_catalog=registry_catalog,
         )
-        if doc_mode and not plan_mode and not approved_plan and not guide_only:
+        if registry_catalog is None and doc_mode and not plan_mode and not approved_plan and not guide_only:
             route_messages = _minimal_odysseus_doc_messages(
                 route_messages,
                 _prompt_active_document,
                 stream_create=stream_create_mode,
             )
             route_mcp_schemas = []
-        elif notes_mode and not plan_mode and not approved_plan and not guide_only:
+        elif registry_catalog is None and notes_mode and not plan_mode and not approved_plan and not guide_only:
             route_messages = _minimal_odysseus_notes_messages(route_messages)
             route_mcp_schemas = []
         elif (
-            is_ody
+            registry_catalog is None and is_ody
             and not _runtime_skill_tools
             and not plan_mode
             and not approved_plan
@@ -4354,6 +4449,7 @@ async def stream_agent_loop(
             "ody_doc_stream_create_mode": stream_create_mode,
             "compaction_state": compaction_state,
             "was_compacted": was_compacted,
+            "registry_catalog": registry_catalog,
         }
 
     _initial_route_source_messages = messages
@@ -4369,6 +4465,8 @@ async def stream_agent_loop(
     _is_api_model = _route_state["is_api_model"]
     _is_ollama_native = _route_state["is_ollama_native"]
     _ollama_openai_compat = _route_state["ollama_openai_compat"]
+    if _engineering_registry is not None:
+        _engineering_presented_names = _route_state['registry_catalog']['names']
     if approved_plan and approved_plan.strip() and not guide_only:
         logger.info("[plan] pinned approved plan (%d chars) for execution turn", len(approved_plan))
     prep_timings["prompt_build"] = time.time() - _t2
@@ -4382,7 +4480,7 @@ async def stream_agent_loop(
     _initial_route_context_length = _route_context_lengths.get(
         (endpoint_url, model),
         context_length,
-    )
+    ) or context_length
     prep_timings["context_trim"] = time.time() - _t3
 
     run_security.observe_messages(_initial_route_request_messages)
@@ -4428,7 +4526,14 @@ async def stream_agent_loop(
     _pinned_fallback_candidate = None
     _pinned_fallback_route = None
     _last_route_request_messages = _initial_route_request_messages
+    _last_route_endpoint_url = endpoint_url
     _last_route_context_length = _initial_route_context_length
+    _context_compactions = 0
+    _context_calibration = 1.0
+    _working_context = None
+    _working_limit = max(1, int(_last_route_context_length * .85))
+    _failed_reads = FailedReadGuard()
+    _failed_read_nudges = 0
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
     # stuck firing the same tool call over and over with no text — burns
@@ -4469,6 +4574,14 @@ async def stream_agent_loop(
     _doc_stream_create_completed = False
     _ody_doc_tool_completed = False
 
+    def _registry_dispatch_kwargs(*, approved=False):
+        if _engineering_registry is None:
+            return {}
+        # A sealed exact human approval is separate from retrieval visibility,
+        # but still cannot bypass fresh owner/settings/host restrictions.
+        return {'registry': _engineering_registry,
+                'registry_access_provider': _engineering_policy if approved else _engineering_access}
+
     # Set when the loop runs out of rounds while the agent was still actively
     # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
     # so the user can resume instead of the turn silently stalling.
@@ -4479,13 +4592,30 @@ async def stream_agent_loop(
         # the exact call that the server will seal for user approval.  Schema
         # visibility is not authority: both the loop and dispatcher still gate
         # execution, and only a one-use server record can cross that boundary.
-        return schemas
+        from src.host_execution import adapt_schemas
+        if _engineering_registry is not None:
+            try:
+                access = _engineering_policy()
+                allowed = {record['id'] for record in _engineering_registry.public(access, include_unavailable=False)}
+                schemas = [schema for schema in schemas if schema.get('function', {}).get('name') in allowed]
+            except Exception:
+                logger.warning('Current engineering tool policy is unavailable', exc_info=False)
+                schemas = []
+        return adapt_schemas(schemas, owner)
 
     def _tool_schemas_for_route(route_state):
         route_mcp_schemas = route_state["mcp_schemas"]
         route_relevant_tools = route_state["relevant_tools"]
         if _force_answer:
             return []
+        if _engineering_registry is not None:
+            catalog = route_state.get('registry_catalog') or {'schemas': []}
+            if route_state['is_api_model'] and not route_state['ody_qwen_finetune_model']:
+                return _filter_route_tool_schemas(catalog['schemas'])
+            # Textual builtins use the same JSON argument schemas in the prompt;
+            # only explicitly selected MCP tools retain their native transport.
+            return _filter_route_tool_schemas([s for s in catalog['schemas']
+                                               if s['function']['name'].startswith('mcp__')])
         if route_state["is_api_model"]:
             if route_relevant_tools:
                 schema_names = set(route_relevant_tools)
@@ -4564,6 +4694,7 @@ async def stream_agent_loop(
                     workspace=workspace,
                     security_context=run_security,
                     exact_approval=exact_approval,
+                    **_registry_dispatch_kwargs(approved=True),
                 )
             finally:
                 await approved_progress_q.put(None)
@@ -4788,9 +4919,96 @@ async def stream_agent_loop(
                 _route_state.get("compaction_state", {}) if round_num == 1 else {}
             ),
         }
+        if _engineering_registry is not None:
+            _active_route_state = await _build_route_request_state(
+                endpoint_url, model, headers, messages, suppress_tools=_force_answer)
+            messages = _active_route_state['messages']
+            _engineering_presented_names = _active_route_state['registry_catalog']['names']
         if round_num == 1 and not _approved_result_injected:
-            _active_route_state["request_messages"] = _initial_route_request_messages
+            _active_route_state["request_messages"] = messages
         all_tool_schemas = _tool_schemas_for_route(_active_route_state)
+        from src.context_policy_runtime import owner_policy as _resolve_context_policy, shape_request
+        def owner_policy(policy_owner):
+            return _resolve_context_policy(policy_owner, session_id=session_id)
+        from src.context_policy import ContextPolicy
+        try:
+            _context_profile = owner_policy(owner)
+        except ValueError:
+            yield f'data: {json.dumps({"type": "context_compaction_failed", "delta": "\\n[Context profile is invalid. Update the settings before continuing.]"})}\n\n'
+            break
+        _configured_policy = ContextPolicy.from_dict(_context_profile['effective']) if _context_profile else None
+        # Shape the growing WORKING history on every round, not only at the
+        # beginning of a chat turn. The full transcript remains untouched.
+        _schema_tokens = schema_token_estimate(all_tool_schemas)
+        try:
+            _hard_cap = int(get_setting("agent_input_token_hard_max", 200000) or 200000)
+        except (TypeError, ValueError):
+            _hard_cap = 200000
+        _working_limit = input_limit(
+            _last_route_context_length or context_length or 8192,
+            max_tokens, _schema_tokens, max(1, _hard_cap),
+        )
+        try:
+            _explicit_budget = int(get_setting("agent_input_token_budget", 6000) or 0)
+        except (TypeError, ValueError):
+            _explicit_budget = 6000
+        if _explicit_budget not in (0, 6000):
+            _working_limit = min(_working_limit, max(1, _explicit_budget - max(max_tokens or 1024, 512) - _schema_tokens))
+
+        async def _summarize_working_context(prompt):
+            from src.llm_core import llm_call_async
+            if _context_profile and owner_policy(owner) != _context_profile:
+                raise ValueError('Context policy changed before summarization')
+            return await llm_call_async(endpoint_url, model, prompt,
+                                        temperature=.2, max_tokens=min(_configured_policy.summary_tokens, _configured_policy.output_reserve) if _configured_policy else 4096,
+                                        headers=headers, timeout=_configured_policy.summary_timeout_seconds if _configured_policy else 120, max_retries=1,
+                                        session_id=session_id, require_answer_content=True)
+
+        _before_context = estimate_tokens(messages)
+        _compacted_messages, _compact_status = messages, "unchanged"
+        _configured_telemetry = None
+        if _context_profile:
+            try:
+                from src.model_context import budget_context_for_model
+                _policy_window = await asyncio.to_thread(budget_context_for_model, endpoint_url, model, fallback=0)
+                _compacted_messages, _configured_telemetry = await shape_request(
+                    messages, all_tool_schemas, _context_profile, _policy_window,
+                    _summarize_working_context, calibration=_context_calibration, hard_input_max=max(1, _hard_cap))
+                if owner_policy(owner) != _context_profile:
+                    raise ValueError('Context policy changed during compaction')
+                _compact_status = _configured_telemetry['status']
+                _working_limit = _configured_telemetry['trigger_messages']
+                _last_route_context_length = _configured_telemetry['window']
+                _route_context_lengths[(endpoint_url, model)] = _last_route_context_length
+            except ValueError:
+                _compact_status = 'failed'
+        elif _before_context * _context_calibration >= _working_limit:
+            _compacted_messages, _compact_status = await compact_working_context(
+                messages, int(_working_limit / _context_calibration), _summarize_working_context,
+            )
+        if _compact_status == "compacted":
+            messages = _compacted_messages
+            _context_compactions += 1
+            _active_route_state["messages"] = messages
+            _active_route_state.pop("request_messages", None)
+            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages)})}\n\n'
+        elif _compact_status in {"failed", "uncompactable"}:
+            # Do not silently drop evidence and continue an audit as if the
+            # summary succeeded. The user can retry after the provider recovers.
+            yield f'data: {json.dumps({"type": "context_compaction_failed", "delta": "\\n[Context checkpoint failed; stopping safely without discarding the conversation. Please retry.]"})}\n\n'
+            full_response += "\n[Context checkpoint failed; stopped without discarding the conversation.]"
+            break
+        _estimated_prompt = int(estimate_tokens(_active_route_state.get("request_messages", messages)) * _context_calibration) + _schema_tokens
+        _working_context = context_snapshot(
+            model=model, context_length=_last_route_context_length, endpoint_url=endpoint_url,
+            prompt_tokens=_estimated_prompt, source="estimated", round_num=round_num,
+            limit=_working_limit, compactions=_context_compactions,
+            auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+        )
+        if _configured_telemetry:
+            _working_context['context_policy'] = _configured_telemetry
+            _working_context['auto_compact_enabled'] = _configured_policy.auto_compact
+        yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
@@ -4823,7 +5041,8 @@ async def stream_agent_loop(
         _candidate_request_states = {0: _active_route_state}
 
         async def _candidate_request(index, candidate_url, candidate_model, candidate_headers):
-            nonlocal _last_route_request_messages, _last_route_context_length
+            nonlocal _last_route_request_messages, _last_route_context_length, _engineering_presented_names
+            nonlocal _last_route_endpoint_url
             if index == 0:
                 state = _active_route_state
             else:
@@ -4835,28 +5054,94 @@ async def stream_agent_loop(
                     candidate_model,
                     candidate_headers,
                     candidate_source_messages,
+                    suppress_tools=_force_answer,
                 )
-            request_messages = state.get("request_messages")
-            if request_messages is None:
-                request_messages = _trim_route_request_messages(
-                    candidate_url,
-                    candidate_model,
-                    state["messages"],
+                if round_num > 1:
+                    # Runtime tool history is not indexed like durable chat
+                    # history; never apply its split offsets to saved messages.
+                    state["compaction_state"] = {}
+            if index > 0 and not _context_profile:
+                from src.model_context import budget_context_for_model
+                from fastapi import HTTPException
+                from src.llm_core import llm_call_async
+                route_context = budget_context_for_model(candidate_url, candidate_model, fallback=context_length) or context_length or 8192
+                _route_context_lengths[(candidate_url, candidate_model)] = route_context
+                candidate_schema_tokens = schema_token_estimate(_tool_schemas_for_route(state))
+                candidate_limit = input_limit(route_context, max_tokens,
+                                              candidate_schema_tokens,
+                                              max(1, _hard_cap))
+                if _explicit_budget not in (0, 6000):
+                    candidate_limit = min(candidate_limit, max(1, _explicit_budget - max(max_tokens or 1024, 512) - candidate_schema_tokens))
+                async def summarize_candidate(prompt):
+                    return await llm_call_async(candidate_url, candidate_model, prompt,
+                        temperature=.2, max_tokens=4096, headers=candidate_headers,
+                        timeout=120, max_retries=1, session_id=session_id,
+                        require_answer_content=True)
+                candidate_before = estimate_tokens(state["messages"])
+                candidate_messages, candidate_status = await compact_working_context(
+                    state["messages"], candidate_limit, summarize_candidate,
                 )
-                state["request_messages"] = request_messages
+                if candidate_status in {"failed", "uncompactable"}:
+                    raise HTTPException(413, "Fallback context cannot fit without losing evidence")
+                state["messages"] = candidate_messages
+                # Only adopt this telemetry if the candidate actually answers.
+                # Failed attempts must not make the active UI claim a smaller
+                # window or a checkpoint belonging to a different model.
+                state["working_limit"] = candidate_limit
+                state["schema_tokens"] = candidate_schema_tokens
+                state["working_compacted"] = candidate_status == "compacted"
+                state["before_tokens"] = candidate_before
+            elif index > 0 and _context_profile:
+                from src.model_context import budget_context_for_model
+                from src.llm_core import llm_call_async
+                from fastapi import HTTPException
+                if owner_policy(owner) != _context_profile:
+                    raise HTTPException(409, 'Context policy changed before fallback')
+                async def configured_summary(prompt):
+                    if owner_policy(owner) != _context_profile:
+                        raise ValueError('Context policy changed before fallback summary')
+                    return await llm_call_async(candidate_url, candidate_model, prompt,
+                        temperature=.2, max_tokens=min(_configured_policy.summary_tokens, _configured_policy.output_reserve),
+                        headers=candidate_headers, timeout=_configured_policy.summary_timeout_seconds,
+                        max_retries=1, session_id=session_id, require_answer_content=True)
+                candidate_window = await asyncio.to_thread(budget_context_for_model, candidate_url, candidate_model, fallback=0)
+                candidate_messages, info = await shape_request(state['messages'], _tool_schemas_for_route(state),
+                    _context_profile, candidate_window, configured_summary, hard_input_max=max(1, _hard_cap))
+                state.update(messages=candidate_messages, working_limit=info['trigger_messages'],
+                    schema_tokens=schema_token_estimate(_tool_schemas_for_route(state)),
+                    working_compacted=info['status'] == 'compacted', before_tokens=info['before_tokens'])
+                _route_context_lengths[(candidate_url, candidate_model)] = info['window']
+            # The working checkpoint has already enforced the input budget.
+            # A second independent trim here used a different fallback budget
+            # and could silently remove the pinned user goal.
+            request_messages = [{k: v for k, v in m.items() if k != "_protected"}
+                                for m in state["messages"]]
+            state["request_messages"] = request_messages
             _last_route_request_messages = request_messages
+            _last_route_endpoint_url = candidate_url
             state["context_length"] = _route_context_lengths.get(
                 (candidate_url, candidate_model),
                 context_length,
-            )
+            ) or context_length
             _last_route_context_length = state["context_length"]
             run_security.observe_messages(request_messages)
             candidate_tools = _tool_schemas_for_route(state)
+            if _context_profile:
+                from fastapi import HTTPException
+                if owner_policy(owner) != _context_profile:
+                    raise HTTPException(409, 'Context policy changed before dispatch')
+                _final_budget = _configured_policy.budget(state['context_length'],
+                    schema_tokens=schema_token_estimate(candidate_tools), hard_input_max=max(1, _hard_cap))
+                if estimate_tokens(request_messages) * (_context_calibration if index == 0 else 1) > _final_budget.hard_messages:
+                    raise HTTPException(413, 'Configured context budget exceeded')
             state["tools"] = candidate_tools
+            if _engineering_registry is not None:
+                _engineering_presented_names = state['registry_catalog']['names']
             _candidate_request_states[index] = state
             return {
                 "messages": request_messages,
                 "kwargs": {
+                    **({'max_tokens': min(max_tokens or _configured_policy.output_reserve, _configured_policy.output_reserve)} if _configured_policy else {}),
                     "tools": candidate_tools or None,
                     "tool_choice_none": state["ody_doc_finetune_mode"],
                     "temperature": (
@@ -5084,6 +5369,17 @@ async def stream_agent_loop(
                         last_round_input_tokens = round_input
                         has_real_usage = True
                         _round_has_real_usage = True
+                        _estimated_input = estimate_tokens(_last_route_request_messages) + _schema_tokens
+                        if _estimated_input > 0:
+                            _context_calibration = max(1.0, round_input / _estimated_input)
+                        _working_context = context_snapshot(
+                            model=_round_actual_model, context_length=_last_route_context_length, endpoint_url=_last_route_endpoint_url,
+                            prompt_tokens=round_input, output_tokens=round_output,
+                            source="backend", round_num=round_num,
+                            limit=_working_limit, compactions=_context_compactions,
+                            auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+                        )
+                        yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
                         # Backend-reported TRUE generation speed (llama.cpp
                         # timings.predicted_per_second) — pure decode, excludes
                         # prefill/network. Preferred over tokens/wall-clock, which
@@ -5119,22 +5415,25 @@ async def stream_agent_loop(
                             endpoint_url, model, headers = _pinned_fallback_candidate
                             answering_state = _candidate_request_states.get(candidate_index)
                             if answering_state is None:
-                                answering_state = await _build_route_request_state(
-                                    endpoint_url,
-                                    model,
-                                    headers,
-                                    messages,
-                                )
-                                answering_state["request_messages"] = _trim_route_request_messages(
-                                    endpoint_url,
-                                    model,
-                                    answering_state["messages"],
-                                )
-                                answering_state["context_length"] = _route_context_lengths.get(
-                                    (endpoint_url, model),
-                                    context_length,
-                                )
+                                await _candidate_request(candidate_index, endpoint_url, model, headers)
+                                answering_state = _candidate_request_states[candidate_index]
                             messages = answering_state["messages"]
+                            _last_route_request_messages = answering_state["request_messages"]
+                            _last_route_context_length = answering_state["context_length"]
+                            _working_limit = answering_state.get("working_limit", _working_limit)
+                            _schema_tokens = answering_state.get("schema_tokens", _schema_tokens)
+                            _context_calibration = 1.0
+                            if answering_state.get("working_compacted"):
+                                _context_compactions += 1
+                                yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": answering_state["before_tokens"], "after_tokens": estimate_tokens(messages)})}\n\n'
+                            _working_context = context_snapshot(
+                                model=model, context_length=_last_route_context_length, endpoint_url=_last_route_endpoint_url,
+                                prompt_tokens=estimate_tokens(_last_route_request_messages) + _schema_tokens,
+                                source="estimated", round_num=round_num,
+                                limit=_working_limit, compactions=_context_compactions,
+                                auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+                            )
+                            yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
                             mcp_schemas = answering_state["mcp_schemas"]
                             _relevant_tools = answering_state["relevant_tools"]
                             _is_api_model = answering_state["is_api_model"]
@@ -5243,12 +5542,22 @@ async def stream_agent_loop(
             if _ody_doc_finetune_mode
             else round_response
         )
+        # Engineering finetunes receive textual builtin schemas even on an
+        # OpenAI-compatible endpoint. Match that actual transport, including
+        # when this round was answered by a fallback, instead of dropping the
+        # advertised fenced calls as native-model prose examples. Dispatch
+        # still checks the fresh catalogue and permissions for every call.
+        _round_native_builtins = (
+            _is_api_model and not guide_only
+            and not (_engineering_registry is not None and _ody_qwen_finetune_model)
+        )
         tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
             _normalized_doc_round,
             native_tool_calls,
             round_num,
-            is_api_model=(_is_api_model and not guide_only),
+            is_api_model=_round_native_builtins,
             allow_fenced_for_api=_ody_doc_finetune_mode,
+            canonical_tools=_engineering_registry is not None,
         )
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
@@ -5355,9 +5664,21 @@ async def stream_agent_loop(
                             "what you have and note what's missing in one short line."
                         ),
                     }]
+                    _synth_output_limit = max_tokens
+                    _synth_profile = owner_policy(owner)
+                    if _synth_profile:
+                        from src.model_context import budget_context_for_model
+                        _synth_policy = ContextPolicy.from_dict(_synth_profile['effective'])
+                        _synth_window = await asyncio.to_thread(budget_context_for_model, endpoint_url, model, fallback=0)
+                        if owner_policy(owner) != _synth_profile:
+                            raise ValueError('Context profile changed before synthesis')
+                        _synth_budget = _synth_policy.budget(_synth_window, hard_input_max=max(1, _hard_cap))
+                        if estimate_tokens(_synth_messages) * _context_calibration > _synth_budget.hard_messages:
+                            raise ValueError('Final synthesis would exceed the configured context budget')
+                        _synth_output_limit = min(max_tokens or _synth_policy.output_reserve, _synth_policy.output_reserve)
                     _raw = await llm_call_async(
                         url=endpoint_url, model=model, messages=_synth_messages,
-                        headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
+                        headers=headers, temperature=0.3, max_tokens=_synth_output_limit, timeout=60,
                     )
                     _raw_text = _raw or ""
                     _synth = _strip_think_blocks(strip_tool_blocks(_raw_text)).strip()
@@ -5420,7 +5741,7 @@ async def stream_agent_loop(
         # model with no real native_tool_calls) must not be stripped from the
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
-        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
+        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_round_native_builtins and not used_native)).strip()
         round_texts.append(cleaned_round)
         round_models.append(_round_actual_model)
         round_endpoint_ids.append(_round_actual_endpoint_id)
@@ -5559,11 +5880,25 @@ async def stream_agent_loop(
         # runaway backstop). On bail we don't give up — we force one
         # tool-free round so the model declares done or declares blocked,
         # mirroring Terminus's explicit-completion handshake.
-        _sig = "|".join(sorted(f"{b.tool_type}:{(b.content or '').strip()[:120]}" for b in tool_blocks))
+        _blocked_repeats = [b for b in tool_blocks if _failed_reads.blocked(b.tool_type, b.content)]
+        if _blocked_repeats:
+            _failed_read_nudges += 1
+            # A changed query/URL is still allowed. Repeating a failed read is
+            # not new progress just because the model added introductory prose.
+            messages.append({"role": "system", "content": (
+                "Recovery guard: this exact web read/search has already failed twice or returned "
+                "the same evidence twice. Do not repeat it. Use the results already in context, "
+                "a different verified URL/query or another authorized source. HTTP 404 is not "
+                "evidence about the contract. If no alternative works, state the blocker honestly.")})
+            yield f'data: {json.dumps({"type": "tool_retry_blocked", "round": round_num, "message": "Repeated web request without new evidence blocked; use existing results or another source."})}\n\n'
+            if _failed_read_nudges >= 2:
+                _force_answer = True
+            continue
+        _sig = "|".join(sorted(call_signature(b.tool_type, b.content) for b in tool_blocks))
         _is_repeat = _sig in _recent_call_sigs
         _recent_call_sigs.append(_sig)
         for _b in tool_blocks:
-            _call_freq[f"{_b.tool_type}:{(_b.content or '').strip()[:120]}"] += 1
+            _call_freq[call_signature(_b.tool_type, _b.content)] += 1
         # "Real" answer text = round text minus <think> blocks. Empty-think
         # rounds (just "<think>\n\n</think>" + a tool call) must not read as
         # progress, so strip think before checking.
@@ -5797,6 +6132,7 @@ async def stream_agent_loop(
                             progress_cb=_push_progress,
                             workspace=workspace,
                             security_context=run_security,
+                            **_registry_dispatch_kwargs(),
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.
@@ -5830,6 +6166,9 @@ async def stream_agent_loop(
                             pass
 
             run_security.observe_tool_result(block.tool_type, result, block.content)
+            _failed_reads.observe(block.tool_type, block.content, result)
+            if tool_result_is_successful(result):
+                _failed_read_nudges = 0
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its
@@ -6382,7 +6721,7 @@ async def stream_agent_loop(
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
-    final_context_tokens = estimate_tokens(messages)
+    final_context_tokens = (_working_context or {}).get("prompt_tokens", estimate_tokens(_last_route_request_messages))
     metrics = _compute_final_metrics(
         _last_route_request_messages, full_response, total_duration, time_to_first_token,
         _last_route_context_length, real_input_tokens, real_output_tokens,
@@ -6397,6 +6736,8 @@ async def stream_agent_loop(
         backend_prefill_tps=backend_prefill_tps,
     )
     metrics["requested_model"] = requested_model
+    if _working_context:
+        metrics["working_context"] = _working_context
     metrics["endpoint_id"] = actual_endpoint_id
     metrics["endpoint_label"] = actual_endpoint_label
     if isinstance(actual_endpoint_cost_tracked, bool):

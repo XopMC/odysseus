@@ -18,6 +18,7 @@ from src.context_compactor import maybe_compact, trim_for_context
 from src.model_context import estimate_tokens, get_context_length
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
+from src.tool_policy import tool_toggle_enabled
 from src.attachment_refs import attachment_ref
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
@@ -722,7 +723,9 @@ async def build_chat_context(
     _preface_kwargs = dict(
         message=_ctx_msg,
         session=sess,
-        use_web=use_web and not skip_web,
+        # FormData values are strings: bool("false") must never initiate a
+        # search or send private chat text to an external search engine.
+        use_web=tool_toggle_enabled(use_web) and not skip_web,
         use_memory=mem_enabled,
         time_filter=time_filter,
         preset_system_prompt=preset.system_prompt,
@@ -735,6 +738,19 @@ async def build_chat_context(
     if use_rag is not None or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
+
+    from src.host_execution import enabled_for as host_enabled_for
+    if agent_mode and host_enabled_for(user):
+        preface.append({"role": "system", "content": (
+            "Host execution is enabled for this owner. The bash, python and file tools operate on the Jetson host "
+            "over SSH as its configured Unix user, NOT inside the application container. Use get_workspace to "
+            "discover the host working directory and absolute paths for projects. Inspect available programs and "
+            "hardware before making claims. Unix permissions still apply. Never request a sudo password in chat "
+            "or put credentials into tool arguments. For a required root command, explain the exact command and "
+            "ask the owner to approve/run it at /host-access, then verify its effects before continuing. "
+            "Do not claim completion until requested changes and relevant tests are verified; if blocked, report "
+            "the concrete blocker. Do not bypass disabled tools or external-content approval boundaries."
+        )})
 
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])
@@ -787,7 +803,7 @@ async def build_chat_context(
     # for every candidate. Running selected-model compaction here would mutate
     # session history before we know which route can answer and would make a
     # later larger-context candidate unable to recover discarded history.
-    if defer_context_shaping:
+    if defer_context_shaping or agent_mode:
         context_length = get_context_length(sess.endpoint_url, sess.model)
         was_compacted = False
     else:
@@ -796,7 +812,7 @@ async def build_chat_context(
         )
     _before_trim_messages = len(messages)
     _before_trim_tokens = estimate_tokens(messages)
-    if not defer_context_shaping:
+    if not defer_context_shaping and not agent_mode:
         messages = trim_for_context(messages, context_length)
     _after_trim_messages = len(messages)
     _after_trim_tokens = estimate_tokens(messages)

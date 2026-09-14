@@ -159,7 +159,7 @@ export function isAdminOnlySettingsTab(id) {
   return getSettingsPanel(id)?.adminOnly === true;
 }
 
-export function getSettingsPanelSearchText(panelOrId) {
+export function getSettingsPanelSearchText(panelOrId, translate = value => value) {
   const panel = typeof panelOrId === 'string'
     ? getSettingsPanel(panelOrId)
     : panelOrId;
@@ -168,6 +168,7 @@ export function getSettingsPanelSearchText(panelOrId) {
 
   return [
     panel.label,
+    translate(panel.label),
     ...(panel.keywords || []),
   ].join(' ').toLowerCase();
 }
@@ -189,7 +190,7 @@ export function searchSettingsPanels(query, options = {}) {
   return SETTINGS_PANELS.filter(panel => {
     if (panel.adminOnly && !isAdmin) return false;
 
-    const haystack = getSettingsPanelSearchText(panel);
+    const haystack = getSettingsPanelSearchText(panel, typeof options.translate === 'function' ? options.translate : undefined);
     return terms.every(term => haystack.includes(term));
   });
 }

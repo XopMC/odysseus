@@ -9,12 +9,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 
 from core.platform_compat import IS_WINDOWS, which_tool
 from src.runtime_paths import get_app_root
+from src.browser_runtime import PLAYWRIGHT_MCP_PACKAGE
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +83,7 @@ _BUILTIN_NPX_SERVERS = {
     "builtin_browser": {
         "name": "Built-in: Browser",
         "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest", "--headless", "--caps", "vision"],
+        "args": ["-y", PLAYWRIGHT_MCP_PACKAGE, "--headless", "--caps", "vision"],
     }
 }
 
@@ -329,7 +331,9 @@ def _is_package_in_npx_cache(package_spec):
 
     for cache_root in _npm_cache_roots():
         npx_root = os.path.join(cache_root, "_npx")
-        if _npx_cache_contains_package(npx_root, package_name):
+        suffix = package_spec[len(package_name):].removeprefix('@')
+        exact_version = suffix if re.fullmatch(r'\d+\.\d+\.\d+(?:-[\w.-]+)?', suffix) else None
+        if _npx_cache_contains_package(npx_root, package_name, exact_version):
             return True
     return False
 
@@ -358,7 +362,7 @@ def _npm_cache_roots():
     return list(dict.fromkeys(roots))
 
 
-def _npx_cache_contains_package(npx_root, package_name):
+def _npx_cache_contains_package(npx_root, package_name, exact_version=None):
     if not os.path.isdir(npx_root):
         return False
     package_path = os.path.join("node_modules", *package_name.split("/"), "package.json")
@@ -373,6 +377,13 @@ def _npx_cache_contains_package(npx_root, package_name):
             continue
         cached_name = _cached_package_name(os.path.join(entry.path, package_path))
         if is_dir and cached_name == package_name:
+            if exact_version is not None:
+                try:
+                    with open(os.path.join(entry.path, package_path), encoding='utf-8') as stream:
+                        if json.load(stream).get('version') != exact_version:
+                            continue
+                except (OSError, ValueError, AttributeError):
+                    continue
             return True
     return False
 

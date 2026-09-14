@@ -4,6 +4,7 @@
  */
 
 import spinnerModule from './spinner.js';
+import { bindUiText } from './i18n.js';
 import sessionModule from './sessions.js';
 import { initEmailLibrary, openEmailLibrary, closeEmailLibrary, isOpen as isLibOpen, prewarmEmailLibrary, prewarmUnreadEmails } from './emailLibrary.js?v=20260815approvalsave1';
 import * as Modals from './modalManager.js';
@@ -1118,6 +1119,7 @@ function _showEmailMenu(em, anchor, itemEl) {
     menuItem.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
     const arrow = a.submenu ? ' <span style="margin-left:auto;opacity:0.5;">›</span>' : '';
     menuItem.innerHTML = _icon(a.icon) + `<span>${a.label}</span>${arrow}`;
+    bindUiText(menuItem.children[1], a.label);
     menuItem.addEventListener('click', (e) => {
       e.stopPropagation();
       if (a.submenu === 'remind') {
@@ -1144,6 +1146,7 @@ function _showRemindSubmenu(em, parentDropdown) {
   header.className = 'dropdown-item-compact';
   header.style.cssText = 'opacity:0.5;font-size:10px;pointer-events:none;text-transform:uppercase;letter-spacing:0.5px;padding-top:6px;';
   header.innerHTML = '<span>Remind me</span>';
+  bindUiText(header.lastElementChild, 'Remind me');
   parentDropdown.appendChild(header);
 
   const now = new Date();
@@ -1165,6 +1168,7 @@ function _showRemindSubmenu(em, parentDropdown) {
     const item = document.createElement('div');
     item.className = 'dropdown-item-compact';
     item.innerHTML = `<span>${p.label}</span><span style="margin-left:auto;opacity:0.5;font-size:10px;">${p.sub}</span>`;
+    bindUiText(item.firstElementChild, p.label);
     item.addEventListener('click', async (e) => {
       e.stopPropagation();
       dismissOrRemove(parentDropdown);
@@ -1175,6 +1179,7 @@ function _showRemindSubmenu(em, parentDropdown) {
   const customItem = document.createElement('div');
   customItem.className = 'dropdown-item-compact';
   customItem.innerHTML = '<span>Pick date and time…</span>';
+  bindUiText(customItem.lastElementChild, 'Pick date and time…');
   customItem.addEventListener('click', async (e) => {
     e.stopPropagation();
     dismissOrRemove(parentDropdown);

@@ -24,6 +24,7 @@ import {
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260819approvalcontrol1';
 import sessionModule from './js/sessions.js';
+import { createTeamWorkspace } from './js/team-workspace.js?v=20260913team1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -55,6 +56,8 @@ import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=202607
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 
 const API_BASE = window.location.origin;
+const teamWorkspace = createTeamWorkspace({ getSessionId: () => sessionModule.getCurrentSessionId() });
+window.teamWorkspace = teamWorkspace;
 window.themeModule = themeModule;
 window.sessionModule = sessionModule;
 window.uiModule = uiModule;
@@ -1836,8 +1839,9 @@ function initializeEventListeners() {
       if (toggle) toggle.classList.toggle('mode-chat', mode === 'chat');
       // Workspace pill + overflow entry are agent-only - hide immediately (no flash).
       try { workspaceModule.applyMode(mode); } catch (_) {}
-      // Delay tool glow-up for a staggered effect
-      setTimeout(() => applyModeToToggles(mode), 500);
+      // Permission state must change with the visible mode. A delayed repaint
+      // from a previous mode can otherwise overwrite a newer tool choice.
+      applyModeToToggles(mode);
     }
     window.__odysseusSetChatMode = setMode;
     agentBtn.addEventListener('click', () => {
@@ -3845,6 +3849,7 @@ function startOdysseusApp() {
   }
 
   function handleSubmit(e) {
+    if (teamWorkspace.blockChatSubmit(e)) return;
     if (e) e.preventDefault();
     _bumpChatPriority(30000);
     // Debounce: prevent double-submit while a request is being initiated
@@ -4285,6 +4290,7 @@ function startOdysseusApp() {
   // Core wiring is complete for this turn — reveal the shell independently of
   // the session-list request.
   revealApplicationShellAfterPaint();
+  teamWorkspace.init(); // Capability-gated and independent of normal chat startup.
 
   if (sessionModule) {
     sessionModule.initDependencies({

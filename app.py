@@ -886,6 +886,16 @@ app.include_router(setup_contacts_routes())
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
 
+from routes.host_access_routes import setup_host_access_routes
+app.include_router(setup_host_access_routes())
+
+from routes.team_routes import setup_team_routes
+from routes.engineering_routes import setup_engineering_routes
+app.include_router(setup_engineering_routes())
+from routes.chat_replay_routes import setup_chat_replay_routes
+app.include_router(setup_chat_replay_routes())
+app.include_router(setup_team_routes())
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")
@@ -1054,6 +1064,13 @@ async def _startup_event():
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])
     app.state._startup_tasks = _startup_tasks
+    from src.team_config import enabled as teams_enabled
+    if teams_enabled():
+        from src.team_runtime import get_runtime
+        _startup_tasks.append(get_runtime().start())
+        if os.environ.get('ODYSSEUS_ENGINEERING_ENABLED') == '1':
+            from src.engineering_operations import get_manager
+            _startup_tasks.append(get_manager(get_runtime().store).start())
     if upload_cleanup_func:
         upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
     # Always-on monitor that auto-continues the agent when a background bash
@@ -1272,6 +1289,13 @@ async def _startup_event():
 
 async def _shutdown_event():
     logger.info("Application shutting down...")
+    from src.team_config import enabled as teams_enabled
+    if teams_enabled():
+        from src.team_runtime import get_runtime
+        if os.environ.get('ODYSSEUS_ENGINEERING_ENABLED') == '1':
+            from src.engineering_operations import get_manager
+            await get_manager(get_runtime().store).close()
+        await get_runtime().close()
     if upload_cleanup_task:
         upload_cleanup_task.cancel()
         try:

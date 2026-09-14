@@ -23,6 +23,7 @@ import {
   // browser loads it once. See cookbook-hwfit.js.
 } from './cookbook.js';
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 
 // Tiny HTML-escape — keeps the file standalone instead of leaning on a
 // shared helper that may not be exported from this module's import surface.
@@ -952,6 +953,8 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   copyBtn.className = 'cookbook-diag-copy';
   copyBtn.title = 'Copy diagnosis details';
   copyBtn.setAttribute('aria-label', 'Copy diagnosis');
+  bindUiText(copyBtn, 'Copy diagnosis details', 'title');
+  bindUiText(copyBtn, 'Copy diagnosis', 'aria-label');
   copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   copyBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -972,6 +975,8 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   dismissBtn.className = 'cookbook-diag-dismiss';
   dismissBtn.title = 'Dismiss diagnosis';
   dismissBtn.setAttribute('aria-label', 'Dismiss');
+  bindUiText(dismissBtn, 'Dismiss diagnosis', 'title');
+  bindUiText(dismissBtn, 'Dismiss', 'aria-label');
   dismissBtn.textContent = '×';
   dismissBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -993,6 +998,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
     button.appendChild(wp.element);
     const _lbl = document.createElement('span');
     _lbl.textContent = busyLabel;
+    bindUiText(_lbl, busyLabel);
     _lbl.style.verticalAlign = 'middle';
     button.appendChild(_lbl);
     try {
@@ -1004,6 +1010,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
       if (button.isConnected) {
         try { wp.destroy(); } catch {}
         button.textContent = _orig;
+        bindUiText(button, fix.label);
         delete button.dataset.busy;
       }
       if (typeof onDone === 'function') onDone();
@@ -1023,6 +1030,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
       btn.className = 'cookbook-btn cookbook-diag-btn';
       btn.type = 'button';
       btn.innerHTML = _diagFixIcon(fix.label) + '<span class="cookbook-diag-btn-label">' + _diagEsc(fix.label) + '</span>';
+      bindUiText(btn.lastElementChild, fix.label);
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         runFix(fix, btn);

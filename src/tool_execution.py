@@ -18,6 +18,7 @@ import re
 import stat
 import sys
 import time
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 
@@ -27,10 +28,12 @@ from src.tool_security import (
     email_tool_policy_names,
     is_public_blocked_tool,
     owner_is_admin_or_single_user,
+    delegated_credential_blocked_tools,
 )
 from src.tool_capabilities import ToolRunSecurityContext, blocked_tool_result
 from src.tool_approvals import ExactToolApproval
 from src.tool_policy import ToolPolicy
+from src.tool_registry import ToolAccess, ToolRegistry, canonical_name, policy_names as registry_policy_names
 from src.constants import (
     MAX_OUTPUT_CHARS,
     MAX_READ_CHARS,
@@ -50,6 +53,125 @@ class _NoToolSecurityContext:
 
 _MISSING_TOOL_SECURITY_CONTEXT = _MissingToolSecurityContext()
 NO_TOOL_SECURITY_CONTEXT = _NoToolSecurityContext()
+
+
+def _current_agent_privileges(owner):
+    """Fresh auth snapshot: revoked/deleted users cannot keep an active run."""
+    from src.auth_helpers import _auth_disabled
+    if _auth_disabled():
+        return {'can_use_agent': True}
+    from core.auth import AuthManager
+    auth = AuthManager()
+    if not auth.is_configured or not owner or owner not in auth.users:
+        return {'can_use_agent': False}
+    return auth.get_privileges(owner)
+
+
+def agent_registry_inventory(builtin_schemas, mcp_manager):
+    """Already-discovered inventory; never connect or trust MCP effect hints."""
+    from src.tool_registry import mcp_tool_id
+    from src.agent_tools import TOOL_TAGS
+    remote = []
+    if mcp_manager is not None:
+        for tool in mcp_manager.get_all_tools():
+            name = mcp_tool_id(tool['server_id'], tool['name'])
+            remote.append({'type': 'function', 'function': {'name': name,
+                'description': tool.get('description', ''),
+                'parameters': tool.get('input_schema') or {'type': 'object', 'properties': {}}}})
+    registry = ToolRegistry.from_schemas(builtin_schemas, mcp_schemas=remote, include_legacy=True)
+    # Native conversion and textual parsing both require a registered tag.
+    # Metadata alone (e.g. a stale native schema) is not a working dispatcher.
+    return ToolRegistry(registry.get(name) for name in registry.names()
+                        if name.startswith('mcp__') or name in TOOL_TAGS)
+
+
+def current_agent_registry_access(registry, *, owner, disabled_tools, tool_policy,
+                                  mcp_manager, plan_mode=False, delegated_credential=False,
+                                  host_bound=False):
+    """Intersect fresh server policy with the existing effective turn policy.
+
+    Called for each schema snapshot AND immediately before each dispatch. The
+    engine flag enables this adapter for a whole run; disabling it mid-run
+    revokes the adapter instead of falling back to the legacy dispatcher.
+    """
+    if os.environ.get('ODYSSEUS_ENGINEERING_ENABLED') != '1':
+        raise PermissionError('Engineering tool policy has been disabled')
+    from src.settings import get_setting
+    from src import host_execution
+    from src.tool_registry import mcp_tool_id
+    from src.tool_security import plan_mode_disabled_tools
+    disabled = set(disabled_tools or ())
+    global_disabled = get_setting('disabled_tools', [])
+    if not isinstance(global_disabled, list):
+        raise PermissionError('Current global tool policy is invalid')
+    disabled.update(global_disabled)
+    if tool_policy:
+        disabled.update(tool_policy.all_disabled_names())
+    if plan_mode:
+        disabled.update(plan_mode_disabled_tools())
+    if delegated_credential:
+        disabled.update(delegated_credential_blocked_tools())
+    privileges = _current_agent_privileges(owner)
+    if not isinstance(privileges, dict) or privileges.get('can_use_agent') is not True:
+        return ToolAccess(mode='agent', role='agent', config={}, adapters=frozenset({'agent'}),
+                          allowed_tools=frozenset())
+    names = registry.names()
+    admin = _owner_is_admin(owner)
+    if not admin:
+        disabled.update(name for name in names if is_public_blocked_tool(name))
+    privilege_tools = {
+        'can_use_bash': host_execution.TOOLS,
+        'can_use_documents': {'create_document', 'edit_document', 'update_document', 'suggest_document'},
+        'can_generate_images': {'generate_image'},
+        'can_manage_memory': {'manage_memory', 'manage_skills'},
+    }
+    for key, tools in privilege_tools.items():
+        if privileges.get(key, True) is not True:
+            disabled.update(tools)
+    if host_bound and not host_execution.enabled_for(owner):
+        # Never change a host-bound action into a container action after revoke.
+        disabled.update(host_execution.TOOLS)
+    servers = set()
+    remote_names = set()
+    mcp_allowed = bool(mcp_manager is not None and admin and not delegated_credential
+                       and not (tool_policy and tool_policy.disable_mcp))
+    if mcp_allowed:
+        from core.database import McpServer, SessionLocal
+        db = SessionLocal()
+        try:
+            rows = {row.id: row for row in db.query(McpServer).all()}
+            for tool in mcp_manager.get_all_tools():
+                server = tool['server_id']
+                name = mcp_tool_id(server, tool['name'])
+                row = rows.get(server)
+                if row is not None and row.is_enabled is not True:
+                    continue
+                if row is None and not mcp_manager.is_builtin(server):
+                    continue
+                if mcp_manager.get_server_status(server).get('status') != 'connected':
+                    continue
+                if tool.get('is_disabled') or (server == 'builtin_browser'
+                        and privileges.get('can_use_browser', True) is not True):
+                    continue
+                blocked = json.loads(row.disabled_tools) if row is not None and row.disabled_tools else []
+                if not isinstance(blocked, list) or not all(isinstance(value, str) for value in blocked):
+                    raise PermissionError('Current MCP tool policy is invalid')
+                if tool['name'] in blocked:
+                    disabled.add(name)
+                    continue
+                servers.add(server)
+                remote_names.add(name)
+        finally:
+            db.close()
+    disabled.update(name for name in names if name.startswith('mcp__') and name not in remote_names)
+    for bare in BUILTIN_EMAIL_TOOLS:
+        if f'mcp__email__{bare}' not in remote_names:
+            disabled.add(bare)
+    if tool_policy:
+        disabled.update(name for name in names if any(tool_policy.blocks(alias) for alias in registry_policy_names(name)))
+    return ToolAccess(mode='agent', role='planner' if plan_mode else 'agent',
+                      config={'mcp': mcp_allowed}, adapters=frozenset({'agent', 'mcp'}),
+                      allowed_tools=names, disabled_tools=disabled, enabled_mcp_servers=servers)
 
 # Persistent working directory for agent subprocesses.
 # Resolves to <repo_root>/data/agent_workspace, inside the bind-mounted volume
@@ -821,6 +943,8 @@ async def execute_tool_block(
         | _MissingToolSecurityContext
     ) = _MISSING_TOOL_SECURITY_CONTEXT,
     exact_approval: Optional[ExactToolApproval] = None,
+    registry: Optional[ToolRegistry] = None,
+    registry_access_provider: Optional[Callable[[], ToolAccess]] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -841,6 +965,15 @@ async def execute_tool_block(
             "security_context must be a ToolRunSecurityContext or "
             "NO_TOOL_SECURITY_CONTEXT"
         )
+
+    # Canonical identity must reach EVERY existing safety gate, not merely the
+    # final dispatcher. A UI alias cannot escape a bash/admin/taint restriction.
+    try:
+        canonical = canonical_name(getattr(block, 'tool_type', None))
+    except ValueError:
+        return 'tool: BLOCKED', {'error': 'Invalid tool identity', 'exit_code': 1, 'blocked': True}
+    if canonical != block.tool_type:
+        block = SimpleNamespace(tool_type=canonical, content=block.content)
 
     approval_claimed = False
     if exact_approval is not None:
@@ -928,6 +1061,17 @@ async def execute_tool_block(
 
     token = _active_workspace.set(workspace or None)
     try:
+        # Optional shared-policy adapter: callers without it retain the legacy
+        # gates below. Passing only half the adapter fails closed. The callback
+        # must reload server-owned policy, never reuse discovery as authority.
+        if registry is not None or registry_access_provider is not None:
+            try:
+                if not isinstance(registry, ToolRegistry) or not callable(registry_access_provider):
+                    raise PermissionError('Current tool policy adapter is unavailable')
+                registry.require_current(block.tool_type, registry_access_provider)
+            except PermissionError as exc:
+                return f'{block.tool_type}: BLOCKED', {'error': str(exc), 'exit_code': 1,
+                                                     'blocked': True, 'policy': 'tool_registry'}
         output = await _execute_tool_block_impl(
             block,
             session_id=session_id,
@@ -1010,14 +1154,14 @@ async def _execute_tool_block_impl(
     except ImportError:
         dynamic_handlers = {}
 
-    tool = block.tool_type
+    tool = canonical_name(block.tool_type)
     content = block.content
 
     # The block/disable gates below must match every policy-equivalent
     # spelling of the tool name (bare email names alias their mcp__email__
     # form — see email_tool_policy_names), not just the spelling the model
     # happened to emit.
-    policy_names = email_tool_policy_names(tool)
+    policy_names = registry_policy_names(tool)
 
     # Misformatted tool call detection: model put JSON inside ```python``` (or
     # similar) without naming the tool. Common with MiniMax-style outputs.
@@ -1079,6 +1223,18 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+
+    # Host mode is an explicit owner opt-in, AFTER every normal policy gate.
+    # Background jobs retain the existing local lifecycle/auto-followup monitor.
+    from src import host_execution
+    if host_execution.enabled_for(owner) and tool in host_execution.TOOLS:
+        is_background, host_content = _split_bg_marker(content) if tool == 'bash' else (False, content)
+        if not (is_background and session_id and host_content):
+            return f'{tool} (Jetson host)', await host_execution.execute(tool, content)
+        try:
+            content = '#!bg\n' + host_execution.background_command(tool, host_content)
+        except (ValueError, TypeError) as exc:
+            return f'{tool} (Jetson host): BLOCKED', {'error': str(exc), 'exit_code': 1}
 
     # Background execution: a `bash` block whose first line is the `#!bg`
     # marker runs DETACHED — returns a job id immediately so the chat stream

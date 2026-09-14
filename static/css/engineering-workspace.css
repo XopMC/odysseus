@@ -1,0 +1,14 @@
+.engineering-workspace { min-width: 0; color: var(--fg); font: inherit; }
+.engineering-workspace [hidden] { display: none !important; }
+.engineering-workspace h4, .engineering-workspace p { margin: 0; overflow-wrap: anywhere; }
+.engineering-workspace .team-card > p, .engineering-description { line-height: 1.5; }
+.engineering-workspace button { max-width: 100%; min-height: 38px; height: auto; white-space: normal; overflow-wrap: anywhere; }
+.engineering-workspace input:not([type="checkbox"]), .engineering-workspace select { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--fg); background: var(--bg); font: inherit; }
+.engineering-workspace select { height: auto; }
+.engineering-workspace button:disabled, .engineering-workspace select:disabled { opacity: .5; cursor: not-allowed; }
+.engineering-project-details, .engineering-tools { display: grid; gap: 8px; min-width: 0; }
+.engineering-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.engineering-tools .team-card { display: grid; gap: 8px; }
+@media (max-width: 768px) {
+  .engineering-workspace .team-config, .engineering-tools { grid-template-columns: minmax(0, 1fr); }
+}

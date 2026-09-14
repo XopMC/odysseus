@@ -3,6 +3,7 @@
  */
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import { loadPanel } from './panels.js';
 import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
@@ -730,6 +731,9 @@ function _wireAlbumsEvents(scope) {
   }
 
   container.querySelectorAll('.gallery-album-menu-pop').forEach(pop => {
+    for (const [action, label] of [['upload', 'Upload here'], ['rename', 'Rename'], ['delete', 'Delete']]) {
+      bindUiText(pop.querySelector(`[data-action="${action}"] > span:last-child`), label);
+    }
     const id = pop.dataset.album;
     pop.querySelector('[data-action="upload"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1168,6 +1172,11 @@ function _renderEditorLanding() {
         <div class="gallery-editor-drafts-grid" id="gallery-editor-drafts-grid"></div>
       </div>
     </div>`;
+  container.querySelectorAll('#gallery-editor-template option').forEach(option => {
+    const index = option.value === '' ? null : Number(option.value);
+    const source = index === null ? 'Select a size…' : presets[index]?.label;
+    if (source) bindUiText(option, source);
+  });
   // Each remount of the editor landing rebuilds the drafts header
   // markup, so the cached event listener references are stale. Reset.
   _draftsWired = false;
@@ -1598,6 +1607,11 @@ function _openDetail(img) {
   // items. Clicking any item closes the menu (per-item handlers also fire).
   const menuBtn = document.getElementById('gallery-detail-menu-btn');
   const menu = document.getElementById('gallery-detail-menu');
+  for (const [id, label] of [['gallery-fav-detail', img.favorite ? 'Favorited' : 'Favorite'],
+    ['gallery-ai-tag-btn', aiTags ? 'Clear AI tags' : 'AI Tag'], ['gallery-download-btn', 'Download'],
+    ['gallery-set-cover-btn', 'Set as album cover'], ['gallery-delete-btn', 'Delete']]) {
+    bindUiText(document.getElementById(id), label);
+  }
   if (menuBtn && menu) {
     // `.dropdown { display:none }` isn't tied to [hidden] — set inline display.
     const _setMenu = (show) => { menu.hidden = !show; menu.style.display = show ? 'block' : 'none'; };
@@ -1621,7 +1635,10 @@ function _openDetail(img) {
     if (!data.ok) return;
     img.favorite = data.favorite;
     const menuItem = document.getElementById('gallery-fav-detail');
-    if (menuItem) menuItem.innerHTML = data.favorite ? '&#9829; Favorited' : '&#9825; Favorite';
+    if (menuItem) {
+      menuItem.innerHTML = '<span aria-hidden="true">' + (data.favorite ? '&#9829;' : '&#9825;') + '</span> ' + (data.favorite ? 'Favorited' : 'Favorite');
+      bindUiText(menuItem, data.favorite ? 'Favorited' : 'Favorite');
+    }
     const headerBtn = document.getElementById('gallery-detail-fav-header');
     if (headerBtn) {
       headerBtn.setAttribute('aria-pressed', data.favorite ? 'true' : 'false');
@@ -2662,6 +2679,7 @@ export function openGallery() {
       const it = document.createElement('div');
       it.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
       it.innerHTML = `<span class="dropdown-icon">${a.icon}</span><span>${a.label}</span>`;
+      bindUiText(it.lastElementChild, a.label);
       it.addEventListener('click', (e) => { e.stopPropagation(); close(); a.action(); });
       dropdown.appendChild(it);
     }

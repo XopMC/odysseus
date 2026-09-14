@@ -4,6 +4,7 @@
 // ============================================
 
 import uiModule from './ui.js';
+import { bindUiText } from './i18n.js';
 import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { makeWindowDraggable } from './windowDrag.js';
@@ -1855,6 +1856,7 @@ async function _fetchDependencies() {
         const rebuild = document.createElement('div');
         rebuild.className = 'dropdown-item-compact';
         rebuild.innerHTML = `<span class="dropdown-icon">${rebuildIco}</span><span>Rebuild</span>`;
+        bindUiText(rebuild.querySelector(':scope > span:not(.dropdown-icon)'), 'Rebuild');
         rebuild.title = 'Clear the cached llama-server build so the next launch rebuilds it.';
         rebuild.addEventListener('click', async (e) => {
           e.stopPropagation();
@@ -1865,6 +1867,7 @@ async function _fetchDependencies() {
         const source = document.createElement('div');
         source.className = 'dropdown-item-compact';
         source.innerHTML = `<span class="dropdown-icon">${upIco}</span><span>Update source + rebuild</span>`;
+        bindUiText(source.querySelector(':scope > span:not(.dropdown-icon)'), 'Update source + rebuild');
         source.title = 'Fast-forward ~/llama.cpp when possible, then clear the cached build.';
         source.addEventListener('click', async (e) => {
           e.stopPropagation();

@@ -181,7 +181,9 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
                 results = _call_provider(provider_name, query, count, time_filter)
                 if results:
                     logger.info(f"{provider_name} search succeeded with {len(results)} results")
-                    break
+                # Empty results are an outcome, not a transient exception.
+                # Move to the next provider instead of repeating the same query.
+                break
             except (NetworkError, ParseError, RateLimitError) as e:
                 error_logger.error(f"{provider_name} search error (attempt {attempt + 1}): {e}")
             except Exception as e:
@@ -291,6 +293,7 @@ def comprehensive_web_search(
                     logger.info(f"Comprehensive search: {provider_name} returned {len(search_results)} results")
                     break
                 empty = True
+                break
             except Exception as e:
                 last_err = e
                 logger.warning(f"Comprehensive search: {provider_name} attempt {attempt + 1} failed: {e}")
@@ -401,6 +404,11 @@ def comprehensive_web_search(
     output_parts.append("WEB SEARCH RESULTS AND FETCHED CONTENT")
     output_parts.append(f"Query: {query}")
     output_parts.append(f"Searched {len(search_results)} results, fetched {len(fetched_content)} pages")
+    if not fetched_content:
+        output_parts.append(
+            "No pages could be read: search snippets only, not verified page content. "
+            "Fetch relevant source URLs before making page-specific claims."
+        )
     output_parts.append("=" * 70)
     output_parts.append("")
 

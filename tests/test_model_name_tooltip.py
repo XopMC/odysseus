@@ -7,6 +7,7 @@ render sites in static/js/modelPicker.js. The module pulls in browser globals so
 it can't be imported under node; this guards the two title assignments at source.
 """
 import re
+import runpy
 from pathlib import Path
 
 SRC = (Path(__file__).resolve().parent.parent / "static/js/modelPicker.js").read_text(encoding="utf-8")
@@ -27,12 +28,10 @@ def test_header_indicator_has_title_tooltip():
 
 
 def test_api_picker_dedupe_includes_endpoint_id():
-    # API providers can expose the same model id intentionally. The chat picker
-    # must not dedupe OpenRouter away just because OpenAI has the same id.
-    assert "const isApiEndpoint = item.category && item.category !== 'local';" in SRC
-    assert re.search(r"const seenKey = isApiEndpoint\s*\?", SRC), \
-        "chat picker should dedupe API models by endpoint+model, not model id only"
-    assert "${item.endpoint_id || item.url || item.endpoint_name || 'api'}::${mid}" in SRC
+    # Exercise the live picker, rather than requiring the old API-only branch
+    # which incorrectly removed equal-named models from local endpoints.
+    check = runpy.run_path(str(Path(__file__).with_name('test_model_picker_endpoints_js.py')))
+    check['test_model_picker_preserves_endpoint_identity']()
 
 
 def test_api_picker_groups_by_endpoint_name():

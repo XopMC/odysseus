@@ -36,6 +36,7 @@ import {
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
 import { loadPanel } from './panels.js';
+import { bindUiText } from './i18n.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -58,6 +59,7 @@ import { loadPanel } from './panels.js';
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
   let _contextHeaderSeq = 0;
+  let _contextEndpointRefresh = null;
   let _contextHeaderData = null;
   let _contextHeaderBound = false;
   let _pendingToolApproval = null;
@@ -92,8 +94,13 @@ import { loadPanel } from './panels.js';
   });
 
   function _fmtContextNumber(n) {
-    const v = Number(n || 0);
-    return v ? v.toLocaleString() : '?';
+    return n != null && Number.isFinite(Number(n)) ? Number(n).toLocaleString() : '?';
+  }
+
+  function _contextSourceLabel(data) {
+    const scope = data.context_status === 'active_request' ? 'Live request'
+      : data.context_status === 'last_request' ? 'Last request' : 'Stored chat';
+    return `${scope} · ${data.source === 'backend' ? 'backend tokens' : 'estimate'}`;
   }
 
   function _contextColorClass(pct) {
@@ -183,6 +190,7 @@ import { loadPanel } from './panels.js';
     const title = document.createElement('div');
     title.className = 'chat-context-popup-title';
     title.textContent = 'Chat Context';
+    bindUiText(title, 'Chat Context');
     popup.appendChild(title);
 
     const bar = document.createElement('div');
@@ -196,27 +204,57 @@ import { loadPanel } from './panels.js';
     const rows = [
       ['Used', `${_fmtContextNumber(d.used_tokens)} / ${_fmtContextNumber(d.context_length)}`],
       ['Usage', `${pct}%`],
+      ['Scope', d.context_status === 'active_request' ? 'Live request'
+        : d.context_status === 'last_request' ? 'Last request' : 'Stored chat'],
+      ['Count source', d.source === 'backend' ? 'Backend tokens' : 'Estimate'],
       ['Window model', modelShort],
       ['Messages', `${Number(d.messages || 0).toLocaleString()}`],
-      ['Auto compact', `${Number(d.auto_compact_threshold || 85)}%`],
+      ['Auto compact', d.auto_compact_enabled === false ? 'Disabled' : `${Number(d.auto_compact_threshold || 85)}%`],
     ];
+    if (d.context_status !== 'stored_chat' && d.stored_chat_tokens != null) {
+      rows.push(['Stored chat (est.)', _fmtContextNumber(d.stored_chat_tokens)]);
+    }
+    if (d.active_run) rows.push(['Manual compact', 'Run active']);
+    if (d.saved_context_policy) {
+      rows.push(['Saved auto compact', d.saved_context_policy.auto_compact ? `${d.saved_context_policy.trigger_percent}%` : 'Disabled']);
+      rows.push(['Saved threshold basis', 'Input budget']);
+      rows.push(['Settings apply', 'Next request']);
+    }
+    if (d.context_policy_error) rows.push(['Saved context policy', 'Needs correction']);
     rows.forEach(([label, value]) => {
       const row = document.createElement('div');
       row.className = 'chat-context-popup-row';
       const a = document.createElement('span');
       a.textContent = label;
+      bindUiText(a, label);
       const b = document.createElement('span');
       b.textContent = value;
+      b.title = value;
+      if (['Scope', 'Count source', 'Manual compact', 'Saved auto compact', 'Saved threshold basis', 'Settings apply', 'Saved context policy'].includes(label)) {
+        bindUiText(b, value);
+        bindUiText(b, value, 'title');
+      }
       row.appendChild(a);
       row.appendChild(b);
       popup.appendChild(row);
     });
 
+    const settingsBtn = document.createElement('button');
+    settingsBtn.type = 'button'; settingsBtn.className = 'chat-context-compact-btn';
+    settingsBtn.textContent = 'Context settings'; bindUiText(settingsBtn, 'Context settings');
+    settingsBtn.addEventListener('click', async event => {
+      event.stopPropagation(); _closeContextHeaderPopup();
+      const { openContextSettings } = await import('./context-settings-dialog.js');
+      openContextSettings({ getSessionId: () => sessionModule.getCurrentSessionId(),
+        onSaved: () => void refreshChatContextHeader('policy-saved') });
+    });
+    popup.appendChild(settingsBtn);
     if (d.can_compact) {
       const compactBtn = document.createElement('button');
       compactBtn.type = 'button';
       compactBtn.className = 'chat-context-compact-btn';
       compactBtn.textContent = 'Compact';
+      bindUiText(compactBtn, 'Compact');
       compactBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         compactBtn.disabled = true;
@@ -227,10 +265,12 @@ import { loadPanel } from './panels.js';
           compactBtn.appendChild(wp.element);
         } catch (_) {}
         compactBtn.appendChild(document.createTextNode('Compacting'));
+        bindUiText(compactBtn, 'Compacting');
         const ok = await compactCurrentChatContext();
         if (!ok) {
           compactBtn.disabled = false;
           compactBtn.textContent = 'Compact failed';
+          bindUiText(compactBtn, 'Compact failed');
         }
       });
       popup.appendChild(compactBtn);
@@ -282,6 +322,61 @@ import { loadPanel } from './panels.js';
   }
   try { window.compactCurrentChatContext = compactCurrentChatContext; } catch (_) {}
 
+  function _applyContextHeaderData(data) {
+    const pill = document.getElementById('chat-context-pill');
+    if (!pill) return;
+    _contextHeaderData = data;
+    pill.hidden = false;
+    const pct = Number(data.context_percent || 0);
+    _renderContextHeaderRing(pill, pct);
+    _renderCompactMenuContextIcon(pct);
+    pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${_contextSourceLabel(data)} · ${String(data.model || '').split('/').pop()}`;
+    pill.classList.remove('warn', 'danger', 'loading');
+    const colorClass = _contextColorClass(pct);
+    if (colorClass) pill.classList.add(colorClass);
+    if (pill.classList.contains('open')) {
+      _closeContextHeaderPopup();
+      _showContextHeaderPopup();
+    }
+  }
+
+  // A background or stale SSE reader must never paint another chat's header.
+  // Measurements are streamed directly, avoiding one model-discovery HTTP
+  // request per agent round. Re-entry/reload reads the same snapshot from API.
+  export function applyStreamContextUsage(data, sessionId) {
+    const sm = _liveSessionModule();
+    if (!sm || !sm.getCurrentSessionId || sm.getCurrentSessionId() !== sessionId) return false;
+    if (!data || !Number.isInteger(data.used_tokens) || data.used_tokens < 0
+        || !Number.isInteger(data.context_length) || data.context_length <= 0
+        || !['backend', 'estimated'].includes(data.source) || !data.model) return false;
+    const selected = sm.getSessions && sm.getSessions().find(s => s.id === sessionId);
+    if (selected && selected.model && selected.model !== data.model) return false;
+    const previous = _contextHeaderData && _contextHeaderData.session_id === sessionId ? _contextHeaderData : {};
+    if (data.endpoint_key !== undefined) {
+      if (typeof data.endpoint_key !== 'string' || !/^[a-f0-9]{64}$/.test(data.endpoint_key)) return false;
+      const pinned = previous.current_endpoint_key && selected?.endpoint_url
+        && previous.endpoint_url === selected.endpoint_url;
+      if (!pinned) {
+        // One read establishes the current server-side route; never paint a
+        // keyed measurement against an unknown or previously selected endpoint.
+        if (!_contextEndpointRefresh) {
+          _contextEndpointRefresh = refreshChatContextHeader('endpoint-context')
+            .finally(() => { _contextEndpointRefresh = null; });
+        }
+        return false;
+      }
+      if (data.endpoint_key !== previous.current_endpoint_key) return false;
+    }
+    ++_contextHeaderSeq; // invalidate an older in-flight persisted-history GET
+    _bindContextHeaderPill();
+    _applyContextHeaderData({
+      messages: selected && selected.message_count, ...previous, ...data, session_id: sessionId,
+      context_percent: Math.min(100, Math.round(data.used_tokens / data.context_length * 1000) / 10),
+      context_status: 'active_request', active_run: true, can_compact: false,
+    });
+    return true;
+  }
+
   export async function refreshChatContextHeader(reason = '') {
     _bindContextHeaderPill();
     const pill = document.getElementById('chat-context-pill');
@@ -304,19 +399,10 @@ import { loadPanel } from './panels.js';
       if (seq !== _contextHeaderSeq) return;
       const latestSm = _liveSessionModule();
       if (!latestSm.getCurrentSessionId || latestSm.getCurrentSessionId() !== sid) return;
-      _contextHeaderData = data;
-      const pct = Number(data.context_percent || 0);
-      _renderContextHeaderRing(pill, pct);
-      _renderCompactMenuContextIcon(pct);
-      pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${String(data.model || '').split('/').pop()}`;
-      pill.classList.remove('warn', 'danger');
-      const colorClass = _contextColorClass(pct);
-      if (colorClass) pill.classList.add(colorClass);
-      pill.classList.remove('loading');
-      if (pill.classList.contains('open')) {
-        _closeContextHeaderPopup();
-        _showContextHeaderPopup();
-      }
+      const selected = latestSm.getSessions?.().find(item => item.id === sid);
+      if (selected?.endpoint_url && data.endpoint_url && selected.endpoint_url !== data.endpoint_url) return;
+      if (selected?.model && data.model && selected.model !== data.model) return;
+      _applyContextHeaderData(data);
     } catch (err) {
       if (seq !== _contextHeaderSeq) return;
       _contextHeaderData = null;
@@ -609,6 +695,7 @@ import { loadPanel } from './panels.js';
       const status = document.createElement('span');
       status.className = 'agent-thread-status';
       status.textContent = ok ? 'done' : 'failed';
+      bindUiText(status, ok ? 'done' : 'failed');
       const header = node.querySelector('.agent-thread-header');
       if (header) header.appendChild(status);
     }
@@ -621,7 +708,7 @@ import { loadPanel } from './panels.js';
   // Background streaming support
   const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics }
   const _activeStreams = new Map();     // sessionId -> { abortCtrl, holder, query, startedAt, cancelViewWork, finalizeView }
-  const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
+  const _resumingStreams = new Map();   // sessionId -> exact pending/live replay subscription
   const _terminalSavedStreams = new Set(); // sessionId -> canonical terminal event seen by active reader
   const _streamRunIds = new Map();      // sessionId -> opaque identity of the current send's detached run
   const _streamGenerations = new Map(); // sessionId -> generation of the current (latest) send
@@ -1263,6 +1350,26 @@ import { loadPanel } from './panels.js';
 
     // --- Send-path entry: block re-clicks between submit and stream start ---
     if (_sendInFlight) return;
+    // Session adoption, uploads and composer/mode listeners can repaint these
+    // controls during preflight. This request must use the choices visible at
+    // Send, not a later repaint (and never infer tool permission from text).
+    const choicesForSend = (() => {
+      const control = (id) => uiModule.el(id);
+      const checked = (id) => !!control(id)?.checked;
+      const stored = Storage.loadToggleState();
+      const mode = control('mode-agent-btn')?.classList.contains('active') ? 'agent'
+        : control('mode-chat-btn')?.classList.contains('active') ? 'chat'
+        : (stored.mode || 'chat');
+      return Object.freeze({
+        mode,
+        plan: checked('plan-toggle'),
+        web: checked('web-toggle'),
+        bash: checked('bash-toggle'),
+        research: checked('research-toggle'),
+        rag: control('rag-toggle') ? checked('rag-toggle') : true,
+        incognito: checked('incognito-toggle'),
+      });
+    })();
     const _sendPerf = _createChatSendPerf();
     _sendInFlight = true;
     const approvalForSend = _pendingToolApproval;
@@ -1321,8 +1428,7 @@ import { loadPanel } from './panels.js';
       }
     }
 
-    const incognitoChkForSend = el('incognito-toggle');
-    const isIncognitoForSend = !!(incognitoChkForSend && incognitoChkForSend.checked);
+    const isIncognitoForSend = choicesForSend.incognito;
 
     if (!isIncognitoForSend) {
       await _adoptOpenedSessionBeforeAutoCreate();
@@ -1877,9 +1983,8 @@ import { loadPanel } from './panels.js';
       // opportunistically hit SearXNG just because the chat search toggle is
       // on; explicit web/current-info requests are handled by the backend
 	      // intent gate.
-	      const toggleState = Storage.loadToggleState();
-	      const isPlanMode = !!toggleState.plan_mode && !(el('research-toggle') && el('research-toggle').checked);
-	      let isAgentMode = (toggleState.mode || 'chat') === 'agent';
+	      const isPlanMode = choicesForSend.plan && !choicesForSend.research;
+	      let isAgentMode = choicesForSend.mode === 'agent';
       const isIncognito = isIncognitoForSend;
 	      const workspaceAgentIntent = !isIncognito && /\b(fix|debug|implement|change|update|refactor|patch|review|test|run|execute|start|launch|build|lint|typecheck|benchmark|eval|terminal[- ]bench|tbench|repo|repository|codebase|project|app|server|api|frontend|backend|bug|issue|pr|file|folder|directory|source|logs?|trace|stacktrace|traceback|docker|container|tmux|terminal|shell|git|branch|commit|diff|pytest|process|port|endpoint|computer|machine|laptop|device|system)\b/i.test(String(msg || ''));
 	      if (isPlanMode || _pendingApprovedPlan) {
@@ -1899,24 +2004,22 @@ import { loadPanel } from './panels.js';
 	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
 	        _pendingApprovedPlan = '';
 	      }
-	      if (el('web-toggle').checked) {
+	      if (choicesForSend.web) {
 	        if (!isAgentMode) {
 	          fd.append('use_web', 'true');
         }
       }
       if (isAgentMode) {
-        fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
+        fd.append('allow_web_search', choicesForSend.web ? 'true' : 'false');
       }
-	      if (!approvalForSend && el('research-toggle').checked) {
+	      if (!approvalForSend && choicesForSend.research) {
 	        fd.append('use_research', 'true');
 	        // Research always runs in chat mode — override agent if set
 	        fd.set('mode', 'chat');
 	        fd.set('plan_mode', 'false');
 	      }
-      fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
-      if (workspaceAgentIntent) fd.set('allow_bash', 'true');
-      const ragChk = el('rag-toggle');
-      if (ragChk && !ragChk.checked) {
+      fd.append('allow_bash', choicesForSend.bash ? 'true' : 'false');
+      if (!choicesForSend.rag) {
         fd.append('use_rag', 'false');
       }
       if (isIncognito) {
@@ -1953,11 +2056,11 @@ import { loadPanel } from './panels.js';
       _sendState.abortCtrl = abortCtrl;
       currentAbort = abortCtrl;
 
-	      const _tState = Storage.loadToggleState();
-	      const _isAgent = (_tState.mode || 'chat') === 'agent' || !!_tState.plan_mode || workspaceAgentIntent;
+	      const _isAgent = fd.get('mode') === 'agent';
+      const _isResearch = fd.get('use_research') === 'true';
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
-      const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+      const timeoutMs = _isResearch || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
       timeoutId = setTimeout(() => {
         if (!abortCtrl.signal.aborted) {
           timedOut = true;
@@ -2016,13 +2119,13 @@ import { loadPanel } from './panels.js';
 
       let loadingText = 'Initializing...';
 
-      if (el('web-toggle').checked && !_isAgent) {
+      if (choicesForSend.web && !_isAgent) {
         const _searchLabel = searchModule ? searchModule.getProviderLabel() : 'web';
         loadingText = `Searching via ${_searchLabel}...<br>
                        <span style="font-size: 0.9em; opacity: 0.8;">
                        Query: "${msg.substring(0, 50)}${msg.length > 50 ? '...' : ''}"<br>
                        Fetching top results...</span>`;
-      } else if (el('research-toggle').checked) {
+      } else if (_isResearch) {
         loadingText = 'Deep research mode active...';
       } else {
         loadingText = 'Processing request...';
@@ -2046,10 +2149,10 @@ import { loadPanel } from './panels.js';
       spinner.start();
       
       // Update spinner message based on mode
-      if (el('web-toggle').checked && !_isAgent) {
+      if (choicesForSend.web && !_isAgent) {
         spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
         setTimeout(() => spinner.updateMessage('Processing results'), 1500);
-      } else if (el('research-toggle').checked) {
+      } else if (_isResearch) {
         spinner.updateMessage('Researching');
         setTimeout(() => spinner.updateMessage('Analyzing sources'), 1500);
       } else {
@@ -2058,7 +2161,7 @@ import { loadPanel } from './panels.js';
       }
       
       const researchBtn = el('research-toggle-btn');
-      if (el('research-toggle').checked && researchBtn) {
+      if (_isResearch && researchBtn) {
         researchBtn.disabled = true;
         researchBtn.classList.remove('active');
       }
@@ -2071,7 +2174,7 @@ import { loadPanel } from './panels.js';
         researchBtn.classList.toggle('active', el('research-toggle').checked);
       };
 
-      if (el('research-toggle').checked && researchBtn) {
+      if (_isResearch && researchBtn) {
         researchBtn.style.display = 'none';
         // Uncheck research toggle so follow-up messages don't trigger another research
         el('research-toggle').checked = false;
@@ -3318,6 +3421,8 @@ import { loadPanel } from './panels.js';
                   contBtn.className = 'continue-btn';
                   contBtn.title = 'Continue the task';
                   contBtn.textContent = 'Continue ▸';
+                  bindUiText(contBtn, 'Continue ▸');
+                  bindUiText(contBtn, 'Continue the task', 'title');
                   const _holder = holder;
                   contBtn.addEventListener('click', () => {
                     note.remove();
@@ -3417,6 +3522,12 @@ import { loadPanel } from './panels.js';
               } else if (json.type === 'memories_used') {
                 if (_isBg) continue;
                 holder._memoriesUsed = json.data;
+              } else if (json.type === 'context_usage') {
+                // The session identity check also handles a background POST
+                // whose session has just become foreground again.
+                if (_streamGenerations.get(streamSessionId) === streamGeneration) {
+                  applyStreamContextUsage(json.data, streamSessionId);
+                }
               } else if (json.type === 'compacted') {
                 if (!_isBg) {
                   uiModule.showToast('Context compacted — older messages summarized');
@@ -3690,6 +3801,7 @@ import { loadPanel } from './panels.js';
                   const _wasOpen = currentToolBubble.classList.contains('open');
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '');
                   currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
+                  chatRenderer.localizeToolNode?.(currentToolBubble);
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -4052,6 +4164,7 @@ import { loadPanel } from './panels.js';
             const _cont = document.createElement('button');
             _cont.className = 'continue-btn agent-continue-btn';
             _cont.title = 'Continue — pick up where it left off';
+            bindUiText(_cont, 'Continue — pick up where it left off', 'title');
             _cont.textContent = '▸';
             _cont.addEventListener('click', () => {
               _stall.remove();
@@ -4588,6 +4701,7 @@ import { loadPanel } from './panels.js';
       if (_ownsStreamState) _terminalSavedStreams.delete(streamSessionId);
 
       if (!_isBgFinally && _ownsStreamState) {
+        refreshChatContextHeader('stream-finished');
         // Reset button to idle state
         updateSubmitButton('idle', submitBtn);
 
@@ -4892,6 +5006,7 @@ import { loadPanel } from './panels.js';
    * Called when user switches sessions mid-stream.
    */
   export function detachCurrentStream(sessionId) {
+    cancelResumedStream(sessionId);
     const active = sessionId ? _activeStreams.get(sessionId) : _getForegroundStreamState();
     if (!active || !active.abortCtrl) {
       // Not streaming — fall through to abort
@@ -4949,40 +5064,80 @@ import { loadPanel } from './panels.js';
    */
   export async function resumeStream(sessionId, replaceHolder = null) {
     if (!sessionId) return false;
+    if (_resumingStreams.has(sessionId)) return true;
     if (hasActiveStream(sessionId)) return false;
+    const resumeGeneration = _streamGenerations.get(sessionId);
+    const viewToken = sessionModule.getSessionViewToken?.();
+    const subscription = { abortCtrl: new AbortController(), reader: null, cancelled: false, lastActivity: Date.now() };
+    const isCurrentView = () => sessionModule.getCurrentSessionId() === sessionId
+      && (viewToken == null || sessionModule.getSessionViewToken?.() === viewToken)
+      && _streamGenerations.get(sessionId) === resumeGeneration
+      && _resumingStreams.get(sessionId) === subscription && !subscription.cancelled;
+    // Reserve before awaiting headers: multiple discovery/recovery callers
+    // must never render the same replay twice.
+    _resumingStreams.set(sessionId, subscription);
+    const replayWatchdog = setInterval(() => {
+      if (!isCurrentView() || Date.now() - subscription.lastActivity > 45000) {
+        cancelResumedStream(sessionId, subscription);
+      }
+    }, 1000);
+    try {
 
     let res;
     try {
-      res = await fetch(`${API_BASE}/api/chat/resume/${sessionId}`);
+      res = await fetch(`${API_BASE}/api/chat/resume/${encodeURIComponent(sessionId)}`, {
+        signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store',
+      });
     } catch (e) {
       return false;
     }
     if (!res.ok || !res.body) return false;
+    if (!isCurrentView()) {
+      try { await res.body.cancel(); } catch (_) {}
+      return false;
+    }
     const resumeRunId = res.headers.get('X-Odysseus-Run-Id') || '';
     if (resumeRunId) _streamRunIds.set(sessionId, resumeRunId);
 
     const box = document.getElementById('chat-history');
-    if (!box) return false;
+    if (!box) {
+      try { await res.body.cancel(); } catch (_) {}
+      return false;
+    }
     if (replaceHolder && replaceHolder.parentNode) replaceHolder.remove();
 
-    // Block duplicate re-attach attempts while this reader is live. A dedicated
-    // set (not _backgroundStreams) so checkBackgroundStream doesn't mistake this
-    // for a same-tab POST stream and spawn its own spinner+poll on re-entry.
-    _resumingStreams.add(sessionId);
-
-    const holder = document.createElement('div');
-    holder.className = 'msg msg-ai';
     const meta = sessionModule.getSessions().find(s => s.id === sessionId);
     const roleLabel = _shortModel(meta && meta.model);
     const roleTs = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    holder.innerHTML = '<div class="role">' + uiModule.esc(roleLabel) +
-      ' <span class="role-timestamp">' + roleTs + '</span></div>' +
-      '<div class="body"><div class="stream-content"></div></div>';
-    holder._requestedModel = meta && meta.model;
-    holder._actualModel = holder._requestedModel;
-    _applyModelColor(holder.querySelector('.role'), meta && meta.model);
-    const contentDiv = holder.querySelector('.stream-content');
-    box.appendChild(holder);
+    const replayHolders = [];
+    const createReplayHolder = (previous = null) => {
+      const holder = document.createElement('div');
+      holder.className = replayHolders.length ? 'msg msg-ai msg-continuation streaming' : 'msg msg-ai';
+      holder.innerHTML = '<div class="role">' + uiModule.esc(roleLabel) +
+        ' <span class="role-timestamp">' + roleTs + '</span></div>' +
+        '<div class="body"><div class="stream-content"></div></div>';
+      holder._requestedModel = meta && meta.model;
+      holder._actualModel = holder._requestedModel;
+      if (previous) {
+        inheritModelRouteState(previous, null, holder, meta?.model);
+        _setRoleModelLabel(holder.querySelector('.role'), holder._requestedModel, holder._actualModel, {
+          requestedEndpointId: holder._requestedEndpointId, requestedEndpointLabel: holder._requestedEndpointLabel,
+          actualEndpointId: holder._actualEndpointId, actualEndpointLabel: holder._actualEndpointLabel,
+        });
+      }
+      _applyModelColor(holder.querySelector('.role'), holder._actualModel);
+      box.appendChild(holder);
+      replayHolders.push(holder);
+      return holder;
+    };
+    const removeReplayHolders = () => {
+      for (const node of replayHolders) {
+        if (node._docWritingThread?.parentNode) node._docWritingThread.remove();
+        if (node.parentNode) node.remove();
+      }
+    };
+    let holder = createReplayHolder();
+    let contentDiv = holder.querySelector('.stream-content');
 
     const spinner = spinnerModule.create('Generating response...', 'right');
     holder.querySelector('.body').appendChild(spinner.createElement());
@@ -4990,6 +5145,8 @@ import { loadPanel } from './panels.js';
     uiModule.scrollHistory();
 
     const reader = res.body.getReader();
+    subscription.reader = reader;
+    subscription.lastActivity = Date.now();
     const decoder = new TextDecoder();
     let buffer = '';
     let roundText = '';
@@ -4999,6 +5156,8 @@ import { loadPanel } from './panels.js';
     let metricsData = null;
     let replayError = null;
     let canonicalTerminalSeen = false;
+    let replayTool = null;
+    const replayEvents = new Set();
     // "Rich" responses (tool calls, sources, doc streaming, multi-round) need the
     // full canonical render, which is rebuilt from the saved DB record on reload.
     // Plain text replies can be finalized in place without a reload.
@@ -5006,7 +5165,6 @@ import { loadPanel } from './panels.js';
 
     const cleanup = () => {
       try { spinner.destroy(); } catch (_) {}
-      _resumingStreams.delete(sessionId);
     };
 
     const renderDelta = () => {
@@ -5023,18 +5181,25 @@ import { loadPanel } from './panels.js';
       readLoop:
       while (true) {
         // User left this session: stop rendering, the run continues server-side.
-        if (sessionModule.getCurrentSessionId &&
-            sessionModule.getCurrentSessionId() !== sessionId) {
+        if (!isCurrentView()) {
           leftSession = true;
           try { await reader.cancel(); } catch (_) {}
           break;
         }
         const { done, value } = await reader.read();
+        // Navigation can happen while reader.read is pending, including A→B→A.
+        if (!isCurrentView()) { leftSession = true; break; }
         if (done) break;
+        subscription.lastActivity = Date.now();
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split('\n\n');
         buffer = parts.pop();
         for (const part of parts) {
+          const eventId = part.split('\n').find(l => l.startsWith('id: '))?.slice(4);
+          if (eventId) {
+            if (replayEvents.has(eventId)) continue;
+            replayEvents.add(eventId);
+          }
           const eventIsError = part.split('\n').some(l => l.trim() === 'event: error');
           if (eventIsError) rich = true;
           const line = part.split('\n').find(l => l.startsWith('data: '));
@@ -5062,6 +5227,11 @@ import { loadPanel } from './panels.js';
           } else if (json.type === 'doc_stream_delta') {
             rich = true;
             if (documentModule) documentModule.streamDocDelta(json.content || json.delta || '');
+          } else if (json.type === 'context_usage') {
+            if (_streamGenerations.get(sessionId) === resumeGeneration
+                && (!resumeRunId || _streamRunIds.get(sessionId) === resumeRunId)) {
+              applyStreamContextUsage(json.data, sessionId);
+            }
           } else if (json.type === 'metrics') {
             metricsData = json.data || metricsData;
             if (metricsData && resumeRunId) {
@@ -5122,9 +5292,37 @@ import { loadPanel } from './panels.js';
               metricsData._costRecordId = _metricsCostRecordId(resumeRunId, json);
             }
             if (metricsData) displayMetrics(holder, metricsData);
-          } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
-                     json.type === 'tool_progress' || json.type === 'agent_step' ||
-                     json.type === 'web_sources' || json.type === 'rag_sources' ||
+          } else if (json.type === 'agent_step') {
+            // Each round remains visible while a remote agent continues.
+            // Previously replay ignored tool/round events until the whole run
+            // finished, making a second device appear frozen for long tasks.
+            rich = true;
+            roundText = '';
+            docFenceOpened = false;
+            replayTool = null;
+            holder = createReplayHolder(holder);
+            contentDiv = holder.querySelector('.stream-content');
+          } else if (json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress') {
+            rich = true;
+            try { spinner.destroy(); } catch (_) {}
+            if (json.type === 'tool_start' || !replayTool) {
+              const card = document.createElement('details');
+              card.className = 'agent-tool-output remote-tool-activity';
+              card.open = true;
+              const label = document.createElement('summary');
+              const output = document.createElement('pre');
+              card.appendChild(label); card.appendChild(output);
+              holder.querySelector('.body').appendChild(card);
+              replayTool = { card, label, output, name: String(json.tool || 'Tool') };
+            }
+            const finished = json.type === 'tool_output';
+            const state = finished ? (json.exit_code == null || json.exit_code === 0 ? '✓' : '✗') : '↻';
+            replayTool.label.textContent = `${state} ${replayTool.name}`;
+            replayTool.card.dataset.status = finished ? (state === '✓' ? 'done' : 'failed') : 'running';
+            const detail = json.output ?? json.message ?? json.command ?? '';
+            if (detail !== '') replayTool.output.textContent = String(detail).slice(-65536);
+            uiModule.scrollHistory();
+          } else if (json.type === 'web_sources' || json.type === 'rag_sources' ||
                      json.type === 'research_progress' || json.type === 'research_sources' ||
                      json.type === 'research_findings' || json.type === 'research_done') {
             rich = true;
@@ -5137,11 +5335,13 @@ import { loadPanel } from './panels.js';
     }
 
     cleanup();
+    if (!isCurrentView()) leftSession = true;
     if (docFenceOpened) _finishDocumentWritingStatus(holder, true);
-    if (leftSession) { if (holder.parentNode) holder.remove(); return true; }
+    if (leftSession) { removeReplayHolders(); return true; }
 
     const onThisSession = sessionModule.getCurrentSessionId &&
                           sessionModule.getCurrentSessionId() === sessionId;
+    if (onThisSession) refreshChatContextHeader('resume-finished');
 
     // A failure before substantive output has no persisted assistant record to
     // recover through a canonical reload. Keep its sanitized provider/request
@@ -5155,11 +5355,21 @@ import { loadPanel } from './panels.js';
       return true;
     }
 
+    // The other client may have added the user turn or persisted intermediate
+    // rounds while this reader replayed. Reconcile with canonical history once,
+    // without selectSession (which clears a draft and resets composer tools).
+    if (onThisSession && sessionModule.refreshSessionHistory) {
+      removeReplayHolders();
+      if (_resumingStreams.get(sessionId) === subscription) _resumingStreams.delete(sessionId);
+      await sessionModule.refreshSessionHistory(sessionId);
+      return true;
+    }
+
     // Plain text reply: finalize in place. Replace the live bubble with a
     // canonical single message (markdown + footer actions + metrics) using the
     // same renderer history does. No history refetch, no end-of-stream flicker.
     if (onThisSession && !rich && roundText.trim()) {
-      if (holder.parentNode) holder.remove();
+      removeReplayHolders();
       const model = meta && meta.model;
       const meta_ = metricsData ? Object.assign({ model }, metricsData) : { model };
       chatRenderer.addMessage('assistant', roundText, model, meta_);
@@ -5169,14 +5379,28 @@ import { loadPanel } from './panels.js';
 
     // Rich response (tools, sources, docs, multi-round) or user moved on:
     // reload from the DB for the full canonical render.
-    if (holder._docWritingThread && holder._docWritingThread.parentNode) holder._docWritingThread.remove();
-    if (holder.parentNode) holder.remove();
+    removeReplayHolders();
     if (metricsData) {
       chatRenderer.recordSessionMetricsCost(metricsData, sessionId);
     }
     if (onThisSession) sessionModule.selectSession(sessionId);
     else sessionModule.loadSessions();
     return true;
+    } finally {
+      clearInterval(replayWatchdog);
+      if (_resumingStreams.get(sessionId) === subscription) _resumingStreams.delete(sessionId);
+    }
+  }
+
+  // This only disconnects this browser's GET subscriber. Navigation or a dead
+  // connection must never issue a server Stop for work started on another device.
+  export function cancelResumedStream(sessionId, expectedSubscription = null) {
+    const subscription = _resumingStreams.get(sessionId);
+    if (!subscription || (expectedSubscription && subscription !== expectedSubscription)) return;
+    subscription.cancelled = true;
+    subscription.abortCtrl.abort();
+    if (subscription.reader) subscription.reader.cancel().catch(() => {});
+    if (_resumingStreams.get(sessionId) === subscription) _resumingStreams.delete(sessionId);
   }
 
   /**
@@ -6690,6 +6914,7 @@ import { loadPanel } from './panels.js';
     detachCurrentStream,
     checkBackgroundStream,
     resumeStream,
+    cancelResumedStream,
     hideWelcomeScreen: chatRenderer.hideWelcomeScreen,
     showWelcomeScreen: chatRenderer.showWelcomeScreen,
     checkPendingResearch,

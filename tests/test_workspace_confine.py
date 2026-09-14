@@ -305,6 +305,11 @@ def _sent_tool_names(monkeypatch, *, workspace, message="look at the local proje
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    # This fixture tests schema selection, not endpoint discovery/compaction.
+    # Give the full coding schema plus output reserve a known serving window;
+    # an unknown window falls back to 8K and can correctly stop before dispatch.
+    monkeypatch.setattr("src.model_context.budget_context_for_model",
+                        lambda endpoint, model, *, fallback=0: fallback)
     # Isolate the selection logic from owner gating (tested separately).
     monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
     if force_keyword_fallback:
@@ -329,10 +334,12 @@ def _sent_tool_names(monkeypatch, *, workspace, message="look at the local proje
             "https://api.openai.com/v1", "gpt-test",
             [{"role": "user", "content": message}],
             max_rounds=1, relevant_tools=None, owner="admin", workspace=workspace,
+            context_length=65536,
         )
         return [c async for c in gen]
 
-    asyncio.run(_run())
+    chunks = asyncio.run(_run())
+    assert captured, f"Tool-selection fixture stopped before model dispatch: {chunks!r}"
     schemas = captured[0] or []
     return {t["function"]["name"] for t in schemas if isinstance(t, dict) and "function" in t}
 
