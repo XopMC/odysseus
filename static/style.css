@@ -2533,11 +2533,10 @@ body.bg-pattern-sparkles {
 	      transition: opacity 0.22s ease, transform 0.22s ease;
 	      will-change: opacity, transform;
 	    }
-	    body.plan-mode-active .chat-input-top > .model-picker-wrap {
-	      opacity: 0;
-	      pointer-events: none;
-	      transform: translateY(-4px) scale(0.96);
-	    }
+	    /* Planning must never hide the model route: on a phone that makes it
+	       impossible to see which endpoint will receive the plan. */
+	    body.plan-mode-active .chat-input-top > .model-picker-wrap { opacity: 1; pointer-events: auto; transform: none; }
+	    .goal-mode-status { right: 112px; }
     .chat-input-top > .model-picker-wrap.model-picker-autohide,
     .chat-input-top > .model-picker-wrap.picker-auto-hidden {
       opacity: 0;

@@ -4322,6 +4322,17 @@ import { bindUiText } from './i18n.js';
 		          if (_endToggles.plan_mode && accumulated) {
 		            _setStoredPlan(accumulated);
 		            _attachPlanActions(footerTarget, accumulated);
+		            // Goal mode deliberately automates only the user-visible
+		            // approval transition. The server still enforces every tool,
+		            // confirmation and resource policy during execution.
+		            if (_endToggles.goal_mode) {
+		              const goalPlan = _getStoredPlan() || _extractPlanText(accumulated);
+		              if (goalPlan.trim()) {
+		                _pendingApprovedPlan = goalPlan;
+		                if (window.__odysseusSetPlanMode) window.__odysseusSetPlanMode(false);
+		                setTimeout(() => _setComposerAndSend('Execute the approved goal. Verify every completion criterion with tools; if a criterion cannot be verified, report it as blocked rather than complete.'), 0);
+		              }
+		            }
 		          }
 		        } catch (_) {}
 	        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {

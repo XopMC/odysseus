@@ -1,5 +1,7 @@
 // Explicit UI catalog only. Never translate model output, names, code or form values.
 const RU = Object.freeze({
+  'Goal':'Цель', 'Plan mode':'Режим плана', 'Goal: plan, execute, verify':'Цель: план, выполнение, проверка',
+  'Goal mode: plan, execute and verify':'Режим цели: план, выполнение и проверка', 'Goal mode off':'Режим цели выключен',
   'Baseline command comparison':'Сравнение с исходным результатом команды',
   'Compare saved command outcomes only. This panel never runs commands, compares individual test failures or performance, or proves that the project is free of regressions.':'Сравниваются только сохранённые результаты команд. Эта панель не выполняет команды, не сравнивает отдельные ошибки тестов или производительность и не доказывает отсутствие регрессий в проекте.',
   'Refresh saved runs':'Обновить сохранённые запуски', 'Load more saved runs':'Загрузить ещё сохранённые запуски',

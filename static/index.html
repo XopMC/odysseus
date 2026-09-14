@@ -1047,6 +1047,10 @@
             <span></span>
           </button>
         </div>
+        <div id="goal-mode-status" class="plan-mode-status goal-mode-status" hidden>
+          <span class="plan-mode-status-label">Goal</span>
+          <button type="button" id="goal-mode-status-toggle" class="plan-mode-status-toggle" aria-label="Turn off goal mode" aria-pressed="true"><span></span></button>
+        </div>
         <!-- Model picker (inside chatbox, top-right) -->
         <div class="model-picker-wrap" id="model-picker-wrap">
           <button type="button" class="model-picker-btn" id="model-picker-btn" title="Switch model"><span id="model-picker-label">Select model</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
@@ -1102,6 +1106,12 @@
               <span class="plus-active-dot"></span>
             </button>
             <div id="overflow-menu" class="overflow-menu hidden">
+              <button type="button" class="overflow-menu-item" id="plan-toggle-btn" aria-pressed="false">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11"/></svg><span>Plan mode</span><span class="overflow-active-dot"></span>
+              </button>
+              <button type="button" class="overflow-menu-item" id="goal-toggle-btn" aria-pressed="false">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m16 8-4 4"/></svg><span>Goal: plan, execute, verify</span><span class="overflow-active-dot"></span>
+              </button>
               <button type="button" class="overflow-menu-item" id="overflow-attach-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 <span>Attach files</span>

@@ -1793,6 +1793,21 @@ function initializeEventListeners() {
     }
   }
 
+  // Goal mode uses the existing safe two-stage Plan → Execute protocol.  It
+  // never grants extra permissions: the plan turn stays read-only, then the
+  // normal Agent policy checks every action while it executes and verifies it.
+  function syncGoalToggle(active) {
+    const btn = el('goal-toggle-btn'), status = el('goal-mode-status');
+    document.body.classList.toggle('goal-mode-active', !!active);
+    if (status) status.hidden = !active;
+    if (btn) { btn.classList.toggle('active', !!active); btn.setAttribute('aria-pressed', String(!!active)); }
+  }
+  function setGoalMode(active, options = {}) {
+    const st = loadToggleState(); st.goal_mode = !!active; saveToggleState(st); syncGoalToggle(!!active);
+    if (active) setPlanMode(true, { silent: true });
+    if (!options.silent && uiModule?.showToast) uiModule.showToast(active ? 'Goal mode: plan, execute and verify' : 'Goal mode off', 1800);
+  }
+
   function applyModeToToggles(mode) {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
@@ -1858,7 +1873,10 @@ function initializeEventListeners() {
     const btn = el('plan-toggle-btn');
     const state = loadToggleState();
     syncPlanToggle(!!state.plan_mode);
+
+    syncGoalToggle(!!state.goal_mode);
     window.__odysseusSetPlanMode = (active) => setPlanMode(active, { silent: true });
+    window.__odysseusSetGoalMode = (active) => setGoalMode(active, { silent: true });
     const statusToggle = el('plan-mode-status-toggle');
     if (btn) {
       btn.addEventListener('click', () => {
@@ -1869,6 +1887,9 @@ function initializeEventListeners() {
     if (statusToggle) {
       statusToggle.addEventListener('click', () => setPlanMode(false));
     }
+    const goalBtn = el('goal-toggle-btn'), goalStatusToggle = el('goal-mode-status-toggle');
+    if (goalBtn) goalBtn.addEventListener('click', () => setGoalMode(!loadToggleState().goal_mode));
+    if (goalStatusToggle) goalStatusToggle.addEventListener('click', () => setGoalMode(false));
     const msgInput = el('message');
     if (msgInput && !msgInput._odysseusPlanTabToggle) {
       msgInput._odysseusPlanTabToggle = true;
@@ -2432,12 +2453,12 @@ function initializeEventListeners() {
 		      if (_isMobile) {
 		        // Mobile has much less horizontal room: any typed text should get
 		        // the full composer row, matching plan-mode's collision behavior.
-		        pickerWrap.classList.toggle('picker-auto-hidden', hasText);
+		        pickerWrap.classList.remove('picker-auto-hidden');
 		        setComposerPlaceholder(w);
 		        return;
 		      }
 		      // Hide model picker
-		      pickerWrap.classList.toggle('picker-auto-hidden', w < PICKER_HIDE_WIDTH);
+		      pickerWrap.classList.remove('picker-auto-hidden');
 	      // Keep a prompt inside the composer even when the picker crowds the row.
 	      // A blank placeholder makes the mobile/compact empty state feel broken.
 	      setComposerPlaceholder(w);
@@ -4107,7 +4128,7 @@ function startOdysseusApp() {
 		      const compactMobile = _isMobileChatInput() && !!(messageInput.value || '').trim();
 		      const hidePicker = compactMobile || (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
 		      if (modelPickerWrap) {
-		        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
+		        modelPickerWrap.classList.remove('model-picker-autohide');
 		      }
 	      const planStatus = el('plan-mode-status');
 	      if (planStatus) {
