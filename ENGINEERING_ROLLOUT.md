@@ -1,5 +1,23 @@
 # Engineering workspace implementation ledger
 
+## 2026-09-14 reviewed Browser MCP evidence
+
+Production image `odysseus:jetson-engineering-20260914-browser-ui8` is healthy.
+Reviewed Team MCP now keeps a bounded Browser screenshot only through a
+server-owned owner/task artifact sink: PNG/JPEG content is base64-validated,
+size- and count-limited, stored outside SQLite under opaque identifiers and
+served only through the owner-scoped Team artifact route with `no-store` and
+`nosniff` headers. The model receives only an artifact reference and a warning
+that browser output is untrusted evidence; a screenshot is never treated as a
+passing verification result. Without this sink, the generic Team MCP dispatcher
+continues to reject image results fail-closed.
+
+The browser MCP itself reconnected after deployment with 30 tools. The fresh
+no-network ARM regression for this exact source/image passed **6546 tests, 33
+skipped, 128 warnings** in 394.04 seconds. This adds browser evidence handling,
+not a preview server, trace viewer, external-account approval flow or completion
+of Stage 6 / the overall engineering roadmap.
+
 ## 2026-09-14 isolated policy and Jetson Python LSP
 
 Production image `odysseus:jetson-engineering-20260914-isolation-ui3` is
