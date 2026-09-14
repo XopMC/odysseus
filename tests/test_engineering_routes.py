@@ -173,6 +173,28 @@ def test_project_policy_workflow_and_other_owner(client):
     assert client.get(ROOT + '/projects').json()['projects'] == []
 
 
+def test_isolated_policy_requires_verified_runner_capability(client, monkeypatch):
+    project = create(client)
+    calls = []
+    async def capability(host_id, op, args, *, owner, scope):
+        calls.append((host_id, op, args, owner, scope))
+        return {'ok': True, 'result': {'supported_ops': ['sandbox.command.start']}}
+    monkeypatch.setenv('ODYSSEUS_ISOLATED_RUNNER_ENABLED', '1')
+    monkeypatch.setattr(engineering_hosts, 'call', capability)
+    url = ROOT + '/projects/' + project['id'] + '/policy'
+    saved = client.post(url, json={'expected_revision': 1, 'access_mode': 'isolated', 'confirmation': True})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['access_mode'] == 'isolated'
+    assert calls == [('legacy-jetson', 'runner.capabilities', {}, 'alice', 'engineering-policy-' + project['id'])]
+
+    second = create(client)
+    async def unavailable(*_args, **_kwargs): return {'ok': True, 'result': {'supported_ops': []}}
+    monkeypatch.setattr(engineering_hosts, 'call', unavailable)
+    denied = client.post(ROOT + '/projects/' + second['id'] + '/policy',
+                         json={'expected_revision': 1, 'access_mode': 'isolated', 'confirmation': True})
+    assert denied.status_code == 409
+
+
 def test_off_flag_and_cookie_origin_boundaries(client, monkeypatch):
     assert client.get(ROOT + '/projects').headers['cache-control'] == 'no-store'
     assert client.get(ROOT + '/capabilities').json()['stage'] == 'foundation'

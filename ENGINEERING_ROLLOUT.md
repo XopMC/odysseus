@@ -2,12 +2,18 @@
 
 ## 2026-09-14 isolated policy and Jetson Python LSP
 
-Production image `odysseus:jetson-engineering-20260914-isolation-ui2` is
+Production image `odysseus:jetson-engineering-20260914-isolation-ui3` is
 healthy with restart policy `always`. An explicit isolated project policy now
 requires the enabled feature flag and an authenticated runner capability check;
 approved checks dispatch only to `sandbox.command.start` in the retained
 verification copy. The policy never falls back to trusted-host execution.
 Targeted ARM regression passed 74 tests (2 skipped).
+
+The initial overlay release exposed a candidate-sync path error: several
+`src/` files had been copied to the candidate root and were therefore not
+included by `Dockerfile.team`. It was corrected before `isolation-ui3`; the
+running container was inspected to confirm the feature gate in
+`engineering_store.py` and isolated dispatch in `engineering_check_runner.py`.
 
 The complete no-network ARM regression, run through
 `scripts/test_engineering_candidate.sh` from a full source snapshot copied to
