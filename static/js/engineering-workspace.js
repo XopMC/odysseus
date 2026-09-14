@@ -53,7 +53,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
   const heading = el('div', undefined, undefined, 'team-heading');
   const title = uiEl('h3', 'Engineering'); title.id = `${prefix}-title`; section.setAttribute('aria-labelledby', title.id);
   heading.append(title, uiEl('span', 'Foundation', 'stage', 'team-status'));
-  const description = uiEl('p', 'Foundation: register projects, review host access policy and inspect the tool catalog. Isolated execution and the full engineering workflow are not available here yet.', undefined, 'engineering-description');
+  const description = uiEl('p', 'Engineering workspace: register projects, choose a host policy, inspect tools and language servers, configure verified checks and context policy. Isolated execution is limited to approved checks in a verification copy.', undefined, 'engineering-description');
   const bindingNotice = uiEl('p', 'The selected Engineering project applies to NEW Team runs only. Existing and legacy tasks keep their current settings. Choose Legacy / no Engineering project to start without this binding.', 'binding-notice');
   const status = el('p', undefined, 'notice', 'team-notice'); status.append(uiEl('span', 'Loading engineering capabilities…')); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const refresh = button('Refresh projects and hosts', 'refresh');
