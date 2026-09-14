@@ -1027,3 +1027,13 @@ completion of the entire engineering roadmap; those acceptance gaps remain open.
   MCP connected with 30 tools. Service health is `healthy`.
 - Local runner regressions passed: 22 tests across host-runner, verification-copy
   and capability suites. This does not claim completion of the remaining roadmap.
+
+### 2026-09-14 full clean ARM regression
+
+- A complete `git archive` snapshot of the released source was tested on Jetson
+  in a fresh no-network container with no production database mounted:
+  **6542 passed, 33 skipped, 105 subtests passed** in 393.96 seconds.
+- The first historical candidate directory was intentionally rejected by the
+  harness because it was not a full source snapshot. The final result above
+  comes from the complete tracked source, including launcher and MCP modules;
+  it is the authoritative regression evidence for `isolation-ui6`.
