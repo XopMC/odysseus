@@ -2,12 +2,18 @@
 
 ## 2026-09-14 isolated policy and Jetson Python LSP
 
-Production image `odysseus:jetson-engineering-20260914-isolation-ui` is
+Production image `odysseus:jetson-engineering-20260914-isolation-ui2` is
 healthy with restart policy `always`. An explicit isolated project policy now
 requires the enabled feature flag and an authenticated runner capability check;
 approved checks dispatch only to `sandbox.command.start` in the retained
 verification copy. The policy never falls back to trusted-host execution.
 Targeted ARM regression passed 74 tests (2 skipped).
+
+The complete no-network ARM regression, run through
+`scripts/test_engineering_candidate.sh` from a full source snapshot copied to
+a disposable container filesystem, passed **6540 tests, 33 skipped, 105
+subtests** in 392.62 seconds. Production databases, credentials and network
+were not mounted into that test container.
 
 Jetson Python LSP is live: Pyright is installed under the `xopmc` user, and the
 broker uses a private Node 22 runtime only for language-server processes, not
