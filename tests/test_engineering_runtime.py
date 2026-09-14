@@ -109,6 +109,24 @@ def test_verified_project_memory_is_bounded_and_never_implicit_external_transfer
     assert runtime.verified_project_memory('owner', store.get_task('owner', task['id']), worker) == []
 
 
+def test_approved_project_requirements_are_local_only(context, monkeypatch):
+    store, projects, project, runtime, _, _ = context
+    from src.engineering_checks import EngineeringChecks
+    checks = EngineeringChecks(store)
+    profile = checks.approve_profile('owner', project['id'], name='Unit', command='pytest -q', confirmation=True)
+    checks.set_requirement('owner', project['id'], title='Unit suite passes', profile_ids=[profile['id']], mandatory=True)
+    local = {'endpoint_id': 'local', 'model': 'coder', 'local': True, 'resource_group': 'local'}
+    remote = {'endpoint_id': 'remote', 'model': 'coder', 'local': False, 'resource_group': 'remote'}
+    monkeypatch.setattr(team_config, 'resolve', lambda owner, endpoint, model: local if endpoint == 'local' else remote)
+    task = store.create_task('owner', 'Task', metadata={'engineering_project_id': project['id']})
+    worker = store.add_worker('owner', task['id'], 'Worker', profile={'endpoint_id': 'local', 'model': 'coder'})
+    expected = [{'id': checks.list_requirements('owner', project['id'])['requirements'][0]['id'],
+                 'title': 'Unit suite passes', 'mandatory': True, 'profile_ids': [profile['id']]}]
+    assert runtime.project_requirements_for_worker('owner', store.get_task('owner', task['id']), worker) == expected
+    worker['profile']['endpoint_id'] = 'remote'
+    assert runtime.project_requirements_for_worker('owner', store.get_task('owner', task['id']), worker) == []
+
+
 @pytest.mark.asyncio
 async def test_disabled_feature_cannot_resume_project_host_work(context, monkeypatch):
     store, _, project, runtime, _, transport = context
