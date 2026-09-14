@@ -113,6 +113,7 @@ def test_cross_device_subscription_lifecycle(scenario):
           assert.equal(requests.filter(x=>/\/stop\//.test(x.url)).length,0,'stall recovery must not stop remote run');
         }else if(scenario==='replay_activity'){
           const events=[
+            'id: 0\ndata: {"delta":"private chain of thought","thinking":true}',
             'id: 1\ndata: {"delta":"First round"}',
             'id: 2\ndata: {"type":"tool_start","tool":"bash","command":"echo example"}',
             'id: 2\ndata: {"type":"tool_start","tool":"bash","command":"echo example"}',
@@ -125,15 +126,18 @@ def test_cross_device_subscription_lifecycle(scenario):
           let firstChunk=true;
           reader.read=()=>firstChunk?(firstChunk=false,Promise.resolve({done:false,value:new TextEncoder().encode(events)})):pendingRead.promise;
           pendingHeaders.resolve(response);await flush();
-          assert.equal(box.children.length,2,'each replayed agent round needs its own message bubble');
+          assert.equal(box.children.length,4,'replay separates prose and every persisted tool invocation');
           const liveBody=box.children[0].querySelector('.body');
-          const nextBody=box.children[1].querySelector('.body');
-          const cards=[...liveBody.children,...nextBody.children].filter(x=>x.className==='agent-tool-output remote-tool-activity');
+          const toolOneBody=box.children[1].querySelector('.body');
+          const nextBody=box.children[2].querySelector('.body');
+          const toolTwoBody=box.children[3].querySelector('.body');
+          const cards=[...liveBody.children,...toolOneBody.children,...nextBody.children,...toolTwoBody.children].filter(x=>x.className==='agent-tool-output remote-tool-activity');
           assert.equal(cards.length,2,'live tools render before completion; duplicate SSE IDs ignored');
           assert.equal(cards[0].dataset.status,'done');assert.equal(cards[0].children[1].textContent,'example');
           assert.equal(cards[1].dataset.status,'running');assert.equal(cards[1].children[1].textContent,'Waiting for search');
           assert.equal(box.children[0].querySelector('.stream-content').innerHTML,'First round');
-          assert.equal(box.children[1].querySelector('.stream-content').innerHTML,'Second round');
+          assert.equal(box.children[2].querySelector('.stream-content').innerHTML,'Second round');
+          assert.equal(box.children[0].querySelector('.stream-content').innerHTML.includes('private chain'),false,'thinking chunks must not render as answer text');
           assert.equal(canonicalRefreshes,0,'still-live rendering must not wait for canonical completion');
           assert.equal(composer.value,'unsent draft');
           pendingRead.resolve({done:true});await first;

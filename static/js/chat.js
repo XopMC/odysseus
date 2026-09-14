@@ -5110,6 +5110,13 @@ import { bindUiText } from './i18n.js';
     const resumeRunId = res.headers.get('X-Odysseus-Run-Id') || '';
     if (resumeRunId) _streamRunIds.set(sessionId, resumeRunId);
 
+    // A detached run belongs to the chat, not to the tab that started it.
+    // Restore the same Stop affordance when another device attaches: the
+    // opaque run id above makes this a precise stop, never a broad
+    // session-wide cancellation.
+    const resumedSubmitBtn = document.querySelector('.send-btn');
+    if (resumedSubmitBtn && isCurrentView()) updateSubmitButton('streaming', resumedSubmitBtn);
+
     const box = document.getElementById('chat-history');
     if (!box) {
       try { await res.body.cancel(); } catch (_) {}
@@ -5168,6 +5175,7 @@ import { bindUiText } from './i18n.js';
     let replayError = null;
     let canonicalTerminalSeen = false;
     let replayTool = null;
+    let replayThinking = '';
     const replayEvents = new Set();
     // "Rich" responses (tool calls, sources, doc streaming, multi-round) need the
     // full canonical render, which is rebuilt from the saved DB record on reload.
@@ -5179,7 +5187,16 @@ import { bindUiText } from './i18n.js';
     };
 
     const renderDelta = () => {
-      const dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText, { final: docFenceOpened }));
+      // Historical SSE chunks can arrive halfway through a thinking block.
+      // Do not turn private reasoning into prose on a reconnect; normal live
+      // streaming shows a compact thinking indicator instead. Explicit
+      // thinking chunks are held separately, while this fallback also covers
+      // backends that encode thoughts as raw tags in delta text.
+      const visibleText = String(roundText || '').replace(
+        /<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>[\s\S]*?(?:<\/(?:think(?:ing)?|thought)\s*>|$)/gi,
+        '',
+      );
+      const dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(visibleText, { final: docFenceOpened }));
       if (docFenceOpened && !dt.trim()) {
         _showDocumentWritingStatus(contentDiv);
       } else {
@@ -5225,6 +5242,25 @@ import { bindUiText } from './i18n.js';
           if (eventIsError) {
             replayError = createTerminalStreamError(json);
           } else if (json.delta) {
+            // Keep thinking private during replay exactly as it is during a
+            // foreground stream. It remains in the canonical record for the
+            // dedicated thinking UI, rather than being emitted as prose.
+            if (json.thinking === true || json.channel === 'thinking' || json.channel === 'thought') {
+              replayThinking += json.delta;
+              rich = true;
+              continue;
+            }
+            // A tool result closes the preceding model turn. New prose needs
+            // a fresh bubble even when an older persisted run omitted the
+            // agent_step event between the tool and its next delta.
+            if (replayTool) {
+              holder = createReplayHolder(holder);
+              contentDiv = holder.querySelector('.stream-content');
+              roundText = '';
+              docFenceOpened = false;
+              replayTool = null;
+              replayThinking = '';
+            }
             roundText += json.delta;
             if (!docFenceOpened && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
               docFenceOpened = true;
@@ -5308,14 +5344,30 @@ import { bindUiText } from './i18n.js';
             // Previously replay ignored tool/round events until the whole run
             // finished, making a second device appear frozen for long tasks.
             rich = true;
+            // Avoid an empty leading duplicate, but preserve every real
+            // persisted round boundary in a long-running agent timeline.
+            if (roundText.trim() || replayTool || gotDelta) {
+              holder = createReplayHolder(holder);
+              contentDiv = holder.querySelector('.stream-content');
+            }
             roundText = '';
             docFenceOpened = false;
             replayTool = null;
-            holder = createReplayHolder(holder);
-            contentDiv = holder.querySelector('.stream-content');
+            replayThinking = '';
           } else if (json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress') {
             rich = true;
             try { spinner.destroy(); } catch (_) {}
+            // Each invocation gets a distinct temporary turn. This mirrors
+            // the live agent thread instead of appending every bash call to
+            // the one assistant message created at reconnect.
+            if (json.type === 'tool_start' && (roundText.trim() || replayTool)) {
+              holder = createReplayHolder(holder);
+              contentDiv = holder.querySelector('.stream-content');
+              roundText = '';
+              docFenceOpened = false;
+              replayTool = null;
+              replayThinking = '';
+            }
             if (json.type === 'tool_start' || !replayTool) {
               const card = document.createElement('details');
               card.className = 'agent-tool-output remote-tool-activity';
@@ -5346,6 +5398,10 @@ import { bindUiText } from './i18n.js';
     }
 
     cleanup();
+    if (isCurrentView()) {
+      const finishedResumeSubmitBtn = document.querySelector('.send-btn');
+      if (finishedResumeSubmitBtn) updateSubmitButton('idle', finishedResumeSubmitBtn);
+    }
     if (!isCurrentView()) leftSession = true;
     if (docFenceOpened) _finishDocumentWritingStatus(holder, true);
     if (leftSession) { removeReplayHolders(); return true; }
