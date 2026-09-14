@@ -85,8 +85,9 @@ explicitly.
   untrusted evidence, not an automatic proof that a task or UI check passed.
 - **Project memory** — owner-scoped, versioned project facts retain their
   source and review state (`proposed`, `verified`, or `stale`). Saving or
-  forgetting a record requires explicit confirmation; records are not
-  automatically forwarded to external models.
+  forgetting a record requires explicit confirmation. Only `verified` records
+  are supplied to local Team models; records are never automatically forwarded
+  to external models.
 - **Russian UI** — the shipped Team, engineering and context-policy panels are
   localized; endpoint labels in model selectors are not truncated.
 
@@ -106,8 +107,9 @@ explicitly.
 
 **Память проекта** хранит факты, источник и состояние проверки (`предложено`,
 `проверено`, `устарело`) отдельно для владельца и проекта. Сохранение и удаление
-требуют отдельного подтверждения; записи не передаются автоматически внешним
-моделям.
+требуют отдельного подтверждения. Локальным моделям команды передаются только
+записи со статусом «проверено»; внешним моделям записи автоматически не
+передаются.
 
 Проверенные MCP-инструменты не считаются безопасными по описанию или аннотации:
 включайте каждый инструмент только после просмотра его точной схемы. В команде

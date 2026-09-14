@@ -6,10 +6,11 @@ Production image `odysseus:jetson-engineering-20260914-memory-ui9` is healthy.
 The Engineering workspace now exposes owner- and project-scoped memory records
 with a source, review state and compare-and-swap revision. Both save and delete
 need explicit confirmation, produce replayable project events, and reject stale
-concurrent edits rather than overwriting another device. The UI deliberately
-does not auto-inject these records into external model calls. The candidate ARM
-regression passed **26 tests, 1 skipped**; it included store, route and UI
-coverage plus Python and JavaScript syntax checks.
+concurrent edits rather than overwriting another device. Only verified memory
+is injected into local Team-model prompts, as labelled evidence rather than
+instructions; remote endpoints receive no memory through this path. The
+candidate ARM regression passed **26 tests, 1 skipped** before this bounded
+prompt scope was added; the follow-up candidate verifies the scope separately.
 
 ## 2026-09-14 reviewed Browser MCP evidence
 
