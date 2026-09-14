@@ -57,6 +57,8 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('printf hello', (self.root / 'state/metadata.json').read_text())
 
     def test_isolated_command_never_accepts_a_user_workspace_or_docker_flags(self):
+        # Exercise the policy boundary before the host-specific Docker gate.
+        self.runner.platform_identity['os'] = 'linux'
         rejected = self.call('sandbox.command.start', {
             'cwd': str(self.root), 'command': 'true', 'idempotency_key': 'isolated-root'})
         self.assertFalse(rejected['ok'])
@@ -65,7 +67,7 @@ class RunnerTests(unittest.TestCase):
             'cwd': str(self.root), 'command': 'true', 'idempotency_key': 'isolated-flags',
             'image': 'attacker/image:latest'})
         self.assertFalse(rejected['ok'])
-        self.assertIn('only cwd, command, timeout and idempotency_key', rejected['error'])
+        self.assertIn('only fixed check arguments', rejected['error'])
         self.assertIn('sandbox.command.start', self.call('runner.capabilities')['result']['supported_ops'])
 
     def test_pty_input_resize_interrupt_and_stop(self):

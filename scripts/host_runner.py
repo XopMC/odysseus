@@ -144,8 +144,11 @@ class Runner:
         if not isinstance(key, str) or not key or len(key) > 200:
             raise ValueError('idempotency_key required (1..200 characters)')
         isolated = op == 'sandbox.command.start'
-        if isolated and set(args) - {'cwd', 'command', 'timeout', 'idempotency_key'}:
-            raise ValueError('isolated command accepts only cwd, command, timeout and idempotency_key')
+        # The last two fields are authenticated check-evidence bindings created
+        # by the server.  They are metadata, never Docker options or host paths.
+        if isolated and set(args) - {'cwd', 'command', 'timeout', 'idempotency_key',
+                                    'expected_workspace_hash', 'check_run_id'}:
+            raise ValueError('isolated command accepts only fixed check arguments')
         cwd = self.safe_cwd(args.get('cwd'))
         lease = self.lease(cwd, owner, scope)
         if lease and self.data['worktrees'][lease].get('kind') == 'verification-copy' and self.data['worktrees'][lease]['status'] != 'ready':
