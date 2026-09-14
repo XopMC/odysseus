@@ -45,6 +45,7 @@ def setup_engineering_routes():
             'check_profiles': True,
             'check_runs': True,
             'requirements': True,
+            'project_memory': True,
             'baseline_comparison': True,
             'context_policy': os.environ.get('ODYSSEUS_CONTEXT_POLICY_ENABLED') == '1',
             'isolated_execution': os.environ.get('ODYSSEUS_ISOLATED_RUNNER_ENABLED') == '1', 'cross_host_workspaces': False,
@@ -228,6 +229,29 @@ def setup_engineering_routes():
         owner, store = context(request)
         records = store.events(owner, project_id, after_seq=after_seq, limit=limit)
         return {'events': records, 'next_cursor': records[-1]['seq'] if records else after_seq}
+
+    @router.get('/projects/{project_id}/memory')
+    async def project_memory(project_id: str, request: Request, after_id: str = '', limit: int = 50):
+        owner, store = context(request)
+        items = store.list_memory(owner, project_id, after_id=after_id, limit=limit)
+        return {'items': items, 'next_cursor': items[-1]['id'] if len(items) == limit else None}
+
+    @router.post('/projects/{project_id}/memory')
+    async def save_project_memory(project_id: str, request: Request):
+        owner, store = context(request, mutation=True)
+        body = await body_object(request, 24576)
+        if set(body) != {'memory_id', 'kind', 'text', 'source', 'state', 'expected_revision', 'confirmation'}:
+            raise HTTPException(400, 'Exact project-memory fields and revision required')
+        return store.save_memory(owner, project_id, **body)
+
+    @router.delete('/projects/{project_id}/memory/{memory_id}')
+    async def delete_project_memory(project_id: str, memory_id: str, request: Request):
+        owner, store = context(request, mutation=True)
+        body = await body_object(request, 1024)
+        if set(body) != {'expected_revision', 'confirmation'}:
+            raise HTTPException(400, 'Exact project-memory deletion confirmation and revision required')
+        store.delete_memory(owner, project_id, memory_id, **body)
+        return {'deleted': True}
 
     @router.get('/projects/{project_id}/check-profiles')
     async def check_profiles(project_id: str, request: Request, after_id: str = '', limit: int = 50):

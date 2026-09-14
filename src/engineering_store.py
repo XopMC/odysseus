@@ -27,7 +27,21 @@ CREATE TABLE IF NOT EXISTS engineering_events (
  type TEXT NOT NULL, payload TEXT NOT NULL, created_at REAL NOT NULL,
  PRIMARY KEY(project_id,seq)
 );
+CREATE TABLE IF NOT EXISTS engineering_project_memory (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES engineering_projects(id),
+ owner TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('proposed','verified','stale')),
+ revision INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS engineering_project_memory_owner_project
+ ON engineering_project_memory(owner,project_id,id);
 '''
+
+MEMORY_KINDS = frozenset({
+    'architecture', 'verified_command', 'known_problem', 'hypothesis',
+    'rejected_hypothesis', 'constraint', 'preference',
+})
+MEMORY_STATES = frozenset({'proposed', 'verified', 'stale'})
 
 
 def project_root(value):
@@ -58,6 +72,10 @@ class EngineeringStore:
                 if version and version[0] != 1:
                     raise Conflict('Unsupported engineering projects version')
                 db.execute("INSERT OR IGNORE INTO engineering_versions VALUES ('projects',1)")
+                version = db.execute("SELECT version FROM engineering_versions WHERE name='project_memory'").fetchone()
+                if version and version[0] != 1:
+                    raise Conflict('Unsupported engineering project memory version')
+                db.execute("INSERT OR IGNORE INTO engineering_versions VALUES ('project_memory',1)")
             self._initialized = True
 
     def _project(self, db, owner, project_id):
@@ -137,3 +155,71 @@ class EngineeringStore:
             self._project(db, owner, project_id)
             return [dict(row, payload=json.loads(row['payload'])) for row in db.execute(
                 'SELECT * FROM engineering_events WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?', (project_id, after_seq, limit))]
+
+    @staticmethod
+    def _memory_fields(kind, text, source, state):
+        if kind not in MEMORY_KINDS or state not in MEMORY_STATES:
+            raise ValueError('Unknown project memory kind or state')
+        _text(text, 'project memory text'); _text(source, 'project memory source')
+        if len(text.encode('utf-8')) > 16384 or len(source.encode('utf-8')) > 2048:
+            raise ValueError('Project memory field is too long')
+        return kind, text, source, state
+
+    def list_memory(self, owner, project_id, *, after_id='', limit=100):
+        _text(owner, 'owner'); _text(project_id, 'project id'); _integer(limit, 'limit', 1, 200)
+        if not isinstance(after_id, str):
+            raise ValueError('Invalid cursor')
+        self.initialize()
+        with self.team._tx(write=False) as db:
+            self._project(db, owner, project_id)
+            return [dict(row) for row in db.execute(
+                'SELECT * FROM engineering_project_memory WHERE owner=? AND project_id=? AND id>? ORDER BY id LIMIT ?',
+                (owner, project_id, after_id, limit))]
+
+    def save_memory(self, owner, project_id, *, memory_id, kind, text, source, state,
+                    expected_revision, confirmation):
+        if confirmation is not True:
+            raise PermissionError('Explicit project-memory confirmation required')
+        _text(owner, 'owner'); _text(project_id, 'project id'); _integer(expected_revision, 'expected_revision', 0)
+        if not isinstance(memory_id, str):
+            raise ValueError('Invalid project memory identity')
+        kind, text, source, state = self._memory_fields(kind, text, source, state)
+        self.initialize()
+        with self.team._tx() as db:
+            self._project(db, owner, project_id)
+            if not memory_id:
+                if expected_revision != 0:
+                    raise Conflict('New project memory requires revision zero')
+                memory_id, now = uuid.uuid4().hex, self.team.clock()
+                db.execute('INSERT INTO engineering_project_memory VALUES (?,?,?,?,?,?,?,?,?,?)',
+                    (memory_id, project_id, owner, kind, text, source, state, 1, now, now))
+                self._event(db, project_id, 'project_memory_saved', {'id': memory_id, 'revision': 1, 'state': state})
+            else:
+                row = db.execute('SELECT * FROM engineering_project_memory WHERE id=? AND owner=? AND project_id=?',
+                    (memory_id, owner, project_id)).fetchone()
+                if row is None:
+                    raise NotFound('Project memory not found')
+                if row['revision'] != expected_revision:
+                    raise Conflict('Project memory changed; reload before saving')
+                now = self.team.clock()
+                db.execute('UPDATE engineering_project_memory SET kind=?,text=?,source=?,state=?,revision=revision+1,updated_at=? WHERE id=?',
+                    (kind, text, source, state, now, memory_id))
+                self._event(db, project_id, 'project_memory_saved', {'id': memory_id, 'revision': expected_revision + 1, 'state': state})
+            row = db.execute('SELECT * FROM engineering_project_memory WHERE id=?', (memory_id,)).fetchone()
+            return dict(row)
+
+    def delete_memory(self, owner, project_id, memory_id, *, expected_revision, confirmation):
+        if confirmation is not True:
+            raise PermissionError('Explicit project-memory deletion confirmation required')
+        _text(owner, 'owner'); _text(project_id, 'project id'); _text(memory_id, 'project memory id')
+        _integer(expected_revision, 'expected_revision', 1); self.initialize()
+        with self.team._tx() as db:
+            self._project(db, owner, project_id)
+            row = db.execute('SELECT * FROM engineering_project_memory WHERE id=? AND owner=? AND project_id=?',
+                (memory_id, owner, project_id)).fetchone()
+            if row is None:
+                raise NotFound('Project memory not found')
+            if row['revision'] != expected_revision:
+                raise Conflict('Project memory changed; reload before deleting')
+            db.execute('DELETE FROM engineering_project_memory WHERE id=?', (memory_id,))
+            self._event(db, project_id, 'project_memory_deleted', {'id': memory_id, 'revision': expected_revision})

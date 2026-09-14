@@ -96,9 +96,10 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
   checkRuns = createCheckRunsPanel();
   const requirements = createRequirementsPanel();
   const baselineComparison = createBaselineComparisonPanel();
+  const projectMemory = createProjectMemoryPanel();
   const lsp = createLspPanel();
   const mcpReviews = createMcpReviewsPanel();
-  content.append(createForm, projectCard, lsp.panel, checkProfiles.panel, checkRuns.panel, requirements.panel, baselineComparison.panel, policyForm, toolCard, mcpReviews.panel, probe.panel, contextPolicy.panel);
+  content.append(createForm, projectCard, lsp.panel, checkProfiles.panel, checkRuns.panel, requirements.panel, projectMemory.panel, baselineComparison.panel, policyForm, toolCard, mcpReviews.panel, probe.panel, contextPolicy.panel);
   section.append(heading, description, bindingNotice, status, refresh, content); root.append(section);
   if (contextOnly) {
     content.replaceChildren(contextPolicy.panel);
@@ -141,6 +142,35 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
       selectionChanged() { projectId = String(current()?.id || ''); ++generation; details.replaceChildren(); status.replaceChildren(); controls(); },
       destroy() { ++generation; },
     };
+  }
+
+  function createProjectMemoryPanel() {
+    let enabled = false, projectId = '', loading = false, saving = false, generation = 0, items = [];
+    let selected = null;
+    const panel = el('section', undefined, 'project-memory', 'team-card team-panel'); panel.hidden = true;
+    const select = el('select', undefined, 'memory-select');
+    const kind = el('select', undefined, 'memory-kind');
+    for (const value of ['architecture', 'verified_command', 'known_problem', 'hypothesis', 'rejected_hypothesis', 'constraint', 'preference']) kind.append(option(value, value.replace(/_/g, ' ')));
+    const state = el('select', undefined, 'memory-state');
+    for (const value of ['proposed', 'verified', 'stale']) state.append(option(value, value));
+    const source = el('input', undefined, 'memory-source'); source.type = 'text';
+    const text = el('textarea', undefined, 'memory-text'); text.rows = 5;
+    const confirm = el('input', undefined, 'memory-confirm'); confirm.type = 'checkbox'; confirm.id = `${prefix}-memory-confirm`;
+    const confirmation = el('label', undefined, undefined, 'team-check'); confirmation.htmlFor = confirm.id; confirmation.append(confirm, uiEl('span', 'I confirm this exact project memory and source.'));
+    const refreshMemory = button('Refresh project memory', 'memory-refresh'), saveMemory = button('Save project memory', 'memory-save'), deleteMemory = button('Forget project memory', 'memory-delete'); saveMemory.type = 'button'; deleteMemory.type = 'button';
+    const status = el('p', '', 'memory-notice', 'team-notice'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    panel.append(uiEl('h4', 'Project memory'), uiEl('p', 'Store project-specific facts with a source and review state. This list is not automatically sent to external models.'), field('Saved memory', select, 'memory-select'), field('Kind', kind, 'memory-kind'), field('State', state, 'memory-state'), field('Source', source, 'memory-source'), field('Memory', text, 'memory-text'), confirmation, el('div', undefined, undefined, 'team-actions', refreshMemory, saveMemory, deleteMemory), status);
+    const say = (label, error = null) => { status.replaceChildren(uiEl('span', label)); if (error) status.append(el('span', `: ${message(error)}`)); status.className = `team-notice${error ? ' team-error' : ''}`; };
+    const controls = () => { const unavailable = !enabled || !projectId || loading || saving; [select, kind, state, source, text, confirm].forEach(node => { node.disabled = unavailable; }); refreshMemory.disabled = unavailable; saveMemory.disabled = unavailable || !confirm.checked || !text.value.trim() || !source.value.trim(); deleteMemory.disabled = unavailable || !selected || !confirm.checked; };
+    const newDraft = () => { selected = null; kind.value = 'architecture'; state.value = 'proposed'; source.value = ''; text.value = ''; confirm.checked = false; };
+    function render() { select.replaceChildren(option('', 'New project memory', true), ...items.map(item => option(item.id, `${item.kind}: ${item.text.slice(0, 96)}`))); select.value = selected?.id || ''; if (selected) { kind.value = selected.kind; state.value = selected.state; source.value = selected.source; text.value = selected.text; } controls(); }
+    async function load() { if (disposed || !enabled || !projectId || loading || saving) return; const token = ++generation, id = projectId; loading = true; controls(); say('Loading project memory…'); try { const data = await request(`${API}/projects/${encodeURIComponent(id)}/memory?limit=100`, { method: 'GET' }); if (disposed || token !== generation || id !== projectId) return; if (!Array.isArray(data?.items)) throw new Error('Invalid project-memory response'); items = data.items.filter(item => item && typeof item.id === 'string' && typeof item.text === 'string' && Number.isInteger(item.revision)); selected = selected && items.find(item => item.id === selected.id) || null; render(); say('Project memory loaded.'); } catch (error) { if (!disposed && token === generation) say('Unable to load project memory.', error); } finally { if (!disposed && token === generation) { loading = false; controls(); } } }
+    select.addEventListener('change', () => { selected = items.find(item => item.id === select.value) || null; if (!selected) newDraft(); confirm.checked = false; render(); });
+    [kind, state, source, text].forEach(node => node.addEventListener('input', () => { confirm.checked = false; controls(); })); confirm.addEventListener('change', controls);
+    refreshMemory.addEventListener('click', () => void load());
+    saveMemory.addEventListener('click', async () => { if (saveMemory.disabled) return; saving = true; controls(); say('Saving project memory…'); try { const saved = await request(`${API}/projects/${encodeURIComponent(projectId)}/memory`, { method: 'POST', body: { memory_id: selected?.id || '', kind: kind.value, state: state.value, source: source.value.trim(), text: text.value.trim(), expected_revision: selected?.revision || 0, confirmation: true } }); selected = saved; items = [...items.filter(item => item.id !== saved.id), saved]; confirm.checked = false; render(); say('Project memory saved.'); } catch (error) { say('Unable to save project memory. Refresh and review the current revision.', error); } finally { saving = false; controls(); } });
+    deleteMemory.addEventListener('click', async () => { if (deleteMemory.disabled || !selected) return; saving = true; controls(); say('Forgetting project memory…'); try { await request(`${API}/projects/${encodeURIComponent(projectId)}/memory/${encodeURIComponent(selected.id)}`, { method: 'DELETE', body: { expected_revision: selected.revision, confirmation: true } }); items = items.filter(item => item.id !== selected.id); newDraft(); render(); say('Project memory removed.'); } catch (error) { say('Unable to remove project memory. Refresh and review the current revision.', error); } finally { saving = false; controls(); } });
+    return { panel, setEnabled(value) { enabled = value === true; panel.hidden = !enabled; if (enabled && projectId) void load(); controls(); }, selectionChanged() { projectId = String(current()?.id || ''); ++generation; items = []; newDraft(); if (enabled && projectId) void load(); else { status.replaceChildren(); render(); } }, destroy() { ++generation; } };
   }
 
   function createMcpReviewsPanel() {
@@ -1526,6 +1556,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
     lsp.selectionChanged();
     checkProfiles.selectionChanged();
     requirements.selectionChanged();
+    projectMemory.selectionChanged();
     baselineComparison.selectionChanged();
     // Publish only a canonical loaded selection, never a delayed tool response.
     onProjectSelected(project ? { ...project } : null);
@@ -1569,17 +1600,18 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
         notice(feature('context_policy') ? 'Review values and explicitly select the overrides to save.' : 'Context settings are unavailable on this server.');
         return;
       }
-      content.hidden = !feature('projects') && !feature('model_probe') && !feature('context_policy') && !feature('check_profiles') && !feature('check_runs') && !feature('requirements') && !feature('baseline_comparison') && !feature('reviewed_mcp');
+      content.hidden = !feature('projects') && !feature('model_probe') && !feature('context_policy') && !feature('check_profiles') && !feature('check_runs') && !feature('requirements') && !feature('project_memory') && !feature('baseline_comparison') && !feature('reviewed_mcp');
       probe.setEnabled(feature('model_probe'));
       contextPolicy.setEnabled(feature('context_policy'));
       lsp.setEnabled(feature('lsp'));
       checkProfiles.setEnabled(feature('check_profiles'));
       checkRuns.setEnabled(feature('check_runs'));
       requirements.setEnabled(feature('requirements'));
+      projectMemory.setEnabled(feature('project_memory'));
       baselineComparison.setEnabled(feature('baseline_comparison'));
       mcpReviews.setEnabled(feature('reviewed_mcp'));
       createForm.hidden = !feature('projects'); policyForm.hidden = !feature('policy'); toolCard.hidden = !feature('tool_catalog');
-      if (!feature('projects')) { selectedId = ''; ++toolsGeneration; lsp.selectionChanged(); checkProfiles.selectionChanged(); requirements.selectionChanged(); baselineComparison.selectionChanged(); onProjectSelected(null); notice('Engineering projects are unavailable or disabled on this server.'); return; }
+      if (!feature('projects')) { selectedId = ''; ++toolsGeneration; lsp.selectionChanged(); checkProfiles.selectionChanged(); requirements.selectionChanged(); projectMemory.selectionChanged(); baselineComparison.selectionChanged(); onProjectSelected(null); notice('Engineering projects are unavailable or disabled on this server.'); return; }
       const [hostData, projectData] = await Promise.all([
         request(`${API}/hosts`, { method: 'GET' }), request(`${API}/projects`, { method: 'GET' }),
       ]);
@@ -1644,7 +1676,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
   });
   refresh.addEventListener('click', () => void discover());
   updateControls(); void discover();
-  const destroy = () => { disposed = true; probe.destroy(); contextPolicy.destroy(); lsp.destroy(); checkProfiles.destroy(); checkRuns.destroy(); requirements.destroy(); baselineComparison.destroy(); mcpReviews.destroy(); ++toolsGeneration; ++discoveryGeneration; section.remove(); };
+  const destroy = () => { disposed = true; probe.destroy(); contextPolicy.destroy(); lsp.destroy(); checkProfiles.destroy(); checkRuns.destroy(); requirements.destroy(); projectMemory.destroy(); baselineComparison.destroy(); mcpReviews.destroy(); ++toolsGeneration; ++discoveryGeneration; section.remove(); };
   destroy.setTaskContext = value => {
     if (disposed || JSON.stringify(taskContext) === JSON.stringify(value)) return;
     taskContext = value; contextPolicy.selectionChanged();
