@@ -83,6 +83,10 @@ explicitly.
 - **Browser evidence** — reviewed Browser MCP screenshots are stored as bounded,
   owner-scoped task artifacts and shown in the Team evidence panel. They remain
   untrusted evidence, not an automatic proof that a task or UI check passed.
+- **Project memory** — owner-scoped, versioned project facts retain their
+  source and review state (`proposed`, `verified`, or `stale`). Saving or
+  forgetting a record requires explicit confirmation; records are not
+  automatically forwarded to external models.
 - **Russian UI** — the shipped Team, engineering and context-policy panels are
   localized; endpoint labels in model selectors are not truncated.
 
@@ -99,6 +103,11 @@ explicitly.
 публичного UI-потока проекта он остаётся отдельной операторской возможностью.
 На Jetson также проверен Pyright: открытие документа и поиск символов работают
 через LSP-runner без замены системного Node.js.
+
+**Память проекта** хранит факты, источник и состояние проверки (`предложено`,
+`проверено`, `устарело`) отдельно для владельца и проекта. Сохранение и удаление
+требуют отдельного подтверждения; записи не передаются автоматически внешним
+моделям.
 
 Проверенные MCP-инструменты не считаются безопасными по описанию или аннотации:
 включайте каждый инструмент только после просмотра его точной схемы. В команде
