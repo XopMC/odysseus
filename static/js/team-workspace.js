@@ -43,6 +43,52 @@ export function createTeamNotificationTracker() {
   };
 }
 
+// Replay is intentionally deterministic and side-effect free: the same saved
+// event stream produces the same cards after a refresh, another device opens
+// the chat, or the SSE connection reconnects.  Old runs did not carry message
+// IDs, so their deltas are grouped conservatively per worker until a metrics
+// boundary; all new runs use exact server-provided boundaries.
+export function replayTeamTimeline(events, workers = []) {
+  const names = new Map((workers || []).map(worker => [worker.id, worker.name || worker.id]));
+  const entries = [], byMessage = new Map(), latest = new Map();
+  const add = (workerId, messageId, event) => {
+    const key = `${workerId || 'team'}:${messageId || `legacy-${event.seq}`}`;
+    let entry = byMessage.get(key);
+    if (!entry) {
+      entry = { key, workerId, worker: names.get(workerId) || workerId || 'Team', model: '', text: '', calls: [], results: [], seq: event.seq, complete: false };
+      byMessage.set(key, entry); entries.push(entry);
+    }
+    latest.set(workerId, entry); return entry;
+  };
+  const ordered = [...(events || [])].filter(event => Number.isSafeInteger(event?.seq)).sort((a, b) => a.seq - b.seq);
+  const seen = new Set();
+  for (const event of ordered) {
+    if (seen.has(event.seq)) continue; seen.add(event.seq);
+    const payload = event.payload || event.data || {}, workerId = payload.worker_id;
+    if (event.type === 'worker_message_started') {
+      const entry = add(workerId, payload.message_id, event); entry.model = payload.model || ''; continue;
+    }
+    if (event.type === 'worker_delta') {
+      let entry = payload.message_id ? byMessage.get(`${workerId || 'team'}:${payload.message_id}`) : latest.get(workerId);
+      if (!entry || entry.complete) entry = add(workerId, payload.message_id || `legacy-${event.seq}`, event);
+      entry.text += String(payload.text || ''); continue;
+    }
+    if (event.type === 'worker_message_completed') {
+      const entry = add(workerId, payload.message_id || `legacy-${event.seq}`, event);
+      if (typeof payload.content === 'string' && payload.content) entry.text = payload.content;
+      entry.calls = Array.isArray(payload.tool_calls) ? payload.tool_calls : entry.calls;
+      entry.complete = true; continue;
+    }
+    if (event.type === 'tool_result') {
+      let entry = payload.message_id ? byMessage.get(`${workerId || 'team'}:${payload.message_id}`) : latest.get(workerId);
+      if (!entry) entry = add(workerId, payload.message_id || `tool-${event.seq}`, event);
+      entry.results.push({ tool: payload.tool || 'tool', result: payload.result }); continue;
+    }
+    if (event.type === 'worker_metrics' && latest.get(workerId)) latest.get(workerId).complete = true;
+  }
+  return entries;
+}
+
 const safeInteger = value => Number.isSafeInteger(value) && value >= 0;
 export function reviewedGitFiles(diff) {
   if (diff?.truncated || !Array.isArray(diff?.files) || diff.files.length > 1000) throw new Error('A complete changed-file list is required before integration. Refresh the diff.');
@@ -161,6 +207,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
   let sessionTimer = null, terminalTimer = null, resourceTimer = null, selectedTab = 'Tasks', selectedTerminal = '', terminalBusy = false;
   let pending = null, disposed = false, fileHash = null, fileLoadedPath = '', diffState = null, snapshotRequestSeq = 0, evidenceRequestSeq = 0, terminalListRequestSeq = 0;
   let cursor = createTeamEventCursor(null), terminalState = new Map(), manualWorkers = [], intentSignature = '';
+  let timelineEvents = new Map(), timelineRenderTimer = null, timelineRequestSeq = 0;
   let previousMode = null;
   let diffRequestSeq = 0;
   let notificationsEnabled = false;
@@ -215,6 +262,47 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
     source?.close(); source = null; clearTimeout(retryTimer); clearTimeout(refreshTimer);
     clearInterval(terminalTimer); terminalTimer = null;
     clearInterval(resourceTimer); resourceTimer = null;
+  }
+  function renderTimeline() {
+    timelineRenderTimer = null;
+    if (!ui.timeline) return;
+    const entries = replayTeamTimeline([...timelineEvents.values()], snapshot?.workers || snapshot?.tasks || []);
+    ui.timeline.replaceChildren();
+    if (!entries.length) { ui.timeline.append(uiElement('p', 'No saved activity yet.')); return; }
+    for (const entry of entries) {
+      const card = element('article', '', 'team-card team-timeline-entry');
+      const heading = element('strong'); heading.append(document.createTextNode(entry.worker + (entry.model ? ` · ${entry.model}` : '')));
+      card.append(heading, teamStatus('span', entry.complete ? 'done' : 'running', 'team-status'));
+      if (entry.text) card.append(element('pre', terminalPlainText(entry.text), 'team-output'));
+      for (const call of entry.calls) {
+        const details = element('details'); details.append(uiElement('summary', 'Tool call:') , document.createTextNode(' ' + (call.name || 'tool')));
+        if (call.arguments_preview) details.append(element('pre', terminalPlainText(call.arguments_preview), 'team-output'));
+        card.append(details);
+      }
+      for (const result of entry.results) {
+        const details = element('details'); details.append(uiElement('summary', 'Tool result:'), document.createTextNode(' ' + result.tool));
+        details.append(element('pre', terminalPlainText(JSON.stringify(result.result ?? {}, null, 2)).slice(0, TERMINAL_TEXT_LIMIT), 'team-output')); card.append(details);
+      }
+      ui.timeline.append(card);
+    }
+  }
+  function recordTimeline(events) {
+    for (const event of events || []) if (Number.isSafeInteger(event?.seq)) timelineEvents.set(event.seq, event);
+    if (!timelineRenderTimer) timelineRenderTimer = setTimeout(renderTimeline, 20);
+  }
+  async function loadTimeline(id, token) {
+    if (!id) return;
+    const requestSeq = ++timelineRequestSeq; let after = 0;
+    timelineEvents = new Map();
+    while (true) {
+      const data = await request(`/api/team/${encode(id)}/timeline?after_seq=${after}&limit=200`);
+      if (!current(token) || teamId !== id || requestSeq !== timelineRequestSeq) return;
+      recordTimeline(data.events);
+      const next = Number(data.next_cursor);
+      if (!Number.isSafeInteger(next) || next <= after) break;
+      after = next;
+    }
+    renderTimeline();
   }
   async function act(action, target) {
     if (pending?.generation === generation) return;
@@ -407,6 +495,8 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
       await post(`/api/team/${encode(teamId)}/guidance`, { message: ui.guidance.control.value }); ui.guidance.control.value = '';
     }, event.currentTarget)));
     ui.summary = element('pre', '', 'team-output'); bindUiText(ui.summary, 'Team result and integration workspace', 'aria-label'); panel.append(ui.summary);
+    ui.timeline = element('div', '', 'team-task-list');
+    panel.append(uiElement('h4', 'Work log'), uiElement('p', 'Saved messages and tool calls are restored before live updates.'), ui.timeline);
     ui.evidence = element('div'); ui.evidence.append(uiElement('h4', 'Results and recovery'),
       button('Refresh results and uncertain actions', () => act(loadEvidence)));
     ui.intents = element('div', '', 'team-task-list'); ui.artifacts = element('div', '', 'team-task-list');
@@ -652,12 +742,16 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
     const data = await request(`/api/team/session/${encode(id)}`);
     if (!current(token, id) || requestSeq !== snapshotRequestSeq) return;
     const previousId = teamId; applySnapshot(data);
-    if (previousId !== teamId) { source?.close(); source = null; }
+    if (previousId !== teamId) { source?.close(); source = null; timelineEvents = new Map(); renderTimeline(); }
     let last = Number(data.last_seq);
     if (!Number.isSafeInteger(last) || last < 0) { try { last = Number(storage?.getItem(cursorKey(teamId))) || 0; } catch (_) { last = 0; } }
     if (teamId && (previousId !== teamId || cursor.needsSnapshot || last > cursor.afterSeq)) {
       cursor.reset(teamId, last); try { storage?.setItem(cursorKey(teamId), String(last)); } catch (_) {}
     }
+    // Replay through the durable log *before* subscribing after last_seq.
+    // Starting SSE first loses the history on reload by design.
+    if (teamId && (previousId !== teamId || !timelineEvents.size)) await loadTimeline(teamId, token);
+    if (!current(token, id) || requestSeq !== snapshotRequestSeq) return;
     if (teamId && !source) connect();
     if (teamId) loadEvidence().catch(error => { if (current(token, id)) notice(error.message, true); });
   }
@@ -724,7 +818,8 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
         return;
       }
       try { storage?.setItem(cursorKey(id), String(cursor.afterSeq)); } catch (_) {}
-      if (data.type === 'terminal.output') {
+      recordTimeline([data]);
+      if (data.type === 'terminal.output' || data.type === 'terminal_output') {
         const payload = data.data || data.payload || {}; appendTerminal(payload.id || payload.terminal_id, payload);
       }
       if (data.type === 'worker_metrics') destroyEngineering?.refreshContextObservation?.();

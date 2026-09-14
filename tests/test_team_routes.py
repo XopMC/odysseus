@@ -344,3 +344,20 @@ def test_sse_replays_only_after_seq_with_real_store_payload_and_no_run_cancel(te
     assert events == [{"team_id": env.task["id"], **second}]
     assert events[0]["payload"]["text"] == "continue"
     assert env.runtime.active == {} and env.runtime.calls == []
+
+
+def test_timeline_replays_durable_history_in_pages_and_is_owner_scoped(team_client):
+    env = team_client
+    for index in range(3):
+        env.store.add_event("alice", env.task["id"], "worker_delta", {
+            "worker_id": env.worker["id"], "message_id": "turn-1", "text": str(index)})
+    first = env.client.get(f"/api/team/{env.task['id']}/timeline?after_seq=0&limit=2")
+    assert first.status_code == 200
+    body = first.json()
+    assert [event['payload']['text'] for event in body['events']] == ['0', '1']
+    assert body['next_cursor'] == body['events'][-1]['seq']
+    second = env.client.get(f"/api/team/{env.task['id']}/timeline?after_seq={body['next_cursor']}&limit=2")
+    assert [event['payload']['text'] for event in second.json()['events']] == ['2']
+    assert second.json()['next_cursor'] is None
+    assert env.client.get(f"/api/team/{env.other_task['id']}/timeline").status_code == 404
+    assert env.client.get(f"/api/team/{env.task['id']}/timeline?limit=201").status_code == 400

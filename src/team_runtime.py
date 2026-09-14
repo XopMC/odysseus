@@ -511,8 +511,17 @@ class TeamRuntime:
                 except Exception:
                     logger.warning('Uncertain dispatch reservation retained for reconciliation')
                 raise
+        # Persist explicit message boundaries.  A delta by itself is not enough
+        # to reconstruct a chat after a browser reconnect: adjacent model calls
+        # by one worker otherwise become one giant bubble.
+        message_id = uuid.uuid4().hex
+        self.event(owner, team_id, 'worker_message_started', {
+            'worker_id': worker['id'], 'message_id': message_id,
+            'endpoint_id': route['endpoint_id'], 'model': route['model'],
+        })
         async def delta(text):
-            self.event(owner, team_id, 'worker_delta', {'worker_id': worker['id'], 'text': text})
+            self.event(owner, team_id, 'worker_delta', {
+                'worker_id': worker['id'], 'message_id': message_id, 'text': text})
         try:
             result = await self.complete(route, messages, tools,
                           max_tokens=max_output_tokens, on_delta=delta)
@@ -529,7 +538,25 @@ class TeamRuntime:
         self.event(owner, team_id, 'worker_metrics', {'worker_id': worker['id'],
                    'context_policy': {**context_observation, 'max_output_tokens': max_output_tokens} if context_observation else None,
                    **{key: result.get(key) for key in ('usage', 'duration', 'ttft', 'generation_tps')}})
-        return result['message']
+        message = result['message']
+        # Keep an exact final text as a compact durable fallback for clients
+        # which received no individual deltas.  Tool arguments stay a bounded
+        # string preview so secret-shaped JSON cannot enter the event database.
+        calls = []
+        for call in message.get('tool_calls') or []:
+            function = call.get('function') or {}
+            arguments = function.get('arguments', '')
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            calls.append({'id': str(call.get('id', ''))[:128],
+                          'name': str(function.get('name', ''))[:128],
+                          'arguments_preview': arguments[:8192]})
+        self.event(owner, team_id, 'worker_message_completed', {
+            'worker_id': worker['id'], 'message_id': message_id,
+            'content': str(message.get('content') or '')[:131072],
+            'tool_calls': calls[:32],
+        })
+        return message
 
     async def run_worker(self, owner, team_id, worker):
         from src.team_store import BudgetError

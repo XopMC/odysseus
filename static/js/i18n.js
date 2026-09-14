@@ -75,6 +75,8 @@ const RU = Object.freeze({
   'History retention rules':'Правила сохранения истории',
   'Team preset':'Профиль команды', 'Saved project profile':'Сохранённый профиль проекта',
   'Team result and integration workspace':'Результат команды и рабочая область интеграции',
+  'Work log':'Журнал работы', 'Saved messages and tool calls are restored before live updates.':'Сохранённые сообщения и вызовы инструментов восстанавливаются до подключения обновлений в реальном времени.',
+  'No saved activity yet.':'Сохранённой активности пока нет.', 'Tool call:':'Вызов инструмента:', 'Tool result:':'Результат инструмента:',
   'Terminal output':'Вывод терминала', 'Last file checkpoint':'Последняя контрольная точка файлов',
   'Terminal':'Терминал',
   'Interactive host terminal. Output is displayed as plain text; commands run only when submitted.':'Интерактивный терминал хоста. Вывод отображается как обычный текст; команды выполняются только после отправки.',

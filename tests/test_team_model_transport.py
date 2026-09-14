@@ -219,7 +219,13 @@ class TeamModelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status['reserved_microusd'], 0)
         self.assertEqual(status['remaining_microusd'], 9982)
         self.assertEqual(status['reservations'][0]['status'], 'settled')
-        self.assertTrue(any(event['type'] == 'worker_delta' for event in self.store.events('owner', task['id'])))
+        events = self.store.events('owner', task['id'])
+        started = next(event for event in events if event['type'] == 'worker_message_started')
+        completed = next(event for event in events if event['type'] == 'worker_message_completed')
+        delta = next(event for event in events if event['type'] == 'worker_delta')
+        self.assertEqual(started['payload']['message_id'], delta['payload']['message_id'])
+        self.assertEqual(started['payload']['message_id'], completed['payload']['message_id'])
+        self.assertEqual(completed['payload']['content'], 'Verified fixture')
 
     async def test_concurrent_cloud_calls_cannot_exceed_shared_task_reservation(self):
         task, first = self.paid_worker(budget=4096, output_only=True)

@@ -159,6 +159,23 @@ def setup_team_routes():
         return StreamingResponse(stream(), media_type='text/event-stream',
                                  headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
+    @router.get('/{team_id}/timeline')
+    async def timeline(team_id: str, request: Request, after_seq: int = 0, limit: int = 200):
+        """Finite, owner-scoped event replay used before opening the live SSE stream.
+
+        A browser reload must not turn a running Team conversation into one
+        synthetic streaming bubble.  SSE is intentionally forward-only; this
+        endpoint is the durable replay counterpart and is deliberately paged so
+        a very long task cannot pin an HTTP response indefinitely.
+        """
+        if after_seq < 0 or limit < 1 or limit > 200:
+            raise HTTPException(400, 'after_seq must be nonnegative and limit must be 1..200')
+        owner, runtime = runtime_for(request)
+        runtime.store.get_task(owner, team_id)
+        found = runtime.store.events(owner, team_id, after_seq=after_seq, limit=limit)
+        return {'events': found,
+                'next_cursor': found[-1]['seq'] if len(found) == limit else None}
+
     @router.get('/{team_id}')
     async def snapshot(team_id: str, request: Request):
         owner, runtime = runtime_for(request)

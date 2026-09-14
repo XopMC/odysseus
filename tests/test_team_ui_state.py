@@ -13,7 +13,7 @@ def test_team_event_cursor_and_explicit_external_consent():
     module = (Path(__file__).resolve().parents[1] / "static/js/team-workspace.js").as_uri()
     script = r"""
       import assert from 'node:assert/strict';
-      const {createTeamEventCursor, createTeamNotificationTracker, terminalPlainText, normalizeTeamStart, reviewedGitFiles, fileRollbackArguments} = await import(process.argv[1]);
+      const {createTeamEventCursor, createTeamNotificationTracker, terminalPlainText, normalizeTeamStart, reviewedGitFiles, fileRollbackArguments, replayTeamTimeline} = await import(process.argv[1]);
       const cursor=createTeamEventCursor('a',3);
       assert.equal(cursor.accept({team_id:'a',seq:4}),true);
       assert.equal(cursor.accept({team_id:'a',seq:4}),false);
@@ -42,6 +42,17 @@ def test_team_event_cursor_and_explicit_external_consent():
       assert.deepEqual(notifications.observe('b',{status:'running',workers:[{id:'w',status:'waiting_approval'}]}),[]);
       notifications.reset();assert.deepEqual(notifications.observe('b',{status:'done'}),[],'reopening is only a baseline');
       assert.equal(terminalPlainText('\u001b[31m<script>x</script>\u001b[0m\u001b]0;evil\u0007'),'<'+'script>x</script>');
+      const replay=replayTeamTimeline([
+        {seq:1,type:'worker_message_started',payload:{worker_id:'w',message_id:'m1',model:'coder'}},
+        {seq:2,type:'worker_delta',payload:{worker_id:'w',message_id:'m1',text:'first'}},
+        {seq:3,type:'worker_message_completed',payload:{worker_id:'w',message_id:'m1',content:'first reply',tool_calls:[{name:'shell',arguments_preview:'pwd'}]}},
+        {seq:4,type:'tool_result',payload:{worker_id:'w',tool:'shell',result:{exit_code:0,output:'/work'}}},
+        {seq:5,type:'worker_message_started',payload:{worker_id:'w',message_id:'m2',model:'coder'}},
+        {seq:6,type:'worker_delta',payload:{worker_id:'w',message_id:'m2',text:'second'}}
+      ],[{id:'w',name:'Worker'}]);
+      assert.equal(replay.length,2,'two saved model turns never merge after reload');
+      assert.equal(replay[0].text,'first reply');assert.equal(replay[0].calls[0].name,'shell');assert.equal(replay[0].results[0].result.output,'/work');
+      assert.equal(replay[1].text,'second');assert.equal(replay[1].complete,false);
       const local={endpoint_id:'jetson',model:'local',label:'Local',local:true};
       const paid={endpoint_id:'cloud',model:'paid',label:'Paid',local:false,api_key:'must-not-leak'};
       const draft={title:'Test',goal:'Build tests',project_path:'/work/project',leader:local,workers:[],config:{external:false}};
