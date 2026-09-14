@@ -184,8 +184,10 @@ def test_project_memory_api_owner_confirmation_and_revision(client):
     assert saved.status_code == 200, saved.text
     item = saved.json()
     assert client.get(url).json()['items'] == [item]
-    assert client.post(url, json={**item, 'text': 'changed', 'expected_revision': 0,
-                                  'confirmation': True}).status_code == 409
+    stale = {'memory_id': item['id'], 'kind': item['kind'], 'text': 'changed',
+             'source': item['source'], 'state': item['state'],
+             'expected_revision': 0, 'confirmation': True}
+    assert client.post(url, json=stale).status_code == 409
     client.cookies.set('odysseus_session', 'bob-cookie')
     assert client.get(url).status_code == 404
     assert client.delete(url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': True}).status_code == 404
