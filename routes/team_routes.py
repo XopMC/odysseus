@@ -5,7 +5,7 @@ import os
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.routing import APIRoute
 
 from src import team_config
@@ -192,6 +192,16 @@ def setup_team_routes():
     async def artifacts(team_id: str, request: Request):
         owner, runtime = runtime_for(request)
         return {'artifacts': runtime.store.list_artifacts(owner, team_id)}
+
+    @router.get('/{team_id}/artifacts/{artifact_id}/content')
+    async def artifact_content(team_id: str, artifact_id: str, request: Request):
+        owner, runtime = runtime_for(request)
+        from src.team_artifact_files import open_screenshot
+        path, content_type = open_screenshot(runtime.store, owner, team_id, artifact_id)
+        return FileResponse(path, media_type=content_type, headers={
+            'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'",
+        })
 
     @router.get('/{team_id}/workers/{worker_id}/checkpoint')
     async def checkpoint(team_id: str, worker_id: str, request: Request):

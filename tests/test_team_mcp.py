@@ -281,3 +281,21 @@ class TeamMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result['exit_code'], 1)
             self.assertTrue(result['stderr'])
             self.assertNotIn('PRIVATE_', str(result))
+
+    async def test_valid_image_requires_explicit_server_artifact_sink(self):
+        import base64
+        self.grant()
+        png = base64.b64encode(b'\x89PNG\r\n\x1a\nfixture').decode()
+        async def respond(*args):
+            return {'exit_code': 0, 'images': [{'mimeType': 'image/png', 'data': png}]}
+        self.manager.call_tool = respond
+        received = []
+        def sink(images):
+            received.extend(images)
+            return [{'id': 'artifact-1', 'content_type': 'image/png', 'bytes': 15}]
+        result = await dispatch(self.store, 'alice', 'executor', lambda: self.config,
+                                self.name, {}, self.manager, artifact_sink=sink)
+        self.assertEqual(result['exit_code'], 0)
+        self.assertEqual(result['artifacts'][0]['id'], 'artifact-1')
+        self.assertEqual(len(received), 1)
+        self.assertNotIn(png, result['stdout'])

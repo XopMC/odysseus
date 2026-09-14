@@ -884,6 +884,15 @@ class TeamStore:
             self._task(db, owner, task_id)
             return [_row(row) for row in db.execute("SELECT * FROM team_artifacts WHERE task_id=? ORDER BY created_at,id", (task_id,))]
 
+    def get_artifact(self, owner, task_id, artifact_id):
+        _text(artifact_id, "artifact id")
+        with self._tx(write=False) as db:
+            self._task(db, owner, task_id)
+            row = db.execute("SELECT * FROM team_artifacts WHERE task_id=? AND id=?", (task_id, artifact_id)).fetchone()
+            if row is None:
+                raise NotFound("Artifact not found")
+            return _row(row)
+
     def approve_endpoint(self, owner, task_id, endpoint_id, limit_microusd, input_rate_per_million, output_rate_per_million):
         """Explicit endpoint approval including BOTH integer rates (zero means free)."""
         _text(endpoint_id, "endpoint id")

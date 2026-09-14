@@ -301,7 +301,7 @@ def validate_arguments(args):
         raise ValueError('MCP arguments exceed size limit')
 
 
-async def dispatch(store, owner, role, config_provider, name, args, manager=None):
+async def dispatch(store, owner, role, config_provider, name, args, manager=None, artifact_sink=None):
     """Freshly authorized read-only manager call; no cached grant can authorize it."""
     validate_arguments(args)
     if manager is None:
@@ -331,16 +331,29 @@ async def dispatch(store, owner, role, config_provider, name, args, manager=None
         return uncertain()
     if not isinstance(result, dict) or type(result.get('exit_code')) is not int:
         return uncertain()
-    if result.get('images'):
+    screenshots = result.get('images')
+    if screenshots:
         # Team's present model transport consumes text tool results only. Do
         # not silently drop the screenshot and claim verified visual evidence.
-        return {'exit_code': 1, 'stderr': 'MCP image results are not supported by Team; visual evidence was not delivered.',
-                'untrusted_content': True, 'source': source}
+        if artifact_sink is None:
+            return {'exit_code': 1, 'stderr': 'MCP image results are not supported by Team; visual evidence was not delivered.',
+                    'untrusted_content': True, 'source': source}
+        try:
+            artifacts = artifact_sink(screenshots)
+        except (ValueError, OSError):
+            return {'exit_code': 1, 'stderr': 'Browser screenshot evidence was rejected; no visual evidence was delivered.',
+                    'untrusted_content': True, 'source': source}
+        if not isinstance(artifacts, list) or not artifacts:
+            return {'exit_code': 1, 'stderr': 'Browser screenshot evidence was unavailable; no visual evidence was delivered.',
+                    'untrusted_content': True, 'source': source}
     normalized = {'exit_code': 0 if result['exit_code'] == 0 else 1,
                   'untrusted_content': True, 'source': source}
     for key in ('stdout', 'stderr'):
         if key in result:
             normalized[key] = str(result[key])[:60000]
+    if screenshots:
+        normalized['artifacts'] = artifacts
+        normalized['stdout'] = (normalized.get('stdout', '') + '\n[Browser screenshots saved as owner-scoped artifacts; inspect them in the Team evidence panel.]').strip()
     if normalized['exit_code'] and not normalized.get('stderr'):
         normalized['stderr'] = 'MCP read failed; no verified evidence returned.'
     return normalized

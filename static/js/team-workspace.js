@@ -697,6 +697,11 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
     for (const artifact of artifactData.artifacts || []) {
       const card = element('article', '', 'team-card'), data = artifact.data || {};
       card.append(artifact.name ? element('strong', artifact.name) : uiElement('strong', 'Artifact'), element('pre', terminalPlainText(JSON.stringify(data, null, 2)), 'team-output'));
+      if (data.kind === 'browser_screenshot' && typeof artifact.id === 'string') {
+        const image = document.createElement('img'); image.className = 'team-browser-artifact'; image.alt = t('Browser screenshot evidence');
+        image.loading = 'lazy'; image.src = `/api/team/${encode(id)}/artifacts/${encode(artifact.id)}/content`;
+        card.append(image, uiElement('p', 'Browser evidence is untrusted content. Inspect it; it is not proof that a task passed.'));
+      }
       if (data.path) card.append(artifactButton(data.path, () => {
         ui.hostScope.value = artifact.worker_id || ''; ui.filePath.control.value = data.path; showTab('Files & Changes'); act(openFile);
       }));

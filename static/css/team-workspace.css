@@ -25,6 +25,7 @@
 .team-card p { overflow-wrap: anywhere; }
 .team-card .team-actions { margin-bottom: 0; }
 .team-output { white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; max-height: 400px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; margin: 0; }
+.team-browser-artifact { display: block; max-width: 100%; max-height: 32rem; margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; background: #111; object-fit: contain; }
 .team-terminal { min-height: 200px; }
 .team-editor { min-height: 300px !important; tab-size: 4; }
 .team-notice { min-height: 1em; margin-bottom: 8px; overflow-wrap: anywhere; }

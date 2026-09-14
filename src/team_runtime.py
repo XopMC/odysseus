@@ -910,14 +910,14 @@ class TeamRuntime:
                         # zero. Never reinterpret "not run" as verified success.
                         result = {**result, 'exit_code': 1, 'not_executed': True}
                 elif intent['created']:
-                    result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'])
+                    result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'], token)
                     self.store.record_tool_result(owner, team_id, intent['id'], token, result)
                 elif not effectful and intent['status'] == 'abandoned':
                     # Interrupted read-only calls may safely be repeated; give
                     # this attempt a distinct fenced ledger entry.
                     retry = self.store.record_tool_intent(owner, team_id, worker['id'], token,
                         name, args, effectful=False, idempotency_key=call['id'] + ':' + worker['attempt_id'])
-                    result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'])
+                    result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'], token)
                     self.store.record_tool_result(owner, team_id, retry['id'], token, result)
                 else:
                     raise RuntimeError('Uncertain tool outcome requires explicit reconciliation; not replayed')
@@ -956,7 +956,7 @@ class TeamRuntime:
             'reason': 'Per-attempt step budget exhausted; checkpoint saved for explicit manual continuation.'})
         raise RuntimeError('Worker round limit reached; 200 additional steps exhausted, progress saved for manual continuation, task not complete')
 
-    async def execute_tool(self, owner, team_id, worker, name, args, call_id, cwd):
+    async def execute_tool(self, owner, team_id, worker, name, args, call_id, cwd, lease_token=None):
         self.assert_task_runtime(owner, team_id)
         if name in team_collaboration.TEAM_TOOLS:
             return self.execute_collaboration(owner, team_id, worker, name, args, call_id)
@@ -969,8 +969,12 @@ class TeamRuntime:
                 if current['status'] in {'paused', 'cancelled'}:
                     raise PermissionError('Task is paused or cancelled')
                 return current['metadata']['config']
-            return await dispatch(self.store, owner, worker_tool_role(worker['profile']),
-                current_mcp_config, name, args)
+            from src.team_artifact_files import persist_screenshots
+            return await dispatch(
+                self.store, owner, worker_tool_role(worker['profile']), current_mcp_config, name, args,
+                artifact_sink=lambda images: persist_screenshots(
+                    self.store, owner, team_id, worker['id'], lease_token or worker.get('lease_token', ''), images),
+            )
         if name in team_tools.WEB_TOOLS:
             from src.agent_tools.web_tools import WebFetchTool, WebSearchTool
             implementation = WebSearchTool() if name == 'web_search' else WebFetchTool()

@@ -377,6 +377,8 @@ const RU = Object.freeze({
   'Checks the selected execution host for language servers. Discovery is read-only; starting a server or requesting code data requires the project execution policy.':'Проверяет выбранный хост выполнения на наличие языковых серверов. Поиск доступности выполняется только для чтения; запуск сервера или запрос данных кода требует политики выполнения проекта.',
   'Inspect language servers':'Проверить языковые серверы', 'Inspecting language servers…':'Проверка языковых серверов…',
   'Reviewed MCP tools':'Проверенные MCP-инструменты',
+  'Browser screenshot evidence':'Доказательство: снимок экрана браузера',
+  'Browser evidence is untrusted content. Inspect it; it is not proof that a task passed.':'Данные браузера являются непроверенным содержимым. Проверьте их: они не доказывают успешное выполнение задачи.',
   'Review one exact tool schema before enabling it for selected Team roles. Only public or brokered network reads are supported; this does not grant host access or execute a tool.':'Проверьте точную схему одного инструмента перед включением для выбранных ролей команды. Поддерживаются только публичное чтение и чтение сети через посредника; это не даёт доступ к хосту и не запускает инструмент.',
   'Refresh reviewed MCP tools':'Обновить проверенные MCP-инструменты', 'Loading reviewed MCP tools…':'Загрузка проверенных MCP-инструментов…', 'Reviewed MCP tools loaded.':'Проверенные MCP-инструменты загружены.',
   'Unable to load reviewed MCP tools.':'Не удалось загрузить проверенные MCP-инструменты.', 'No connected MCP tools are available to review.':'Нет подключённых MCP-инструментов, доступных для проверки.',
