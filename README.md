@@ -80,6 +80,9 @@ explicitly.
   the engineering UI and explicitly enable only public/brokered read access
   for selected Team roles. Every grant is owner-scoped, revision-bound and can
   be revoked; it never grants shell, files, secrets or mutation authority.
+- **Browser evidence** — reviewed Browser MCP screenshots are stored as bounded,
+  owner-scoped task artifacts and shown in the Team evidence panel. They remain
+  untrusted evidence, not an automatic proof that a task or UI check passed.
 - **Russian UI** — the shipped Team, engineering and context-policy panels are
   localized; endpoint labels in model selectors are not truncated.
 
@@ -102,6 +105,11 @@ explicitly.
 поддерживаются лишь публичное чтение и чтение сети через посредника; операции
 изменения, доступ к секретам и к хосту этим механизмом не выдаются.
 
+Снимки Browser MCP сохраняются как ограниченные артефакты задачи, доступные
+только владельцу, и отображаются в панели доказательств команды. Это
+непроверенные данные: снимок сам по себе не означает, что задача или UI-проверка
+пройдены.
+
 ### Important
 
 The extension is for operator-owned, trusted machines. Shell, file and network
@@ -119,6 +127,10 @@ Reviewed MCP tools are not treated as safe based on a description or
 annotation: inspect the exact schema before enabling each one. Team supports
 only public reads and brokered network reads through this control; it grants no
 mutation, secret or host authority.
+
+Reviewed Browser MCP screenshots are retained as bounded, owner-scoped task
+artifacts in the Team evidence panel. They are untrusted evidence, not an
+automatic pass verdict for a task or UI check.
 
 ## Demo
 
