@@ -97,7 +97,8 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
   const requirements = createRequirementsPanel();
   const baselineComparison = createBaselineComparisonPanel();
   const lsp = createLspPanel();
-  content.append(createForm, projectCard, lsp.panel, checkProfiles.panel, checkRuns.panel, requirements.panel, baselineComparison.panel, policyForm, toolCard, probe.panel, contextPolicy.panel);
+  const mcpReviews = createMcpReviewsPanel();
+  content.append(createForm, projectCard, lsp.panel, checkProfiles.panel, checkRuns.panel, requirements.panel, baselineComparison.panel, policyForm, toolCard, mcpReviews.panel, probe.panel, contextPolicy.panel);
   section.append(heading, description, bindingNotice, status, refresh, content); root.append(section);
   if (contextOnly) {
     content.replaceChildren(contextPolicy.panel);
@@ -140,6 +141,73 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
       selectionChanged() { projectId = String(current()?.id || ''); ++generation; details.replaceChildren(); status.replaceChildren(); controls(); },
       destroy() { ++generation; },
     };
+  }
+
+  function createMcpReviewsPanel() {
+    let enabled = false, loadingReviews = false, saving = false, generation = 0;
+    const panel = el('section', undefined, 'mcp-reviews', 'team-card team-panel'); panel.hidden = true;
+    const refreshReviews = button('Refresh reviewed MCP tools', 'mcp-refresh');
+    const status = el('p', '', 'mcp-notice', 'team-notice'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    const rows = el('div', undefined, 'mcp-tools', 'engineering-tools');
+    panel.append(uiEl('h4', 'Reviewed MCP tools'), uiEl('p', 'Review one exact tool schema before enabling it for selected Team roles. Only public or brokered network reads are supported; this does not grant host access or execute a tool.'), refreshReviews, status, rows);
+    const say = (label, error = null) => { status.replaceChildren(uiEl('span', label)); if (error) status.append(el('span', `: ${message(error)}`)); status.className = `team-notice${error ? ' team-error' : ''}`; };
+    const controls = () => { refreshReviews.disabled = !enabled || loadingReviews || saving; };
+    const valid = row => row && typeof row.tool_id === 'string' && typeof row.schema_digest === 'string' && /^[a-f0-9]{64}$/.test(row.schema_digest) && typeof row.available === 'boolean' && row.schema && typeof row.schema === 'object';
+    function render(data) {
+      rows.replaceChildren();
+      const policies = new Map((Array.isArray(data.reviews) ? data.reviews : []).filter(item => item && typeof item.tool_id === 'string').map(item => [item.tool_id, item]));
+      const catalogue = Array.isArray(data.catalogue) ? data.catalogue : [];
+      if (!catalogue.length) { rows.append(uiEl('p', 'No connected MCP tools are available to review.')); return; }
+      for (const item of catalogue) {
+        if (!valid(item)) continue;
+        const policy = policies.get(item.tool_id), card = el('article', undefined, undefined, 'team-card');
+        card.append(el('strong', item.tool_id), uiEl('p', item.available ? 'Available' : 'Unavailable'));
+        const schema = el('details'), summary = uiEl('summary', 'Show exact schema'), code = el('pre', JSON.stringify(item.schema, null, 2), undefined, 'team-output'); code.setAttribute('data-i18n-ignore', ''); schema.append(summary, code); card.append(schema);
+        if (policy) { const state = el('p'); state.append(uiEl('span', policy.enabled ? 'MCP access enabled' : 'MCP access revoked'), el('span', `: ${policy.revision}`)); card.append(state); }
+        const roles = el('div', undefined, undefined, 'team-actions'), checks = [];
+        const selected = new Set(policy?.enabled === true && Array.isArray(policy.roles) ? policy.roles : []);
+        for (const role of ['lead', 'executor', 'researcher', 'reviewer']) {
+          const input = el('input'); input.type = 'checkbox'; input.checked = selected.has(role); input.id = `${prefix}-mcp-${item.tool_id.replace(/[^a-zA-Z0-9]/g, '-')}-${role}`;
+          const label = el('label', undefined, undefined, 'team-check'); label.htmlFor = input.id; label.append(input, uiEl('span', role)); roles.append(label); checks.push({ role, input });
+        }
+        const effect = el('select'); effect.append(option('brokered_network_read', 'Brokered network read', true), option('read_public', 'Public read', true));
+        if (policy?.enabled && Array.isArray(policy.effects) && policy.effects.length === 1 && ['brokered_network_read', 'read_public'].includes(policy.effects[0])) effect.value = policy.effects[0];
+        const confirm = el('input'); confirm.type = 'checkbox'; confirm.id = `${prefix}-mcp-confirm-${item.tool_id.replace(/[^a-zA-Z0-9]/g, '-')}`;
+        const confirmation = el('label', undefined, undefined, 'team-check'); confirmation.htmlFor = confirm.id; confirmation.append(confirm, uiEl('span', 'I reviewed this exact schema and approve this read-only Team access.'));
+        const save = button(policy?.enabled ? 'Update reviewed MCP access' : 'Enable reviewed MCP access', 'mcp-save'), revoke = button('Revoke MCP access', 'mcp-revoke'); revoke.hidden = !policy?.enabled;
+        const update = () => { save.disabled = saving || !item.available || !confirm.checked || !checks.some(check => check.input.checked); revoke.disabled = saving; };
+        confirm.addEventListener('change', update); checks.forEach(check => check.input.addEventListener('change', update)); update();
+        save.addEventListener('click', async () => {
+          if (save.disabled || saving) return;
+          saving = true; controls(); update(); say('Saving reviewed MCP access…');
+          try {
+            await request(`${API}/mcp/reviews`, { method: 'POST', body: { tool_id: item.tool_id, schema_digest: item.schema_digest, effects: [effect.value], roles: checks.filter(check => check.input.checked).map(check => check.role), expected_revision: Number.isInteger(policy?.revision) ? policy.revision : 0, confirmation: true } });
+            if (!disposed) { say('Reviewed MCP access saved.'); void load(); }
+          } catch (error) { if (!disposed) say('Unable to save reviewed MCP access. Refresh and review the exact schema again.', error); }
+          finally { saving = false; controls(); update(); }
+        });
+        revoke.addEventListener('click', async () => {
+          if (revoke.disabled || saving || !policy?.enabled) return;
+          saving = true; controls(); update(); say('Revoking MCP access…');
+          try {
+            await request(`${API}/mcp/reviews/revoke`, { method: 'POST', body: { tool_id: item.tool_id, expected_revision: policy.revision } });
+            if (!disposed) { say('Reviewed MCP access revoked.'); void load(); }
+          } catch (error) { if (!disposed) say('Unable to revoke MCP access. Refresh before trying again.', error); }
+          finally { saving = false; controls(); update(); }
+        });
+        card.append(field('Allowed read effect', effect, `mcp-effect-${item.tool_id}`), roles, confirmation, save, revoke); rows.append(card);
+      }
+      if (!rows.children.length) rows.append(uiEl('p', 'No valid MCP review entries were returned.'));
+    }
+    async function load() {
+      if (disposed || !enabled || loadingReviews) return;
+      const token = ++generation; loadingReviews = true; controls(); say('Loading reviewed MCP tools…');
+      try { const data = await request(`${API}/mcp/reviews`, { method: 'GET' }); if (!disposed && token === generation) { render(data); say('Reviewed MCP tools loaded.'); } }
+      catch (error) { if (!disposed && token === generation) { rows.replaceChildren(); say('Unable to load reviewed MCP tools.', error); } }
+      finally { if (!disposed && token === generation) { loadingReviews = false; controls(); } }
+    }
+    refreshReviews.addEventListener('click', () => void load());
+    return { panel, setEnabled(value) { enabled = value === true; panel.hidden = !enabled; if (enabled) void load(); else { ++generation; rows.replaceChildren(); } controls(); }, destroy() { ++generation; } };
   }
 
   function createCheckProfilesPanel() {
@@ -1501,7 +1569,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
         notice(feature('context_policy') ? 'Review values and explicitly select the overrides to save.' : 'Context settings are unavailable on this server.');
         return;
       }
-      content.hidden = !feature('projects') && !feature('model_probe') && !feature('context_policy') && !feature('check_profiles') && !feature('check_runs') && !feature('requirements') && !feature('baseline_comparison');
+      content.hidden = !feature('projects') && !feature('model_probe') && !feature('context_policy') && !feature('check_profiles') && !feature('check_runs') && !feature('requirements') && !feature('baseline_comparison') && !feature('reviewed_mcp');
       probe.setEnabled(feature('model_probe'));
       contextPolicy.setEnabled(feature('context_policy'));
       lsp.setEnabled(feature('lsp'));
@@ -1509,6 +1577,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
       checkRuns.setEnabled(feature('check_runs'));
       requirements.setEnabled(feature('requirements'));
       baselineComparison.setEnabled(feature('baseline_comparison'));
+      mcpReviews.setEnabled(feature('reviewed_mcp'));
       createForm.hidden = !feature('projects'); policyForm.hidden = !feature('policy'); toolCard.hidden = !feature('tool_catalog');
       if (!feature('projects')) { selectedId = ''; ++toolsGeneration; lsp.selectionChanged(); checkProfiles.selectionChanged(); requirements.selectionChanged(); baselineComparison.selectionChanged(); onProjectSelected(null); notice('Engineering projects are unavailable or disabled on this server.'); return; }
       const [hostData, projectData] = await Promise.all([
@@ -1575,7 +1644,7 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
   });
   refresh.addEventListener('click', () => void discover());
   updateControls(); void discover();
-  const destroy = () => { disposed = true; probe.destroy(); contextPolicy.destroy(); lsp.destroy(); checkProfiles.destroy(); checkRuns.destroy(); requirements.destroy(); baselineComparison.destroy(); ++toolsGeneration; ++discoveryGeneration; section.remove(); };
+  const destroy = () => { disposed = true; probe.destroy(); contextPolicy.destroy(); lsp.destroy(); checkProfiles.destroy(); checkRuns.destroy(); requirements.destroy(); baselineComparison.destroy(); mcpReviews.destroy(); ++toolsGeneration; ++discoveryGeneration; section.remove(); };
   destroy.setTaskContext = value => {
     if (disposed || JSON.stringify(taskContext) === JSON.stringify(value)) return;
     taskContext = value; contextPolicy.selectionChanged();

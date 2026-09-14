@@ -48,6 +48,9 @@ def setup_engineering_routes():
             'baseline_comparison': True,
             'context_policy': os.environ.get('ODYSSEUS_CONTEXT_POLICY_ENABLED') == '1',
             'isolated_execution': os.environ.get('ODYSSEUS_ISOLATED_RUNNER_ENABLED') == '1', 'cross_host_workspaces': False,
+            # Per-owner reviewed MCP policies are deliberately separate from
+            # the project tool catalogue: they are not granted by a project.
+            'reviewed_mcp': os.environ.get('ODYSSEUS_TEAM_MCP_ENABLED') == '1',
             # The server-owned LSP bridge is live. Individual language servers
             # remain discoverable capabilities of the selected execution host.
             'lsp': True, 'debug': False, 'experiments': False}}
