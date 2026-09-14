@@ -348,10 +348,12 @@ def test_sse_replays_only_after_seq_with_real_store_payload_and_no_run_cancel(te
 
 def test_timeline_replays_durable_history_in_pages_and_is_owner_scoped(team_client):
     env = team_client
+    existing = env.store.events("alice", env.task["id"], limit=500)
+    before = existing[-1]['seq'] if existing else 0
     for index in range(3):
         env.store.add_event("alice", env.task["id"], "worker_delta", {
             "worker_id": env.worker["id"], "message_id": "turn-1", "text": str(index)})
-    first = env.client.get(f"/api/team/{env.task['id']}/timeline?after_seq=0&limit=2")
+    first = env.client.get(f"/api/team/{env.task['id']}/timeline?after_seq={before}&limit=2")
     assert first.status_code == 200
     body = first.json()
     assert [event['payload']['text'] for event in body['events']] == ['0', '1']
