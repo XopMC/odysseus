@@ -76,6 +76,10 @@ explicitly.
   configurable context-compaction policies, and a read-only LSP discovery
   panel. Language-server availability is reported per execution host; the
   Jetson release includes a user-level Python/Pyright toolchain.
+- **Reviewed Team MCP** — the owner can inspect an exact current MCP schema in
+  the engineering UI and explicitly enable only public/brokered read access
+  for selected Team roles. Every grant is owner-scoped, revision-bound and can
+  be revoked; it never grants shell, files, secrets or mutation authority.
 - **Russian UI** — the shipped Team, engineering and context-policy panels are
   localized; endpoint labels in model selectors are not truncated.
 
@@ -93,6 +97,11 @@ explicitly.
 На Jetson также проверен Pyright: открытие документа и поиск символов работают
 через LSP-runner без замены системного Node.js.
 
+Проверенные MCP-инструменты не считаются безопасными по описанию или аннотации:
+включайте каждый инструмент только после просмотра его точной схемы. В команде
+поддерживаются лишь публичное чтение и чтение сети через посредника; операции
+изменения, доступ к секретам и к хосту этим механизмом не выдаются.
+
 ### Important
 
 The extension is for operator-owned, trusted machines. Shell, file and network
@@ -105,6 +114,11 @@ The low-level Linux isolated-runner operation has been verified on Jetson, but
 remains an operator capability until the project-facing UI flow is released.
 Pyright has also been verified on Jetson for document open and symbol lookup,
 using a user-level Node runtime rather than replacing the system Node.js.
+
+Reviewed MCP tools are not treated as safe based on a description or
+annotation: inspect the exact schema before enabling each one. Team supports
+only public reads and brokered network reads through this control; it grants no
+mutation, secret or host authority.
 
 ## Demo
 
