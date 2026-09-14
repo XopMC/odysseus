@@ -9,6 +9,7 @@ case "$source_dir" in /*) ;; *) echo "Source snapshot must be absolute" >&2; exi
 test -f "$source_dir/pyproject.toml"
 test -f "$source_dir/.gitignore"
 test -f "$source_dir/tests/conftest.py"
+test -f "$source_dir/services/hwfit/data/hf_models.json"
 test ! -e "$source_dir/.env"
 test ! -d "$source_dir/data"
 docker run --rm --network none --cpus 4 --memory 8g \
