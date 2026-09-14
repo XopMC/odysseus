@@ -1,5 +1,22 @@
 # Engineering workspace implementation ledger
 
+## 2026-09-15 Jetson engineering toolchains
+
+The persistent Jetson runner now has executable, user-scoped toolchains for
+Python/Pyright, TypeScript, C/C++/CUDA, Go, Rust and Solidity. The runner PATH
+contains CUDA 12.6, the user Node runtime, Go, Rust and user LSP binaries; this
+is deliberate so a systemd-launched runner sees the same tools that discovery
+reports. Real runner start/stop probes passed for Python, TypeScript, C/C++, Go,
+Rust and Solidity. C++, CUDA (`nvcc`), Go, Rust and Solidity (`solc`) smoke
+programs also compiled successfully.
+
+Xcode and Metal are not reported as available on Jetson: they are macOS-only
+toolchains and require the configured Mac execution host. This deployment does
+not falsely mark DAP, profile UI, preview/trace or cross-host Git transfer as
+finished; those remain separate subsystem releases. A Swift Linux toolchain is
+installed only after its official signature is verified and SourceKit-LSP starts
+through the runner.
+
 ## 2026-09-14 consolidated Team engineering regression
 
 Production image `odysseus:jetson-engineering-20260914-requirements-ui12` is

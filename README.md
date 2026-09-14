@@ -75,7 +75,9 @@ explicitly.
   reviewed check commands, acceptance criteria, tool availability diagnostics,
   configurable context-compaction policies, and a read-only LSP discovery
   panel. Language-server availability is reported per execution host; the
-  Jetson release includes a user-level Python/Pyright toolchain.
+  Jetson release includes user-level Python/Pyright, TypeScript, C/C++, Go,
+  Rust and Solidity toolchains. Discovery reports only servers that the
+  persistent runner can actually start.
 - **Reviewed Team MCP** — the owner can inspect an exact current MCP schema in
   the engineering UI and explicitly enable only public/brokered read access
   for selected Team roles. Every grant is owner-scoped, revision-bound and can
@@ -102,8 +104,10 @@ explicitly.
 его нельзя считать полной IDE-поддержкой только из-за наличия кнопки.
 Низкоуровневый изолированный запуск Linux уже проверен на Jetson, но до
 публичного UI-потока проекта он остаётся отдельной операторской возможностью.
-На Jetson также проверен Pyright: открытие документа и поиск символов работают
-через LSP-runner без замены системного Node.js.
+На Jetson проверены запуск и остановка LSP для Python, TypeScript, C/C++, Go,
+Rust и Solidity. Также реально собраны smoke-примеры C++, CUDA, Go, Rust и
+Solidity. Это не делает Linux-устройство заменой Mac: Xcode и Metal-профили
+по-прежнему запускаются только на явно выбранном Mac-host.
 
 **Память проекта** хранит факты, источник и состояние проверки (`предложено`,
 `проверено`, `устарело`) отдельно для владельца и проекта. Сохранение и удаление
@@ -131,8 +135,10 @@ The LSP bridge works only with language servers actually installed and verified
 on the selected host; its presence is not full IDE support.
 The low-level Linux isolated-runner operation has been verified on Jetson, but
 remains an operator capability until the project-facing UI flow is released.
-Pyright has also been verified on Jetson for document open and symbol lookup,
-using a user-level Node runtime rather than replacing the system Node.js.
+Jetson has verified LSP start/stop coverage for Python, TypeScript, C/C++, Go,
+Rust and Solidity, plus real C++, CUDA, Go, Rust and Solidity compiler smoke
+checks. This does not turn Linux into a Mac replacement: Xcode and Metal
+profiles remain available only on an explicitly selected Mac execution host.
 
 Reviewed MCP tools are not treated as safe based on a description or
 annotation: inspect the exact schema before enabling each one. Team supports
