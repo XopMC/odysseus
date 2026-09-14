@@ -173,6 +173,28 @@ def test_project_policy_workflow_and_other_owner(client):
     assert client.get(ROOT + '/projects').json()['projects'] == []
 
 
+def test_project_memory_api_owner_confirmation_and_revision(client):
+    project = create(client)
+    url = ROOT + '/projects/' + project['id'] + '/memory'
+    body = {'memory_id': '', 'kind': 'architecture', 'text': 'Runner owns PTY state',
+            'source': 'host-runner protocol', 'state': 'verified',
+            'expected_revision': 0, 'confirmation': False}
+    assert client.post(url, json=body).status_code == 403
+    saved = client.post(url, json={**body, 'confirmation': True})
+    assert saved.status_code == 200, saved.text
+    item = saved.json()
+    assert client.get(url).json()['items'] == [item]
+    assert client.post(url, json={**item, 'text': 'changed', 'expected_revision': 0,
+                                  'confirmation': True}).status_code == 409
+    client.cookies.set('odysseus_session', 'bob-cookie')
+    assert client.get(url).status_code == 404
+    assert client.delete(url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': True}).status_code == 404
+    client.cookies.set('odysseus_session', 'alice-cookie')
+    assert client.delete(url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': False}).status_code == 403
+    assert client.delete(url + '/' + item['id'], json={'expected_revision': 1, 'confirmation': True}).status_code == 200
+    assert client.get(url).json()['items'] == []
+
+
 def test_isolated_policy_requires_verified_runner_capability(client, monkeypatch):
     project = create(client)
     calls = []
