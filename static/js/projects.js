@@ -139,15 +139,16 @@ function modal() {
   node = document.createElement('div'); node.id = 'project-create-modal'; node.className = 'modal hidden';
   node.innerHTML = `<div class="modal-content project-create-dialog" role="dialog" aria-modal="true" aria-label="Create project">
     <div class="modal-header"><h4>Create project</h4><button type="button" class="close-btn">×</button></div>
-    <div class="modal-body"><label>Project name<input id="project-name" maxlength="200"></label>
-    <label>Execution host<select id="project-host"></select></label>
-    <label>Project folder<div class="project-path-row"><input id="project-root" value="/home/xopmc"><button type="button" id="project-browse">Browse</button></div></label>
+    <div class="modal-body"><label><span data-project-label>Project name</span><input id="project-name" maxlength="200"></label>
+    <label><span data-project-label>Execution host</span><select id="project-host"></select></label>
+    <label><span data-project-label>Project folder</span><div class="project-path-row"><input id="project-root" value="/home/xopmc"><button type="button" id="project-browse">Browse</button></div></label>
     <div id="project-folders" class="project-folder-list"></div>
-    <label>Access mode<select id="project-access"><option value="read_only">Read-only</option><option value="trusted_host">Trusted host</option><option value="isolated">Isolation</option></select></label>
+    <label><span data-project-label>Access mode</span><select id="project-access"><option value="read_only">Read-only</option><option value="trusted_host">Trusted host</option><option value="isolated">Isolation</option></select></label>
     <p class="project-safety">Selecting a folder does not grant execution. Trusted host and isolation are explicit project permissions.</p>
     <div class="chat-work-actions"><button type="button" id="project-save">Create</button><button type="button" class="project-close">Cancel</button></div></div></div>`;
   document.body.appendChild(node);
-  node.querySelectorAll('h4,label,button,option,p').forEach(item => { const source = item.textContent.trim(); if (source) bindUiText(item, source); });
+  node.querySelectorAll('h4,[data-project-label],button,option,p').forEach(item => { const source = item.textContent.trim(); if (source) bindUiText(item, source); });
+  bindUiText(node.querySelector('[role="dialog"]'), 'Create project', 'aria-label');
   const close = () => node.classList.add('hidden');
   node.querySelector('.close-btn').addEventListener('click', close); node.querySelector('.project-close').addEventListener('click', close);
   el('project-browse').addEventListener('click', async () => {
@@ -176,12 +177,21 @@ function modal() {
 
 async function openCreate() {
   const node = modal();
+  // Give immediate feedback even while the host list is loading.  On a narrow
+  // screen the sidebar otherwise covers the bottom-sheet and makes a valid
+  // click look like it did nothing.
+  node.classList.remove('hidden');
+  if (window.matchMedia('(max-width: 768px)').matches) el('sidebar')?.classList.add('hidden');
+  el('project-name').focus();
   try {
     const data = await request(`${api}/api/projects/hosts`);
     const select = el('project-host'); select.replaceChildren();
     for (const host of data.hosts || []) { const option=document.createElement('option'); option.value=host.id; option.textContent=host.name; select.appendChild(option); }
-    node.classList.remove('hidden'); el('project-name').focus();
-  } catch (error) { window.uiModule?.showError?.(t(error.message)); }
+    if (!select.options.length) throw new Error('Execution host is not configured');
+  } catch (error) {
+    node.classList.add('hidden');
+    window.uiModule?.showError?.(t(error.message));
+  }
 }
 
 function bind() {
