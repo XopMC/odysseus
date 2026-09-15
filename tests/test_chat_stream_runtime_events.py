@@ -80,7 +80,9 @@ def test_runtime_control_events_survive_route_filter_and_reach_detached_snapshot
     observed = [json.loads(line[6:]) for line in response.text.splitlines()
                 if line.startswith("data: ") and line != "data: [DONE]"]
     control_types = {"context_usage", "compacted", "tool_retry_blocked"}
-    assert [event for event in observed if event.get("type") in control_types] == expected[:-1]
+    controls = [event for event in observed if event.get("type") in control_types]
+    assert [{key: value for key, value in event.items() if key != "_replay"} for event in controls] == expected[:-1]
+    assert all(event["_replay"]["run_id"] == response.headers["X-Odysseus-Run-Id"] for event in controls)
     assert any(event.get("delta") == expected[-1]["delta"] for event in observed)
     assert "agent" in captured
     run = agent_runs._RUNS["session-1"]

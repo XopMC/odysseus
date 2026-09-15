@@ -123,6 +123,11 @@ PLAN_MODE_READONLY_TOOLS = {
     "resolve_contact",
     "chat_with_model",
     "ask_teacher",
+    # These only persist the proposed plan itself; they cannot touch the
+    # workspace or invoke an external side effect.
+    "ask_user",
+    "create_plan",
+    "update_plan",
 }
 
 
@@ -163,6 +168,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "bash", "python",
     # Controls shell processes (kill); plan mode can't run bash anyway.
     "manage_bg_jobs",
+    "update_plan_step", "update_goal_progress", "complete_goal",
 }
 
 

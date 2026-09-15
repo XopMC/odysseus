@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -128,3 +129,26 @@ class DetachedReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first.task.cancelled())
         gate.set()
         await first.task
+
+    async def test_json_events_have_stable_ids_and_cursor_resume(self):
+        async def source():
+            yield 'data: ' + json.dumps({'delta': 'hello'}) + '\n\n'
+            yield 'data: ' + json.dumps({'type': 'tool_start', 'tool': 'bash'}) + '\n\n'
+            yield 'data: ' + json.dumps({'type': 'tool_progress', 'tool': 'bash', 'tail': 'one'}) + '\n\n'
+            yield 'data: ' + json.dumps({'type': 'tool_output', 'tool': 'bash', 'output': 'ok', 'exit_code': 0}) + '\n\n'
+
+        run = agent_runs.start('cursor-chat', source())
+        await run.task
+        all_events = [event async for event in agent_runs.subscribe('cursor-chat', run)]
+        resumed = [event async for event in agent_runs.subscribe('cursor-chat', run, after_seq=1)]
+        self.assertEqual(len(all_events), 4)
+        self.assertEqual(resumed, all_events[2:])
+        decoded = []
+        for seq, event in enumerate(all_events):
+            self.assertIn(f'id: {seq}\n', event)
+            payload = json.loads(next(line[6:] for line in event.splitlines() if line.startswith('data: ')))
+            self.assertEqual(payload['_replay']['run_id'], run.run_id)
+            self.assertEqual(payload['_replay']['seq'], seq)
+            decoded.append(payload)
+        tool_ids = [item['tool_call_id'] for item in decoded[1:]]
+        self.assertEqual(tool_ids, [tool_ids[0]] * 3)

@@ -115,6 +115,27 @@ class EngineeringStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.create_project('alice', name='Bad', root=root, host_id='legacy-jetson')
 
+    def test_project_skills_are_digest_versioned_and_never_cross_projects(self):
+        first = self.project()
+        second = self.store.create_project('alice', name='Other', root='/work/other', host_id='legacy-jetson')
+        skill = self.store.save_skill(
+            'alice', first['id'], name='release', source='project:.odysseus/skills/release/SKILL.md',
+            content='# Release\nRun the approved checks.', enabled=True, expected_revision=0,
+        )
+        self.assertEqual(skill['revision'], 1)
+        self.assertEqual(len(skill['digest']), 64)
+        self.assertEqual(self.store.list_skills('alice', second['id']), [])
+        self.assertEqual(self.store.enabled_skill_context('alice', first['id'])[0]['name'], 'release')
+        with self.assertRaises(NotFound):
+            self.store.list_skills('bob', first['id'])
+        with self.assertRaises(Conflict):
+            self.store.save_skill(
+                'alice', first['id'], name='release', source='manual', content='changed',
+                enabled=True, expected_revision=0,
+            )
+        self.store.delete_skill('alice', first['id'], skill['id'], expected_revision=1)
+        self.assertEqual(self.store.list_skills('alice', first['id']), [])
+
 
 if __name__ == '__main__':
     unittest.main()

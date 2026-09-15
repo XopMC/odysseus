@@ -1363,6 +1363,7 @@ import { bindUiText } from './i18n.js';
       return Object.freeze({
         mode,
         plan: checked('plan-toggle'),
+        goal: !!stored.goal_mode,
         web: checked('web-toggle'),
         bash: checked('bash-toggle'),
         research: checked('research-toggle'),
@@ -2000,6 +2001,7 @@ import { bindUiText } from './i18n.js';
 	      }
 	      fd.append('mode', isAgentMode ? 'agent' : 'chat');
 	      fd.append('plan_mode', isPlanMode ? 'true' : 'false');
+	      fd.append('goal_mode', choicesForSend.goal ? 'true' : 'false');
 	      if (!isPlanMode && _pendingApprovedPlan) {
 	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
 	        _pendingApprovedPlan = '';
@@ -3936,6 +3938,10 @@ import { bindUiText } from './i18n.js';
                 // the stored plan + live-refresh the docked plan window.
                 const _pu = (json.data && json.data.plan) ? json.data.plan : '';
                 if (_pu) _setStoredPlan(_pu);
+                window.chatWork?.handleEvent?.(json);
+
+              } else if (json.type === 'goal_update') {
+                window.chatWork?.handleEvent?.(json);
 
               } else if (json.type === 'agent_step') {
                 _closeOpenThinkingMarkup(_isBg);
@@ -4317,24 +4323,7 @@ import { bindUiText } from './i18n.js';
         }
         // Also store raw on the footer target so copy/TTS work
 	        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
-		        try {
-		          const _endToggles = Storage.loadToggleState();
-		          if (_endToggles.plan_mode && accumulated) {
-		            _setStoredPlan(accumulated);
-		            _attachPlanActions(footerTarget, accumulated);
-		            // Goal mode deliberately automates only the user-visible
-		            // approval transition. The server still enforces every tool,
-		            // confirmation and resource policy during execution.
-		            if (_endToggles.goal_mode) {
-		              const goalPlan = _getStoredPlan() || _extractPlanText(accumulated);
-		              if (goalPlan.trim()) {
-		                _pendingApprovedPlan = goalPlan;
-		                if (window.__odysseusSetPlanMode) window.__odysseusSetPlanMode(false);
-		                setTimeout(() => _setComposerAndSend('Execute the approved goal. Verify every completion criterion with tools; if a criterion cannot be verified, report it as blocked rather than complete.'), 0);
-		              }
-		            }
-		          }
-		        } catch (_) {}
+		        window.chatWork?.onRunEnded?.(streamSessionId);
 	        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
 	          addAITTSButton(footerTarget, accumulated);
 	        }
@@ -4823,6 +4812,7 @@ import { bindUiText } from './i18n.js';
       : (active ? active.abortCtrl : currentAbort);
     let abortNow = true;
     if (stopServer) {
+      window.chatWork?.pauseActiveGoal?.();
       try {
         if (_sid) {
           // Before response headers arrive there is no safe server-side stop
@@ -5114,7 +5104,7 @@ import { bindUiText } from './i18n.js';
     // Restore the same Stop affordance when another device attaches: the
     // opaque run id above makes this a precise stop, never a broad
     // session-wide cancellation.
-    const resumedSubmitBtn = document.querySelector('.send-btn');
+    const resumedSubmitBtn = document.querySelector?.('.send-btn');
     if (resumedSubmitBtn && isCurrentView()) updateSubmitButton('streaming', resumedSubmitBtn);
 
     const box = document.getElementById('chat-history');
@@ -5126,8 +5116,10 @@ import { bindUiText } from './i18n.js';
 
     const meta = sessionModule.getSessions().find(s => s.id === sessionId);
     const roleLabel = _shortModel(meta && meta.model);
-    const roleTs = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const resumeStartedAt = Number(res.headers.get('X-Odysseus-Started-At') || 0) * 1000;
+    const roleTs = new Date(resumeStartedAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const replayHolders = [];
+    const replayNodes = [];
     const createReplayHolder = (previous = null) => {
       const holder = document.createElement('div');
       holder.className = replayHolders.length ? 'msg msg-ai msg-continuation streaming' : 'msg msg-ai';
@@ -5146,10 +5138,15 @@ import { bindUiText } from './i18n.js';
       _applyModelColor(holder.querySelector('.role'), holder._actualModel);
       box.appendChild(holder);
       replayHolders.push(holder);
+      replayNodes.push(holder);
       return holder;
     };
     const removeReplayHolders = () => {
-      for (const node of replayHolders) {
+      for (const node of replayNodes) {
+        node.querySelectorAll?.('.agent-thread-node').forEach(toolNode => {
+          if (toolNode._waveInterval) clearInterval(toolNode._waveInterval);
+          if (toolNode._elapsedTicker) clearInterval(toolNode._elapsedTicker);
+        });
         if (node._docWritingThread?.parentNode) node._docWritingThread.remove();
         if (node.parentNode) node.remove();
       }
@@ -5175,6 +5172,8 @@ import { bindUiText } from './i18n.js';
     let replayError = null;
     let canonicalTerminalSeen = false;
     let replayTool = null;
+    let replayThread = null;
+    let nextDeltaStartsRound = false;
     let replayThinking = '';
     const replayEvents = new Set();
     // "Rich" responses (tool calls, sources, doc streaming, multi-round) need the
@@ -5184,6 +5183,80 @@ import { bindUiText } from './i18n.js';
 
     const cleanup = () => {
       try { spinner.destroy(); } catch (_) {}
+    };
+
+    const finishReplayThinking = () => {
+      const section = holder?.querySelector('.thinking-section');
+      if (!section) return;
+      section.querySelector('.thinking-content')?.classList.remove('expanded');
+      section.querySelector('.thinking-toggle')?.classList.remove('expanded');
+      const label = section.querySelector('.live-think-header-text');
+      if (label) { label.textContent = 'View thinking process'; bindUiText(label, 'View thinking process'); }
+    };
+
+    const renderReplayThinking = () => {
+      if (!replayThinking || !holder) return;
+      let section = holder.querySelector('.thinking-section');
+      if (!section) {
+        const id = 'replay-think-' + Math.random().toString(36).slice(2);
+        section = document.createElement('div');
+        section.className = 'thinking-section';
+        section.innerHTML = `<div class="thinking-header" data-thinking-id="${id}"><div class="thinking-header-left"><span class="live-think-header-text">Thinking…</span></div><span class="thinking-toggle expanded" id="${id}-toggle"></span></div><div class="thinking-content expanded" id="${id}"><div class="thinking-content-inner"></div></div>`;
+        bindUiText(section.querySelector('.live-think-header-text'), 'Thinking…');
+        holder.querySelector('.body')?.insertBefore(section, contentDiv);
+      }
+      const inner = section.querySelector('.thinking-content-inner');
+      if (inner) inner.innerHTML = markdownModule.mdToHtml(replayThinking);
+    };
+
+    const ensureReplayThread = () => {
+      if (replayThread?.isConnected) return replayThread;
+      replayThread = document.createElement('div');
+      replayThread.className = 'agent-thread streaming';
+      const previous = box.lastElementChild;
+      if (previous?.classList.contains('msg') || previous?.classList.contains('agent-thread')) {
+        replayThread.classList.add('has-top');
+      }
+      box.appendChild(replayThread);
+      replayNodes.push(replayThread);
+      return replayThread;
+    };
+
+    const startReplayTool = (json) => {
+      const thread = ensureReplayThread();
+      const node = document.createElement('div');
+      node.className = 'agent-thread-node running';
+      const name = String(json.tool || 'Tool');
+      const command = json.command ? `<pre class="agent-thread-cmd">${uiModule.esc(String(json.command))}</pre>` : '';
+      node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">▶</span><span class="agent-thread-tool">${uiModule.esc(name)}</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${command}</div>`;
+      node.dataset.toolCallId = String(json.tool_call_id || json._replay?.tool_call_id || '');
+      thread.appendChild(node);
+      const started = Number(json._replay?.created_at || json._replay?.started_at || 0) * 1000;
+      node._startTime = started || Date.now();
+      node._elapsedTicker = setInterval(() => {
+        const header = node.querySelector('.agent-thread-header');
+        if (!header || !node.isConnected) return;
+        let elapsed = header.querySelector('.agent-thread-elapsed');
+        if (!elapsed) {
+          elapsed = document.createElement('span');
+          elapsed.className = 'agent-thread-elapsed';
+          header.insertBefore(elapsed, header.querySelector('.agent-thread-tool'));
+        }
+        const seconds = Math.max(0, (Date.now() - node._startTime) / 1000);
+        elapsed.textContent = seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`;
+      }, 200);
+      replayTool = { node, name };
+      return replayTool;
+    };
+
+    const findReplayTool = (json) => {
+      const id = String(json.tool_call_id || json._replay?.tool_call_id || '');
+      if (id) {
+        const found = replayNodes.flatMap(n => Array.from(n.querySelectorAll?.('.agent-thread-node') || []))
+          .find(n => n.dataset.toolCallId === id);
+        if (found) return { node: found, name: String(json.tool || found.querySelector('.agent-thread-tool')?.textContent || 'Tool') };
+      }
+      return replayTool;
     };
 
     const renderDelta = () => {
@@ -5248,17 +5321,23 @@ import { bindUiText } from './i18n.js';
             if (json.thinking === true || json.channel === 'thinking' || json.channel === 'thought') {
               replayThinking += json.delta;
               rich = true;
+              renderReplayThinking();
+              uiModule.scrollHistory();
               continue;
             }
             // A tool result closes the preceding model turn. New prose needs
             // a fresh bubble even when an older persisted run omitted the
             // agent_step event between the tool and its next delta.
-            if (replayTool) {
+            if (replayTool || nextDeltaStartsRound) {
+              finishReplayThinking();
+              if (replayThread) replayThread.classList.add('has-bottom');
               holder = createReplayHolder(holder);
               contentDiv = holder.querySelector('.stream-content');
               roundText = '';
               docFenceOpened = false;
               replayTool = null;
+              replayThread = null;
+              nextDeltaStartsRound = false;
               replayThinking = '';
             }
             roundText += json.delta;
@@ -5339,6 +5418,9 @@ import { bindUiText } from './i18n.js';
               metricsData._costRecordId = _metricsCostRecordId(resumeRunId, json);
             }
             if (metricsData) displayMetrics(holder, metricsData);
+          } else if (json.type === 'plan_update' || json.type === 'goal_update') {
+            rich = true;
+            window.chatWork?.handleEvent?.(json);
           } else if (json.type === 'agent_step') {
             // Each round remains visible while a remote agent continues.
             // Previously replay ignored tool/round events until the whole run
@@ -5346,44 +5428,38 @@ import { bindUiText } from './i18n.js';
             rich = true;
             // Avoid an empty leading duplicate, but preserve every real
             // persisted round boundary in a long-running agent timeline.
-            if (roundText.trim() || replayTool || gotDelta) {
-              holder = createReplayHolder(holder);
-              contentDiv = holder.querySelector('.stream-content');
-            }
-            roundText = '';
+            finishReplayThinking();
+            nextDeltaStartsRound = Boolean(roundText.trim() || replayTool || gotDelta);
             docFenceOpened = false;
-            replayTool = null;
             replayThinking = '';
           } else if (json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress') {
             rich = true;
             try { spinner.destroy(); } catch (_) {}
-            // Each invocation gets a distinct temporary turn. This mirrors
-            // the live agent thread instead of appending every bash call to
-            // the one assistant message created at reconnect.
-            if (json.type === 'tool_start' && (roundText.trim() || replayTool)) {
-              holder = createReplayHolder(holder);
-              contentDiv = holder.querySelector('.stream-content');
-              roundText = '';
-              docFenceOpened = false;
-              replayTool = null;
-              replayThinking = '';
+            finishReplayThinking();
+            if (json.type === 'tool_start') replayTool = startReplayTool(json);
+            else replayTool = findReplayTool(json) || startReplayTool(json);
+            const node = replayTool.node;
+            const content = node.querySelector('.agent-thread-content');
+            if (json.type === 'tool_progress') {
+              let tail = node.querySelector('.agent-thread-tail');
+              const detail = json.tail ?? json.message ?? '';
+              if (detail !== '') {
+                if (!tail) {
+                  tail = document.createElement('pre');
+                  tail.className = 'agent-thread-tail';
+                  content?.appendChild(tail);
+                }
+                tail.textContent = String(detail).slice(-65536);
+              }
+            } else if (json.type === 'tool_output') {
+              if (node._elapsedTicker) { clearInterval(node._elapsedTicker); node._elapsedTicker = null; }
+              const ok = json.exit_code == null || json.exit_code === 0;
+              node.className = 'agent-thread-node' + (ok ? '' : ' error');
+              const command = json.command ? `<pre class="agent-thread-cmd">${uiModule.esc(String(json.command))}</pre>` : '';
+              const output = json.output ? `<details class="agent-tool-output"><summary>Output</summary><pre>${uiModule.esc(String(json.output).slice(-65536))}</pre></details>` : '';
+              node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '✓' : '✗'}</span><span class="agent-thread-tool">${uiModule.esc(replayTool.name)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">▶</span></div><div class="agent-thread-content">${command}${output}</div>`;
+              chatRenderer.localizeToolNode?.(node);
             }
-            if (json.type === 'tool_start' || !replayTool) {
-              const card = document.createElement('details');
-              card.className = 'agent-tool-output remote-tool-activity';
-              card.open = true;
-              const label = document.createElement('summary');
-              const output = document.createElement('pre');
-              card.appendChild(label); card.appendChild(output);
-              holder.querySelector('.body').appendChild(card);
-              replayTool = { card, label, output, name: String(json.tool || 'Tool') };
-            }
-            const finished = json.type === 'tool_output';
-            const state = finished ? (json.exit_code == null || json.exit_code === 0 ? '✓' : '✗') : '↻';
-            replayTool.label.textContent = `${state} ${replayTool.name}`;
-            replayTool.card.dataset.status = finished ? (state === '✓' ? 'done' : 'failed') : 'running';
-            const detail = json.output ?? json.message ?? json.command ?? '';
-            if (detail !== '') replayTool.output.textContent = String(detail).slice(-65536);
             uiModule.scrollHistory();
           } else if (json.type === 'web_sources' || json.type === 'rag_sources' ||
                      json.type === 'research_progress' || json.type === 'research_sources' ||
@@ -5399,7 +5475,7 @@ import { bindUiText } from './i18n.js';
 
     cleanup();
     if (isCurrentView()) {
-      const finishedResumeSubmitBtn = document.querySelector('.send-btn');
+      const finishedResumeSubmitBtn = document.querySelector?.('.send-btn');
       if (finishedResumeSubmitBtn) updateSubmitButton('idle', finishedResumeSubmitBtn);
     }
     if (!isCurrentView()) leftSession = true;
@@ -5409,6 +5485,7 @@ import { bindUiText } from './i18n.js';
     const onThisSession = sessionModule.getCurrentSessionId &&
                           sessionModule.getCurrentSessionId() === sessionId;
     if (onThisSession) refreshChatContextHeader('resume-finished');
+    if (onThisSession) window.chatWork?.onRunEnded?.(sessionId);
 
     // A failure before substantive output has no persisted assistant record to
     // recover through a canonical reload. Keep its sanitized provider/request

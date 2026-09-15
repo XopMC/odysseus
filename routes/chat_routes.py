@@ -12,6 +12,7 @@ from typing import Dict, Any, AsyncGenerator, List, Optional
 from fastapi import APIRouter, Request, HTTPException, Form, Query, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
+from sqlalchemy.exc import OperationalError
 
 from core.models import ChatMessage
 from src.request_models import ChatRequest
@@ -76,6 +77,7 @@ from src.tool_policy import (
 from src.tool_approvals import tool_approval_store
 from src.tool_approval_scopes import stamp_chat_session_grant
 from src.tool_security import delegated_credential_blocked_tools
+from src.chat_work_store import WorkNotFound, store as chat_work_store
 
 logger = logging.getLogger(__name__)
 
@@ -999,6 +1001,9 @@ def setup_chat_routes(
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
         plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
+        goal_mode = str(form_data.get("goal_mode") or (body or {}).get("goal_mode") or "").lower() == "true"
+        goal_continuation = str(form_data.get("goal_continuation") or (body or {}).get("goal_continuation") or "").lower() == "true"
+        goal_lease_token = str(form_data.get("goal_lease_token") or (body or {}).get("goal_lease_token") or "").strip()
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
         tool_approval_id = (
             form_data.get("tool_approval_id")
@@ -1018,7 +1023,7 @@ def setup_chat_routes(
             request, form_data.get("workspace")
         )
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
-        if plan_mode:
+        if plan_mode or goal_mode:
             chat_mode = "agent"
         # An approved plan being EXECUTED: the frontend sends the checklist back
         # on each turn so we can pin it in context. This way a long plan on a
@@ -1026,6 +1031,7 @@ def setup_chat_routes(
         # the plan. Ignored while still proposing (plan_mode on). Capped so a
         # huge plan can't blow the prompt.
         approved_plan = ""
+        active_goal = None
         if not plan_mode:
             approved_plan = (form_data.get("approved_plan") or "").strip()[:8192]
         # Did the USER explicitly pick agent mode? (vs. us auto-escalating
@@ -1263,6 +1269,42 @@ def setup_chat_routes(
                 )
             if not (getattr(sess, "endpoint_url", "") or "").strip():
                 raise HTTPException(400, "Selected model endpoint is not configured")
+
+            # Project-bound chats use the server-owned project root. A browser
+            # cannot replace it with a localStorage/FormData path.
+            project_id = str(getattr(sess, "project_id", None) or "").strip()
+            if project_id:
+                from src.engineering_store import EngineeringStore
+                from src.team_runtime import get_runtime
+                project = EngineeringStore(get_runtime().store).assert_access(
+                    owner, project_id, effect="read",
+                )
+                workspace = project["root"]
+                workspace_rejected = None
+
+            # Legacy/in-memory test sessions and an older rollback-compatible
+            # database may not have durable work state yet.  Ordinary chat must
+            # remain available; Goal/Plan mutations below still require the
+            # real owner-scoped session row and therefore fail closed.
+            try:
+                work_state = chat_work_store.get(owner, session)
+            except (WorkNotFound, OperationalError):
+                work_state = {"plan": None, "goal": None, "cursor": 0}
+            if goal_continuation:
+                active_goal = chat_work_store.consume_goal_lease(owner, session, goal_lease_token)
+                work_state["goal"] = active_goal
+                chat_mode = "agent"
+            elif goal_mode and not tool_approval_continuation:
+                active_goal = chat_work_store.ensure_goal(owner, session, str(message or ""))
+                work_state["goal"] = active_goal
+            else:
+                active_goal = work_state.get("goal")
+            durable_plan = work_state.get("plan")
+            if not plan_mode and durable_plan and durable_plan.get("status") in {"approved", "executing"}:
+                approved_plan = "\n".join(
+                    f"- [{'x' if step.get('status') == 'done' else ' '}] {step.get('text', '')}"
+                    for step in durable_plan.get("steps", [])
+                )[:8192]
             if (
                 chat_mode == "chat"
                 and isinstance(message, str)
@@ -1340,6 +1382,10 @@ def setup_chat_routes(
 
         image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
+        if str(getattr(sess, "project_id", None) or "").strip():
+            # Project chats use only their project memory. Personal memory is
+            # intentionally not blended into another project's context.
+            no_memory = True
         if image_generation_session:
             no_memory = True
             use_rag = "false"
@@ -1382,8 +1428,38 @@ def setup_chat_routes(
                 and pending_tool_approval.continuation_query
                 else None
             ),
-            persist_user_message=not tool_approval_continuation,
+            persist_user_message=not tool_approval_continuation and not goal_continuation,
         )
+
+        if str(getattr(sess, "project_id", None) or "").strip():
+            try:
+                from src.engineering_store import EngineeringStore
+                from src.team_runtime import get_runtime
+                _project_store = EngineeringStore(get_runtime().store)
+                _project_id = str(sess.project_id)
+                _project_memory = _project_store.list_memory(ctx.user, _project_id, limit=100)
+                _project_skills = _project_store.enabled_skill_context(ctx.user, _project_id)
+                _parts = []
+                if _project_memory:
+                    _parts.append("Project memory:\n" + "\n".join(
+                        f"- [{item['state']}] {item['text']} (source: {item['source']})"
+                        for item in _project_memory if item.get('state') != 'stale'
+                    ))
+                if _project_skills:
+                    _parts.append("Project skills (procedures, not permissions):\n" + "\n\n".join(
+                        f"### {item['name']} [{item['digest'][:12]}]\n{item['content']}"
+                        for item in _project_skills
+                    ))
+                if _parts:
+                    _project_context = untrusted_context_message(
+                        "project memory and skills", "\n\n".join(_parts)[:64000],
+                    )
+                    ctx.messages.insert(len(ctx.preface), _project_context)
+                    route_messages = getattr(ctx, "route_messages", None)
+                    if route_messages is not None and route_messages is not ctx.messages:
+                        route_messages.insert(min(len(ctx.preface), len(route_messages)), dict(_project_context))
+            except Exception:
+                logger.exception("Unable to load project memory/skills for session %s", session)
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 
@@ -2324,6 +2400,8 @@ def setup_chat_routes(
                     except (TypeError, ValueError):
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
+                    if active_goal and active_goal.get("status") == "active":
+                        _max_rounds = 200
 
                     _forced_tools = None
                     if _search_enabled:
@@ -2357,6 +2435,7 @@ def setup_chat_routes(
                         fallback_on_empty=_foreground_policy.fallback_on_empty,
                         plan_mode=plan_mode,
                         approved_plan=approved_plan or None,
+                        active_goal=active_goal,
                         workspace=workspace or None,
                         relevant_tools=(
                             set(pending_tool_approval.selected_tools)
@@ -2389,7 +2468,7 @@ def setup_chat_routes(
                                     web_sources = data.get("data", [])
                                     yield chunk
                                 elif data.get("type") in (
-                                    "tool_start", "tool_output", "agent_step",
+                                    "tool_start", "tool_progress", "tool_output", "agent_step",
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "ui_control",
                                     "rounds_exhausted", "budget_exceeded",
@@ -2397,6 +2476,7 @@ def setup_chat_routes(
                                     "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "goal_update",
                                     "context_usage", "compacted", "tool_retry_blocked",
                                     "agent_prep",
                                 ):
@@ -2628,7 +2708,11 @@ def setup_chat_routes(
         return StreamingResponse(
             agent_runs.subscribe(session, _detached_run),
             media_type="text/event-stream",
-            headers={"X-Odysseus-Run-Id": _detached_run.run_id},
+            headers={
+                "X-Odysseus-Run-Id": _detached_run.run_id,
+                "X-Odysseus-Started-At": str(_detached_run.started_at),
+                "Cache-Control": "private, no-store",
+            },
         )
 
     # ------------------------------------------------------------------ #
@@ -2641,11 +2725,45 @@ def setup_chat_routes(
         _active_run = agent_runs.get_active_run(session_id)
         if _active_run is None:
             raise HTTPException(404, "No active run for this session")
+        raw_cursor = request.headers.get("Last-Event-ID") or request.query_params.get("after_seq") or "-1"
+        try:
+            after_seq = int(raw_cursor)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid replay cursor") from None
+        if after_seq < -1:
+            raise HTTPException(400, "Invalid replay cursor")
         return StreamingResponse(
-            agent_runs.subscribe(session_id, _active_run),
+            agent_runs.subscribe(session_id, _active_run, after_seq=after_seq),
             media_type="text/event-stream",
-            headers={"X-Odysseus-Run-Id": _active_run.run_id},
+            headers={
+                "X-Odysseus-Run-Id": _active_run.run_id,
+                "X-Odysseus-Started-At": str(_active_run.started_at),
+                "Cache-Control": "private, no-store",
+            },
         )
+
+    @router.get("/api/chat/run/{session_id}")
+    async def chat_run_snapshot(request: Request, session_id: str) -> Dict[str, Any]:
+        """Owner-scoped run identity/cursor used before a cross-device attach."""
+        _verify_session_owner(request, session_id)
+        snapshot = agent_runs.describe_run(session_id)
+        if snapshot is None:
+            raise HTTPException(404, "No run for this session")
+        return snapshot
+
+    @router.get("/api/chat/run/{session_id}/events")
+    async def chat_run_events(
+        request: Request, session_id: str, after_seq: int = -1, limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Owner-scoped, paged snapshot used before live replay attachment."""
+        _verify_session_owner(request, session_id)
+        try:
+            snapshot = agent_runs.event_page(session_id, after_seq=after_seq, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        if snapshot is None:
+            raise HTTPException(404, "No run for this session")
+        return snapshot
 
     # ------------------------------------------------------------------ #
     # POST /api/chat/stop — cancel a detached run (Stop button). Closing the SSE
@@ -2672,9 +2790,9 @@ def setup_chat_routes(
         rec = _active_streams.get(session_id)
         if rec is None:
             if agent_runs.is_active(session_id):
-                return {"status": "streaming", "detached": True}
+                return {"status": "streaming", "detached": True, **(agent_runs.describe_run(session_id) or {})}
             raise HTTPException(404, "No active stream for this session")
-        return rec
+        return {**rec, **(agent_runs.describe_run(session_id) or {})}
 
     # ------------------------------------------------------------------ #
     # POST /api/inject_context

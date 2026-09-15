@@ -24,7 +24,10 @@ from .web_tools import WebSearchTool, WebFetchTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
 from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
-from .interaction_tools import AskUserTool, UpdatePlanTool
+from .interaction_tools import (
+    AskUserTool, CompleteGoalTool, CreatePlanTool, GetGoalTool,
+    UpdateGoalProgressTool, UpdatePlanStepTool, UpdatePlanTool,
+)
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
@@ -54,7 +57,12 @@ TOOL_HANDLERS = {
     "manage_documents": ManageDocumentTool().execute,
     "get_workspace": GetWorkspaceTool().execute,
     "ask_user": AskUserTool().execute,
+    "create_plan": CreatePlanTool().execute,
     "update_plan": UpdatePlanTool().execute,
+    "update_plan_step": UpdatePlanStepTool().execute,
+    "get_goal": GetGoalTool().execute,
+    "update_goal_progress": UpdateGoalProgressTool().execute,
+    "complete_goal": CompleteGoalTool().execute,
     "chat_with_model": ChatWithModelTool().execute,
     "ask_teacher": AskTeacherTool().execute,
     "list_models": ListModelsTool().execute,
@@ -85,7 +93,8 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "send_to_session",
              "pipeline",
              "manage_session", "manage_memory", "list_models",
-             "ui_control", "generate_image", "ask_user", "update_plan",
+             "ui_control", "generate_image", "ask_user", "create_plan", "update_plan", "update_plan_step",
+             "get_goal", "update_goal_progress", "complete_goal",
              "manage_tasks", "api_call", "ask_teacher", "manage_skills",
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",

@@ -541,6 +541,26 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "create_plan",
+            "description": "Persist a structured plan for user review while Plan mode is active. This does not execute the plan.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "steps": {"type": "array", "items": {"type": "object", "properties": {
+                        "id": {"type": "string"}, "text": {"type": "string"},
+                        "status": {"type": "string", "enum": ["pending", "in_progress", "done", "blocked"]},
+                        "required": {"type": "boolean"}
+                    }, "required": ["text"]}},
+                    "expected_revision": {"type": "integer"}
+                },
+                "required": ["title", "steps"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_plan",
             "description": "Write back to the ACTIVE PLAN: mark steps done or revise them. Use this while executing an approved plan — after you finish a step, call update_plan with the full checklist and that step marked `- [x]`; when the user asks to change the plan, call it with the revised checklist. The user's docked plan window updates live. Pass the COMPLETE checklist every time (not a diff). No effect if there is no active plan.",
             "parameters": {
@@ -550,6 +570,50 @@ FUNCTION_TOOL_SCHEMAS = [
                 },
                 "required": ["plan"]
             }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_plan_step",
+            "description": "Update one stable step of the approved active plan after performing and checking that step.",
+            "parameters": {"type": "object", "properties": {
+                "step_id": {"type": "string"},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "done", "blocked"]},
+                "summary": {"type": "string"},
+                "expected_revision": {"type": "integer"}
+            }, "required": ["step_id", "status"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_goal",
+            "description": "Read the exact active goal, its attempt and latest durable checkpoint.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_goal_progress",
+            "description": "Persist meaningful progress/checkpoint for the active goal. Set waiting_user only for a real permission, budget or user decision blocker.",
+            "parameters": {"type": "object", "properties": {
+                "progress": {"type": "string"},
+                "checkpoint": {"type": "object"},
+                "waiting_user": {"type": "boolean"}
+            }, "required": ["progress"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_goal",
+            "description": "Complete the active goal only after every requested outcome is verified. Ordinary prose cannot complete a goal.",
+            "parameters": {"type": "object", "properties": {
+                "summary": {"type": "string"},
+                "evidence": {"type": "array", "items": {"type": "string"}}
+            }, "required": ["summary", "evidence"]}
         }
     },
     {

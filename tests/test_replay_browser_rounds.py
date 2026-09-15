@@ -27,6 +27,9 @@ try {
    const sessionModule={getCurrentSessionId:()=> 's1',getSessionViewToken:()=>1,getSessions:()=>[{id:'s1',model:'qwen'}],refreshSessionHistory:async()=>{window.refreshed=(window.refreshed||0)+1;}};
    const uiModule={esc:v=>v,scrollHistory:noop},markdownModule={normalizeThinkingMarkup:v=>v,mdToHtml:v=>v,squashOutsideCode:v=>v};
    const spinnerModule={create:()=>({createElement:()=>document.createElement('span'),start:noop,destroy:noop})};
+   const chatRenderer={recordSessionMetricsCost:noop,localizeToolNode:noop,addMessage:noop};
+   const updateSubmitButton=noop,applyStreamContextUsage=noop,displayMetrics=noop,bindUiText=noop;
+   const createTerminalStreamError=v=>v,documentModule=null;
    const _shortModel=v=>v,_applyModelColor=noop,_setRoleModelLabel=noop,_streamDisplayText=v=>v;
    const inheritModelRouteState=(previous,unused,next)=>{next._actualModel=previous._actualModel;};
    const refreshChatContextHeader=noop,hasActiveStream=()=>false,cancelResumedStream=noop;
@@ -40,8 +43,10 @@ try {
   await page.waitForFunction(()=>document.querySelectorAll('#chat-history > .msg').length===2);
   assert.equal(await page.locator('#chat-history > .msg').nth(0).locator('.stream-content').textContent(),'Первый шаг');
   assert.equal(await page.locator('#chat-history > .msg').nth(1).locator('.stream-content').textContent(),'Второй шаг');
-  assert.equal(await page.locator('#chat-history > .msg').nth(0).locator('details[data-status="done"] pre').textContent(),'ok');
-  assert.equal(await page.locator('#chat-history > .msg').nth(1).locator('details').count(),0);
+  assert.equal(await page.locator('#chat-history > .agent-thread').count(),1);
+  assert.equal(await page.locator('#chat-history > .agent-thread .agent-thread-node').count(),1);
+  assert.equal(await page.locator('#chat-history > .agent-thread .agent-tool-output pre').textContent(),'ok');
+  assert.equal(await page.locator('#chat-history > .msg details.agent-tool-output').count(),0);
   assert.equal(await page.locator('#draft').inputValue(),'unsent draft');
   assert.deepEqual(errors,[]);
  }

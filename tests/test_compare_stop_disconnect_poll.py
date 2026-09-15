@@ -207,7 +207,10 @@ async def test_lazy_subscription_stays_bound_to_header_run_after_replacement():
     await second.task
 
     replayed = [event async for event in lazy_body]
-    assert replayed == ['data: {"delta":"first"}\n\n']
+    assert len(replayed) == 1
+    assert 'id: 0' in replayed[0]
+    assert '"delta":"first"' in replayed[0]
+    assert f'"run_id":"{first.run_id}"' in replayed[0]
     assert agent_runs.get_run_id(session_id) == second.run_id
 
 
@@ -332,8 +335,9 @@ async def test_reconnect_replays_pinned_fallback_run_without_restarting_tools():
             release.set()
     await run.task
 
-    assert resumed_events[:2] == [fallback, tool]
-    assert resumed_events[-1] == "data: [DONE]\n\n"
+    assert '"type":"fallback"' in resumed_events[0]
+    assert '"type":"tool_output"' in resumed_events[1]
+    assert resumed_events[-1].endswith("data: [DONE]\n\n")
     assert tool_executions == 1
     assert agent_runs._RUNS[session_id] is run
 

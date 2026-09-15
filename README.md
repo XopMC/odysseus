@@ -62,6 +62,18 @@ explicitly.
   their endpoint identity.
 - **Durable work** — Team tasks, events, checkpoints and replay data are kept
   server-side so reconnecting clients can recover the saved state.
+- **Live chat recovery** — every active Agent event has a durable run/sequence
+  identity. Reloading or opening the chat on another device reconstructs
+  separate answer, reasoning and tool cards, resumes shell progress without
+  duplicates, keeps the elapsed timer, and restores the exact-run Stop action.
+- **Plan and Goal** — Plan is a read-only proposal that runs only after explicit
+  approval and keeps durable step state. Goal is independent: it continues a
+  detached server run until `complete_goal` records verification evidence, or
+  pauses for a permission, unknown side effect, budget or user decision.
+- **Projects** — chats can be bound to a server-validated folder on a registered
+  execution host. The sidebar groups project chats and exposes isolated project
+  memory, project-only `SKILL.md` instructions and explicit read-only/trusted/
+  verified-isolation access modes. Skill text never grants permissions.
 - **Host runner** — explicitly approved trusted-host terminal, file and Git
   operations use a persistent runner. A command with unknown outcome is not
   silently repeated; privileged or destructive actions still require explicit
@@ -102,8 +114,9 @@ explicitly.
 приёмка остаются отдельными этапами разработки. LSP-мост работает только для
 языковых серверов, фактически установленных и проверенных на выбранном хосте;
 его нельзя считать полной IDE-поддержкой только из-за наличия кнопки.
-Низкоуровневый изолированный запуск Linux уже проверен на Jetson, но до
-публичного UI-потока проекта он остаётся отдельной операторской возможностью.
+Мастер проектов проверяет папку на выбранном runner и не доверяет пути из
+браузера. Режим изоляции доступен только при подтверждённой поддержке runner;
+скрытого перехода к доверенному хосту нет.
 На Jetson проверены запуск и остановка LSP для Python, TypeScript, C/C++, Swift,
 Go, Rust и Solidity. Также реально собраны smoke-примеры C++, CUDA, Swift, Go,
 Rust и Solidity. Это не делает Linux-устройство заменой Mac: Xcode и Metal-профили
@@ -125,6 +138,22 @@ Rust и Solidity. Это не делает Linux-устройство замен
 непроверенные данные: снимок сам по себе не означает, что задача или UI-проверка
 пройдены.
 
+**Восстановление чата:** активный запуск хранит последовательную ленту текста,
+размышлений, инструментов, прогресса и раундов. После перезагрузки страницы или
+на втором устройстве интерфейс собирает те же отдельные карточки, продолжает
+поток с последнего события и возвращает кнопку остановки.
+
+**План и Цель:** План сначала строится только с инструментами чтения и начинает
+выполняться после нажатия «Выполнить». Цель не создаёт план: сервер продолжает
+работу после преждевременного ответа модели и принимает завершение только через
+`complete_goal` с проверяемыми доказательствами. Подтверждения, бюджет и действия
+с неизвестным исходом не обходятся — Цель остаётся ждать пользователя.
+
+**Проекты:** папка выбирается на зарегистрированном Jetson/Mac runner, а её
+канонический путь и доступность проверяет сервер. Чаты, долговременная память и
+`SKILL.md` из `.odysseus/skills/` изолированы по проекту; навыки являются
+недоверенным контекстом и не расширяют доступ к машине.
+
 ### Important
 
 The extension is for operator-owned, trusted machines. Shell, file and network
@@ -133,8 +162,9 @@ project and host. Container isolation, full cross-host worktrees, DAP, model
 experiments and end-to-end release acceptance remain separate delivery stages.
 The LSP bridge works only with language servers actually installed and verified
 on the selected host; its presence is not full IDE support.
-The low-level Linux isolated-runner operation has been verified on Jetson, but
-remains an operator capability until the project-facing UI flow is released.
+The project wizard validates the folder on the selected runner. Isolation is
+offered only when the runner reports verified support; there is no silent
+fallback to trusted-host execution.
 Jetson has verified LSP start/stop coverage for Python, TypeScript, C/C++, Swift,
 Go, Rust and Solidity, plus real C++, CUDA, Swift, Go, Rust and Solidity compiler smoke
 checks. This does not turn Linux into a Mac replacement: Xcode and Metal

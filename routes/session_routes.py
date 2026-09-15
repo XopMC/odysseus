@@ -298,7 +298,8 @@ def setup_session_routes(
             last_msg_map = {}
             mode_map = {}
             msg_count_map = {}
-            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count).filter(DbSession.archived == False)
+            project_map = {}
+            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.project_id).filter(DbSession.archived == False)
             q = owner_filter(q, DbSession, user)
             rows = q.all()
             for row in rows:
@@ -316,6 +317,7 @@ def setup_session_routes(
                 )
                 mode_map[row.id] = row.mode
                 msg_count_map[row.id] = row.message_count or 0
+                project_map[row.id] = row.project_id
             # Sessions with active documents that have content
             from sqlalchemy import func
             doc_session_ids = set(
@@ -349,6 +351,7 @@ def setup_session_routes(
                      "has_images": s.id in img_session_ids,
                      "mode": mode_map.get(s.id),
                      "message_count": msg_count_map.get(s.id, 0)}
+                    | {"project_id": project_map.get(s.id)}
                     for s in user_sessions.values()
                     if not s.archived
                     and (s.name or "").strip() not in ("Nobody", "Incognito")
@@ -366,6 +369,7 @@ def setup_session_routes(
         skip_validation: str = Form(None),
         api_key: str = Form(""),
         endpoint_id: str = Form(""),
+        project_id: str = Form(""),
     ):
         skip_val = str(skip_validation).lower() == "true"
         user = effective_user(request)
@@ -459,6 +463,11 @@ def setup_session_routes(
         
         sid = str(uuid.uuid4())
         user = effective_user(request)
+        project_id = str(project_id or "").strip()
+        if project_id:
+            from src.engineering_store import EngineeringStore
+            from src.team_runtime import get_runtime
+            EngineeringStore(get_runtime().store).get_project(user, project_id)
         session = session_manager.create_session(
             session_id=sid,
             name=name or "",
@@ -466,6 +475,7 @@ def setup_session_routes(
             model=model_to_use,
             rag=str(rag).lower() == "true" if rag else False,
             owner=user,
+            project_id=project_id or None,
         )
         # Set auth headers for custom API-key endpoints
         resolved_key = request_api_key
@@ -490,7 +500,8 @@ def setup_session_routes(
             name=session.name,
             model=model_to_use,
             rag=str(rag).lower() == "true" if rag else False,
-            archived=False
+            archived=False,
+            project_id=project_id or None,
         )    
     @router.patch("/session/{sid}")
     def rename_session(
@@ -498,6 +509,7 @@ def setup_session_routes(
         name: str = Form(None), folder: str = Form(None),
         model: str = Form(None), endpoint_url: str = Form(None),
         endpoint_id: str = Form(None),
+        project_id: str = Form(None),
     ):
         _verify_session_owner(request, sid)
         try:
@@ -505,6 +517,28 @@ def setup_session_routes(
         except KeyError:
             raise HTTPException(404, f"Session {sid} not found")
         result = {"id": sid}
+        if project_id is not None:
+            from src import agent_runs
+            if agent_runs.is_active(sid):
+                raise HTTPException(409, "A running chat cannot be moved between projects")
+            user = effective_user(request)
+            target = str(project_id or "").strip()
+            if target:
+                from src.engineering_store import EngineeringStore
+                from src.team_runtime import get_runtime
+                EngineeringStore(get_runtime().store).get_project(user, target)
+            db = SessionLocal()
+            try:
+                row = db.query(DbSession).filter(DbSession.id == sid, DbSession.owner == user).first()
+                if not row:
+                    raise HTTPException(404, "Session not found")
+                row.project_id = target or None
+                row.updated_at = utcnow_naive()
+                db.commit()
+            finally:
+                db.close()
+            session.project_id = target or None
+            result["project_id"] = target or None
         if name is not None:
             session_manager.update_session_name(sid, name)
             result["name"] = name

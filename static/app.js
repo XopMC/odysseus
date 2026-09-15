@@ -24,6 +24,8 @@ import {
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260819approvalcontrol1';
 import sessionModule from './js/sessions.js';
+import chatWork from './js/chat-work.js?v=20260915work1';
+import projectsModule from './js/projects.js?v=20260915projects1';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260913team1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
@@ -60,6 +62,8 @@ const teamWorkspace = createTeamWorkspace({ getSessionId: () => sessionModule.ge
 window.teamWorkspace = teamWorkspace;
 window.themeModule = themeModule;
 window.sessionModule = sessionModule;
+window.chatWork = chatWork;
+window.projectsModule = projectsModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
@@ -1793,9 +1797,9 @@ function initializeEventListeners() {
     }
   }
 
-  // Goal mode uses the existing safe two-stage Plan → Execute protocol.  It
-  // never grants extra permissions: the plan turn stays read-only, then the
-  // normal Agent policy checks every action while it executes and verifies it.
+  // Goal is independent of Plan. The durable server controller decides when
+  // an active goal is complete; this toggle only marks the next user message
+  // as the objective.
   function syncGoalToggle(active) {
     const btn = el('goal-toggle-btn'), status = el('goal-mode-status');
     document.body.classList.toggle('goal-mode-active', !!active);
@@ -1804,8 +1808,8 @@ function initializeEventListeners() {
   }
   function setGoalMode(active, options = {}) {
     const st = loadToggleState(); st.goal_mode = !!active; saveToggleState(st); syncGoalToggle(!!active);
-    if (active) setPlanMode(true, { silent: true });
-    if (!options.silent && uiModule?.showToast) uiModule.showToast(active ? 'Goal mode: plan, execute and verify' : 'Goal mode off', 1800);
+    if (!options.silent && uiModule?.showToast) uiModule.showToast(active ? 'Goal mode: work until verified completion' : 'Goal mode off', 1800);
+    chatWork.render();
   }
 
   function applyModeToToggles(mode) {
@@ -1877,6 +1881,7 @@ function initializeEventListeners() {
     syncGoalToggle(!!state.goal_mode);
     window.__odysseusSetPlanMode = (active) => setPlanMode(active, { silent: true });
     window.__odysseusSetGoalMode = (active) => setGoalMode(active, { silent: true });
+    window.__odysseusGoalModeActive = () => !!loadToggleState().goal_mode;
     const statusToggle = el('plan-mode-status-toggle');
     if (btn) {
       btn.addEventListener('click', () => {
@@ -3719,6 +3724,8 @@ function startOdysseusApp() {
 
   // Initialize all event listeners
   try { initializeEventListeners(); } catch(e) { console.error('Event init error:', e); }
+  try { chatWork.bind(); chatWork.refresh(); } catch(e) { console.error('Chat work init error:', e); }
+  try { projectsModule.bind(); } catch(e) { console.error('Projects init error:', e); }
 
   // Reveal the toolbar now that all toggle/overflow state is resolved
   // (hidden via inline style="visibility:hidden" in HTML to prevent FOUC)

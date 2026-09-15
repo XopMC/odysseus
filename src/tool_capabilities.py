@@ -70,8 +70,12 @@ def _register(
 
 
 _register(
-    {"ask_user", "update_plan"},
+    {"ask_user", "create_plan", "update_plan"},
     ToolEffect.USER_INTERACTION,
+)
+_register(
+    {"get_goal"},
+    ToolEffect.READ_PRIVATE,
 )
 _register(
     {
@@ -140,6 +144,7 @@ _register(
 )
 _register(
     {
+        "complete_goal",
         "create_document",
         "manage_calendar",
         "manage_contact",
@@ -152,6 +157,8 @@ _register(
         "manage_tasks",
         "suggest_document",
         "todowrite",
+        "update_goal_progress",
+        "update_plan_step",
     },
     ToolEffect.WRITE_PRIVATE,
 )

@@ -1159,7 +1159,7 @@ function _renderSessionListImpl() {
 
   // Get saved order from localStorage
   const savedOrder = Storage.get('session-order');
-  let orderedSessions = sessions.filter(s => !s.archived && s.folder !== 'Assistant' && !_isIncognitoSession(s.id) && (s.name || '').trim() !== 'Nobody' && (s.name || '').trim() !== 'Incognito');
+  let orderedSessions = sessions.filter(s => !s.archived && !s.project_id && s.folder !== 'Assistant' && !_isIncognitoSession(s.id) && (s.name || '').trim() !== 'Nobody' && (s.name || '').trim() !== 'Incognito');
 
   if (savedOrder) {
     try {
@@ -1779,6 +1779,7 @@ export async function loadSessions() {
     }
     sessions = _normalizeSessionsList(fetched);
     renderSessionList();
+    window.projectsModule?.refresh?.();
 
     const sessionsSection = uiModule.el('sessions-section');
     if (sessions.length === 0) {
@@ -2194,6 +2195,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     }
     // Check server for active stream (survives page refresh)
     _checkServerStream(id);
+    window.chatWork?.refresh?.(id);
     // Document panel: keep open if next session also wants it, otherwise close
     if (window.documentModule) {
       const docBtn = document.getElementById('overflow-doc-btn');
@@ -2381,6 +2383,8 @@ export async function materializePendingSession() {
     if (pending.endpointId) {
       fd.append('endpoint_id', pending.endpointId);
     }
+    const pendingProjectId = sessionStorage.getItem('odysseus-pending-project-id') || '';
+    if (pendingProjectId) fd.append('project_id', pendingProjectId);
 
     let res;
     try {
@@ -2401,6 +2405,7 @@ export async function materializePendingSession() {
       uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
       return false;
     }
+    if (pendingProjectId) sessionStorage.removeItem('odysseus-pending-project-id');
 
     // The user may have opened an existing chat while this deferred default
     // session was being created. Do not let a stale response steal

@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
 from typing import AsyncGenerator, Dict, Optional
 
@@ -32,7 +33,11 @@ def replay_root():
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "context_usage")
+    __slots__ = (
+        "buffer", "subscribers", "status", "task", "evict_task", "run_id",
+        "context_usage", "started_at", "round", "segment", "tool_counter",
+        "active_tool_call_id",
+    )
 
     def __init__(self) -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
@@ -44,6 +49,11 @@ class _Run:
         # The browser uses it to make local cost accounting replay-idempotent.
         self.run_id: str = uuid.uuid4().hex
         self.context_usage: Optional[dict] = None
+        self.started_at: float = time.time()
+        self.round: int = 0
+        self.segment: int = 0
+        self.tool_counter: int = 0
+        self.active_tool_call_id: Optional[str] = None
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -55,8 +65,72 @@ _RUNS: Dict[str, _Run] = {}
 _EVICT_GRACE_S = 180
 
 
+def _annotate_event(run: _Run, ev: str, seq: int) -> str:
+    """Add a stable replay identity to JSON SSE frames without changing their type.
+
+    Legacy clients ignore the additive ``_replay`` object.  Plain-text test and
+    heartbeat frames remain byte-for-byte compatible.
+    """
+    lines = ev.splitlines()
+    data_indexes = [idx for idx, line in enumerate(lines) if line.startswith("data:")]
+    if not data_indexes:
+        return ev
+    raw = "\n".join(lines[idx][5:].lstrip() for idx in data_indexes)
+    if raw == "[DONE]":
+        return f"id: {seq}\n" + ev
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return ev
+    if not isinstance(payload, dict):
+        return ev
+
+    event_type = payload.get("type")
+    if event_type == "agent_step":
+        try:
+            run.round = max(0, int(payload.get("round") or run.round + 1))
+        except (TypeError, ValueError):
+            run.round += 1
+        run.segment += 1
+        run.active_tool_call_id = None
+    elif event_type == "tool_start":
+        run.tool_counter += 1
+        run.segment += 1
+        run.active_tool_call_id = str(payload.get("tool_call_id") or f"tool-{run.tool_counter}")
+    elif event_type == "tool_output":
+        # Keep the current id for this result; it is cleared after annotation.
+        pass
+    elif payload.get("delta") and not payload.get("thinking"):
+        if run.segment == 0:
+            run.segment = 1
+
+    created_at = time.time()
+    replay = {
+        "run_id": run.run_id,
+        "seq": seq,
+        "created_at": created_at,
+        "started_at": run.started_at,
+        "round": run.round,
+        "segment_id": f"{run.run_id}:{run.segment}",
+    }
+    if event_type in ("tool_start", "tool_progress", "tool_output"):
+        tool_call_id = str(payload.get("tool_call_id") or run.active_tool_call_id or "")
+        if tool_call_id:
+            payload["tool_call_id"] = tool_call_id
+            replay["tool_call_id"] = tool_call_id
+    payload["_replay"] = replay
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    prefix = [line for line in lines if not line.startswith("data:") and not line.startswith("id:")]
+    rendered = [f"id: {seq}", *prefix, f"data: {encoded}"]
+    if event_type == "tool_output":
+        run.active_tool_call_id = None
+    return "\n".join(rendered) + "\n\n"
+
+
 def _publish(run: _Run, ev: str) -> None:
     """Append one SSE event and fan it out to every live subscriber."""
+    seq = len(run.buffer)
+    ev = _annotate_event(run, ev, seq)
     # Bind measurements to this exact run, not a session lookup: a cancelled
     # predecessor can still publish while its replacement is being started.
     try:
@@ -70,7 +144,6 @@ def _publish(run: _Run, ev: str) -> None:
     except (TypeError, ValueError):
         pass  # Other SSE events, comments and [DONE] are not measurements.
     run.buffer.append(ev)
-    seq = len(run.buffer) - 1
     for q in list(run.subscribers):
         try:
             q.put_nowait(True)
@@ -85,6 +158,76 @@ def _wake_run_subscribers(run: _Run) -> None:
             q.put_nowait(True)
         except Exception:
             pass
+
+
+def _persist_timeline_v2(session_id: str, run: _Run) -> None:
+    """Attach the bounded canonical replay timeline to the saved assistant turn.
+
+    The agent generator persists the assistant message before it returns.  The
+    detached runner is therefore the first layer that has both that durable row
+    and the fully annotated SSE sequence.  Keep the older round/tool metadata
+    untouched so a rollback-compatible build can still render the same turn.
+    """
+    try:
+        from core.database import ChatMessage as DbChatMessage, SessionLocal
+
+        events = []
+        encoded_bytes = 0
+        truncated = False
+        for index in range(min(len(run.buffer), 5000)):
+            frame = run.buffer[index]
+            raw = "\n".join(
+                line[5:].lstrip() for line in frame.splitlines()
+                if line.startswith("data:")
+            )
+            if not raw or raw == "[DONE]":
+                continue
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            item = {"seq": index, "data": payload}
+            size = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+            if encoded_bytes + size > 2 * 1024 * 1024:
+                truncated = True
+                break
+            encoded_bytes += size
+            events.append(item)
+        if len(run.buffer) > 5000:
+            truncated = True
+        if not events:
+            return
+        with SessionLocal.begin() as db:
+            row = (
+                db.query(DbChatMessage)
+                .filter(DbChatMessage.session_id == session_id, DbChatMessage.role == "assistant")
+                .order_by(DbChatMessage.timestamp.desc(), DbChatMessage.id.desc())
+                .first()
+            )
+            if row is None:
+                return
+            try:
+                metadata = json.loads(row.meta_data or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["timeline_v2"] = {
+                "version": 2,
+                "run_id": run.run_id,
+                "started_at": run.started_at,
+                "status": run.status,
+                "events": events,
+                "truncated": truncated,
+            }
+            row.meta_data = json.dumps(metadata, ensure_ascii=False)
+    except Exception as exc:
+        # Replay remains available from the durable run log and legacy
+        # round/tool metadata.  A metadata write failure must not corrupt the
+        # already-saved conversation or delay subscriber shutdown.
+        logger.warning("[agent-run] timeline_v2 persistence failed for %s: %s", session_id, exc)
 
 
 def _schedule_evict(session_id: str, expected_run: Optional[_Run] = None) -> None:
@@ -131,6 +274,52 @@ def get_active_run(session_id: str) -> Optional[_Run]:
     """Return the exact active run currently registered for a session."""
     r = _RUNS.get(session_id)
     return r if r and r.status == "running" else None
+
+
+def describe_run(session_id: str) -> Optional[dict]:
+    """Return the owner-gated route's public snapshot of the current run."""
+    run = _RUNS.get(session_id)
+    if run is None:
+        return None
+    return {
+        "run_id": run.run_id,
+        "status": run.status,
+        "started_at": run.started_at,
+        "last_seq": len(run.buffer) - 1,
+        "next_seq": len(run.buffer),
+        "context_usage": dict(run.context_usage) if run.context_usage else None,
+    }
+
+
+def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Optional[dict]:
+    """Return a bounded JSON snapshot without opening a live SSE subscriber."""
+    if type(after_seq) is not int or after_seq < -1 or type(limit) is not int or not 1 <= limit <= 200:
+        raise ValueError("Invalid replay cursor or page size")
+    run = _RUNS.get(session_id)
+    if run is None:
+        return None
+    count = len(run.buffer)
+    if after_seq >= count and count:
+        raise ValueError("Replay cursor is ahead of the log")
+    rows = []
+    for seq in range(after_seq + 1, min(count, after_seq + 1 + limit)):
+        frame = run.buffer[seq]
+        raw = "\n".join(line[5:].lstrip() for line in frame.splitlines() if line.startswith("data:"))
+        if raw == "[DONE]":
+            data = {"type": "done"}
+        else:
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                data = {"type": "opaque"}
+        rows.append({"seq": seq, "data": data})
+    cursor = rows[-1]["seq"] if rows else after_seq
+    return {
+        **describe_run(session_id),
+        "events": rows,
+        "next_cursor": cursor,
+        "has_more": cursor + 1 < count,
+    }
 
 
 def normalize_context_usage(data) -> Optional[dict]:
@@ -228,6 +417,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
             # to persist another error or silently continue effectful tools.
             logger.error('[agent-run] replay storage unavailable; run stopped')
     finally:
+        _persist_timeline_v2(session_id, run)
         if hasattr(run.buffer, 'checkpoint'):
             try:
                 run.buffer.checkpoint(run.status)
@@ -274,6 +464,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
 async def subscribe(
     session_id: str,
     expected_run: Optional[_Run] = None,
+    after_seq: int = -1,
 ) -> AsyncGenerator[str, None]:
     """Replay the run's buffer from the start, then stream live until it ends.
     Safe to call repeatedly (reconnect) and from multiple clients at once.
@@ -295,7 +486,9 @@ async def subscribe(
     if run.evict_task and not run.evict_task.done():
         run.evict_task.cancel()
     try:
-        next_seq = 0
+        if type(after_seq) is not int or after_seq < -1:
+            return
+        next_seq = min(after_seq + 1, len(run.buffer))
         while next_seq < len(run.buffer):
             yield run.buffer[next_seq]
             next_seq += 1

@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS engineering_project_memory (
 );
 CREATE INDEX IF NOT EXISTS engineering_project_memory_owner_project
  ON engineering_project_memory(owner,project_id,id);
+CREATE TABLE IF NOT EXISTS engineering_project_skills (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES engineering_projects(id),
+ owner TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, content TEXT NOT NULL,
+ digest TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1,
+ created_at REAL NOT NULL, updated_at REAL NOT NULL,
+ UNIQUE(project_id,name)
+);
+CREATE INDEX IF NOT EXISTS engineering_project_skills_owner_project
+ ON engineering_project_skills(owner,project_id,id);
 '''
 
 MEMORY_KINDS = frozenset({
@@ -175,6 +184,72 @@ class EngineeringStore:
             return [dict(row) for row in db.execute(
                 'SELECT * FROM engineering_project_memory WHERE owner=? AND project_id=? AND id>? ORDER BY id LIMIT ?',
                 (owner, project_id, after_id, limit))]
+
+    def list_skills(self, owner, project_id, *, after_id='', limit=100):
+        _text(owner, 'owner'); _text(project_id, 'project id'); _integer(limit, 'limit', 1, 200)
+        if not isinstance(after_id, str):
+            raise ValueError('Invalid cursor')
+        self.initialize()
+        with self.team._tx(write=False) as db:
+            self._project(db, owner, project_id)
+            return [dict(row) for row in db.execute(
+                'SELECT id,project_id,owner,name,source,digest,enabled,revision,created_at,updated_at '
+                'FROM engineering_project_skills WHERE owner=? AND project_id=? AND id>? ORDER BY id LIMIT ?',
+                (owner, project_id, after_id, limit))]
+
+    def enabled_skill_context(self, owner, project_id, *, limit=32):
+        _integer(limit, 'limit', 1, 64)
+        self.initialize()
+        with self.team._tx(write=False) as db:
+            self._project(db, owner, project_id)
+            return [dict(row) for row in db.execute(
+                'SELECT name,source,content,digest,revision FROM engineering_project_skills '
+                'WHERE owner=? AND project_id=? AND enabled=1 ORDER BY name LIMIT ?',
+                (owner, project_id, limit))]
+
+    def save_skill(self, owner, project_id, *, name, source, content, enabled=True,
+                   expected_revision=None):
+        import hashlib
+        _text(owner, 'owner'); _text(project_id, 'project id'); _text(name, 'skill name')
+        _text(source, 'skill source'); _text(content, 'skill content')
+        if len(name) > 160 or len(source) > 2048 or len(content.encode('utf-8')) > 262144:
+            raise ValueError('Project skill field is too long')
+        digest = hashlib.sha256(content.encode()).hexdigest()
+        self.initialize()
+        with self.team._tx() as db:
+            self._project(db, owner, project_id)
+            row = db.execute('SELECT * FROM engineering_project_skills WHERE project_id=? AND name=?',
+                             (project_id, name)).fetchone()
+            now = self.team.clock()
+            if row:
+                row = dict(row)
+                if expected_revision is None or row['revision'] != expected_revision:
+                    raise Conflict('Project skill changed; reload before saving')
+                db.execute('UPDATE engineering_project_skills SET source=?,content=?,digest=?,enabled=?,revision=revision+1,updated_at=? WHERE id=?',
+                           (source, content, digest, 1 if enabled else 0, now, row['id']))
+                skill_id = row['id']
+            else:
+                if expected_revision not in (None, 0):
+                    raise Conflict('Project skill changed; reload before saving')
+                skill_id = uuid.uuid4().hex
+                db.execute('INSERT INTO engineering_project_skills VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                           (skill_id, project_id, owner, name, source, content, digest, 1 if enabled else 0, 1, now, now))
+            self._event(db, project_id, 'project_skill_saved', {'skill_id': skill_id, 'name': name, 'digest': digest})
+            return dict(db.execute('SELECT id,project_id,owner,name,source,digest,enabled,revision,created_at,updated_at FROM engineering_project_skills WHERE id=?', (skill_id,)).fetchone())
+
+    def delete_skill(self, owner, project_id, skill_id, *, expected_revision):
+        _integer(expected_revision, 'expected_revision', 1)
+        self.initialize()
+        with self.team._tx() as db:
+            self._project(db, owner, project_id)
+            row = db.execute('SELECT * FROM engineering_project_skills WHERE id=? AND project_id=? AND owner=?',
+                             (skill_id, project_id, owner)).fetchone()
+            if row is None:
+                raise NotFound('Project skill not found')
+            if row['revision'] != expected_revision:
+                raise Conflict('Project skill changed; reload before deleting')
+            db.execute('DELETE FROM engineering_project_skills WHERE id=?', (skill_id,))
+            self._event(db, project_id, 'project_skill_deleted', {'skill_id': skill_id})
 
     def save_memory(self, owner, project_id, *, memory_id, kind, text, source, state,
                     expected_revision, confirmation):

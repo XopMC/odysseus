@@ -194,6 +194,9 @@ class Session(TimestampMixin, Base):
 
     # Organization
     folder = Column(String, nullable=True, default=None)
+    # Engineering projects live in the Team database, so this is an opaque,
+    # owner-validated binding rather than a cross-database foreign key.
+    project_id = Column(String, nullable=True, default=None, index=True)
     
     # Headers stored as JSON
     headers = Column(JSON, default=dict)
@@ -246,10 +249,58 @@ class Session(TimestampMixin, Base):
             'message_count': self.message_count,
             'is_important': self.is_important,
             'folder': self.folder,
+            'project_id': self.project_id,
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
         }
+
+class ChatPlan(TimestampMixin, Base):
+    """One owner-scoped durable plan per chat."""
+    __tablename__ = "chat_plans"
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    title = Column(Text, nullable=False, default="")
+    status = Column(String, nullable=False, default="draft")
+    steps = Column(JSON, nullable=False, default=list)
+    current_step_id = Column(String, nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+
+
+class ChatGoal(TimestampMixin, Base):
+    """Durable goal state; completion is accepted only through complete_goal."""
+    __tablename__ = "chat_goals"
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    objective = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="active")
+    attempt = Column(Integer, nullable=False, default=1)
+    progress = Column(Text, nullable=False, default="")
+    checkpoint = Column(JSON, nullable=False, default=dict)
+    last_error = Column(Text, nullable=True)
+    failure_key = Column(String, nullable=True)
+    failure_count = Column(Integer, nullable=False, default=0)
+    revision = Column(Integer, nullable=False, default=1)
+    lease_token = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+
+class ChatWorkEvent(Base):
+    """Append-only Plan/Goal journal used by reload and second devices."""
+    __tablename__ = "chat_work_events"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False)
+    entity_id = Column(String, nullable=False)
+    revision = Column(Integer, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (Index("ix_chat_work_events_cursor", "owner", "session_id", "id"),)
+
 
 class ChatMessage(Base):
     """
@@ -1282,6 +1333,21 @@ def _migrate_add_folder_column():
         except Exception:
             pass
 
+
+def _migrate_add_project_id_column():
+    """Add the nullable, rollback-compatible chat/project binding."""
+    if engine.url.get_backend_name() != "sqlite":
+        return
+    try:
+        with engine.connect() as conn:
+            columns = [row[1] for row in conn.execute(text("PRAGMA table_info(sessions)"))]
+            if "project_id" not in columns:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN project_id TEXT"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_project_id ON sessions(project_id)"))
+            conn.commit()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("project_id migration failed: %s", exc)
+
 def _migrate_add_token_columns():
     """Add cumulative token tracking columns to sessions table."""
     import sqlite3
@@ -2114,6 +2180,7 @@ def init_db():
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()
+    _migrate_add_project_id_column()
     _migrate_add_token_columns()
     _migrate_add_mode_column()
     _migrate_add_multiuser_owner_columns()

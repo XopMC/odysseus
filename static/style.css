@@ -2537,11 +2537,66 @@ body.bg-pattern-sparkles {
 	       impossible to see which endpoint will receive the plan. */
 	    body.plan-mode-active .chat-input-top > .model-picker-wrap { opacity: 1; pointer-events: auto; transform: none; }
 	    .goal-mode-status { right: 112px; }
+	    .chat-work-status-row {
+	      width: 100%; max-width: 800px; margin: 0 auto 8px;
+	      display: flex; flex-direction: column; gap: 8px;
+	    }
+	    .chat-work-status-row:empty { display: none; }
+	    .chat-work-card {
+	      position: relative; right: auto; bottom: auto; height: auto; display: block;
+	      width: 100%; box-sizing: border-box; padding: 10px 12px;
+	      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 48%, transparent);
+	      border-radius: 15px;
+	      background: color-mix(in srgb, var(--accent, var(--red)) 9%, var(--input-bg, var(--panel)));
+	      color: var(--text); font-size: 12px;
+	    }
+	    .chat-work-card[hidden] { display: none !important; }
+	    .chat-work-card-head { display: flex; justify-content: space-between; gap: 12px; color: var(--accent, var(--red)); }
+	    .chat-work-current { margin-top: 5px; overflow-wrap: anywhere; }
+	    .chat-work-card details { margin-top: 5px; }
+	    .chat-work-card ol { margin: 6px 0 0; padding-left: 22px; max-height: 160px; overflow: auto; }
+	    .chat-work-card li.done { opacity: .62; text-decoration: line-through; }
+	    .chat-work-card li.in_progress { color: var(--accent, var(--red)); font-weight: 700; }
+	    .chat-work-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+	    .chat-work-actions button {
+	      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 42%, transparent);
+	      border-radius: 999px; background: transparent; color: inherit; padding: 4px 9px; cursor: pointer;
+	    }
+	    .chat-work-actions button:disabled { opacity: .45; cursor: default; }
+	    @media (max-width: 768px) {
+	      .chat-work-status-row { padding: 0 8px; margin-bottom: 6px; }
+	      .chat-work-card { padding: 8px 10px; border-radius: 13px; }
+	      .chat-work-actions { overflow-x: auto; flex-wrap: nowrap; }
+	      .chat-work-actions button { white-space: nowrap; }
+	    }
+	    .project-sidebar-head { width: 100%; text-align: left; }
+	    .project-open { opacity:.55; font-size:10px; letter-spacing:1px; padding:4px; }
+	    .project-details-dialog { width:min(760px,calc(100vw - 24px)); max-height:min(82vh,900px); overflow:auto; }
+	    .project-tabs { display:flex; gap:6px; padding:0 18px 12px; overflow-x:auto; }
+	    .project-tabs button { white-space:nowrap; }
+	    .project-tabs button.active { color:var(--accent); border-color:var(--accent); }
+	    .project-detail-row { display:grid; gap:4px; padding:10px 0; border-bottom:1px solid color-mix(in srgb,var(--accent) 20%,transparent); overflow-wrap:anywhere; }
+	    #project-details-access { white-space:pre-wrap; overflow-wrap:anywhere; }
+	    .project-chevron { width: 14px; opacity: .7; }
+	    .project-new-chat { font-size: 16px; color: var(--accent, var(--red)); padding: 0 4px; }
+	    .project-chat-list { padding-left: 14px; }
+	    .project-chat-list.hidden { display: none; }
+	    .project-chat-row { width: 100%; font-size: 11px; }
+	    .project-empty { padding: 5px 10px; opacity: .55; font-size: 10px; }
+	    .project-create-dialog { width: min(520px, calc(100vw - 24px)); }
+	    .project-create-dialog label { display: grid; gap: 5px; margin-bottom: 12px; }
+	    .project-create-dialog input, .project-create-dialog select { width: 100%; box-sizing: border-box; }
+	    .project-path-row { display: flex; gap: 7px; }
+	    .project-folder-list { display: grid; gap: 4px; max-height: 220px; overflow: auto; margin: -5px 0 12px; }
+	    .project-folder-list button { text-align: left; border: 0; background: color-mix(in srgb, var(--panel) 85%, transparent); color: inherit; padding: 6px 8px; border-radius: 6px; }
+	    .project-safety { opacity: .72; font-size: 11px; }
+    /* Route identity is safety-critical when equal model IDs exist on several
+       endpoints. Keep the picker visible while typing, planning and running. */
     .chat-input-top > .model-picker-wrap.model-picker-autohide,
     .chat-input-top > .model-picker-wrap.picker-auto-hidden {
-      opacity: 0;
-      pointer-events: none;
-      transform: translateY(-4px) scale(0.96);
+      opacity: 1;
+      pointer-events: auto;
+      transform: none;
     }
     .ghost-text-overlay {
       position: absolute;
@@ -2596,7 +2651,8 @@ body.bg-pattern-sparkles {
       .chat-input-right .mode-toggle { display: none !important; }
     }
     @container chatbar (max-width: 260px) {
-      #model-picker-wrap { display: none !important; }
+      #model-picker-wrap { display: block !important; }
+      .model-picker-btn #model-picker-label { max-width: 82px; }
     }
     .chat-input-left {
       display: flex;

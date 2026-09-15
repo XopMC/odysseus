@@ -546,7 +546,7 @@ _DOMAIN_TOOL_MAP = {
 
 _WORKSPACE_TERMINUS_TOOLS = (
     _DOMAIN_TOOL_MAP["files"]
-    | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan"}
+    | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "create_plan", "update_plan", "update_plan_step", "get_goal", "update_goal_progress", "complete_goal"}
 )
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -760,7 +760,12 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
     "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
     "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; calling this ENDS your turn and their choice comes back as your next message. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
+    "create_plan": "- ```create_plan``` — In Plan mode, persist a structured read-only plan for approval. Args: {\"title\":\"...\",\"steps\":[{\"id\":\"step-1\",\"text\":\"...\",\"status\":\"pending\",\"required\":true}]}. This never executes work.",
     "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
+    "update_plan_step": "- ```update_plan_step``` — Update one stable active-plan step only after doing and checking it. Args: {\"step_id\":\"...\",\"status\":\"pending|in_progress|done|blocked\",\"summary\":\"...\"}.",
+    "get_goal": "- ```get_goal``` — Read the durable active goal, attempt number and checkpoint for this chat.",
+    "update_goal_progress": "- ```update_goal_progress``` — Save meaningful progress and a restart-safe checkpoint for the active goal. Args: {\"progress\":\"...\",\"checkpoint\":{},\"waiting_user\":false}.",
+    "complete_goal": "- ```complete_goal``` — The ONLY way to finish an active Goal. Call it after verification with {\"summary\":\"...\",\"evidence\":[\"actual check/result\"]}. Prose does not complete a Goal.",
     "list_served_models": "- ```list_served_models``` — Show what the Cookbook (LLM-serving subsystem) is currently running. NO args. Use this for ANY 'what's running' / 'what's serving' / 'show my cookbook' / 'is anything up' query. DO NOT shell out (`ps aux`, `docker ps`, etc.) — this tool is the source of truth. Failed serve tasks include recent logs plus diagnosis/retry suggestions; use those suggestions to call `serve_model` again with an adjusted command when appropriate.",
     "stop_served_model": "- ```stop_served_model``` — Stop a running model server. Args (JSON): {\"session_id\": \"<from list_served_models>\"}. Use for 'kill my cookbook' / 'stop the model' / 'shut down vLLM'.",
     "tail_serve_output": "- ```tail_serve_output``` — Read the actual tmux stderr/traceback of a CURRENTLY failing cookbook task. Args (JSON): {\"session_id\": \"<from list_served_models>\", \"tail\": 150?}. **Use ONLY after** you just launched something via `serve_model` AND `list_served_models` reports YOUR new task as `crashed`/`error`. DO NOT use it on old stopped/completed download tasks (they're historical noise — won't predict whether a new launch succeeds). DO NOT call it before launching a fresh attempt. When you do call it, bump `tail` to 400+ only if the visible error references 'see root cause above'.",
@@ -2907,7 +2912,7 @@ def _build_base_prompt(
         # ALWAYS_AVAILABLE back in here used to silently undo those
         # drops. Only force-include the irreducible loop primitives
         # (ask_user, update_plan) as belt-and-suspenders.
-        tool_names = set(relevant_tools) | {"ask_user", "update_plan"}
+        tool_names = set(relevant_tools) | {"ask_user", "create_plan", "update_plan", "update_plan_step", "get_goal", "update_goal_progress", "complete_goal"}
         if needs_admin:
             tool_names |= _ADMIN_TOOLS
         agent_prompt = _assemble_prompt(tool_names, disabled, compact=compact)
@@ -3408,7 +3413,8 @@ PLAN_MODE_DIRECTIVE = (
     "ground the plan. If the task is 'write a file', your plan is to DESCRIBE "
     "writing it — you do NOT write it now.\n"
     "\n"
-    "OUTPUT: present the plan as a GitHub-style checklist, one concrete step per line:\n"
+    "Before your final explanation, call `create_plan` exactly once with stable "
+    "step IDs. Then present the same plan as a GitHub-style checklist, one concrete step per line:\n"
     "- [ ] first action you will take once approved\n"
     "- [ ] next action\n"
     "Each item = one concrete action (file to create/edit, command to run, side "
@@ -3439,6 +3445,26 @@ def build_active_plan_note(approved_plan: str) -> str:
         "invent steps; if a step is genuinely impossible, say so and stop.\n\n"
         "Current plan:\n"
         + approved_plan.strip()
+    )
+
+
+def build_active_goal_note(goal: Optional[dict]) -> str:
+    """Pin durable goal state without confusing it with Plan mode."""
+    if not isinstance(goal, dict) or goal.get("status") not in {"active", "waiting_user"}:
+        return ""
+    checkpoint = json.dumps(goal.get("checkpoint") or {}, ensure_ascii=False)[:6000]
+    return (
+        "## ACTIVE GOAL — CONTINUE UNTIL EXPLICITLY COMPLETED\n"
+        "This is one durable goal, not a plan request. Continue useful safe work; do not "
+        "stop merely because one model response ended. Persist meaningful milestones with "
+        "`update_goal_progress`. If a real permission, budget, or user decision is required, "
+        "set waiting_user=true and state the exact blocker. The ONLY successful terminal "
+        "action is `complete_goal`, and it requires concrete verification evidence. Never "
+        "repeat a command whose side effect has an unknown outcome.\n\n"
+        f"Objective: {str(goal.get('objective') or '').strip()}\n"
+        f"Attempt: {int(goal.get('attempt') or 1)}\n"
+        f"Latest progress: {str(goal.get('progress') or '').strip()}\n"
+        f"Checkpoint: {checkpoint}"
     )
 
 
@@ -3477,6 +3503,7 @@ async def stream_agent_loop(
     fallback_on_empty: bool = True,
     plan_mode: bool = False,
     approved_plan: Optional[str] = None,
+    active_goal: Optional[Dict] = None,
     tool_policy: Optional[ToolPolicy] = None,
     workspace: Optional[str] = None,
     forced_tools: Optional[Set[str]] = None,
@@ -4191,6 +4218,10 @@ async def stream_agent_loop(
             }
         elif general_no_tool_mode:
             route_tools = set()
+        if route_tools is not None and plan_mode:
+            route_tools |= {"ask_user", "create_plan", "update_plan"}
+        if route_tools is not None and active_goal:
+            route_tools |= {"ask_user", "get_goal", "update_goal_progress", "complete_goal"}
         return route_tools
 
     (
@@ -4434,6 +4465,8 @@ async def stream_agent_loop(
             _prepend_agent_directive(route_messages, PLAN_MODE_DIRECTIVE)
         elif approved_plan and approved_plan.strip() and not guide_only:
             _prepend_agent_directive(route_messages, build_active_plan_note(approved_plan))
+        if active_goal and not guide_only:
+            _prepend_agent_directive(route_messages, build_active_goal_note(active_goal))
         if guide_only:
             _prepend_agent_directive(route_messages, GUIDE_ONLY_DIRECTIVE)
         return {
@@ -4899,6 +4932,8 @@ async def stream_agent_loop(
         )
         _approved_result_injected = True
 
+    _goal_stall_signature = None
+    _goal_stall_count = 0
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -4934,7 +4969,11 @@ async def stream_agent_loop(
         try:
             _context_profile = owner_policy(owner)
         except ValueError:
-            yield f'data: {json.dumps({"type": "context_compaction_failed", "delta": "\\n[Context profile is invalid. Update the settings before continuing.]"})}\n\n'
+            _invalid_context_event = {
+                "type": "context_compaction_failed",
+                "delta": "\\n[Context profile is invalid. Update the settings before continuing.]",
+            }
+            yield f'data: {json.dumps(_invalid_context_event)}\n\n'
             break
         _configured_policy = ContextPolicy.from_dict(_context_profile['effective']) if _context_profile else None
         # Shape the growing WORKING history on every round, not only at the
@@ -4995,7 +5034,11 @@ async def stream_agent_loop(
         elif _compact_status in {"failed", "uncompactable"}:
             # Do not silently drop evidence and continue an audit as if the
             # summary succeeded. The user can retry after the provider recovers.
-            yield f'data: {json.dumps({"type": "context_compaction_failed", "delta": "\\n[Context checkpoint failed; stopping safely without discarding the conversation. Please retry.]"})}\n\n'
+            _checkpoint_failure_event = {
+                "type": "context_compaction_failed",
+                "delta": "\\n[Context checkpoint failed; stopping safely without discarding the conversation. Please retry.]",
+            }
+            yield f'data: {json.dumps(_checkpoint_failure_event)}\n\n'
             full_response += "\n[Context checkpoint failed; stopped without discarding the conversation.]"
             break
         _estimated_prompt = int(estimate_tokens(_active_route_state.get("request_messages", messages)) * _context_calibration) + _schema_tokens
@@ -5867,6 +5910,53 @@ async def stream_agent_loop(
                     + "\n\n"
                 )
                 break
+            # Goal uses an explicit completion handshake. A prose answer is a
+            # checkpoint, not completion, so the detached server run continues
+            # even after the initiating browser disconnects.
+            if active_goal and owner and session_id and not _force_answer:
+                try:
+                    from src.chat_work_store import store as _chat_work_store
+                    _goal_now = _chat_work_store.get(owner, session_id).get("goal")
+                except Exception:
+                    logger.exception("Failed to read active Goal before continuation")
+                    _goal_now = None
+                if _goal_now and _goal_now.get("status") == "active":
+                    _goal_text = _strip_think_blocks(cleaned_round).strip()
+                    _goal_signature = re.sub(r"\s+", " ", _goal_text.lower())[-1000:] or "empty-response"
+                    if _goal_signature == _goal_stall_signature:
+                        _goal_stall_count += 1
+                    else:
+                        _goal_stall_signature, _goal_stall_count = _goal_signature, 1
+                    if _goal_stall_count >= 6:
+                        active_goal = _chat_work_store.update_goal(
+                            owner, session_id,
+                            "No new safe progress after repeated continuation attempts.",
+                            {"round": round_num, "reason": "repeated_premature_stop"},
+                            waiting_user=True,
+                        )
+                        yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                        break
+                    active_goal = _chat_work_store.update_goal(
+                        owner, session_id,
+                        "Goal is still active; continuing from the latest server checkpoint.",
+                        {"round": round_num, "response_excerpt": _goal_text[-2000:]},
+                    )
+                    yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                    if _goal_text:
+                        messages.append({"role": "assistant", "content": _goal_text})
+                    _recovery = (
+                        "The Goal is still active because you did not call complete_goal. "
+                        "Continue now with the next concrete safe action and verify it. "
+                        "Do not merely restate completion; call complete_goal only with actual evidence."
+                    )
+                    if _goal_stall_count >= 3:
+                        _recovery += (
+                            " The previous approach has stalled repeatedly. Change hypothesis, "
+                            "run a diagnostic step, or explain what user decision is required via ask_user."
+                        )
+                    messages.append({"role": "system", "content": _recovery})
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    continue
             break  # no tools — done
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
@@ -6287,6 +6377,17 @@ async def stream_agent_loop(
                     yield 'data: ' + json.dumps({"delta": _auq_delta}) + '\n\n'
                 _pending_ask_user_event = _auq
                 _awaiting_user = True
+                if active_goal and owner and session_id:
+                    try:
+                        from src.chat_work_store import store as _chat_work_store
+                        active_goal = _chat_work_store.update_goal(
+                            owner, session_id,
+                            "Waiting for the user's decision: " + _auq_q,
+                            {"question": _auq_q}, waiting_user=True,
+                        )
+                        yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                    except Exception:
+                        logger.exception("Failed to checkpoint goal wait state")
 
             # update_plan: agent wrote back to the plan (ticked a step / revised).
             # Push it to the frontend so the stored plan + docked window update
@@ -6294,6 +6395,11 @@ async def stream_agent_loop(
             if "plan_update" in result:
                 yield (
                     f'data: {json.dumps({"type": "plan_update", "data": result["plan_update"]})}\n\n'
+                )
+
+            if "goal_update" in result:
+                yield (
+                    f'data: {json.dumps({"type": "goal_update", "data": result["goal_update"]})}\n\n'
                 )
 
             # Build output for frontend tool bubble.

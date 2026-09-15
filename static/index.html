@@ -826,6 +826,15 @@
           </div>
         </div>
       </div>
+      <div class="section" id="projects-section">
+        <div class="section-header-flex">
+          <span class="section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h7l2 2h9v10H3z"/><path d="M3 7V5h7l2 2"/></svg><span class="section-title-label">Projects</span></span>
+          <button type="button" class="section-header-btn list-item-plus-btn" id="project-create-btn" title="Create project" aria-label="Create project">
+            <svg class="list-item-plus-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg><span class="list-item-plus-label">new</span>
+          </button>
+        </div>
+        <div id="project-list"></div>
+      </div>
       <!-- Hidden dropdown for session actions -->
       <div id="session-actions-dropdown" class="dropdown hidden">
         <div class="dropdown-item" id="rename-session-option">
@@ -1036,21 +1045,36 @@
     <input type="checkbox" id="incognito-toggle" style="display:none;">
     <input type="file" id="file-input" class="hidden" multiple />
 
+    <div id="chat-work-status-row" class="chat-work-status-row" aria-live="polite">
+      <section id="plan-mode-status" class="chat-work-card plan-work-card" hidden>
+        <div class="chat-work-card-head"><strong class="plan-mode-status-label">Plan</strong><span id="plan-work-progress"></span></div>
+        <div id="plan-work-current" class="chat-work-current"></div>
+        <details id="plan-work-details"><summary>Show steps</summary><ol id="plan-work-steps"></ol></details>
+        <div class="chat-work-actions">
+          <button type="button" id="plan-work-execute">Execute</button>
+          <button type="button" id="plan-work-edit">Edit</button>
+          <button type="button" id="plan-work-cancel">Cancel</button>
+          <button type="button" id="plan-mode-status-toggle">Turn off Plan mode</button>
+        </div>
+      </section>
+      <section id="goal-mode-status" class="chat-work-card goal-work-card" hidden>
+        <div class="chat-work-card-head"><strong>Goal</strong><span id="goal-work-state"></span></div>
+        <div id="goal-work-objective" class="chat-work-current"></div>
+        <div id="goal-work-progress"></div>
+        <div class="chat-work-actions">
+          <button type="button" id="goal-work-pause">Pause</button>
+          <button type="button" id="goal-work-resume">Resume</button>
+          <button type="button" id="goal-work-cancel">Cancel</button>
+          <button type="button" id="goal-mode-status-toggle">Turn off Goal mode</button>
+        </div>
+      </section>
+    </div>
+
     <!-- Unified chat input bar -->
     <div class="chat-input-bar">
       <div class="chat-input-top">
         <div id="message-ghost" class="ghost-text-overlay" aria-hidden="true"></div>
         <textarea id="message" placeholder="Message Odysseus..." required autocomplete="off" aria-label="Message input" rows="1" autofocus></textarea>
-        <div id="plan-mode-status" class="plan-mode-status" hidden>
-          <span class="plan-mode-status-label">Plan mode</span>
-          <button type="button" id="plan-mode-status-toggle" class="plan-mode-status-toggle" aria-label="Turn off plan mode" aria-pressed="true">
-            <span></span>
-          </button>
-        </div>
-        <div id="goal-mode-status" class="plan-mode-status goal-mode-status" hidden>
-          <span class="plan-mode-status-label">Goal</span>
-          <button type="button" id="goal-mode-status-toggle" class="plan-mode-status-toggle" aria-label="Turn off goal mode" aria-pressed="true"><span></span></button>
-        </div>
         <!-- Model picker (inside chatbox, top-right) -->
         <div class="model-picker-wrap" id="model-picker-wrap">
           <button type="button" class="model-picker-btn" id="model-picker-btn" title="Switch model"><span id="model-picker-label">Select model</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
@@ -1110,7 +1134,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11"/></svg><span>Plan mode</span><span class="overflow-active-dot"></span>
               </button>
               <button type="button" class="overflow-menu-item" id="goal-toggle-btn" aria-pressed="false">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m16 8-4 4"/></svg><span>Goal: plan, execute, verify</span><span class="overflow-active-dot"></span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m16 8-4 4"/></svg><span>Goal: work until verified completion</span><span class="overflow-active-dot"></span>
               </button>
               <button type="button" class="overflow-menu-item" id="overflow-attach-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>

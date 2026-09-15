@@ -242,9 +242,10 @@ def test_terminal_then_session_switch_preserves_completed_background_state():
 
 def test_detached_run_identity_is_attached_to_live_metrics():
     routes = Path("routes/chat_routes.py").read_text(encoding="utf-8")
-    assert "headers={\"X-Odysseus-Run-Id\": _detached_run.run_id}" in routes
+    assert '"X-Odysseus-Run-Id": _detached_run.run_id' in routes
+    assert '"X-Odysseus-Started-At": str(_detached_run.started_at)' in routes
     assert "agent_runs.subscribe(session, _detached_run)" in routes
-    assert "agent_runs.subscribe(session_id, _active_run)" in routes
+    assert "agent_runs.subscribe(session_id, _active_run, after_seq=after_seq)" in routes
     assert "const streamRunId = res.headers.get('X-Odysseus-Run-Id')" in CHAT_JS
     assert "metrics._costRecordId = _metricsCostRecordId(streamRunId, json)" in CHAT_JS
     assert "'X-Odysseus-Run-Id': runId" in CHAT_JS
