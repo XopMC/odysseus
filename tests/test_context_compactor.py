@@ -255,6 +255,53 @@ async def test_deferred_compaction_persists_only_after_route_commit(monkeypatch)
     assert len(updates) == 1
 
 
+@pytest.mark.asyncio
+async def test_auto_compaction_never_replaces_canonical_transcript(monkeypatch):
+    from types import SimpleNamespace
+
+    history = [SimpleNamespace(role="user", content=f"message-{index}", metadata={})
+               for index in range(8)]
+    session = SimpleNamespace(history=history)
+    messages = [{"role": item.role, "content": item.content} for item in history]
+    before = list(session.history)
+
+    monkeypatch.setattr(cc, "get_context_length", lambda *args: 20)
+    monkeypatch.setattr(cc, "resolve_endpoint", lambda *args, **kwargs: (None, None, None))
+
+    async def fake_summary(*args, **kwargs):
+        return "safe working checkpoint"
+
+    monkeypatch.setattr(cc, "llm_call_async", fake_summary)
+
+    compacted, _context, was_compacted = await cc.maybe_compact(
+        session, "http://local/v1", "test-model", messages,
+    )
+
+    assert was_compacted is True
+    assert len(compacted) < len(messages)
+    assert session.history == before
+    assert session.context_checkpoint_count == 4
+    assert "safe working checkpoint" in session.context_checkpoint.content
+
+
+def test_repeated_checkpoint_advances_over_new_messages_without_rewriting_history():
+    from types import SimpleNamespace
+
+    history = [SimpleNamespace(content=f"message-{index}") for index in range(12)]
+    session = SimpleNamespace(
+        history=history,
+        context_checkpoint_count=4,
+        context_checkpoint=None,
+    )
+    before = list(history)
+
+    cc._update_session_history(session, 3, "new checkpoint")
+
+    assert session.history == before
+    assert session.context_checkpoint_count == 7
+    assert "new checkpoint" in session.context_checkpoint.content
+
+
 class TestResearchPrimerPreserved:
     """A research-spinoff primer (metadata research_spinoff_from) must never be
     trimmed away — it is the Discuss chat's sole knowledge base (drift fix)."""

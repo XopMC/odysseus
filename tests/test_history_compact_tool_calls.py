@@ -201,16 +201,17 @@ def test_manual_compact_tolerates_dict_message_with_none_content(monkeypatch):
 
 
 def test_registered_manual_compact_route_tolerates_none_content(monkeypatch):
+    original = [
+        ChatMessage(role="user", content="start"),
+        ChatMessage(role="assistant", content=None),
+        ChatMessage(role="tool", content="tool result"),
+        ChatMessage(role="assistant", content="done"),
+        ChatMessage(role="user", content="next"),
+        ChatMessage(role="assistant", content="final"),
+    ]
     response, captured, manager = _registered_compact_response(
         monkeypatch,
-        [
-            ChatMessage(role="user", content="start"),
-            ChatMessage(role="assistant", content=None),
-            ChatMessage(role="tool", content="tool result"),
-            ChatMessage(role="assistant", content="done"),
-            ChatMessage(role="user", content="next"),
-            ChatMessage(role="assistant", content="final"),
-        ],
+        original,
     )
 
     assert response.status_code == 200
@@ -218,7 +219,11 @@ def test_registered_manual_compact_route_tolerates_none_content(monkeypatch):
     compact_prompt = captured["messages"][1]["content"]
     assert "ASSISTANT: None" not in compact_prompt
     assert "ASSISTANT: " in compact_prompt
-    assert manager.replaced_messages is not None
+    assert response.json()["transcript_preserved"] is True
+    assert manager.replaced_messages is None
+    assert manager.session.history == original
+    assert manager.session.context_checkpoint_count == 2
+    assert manager.session.context_checkpoint.metadata["hidden"] is True
 
 
 def test_registered_manual_compact_route_uses_session_owner(monkeypatch):
@@ -235,7 +240,8 @@ def test_registered_manual_compact_route_uses_session_owner(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert manager.replaced_messages is not None
+    assert manager.replaced_messages is None
+    assert manager.session.message_count == 6
     assert ("utility", "session-owner") in captured["resolve_calls"]
 
 

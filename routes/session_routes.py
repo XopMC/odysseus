@@ -1100,19 +1100,25 @@ def setup_session_routes(
             content=f"[Conversation summary]\n{summary}",
             metadata={
                 "compacted": True,
+                "hidden": True,
+                "context_checkpoint": True,
                 "summarized_count": len(older),
                 "timestamp": utcnow_naive().isoformat(),
             },
         )
-        new_history = [summary_msg] + recent
-        if not session_manager.replace_messages(session_id, new_history):
-            raise HTTPException(500, "Failed to save compacted history")
+        # Compaction is a working-context operation, never a transcript edit.
+        # Keep every durable message and substitute the checkpoint only for
+        # future model requests in this process. After a restart the complete
+        # transcript is re-compacted when needed; nothing is lost.
+        session.context_checkpoint = summary_msg
+        session.context_checkpoint_count = len(older)
 
         return {
             "ok": True,
             "summarized": len(older),
             "kept": len(recent),
-            "message_count": len(new_history),
+            "message_count": len(history),
+            "transcript_preserved": True,
         }
 
     @router.post("/sessions/auto-sort")

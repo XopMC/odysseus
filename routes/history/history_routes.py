@@ -842,67 +842,27 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             )
             summary = normalize_compaction_summary(summary)
 
-            # Replace session history: summary as system message + recent messages
+            # Install a model-context checkpoint while preserving the complete
+            # canonical transcript used by history, export and live replay.
             compacted_at = datetime.now(timezone.utc).isoformat()
-            # System message holds the full summary for AI context
             system_summary = ChatMessage(
                 role="system",
                 content=f"[Conversation summary — {len(older)} earlier messages were compacted]\n\n{summary}",
-                metadata={"compacted": True, "hidden": True, "timestamp": compacted_at},
+                metadata={
+                    "compacted": True,
+                    "hidden": True,
+                    "context_checkpoint": True,
+                    "summarized_count": len(older),
+                    "timestamp": compacted_at,
+                },
             )
-            # Visible assistant message just shows stats
-            summary_msg = ChatMessage(
-                role="assistant",
-                content=f"**Conversation compacted** — {len(older)} messages summarized, {len(recent)} kept.",
-                metadata={"compacted": True, "messages_removed": len(older), "timestamp": compacted_at},
+            session.context_checkpoint = system_summary
+            session.context_checkpoint_count = len(older)
+            logger.info(
+                "Compact: installed context checkpoint for %s messages; "
+                "preserved all %s transcript messages",
+                len(older), msg_count_before,
             )
-            new_history = [system_summary, summary_msg] + list(recent)
-            session.history = new_history
-            session.message_count = len(session.history)
-            logger.info(f"Compact: session {session_id} history now has {len(session.history)} messages (was {msg_count_before})")
-
-            # Update DB: delete old messages, insert summary
-            db = SessionLocal()
-            try:
-                db_msgs = db.query(DbChatMessage).filter(
-                    DbChatMessage.session_id == session_id
-                ).order_by(DbChatMessage.timestamp).all()
-
-                # Delete all but the last keep_count
-                for m in db_msgs[:-keep_count]:
-                    db.delete(m)
-
-                # Insert system summary (hidden, for AI context) and visible summary
-                import json as _json
-                import uuid
-                now = datetime.now(timezone.utc)
-                db_sys_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="system",
-                    content=system_summary.content,
-                    meta_data=_json.dumps(system_summary.metadata),
-                    timestamp=now,
-                )
-                db.add(db_sys_summary)
-                db_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="assistant",
-                    content=summary_msg.content,
-                    meta_data=_json.dumps(summary_msg.metadata),
-                    timestamp=now,
-                )
-                db.add(db_summary)
-
-                # Update session record
-                db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-                if db_session:
-                    db_session.message_count = len(session.history)
-                    db_session.updated_at = datetime.now(timezone.utc)
-                db.commit()
-            finally:
-                db.close()
 
             session_manager.save_sessions()
 
@@ -911,9 +871,11 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
             return {
                 "status": "ok",
-                "message": f"Compacted: {msg_count_before} msgs → {len(session.history)} msgs ({pct_before}% → {pct_after}%)",
+                "message": f"Context compacted; all {msg_count_before} transcript messages preserved ({pct_before}% → {pct_after}%)",
                 "before": pct_before,
                 "after": pct_after,
+                "message_count": msg_count_before,
+                "transcript_preserved": True,
             }
 
         except Exception as e:

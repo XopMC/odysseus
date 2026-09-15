@@ -20,8 +20,9 @@ let _suppressNextSessionLoading = false;
 let _rootFreshChatApplied = false;
 const HISTORY_DISPLAY_CHAR_LIMIT = 160000;
 const HISTORY_DISPLAY_TAIL_CHARS = 20000;
-const HISTORY_PAGE_LIMIT_MOBILE = 8;
-const HISTORY_PAGE_LIMIT_DESKTOP = 24;
+// Keep initial rendering bounded on every device. Older messages are fetched
+// in equally sized pages only when the user scrolls to the top.
+const HISTORY_PAGE_LIMIT = 50;
 
 const SIDEBAR_MAX_VISIBLE = 10;
 const FOLDER_MAX_VISIBLE = 5;
@@ -173,7 +174,7 @@ function _stripUserVisionBlocks(text) {
 }
 
 function _historyPageLimit() {
-  return window.innerWidth <= 768 ? HISTORY_PAGE_LIMIT_MOBILE : HISTORY_PAGE_LIMIT_DESKTOP;
+  return HISTORY_PAGE_LIMIT;
 }
 
 function _historyUrl(id, { limit = null, offset = null } = {}) {

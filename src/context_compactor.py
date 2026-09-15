@@ -443,12 +443,13 @@ async def maybe_compact(
 
 
 def apply_compaction_state(session, compaction_state: Optional[Dict[str, Any]]) -> bool:
-    """Persist a route-specific compaction after that route commits output.
+    """Apply a route-specific LLM checkpoint after that route commits output.
 
     Candidate prompts may be compacted speculatively while an explicit
-    foreground fallback chain is being tried.  Persisting at construction time
-    would let an unavailable route rewrite history before another route answers,
-    so callers hold this small plan and apply only the winning route's plan.
+    foreground fallback chain is being tried. Applying at construction time
+    would let an unavailable route change the working context before another
+    route answers, so callers hold this small plan and apply only the winning
+    route's plan. The canonical transcript is never rewritten.
     """
 
     state = compaction_state if isinstance(compaction_state, dict) else None
@@ -489,39 +490,35 @@ def apply_compaction_state_for_session(
 
 def _update_session_history(session, split_point: int, summary: str,
                             system_msg_count: int = 0):
-    """Update the in-memory session history after compaction.
+    """Install an LLM-only checkpoint without mutating the transcript.
 
-    `split_point` is the index in `convo_msgs` (system-stripped). The
-    in-memory `session.history` includes leading system messages, so the
-    actual recent-history slice starts at `system_msg_count + split_point`.
-    Prepending `session.history[:system_msg_count]` to the new history
-    preserves persona, preset, and RAG system messages that would
-    otherwise be dropped.
+    Older implementations called ``replace_messages`` here, permanently
+    deleting the summarized rows. Besides losing chat history, a Stop/error
+    racing with that replacement could also discard tool calls already visible
+    in the browser. Keep the complete append-only ``session.history`` and let
+    ``Session.get_context_messages`` substitute this checkpoint only when
+    constructing a model request.
     """
     if not session or not hasattr(session, "history"):
         return
 
-    effective_split = system_msg_count + split_point
-    if effective_split >= len(session.history):
+    # split_point is counted over the non-system conversation passed to the
+    # model. Runtime preface system messages are not members of session.history,
+    # so clamp to the durable transcript rather than adding system_msg_count.
+    prior_covered = int(getattr(session, "context_checkpoint_count", 0) or 0)
+    covered_count = min(prior_covered + max(0, split_point), len(session.history))
+    if covered_count <= 0:
         return
-
-    # Keep the recent messages, prepend summary AND the leading system
-    # messages so the system prompt survives compaction.
-    system_prefix = list(session.history[:system_msg_count])
-    recent_history = session.history[effective_split:]
     summary = normalize_compaction_summary(summary)
     summary_msg = ChatMessage(
         role="system",
         content=f"[Conversation summary]\n{summary}",
-        metadata={"compacted": True, "summarized_count": split_point},
+        metadata={
+            "compacted": True,
+            "hidden": True,
+            "context_checkpoint": True,
+            "summarized_count": covered_count,
+        },
     )
-    new_history = system_prefix + [summary_msg] + recent_history
-    try:
-        from core.models import get_session_manager_instance
-        manager = get_session_manager_instance()
-    except Exception:
-        manager = None
-    if manager and getattr(session, "id", None):
-        if manager.replace_messages(session.id, new_history):
-            return
-    session.history = new_history
+    session.context_checkpoint = summary_msg
+    session.context_checkpoint_count = covered_count

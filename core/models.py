@@ -119,6 +119,11 @@ class Session:
     is_important: bool = False
     message_count: int = 0
     project_id: Optional[str] = None
+    # A context checkpoint is an LLM-only view over the immutable transcript.
+    # It must never replace ``history``: the latter is the canonical UI/export
+    # log and has to survive compaction, Stop, errors and process restarts.
+    context_checkpoint: Optional[ChatMessage] = None
+    context_checkpoint_count: int = 0
 
     def __post_init__(self):
         if self.headers is None:
@@ -161,9 +166,15 @@ class Session:
         the model. Display/history-load paths use the raw ``history`` and are
         unaffected.
         """
+        history_for_context = self.history
+        checkpoint = self.context_checkpoint
+        checkpoint_count = int(self.context_checkpoint_count or 0)
+        if checkpoint is not None and 0 < checkpoint_count <= len(self.history):
+            history_for_context = [checkpoint, *self.history[checkpoint_count:]]
+
         messages = [
             msg.to_dict()
-            for msg in self.history
+            for msg in history_for_context
             if (msg.metadata or {}).get("source") != "slash"
         ]
         if not _history_grants_chat_session_approval(self.history, self.id):
