@@ -58,7 +58,9 @@ function renderGoal() {
   const draftEnabled = !!window.__odysseusGoalModeActive?.();
   const goal = snapshot.goal;
   const live = goal && !['completed', 'cancelled'].includes(goal.status);
-  node.hidden = !draftEnabled && !goal;
+  // A cancelled goal remains in the durable audit log, but it is no longer
+  // active UI state and must disappear after cancel, reload, or reconnect.
+  node.hidden = !draftEnabled && (!goal || goal.status === 'cancelled');
   if (!goal) {
     const state = el('goal-work-state');
     const objective = el('goal-work-objective');
@@ -117,6 +119,7 @@ async function mutate(kind, action) {
   if (!sessionId || !record) return;
   try {
     snapshot[kind] = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/${kind}/${action}`, { expected_revision: record.revision });
+    if (kind === 'goal' && action === 'cancel') snapshot.goal = null;
     render();
     if (kind === 'plan' && action === 'execute') {
       window.__odysseusSetPlanMode?.(false);

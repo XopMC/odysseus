@@ -1,7 +1,7 @@
 """Real Team HTTP boundary and SQLite ownership; no model or host execution.
 
 Only the runtime executor/host transport are substituted. Authentication,
-same-origin enforcement, request parsing, routing and durable owner checks run.
+request parsing, routing and durable owner checks run.
 """
 import asyncio
 import importlib
@@ -149,14 +149,13 @@ def test_only_interactive_owner_cookie_can_use_team(team_client, credential):
     assert env.client.get("/api/team/capabilities", headers=headers).json()["enabled"] is False
 
 
-@pytest.mark.parametrize("origin", [None, "null", "https://evil.example", "http://testserver.evil", "http://testserver:81"])
-def test_mutations_require_exact_same_origin_even_with_valid_cookie(team_client, origin):
+@pytest.mark.parametrize("origin", [None, "null", "https://another-device.example", "http://testserver:81"])
+def test_authenticated_owner_can_mutate_from_any_browser_origin(team_client, origin):
     env = team_client
     headers = {} if origin is None else {"Origin": origin}
     response = env.client.post(f"/api/team/{env.task['id']}/pause", json={}, headers=headers)
-    assert response.status_code == 403
-    assert env.store.get_task("alice", env.task["id"])["status"] == env.task["status"]
-    assert env.runtime.calls == []
+    assert response.status_code == 200
+    assert env.store.get_task("alice", env.task["id"])["status"] == "paused"
 
 
 def test_host_allowlist_is_independent_of_cookie_login(team_client, monkeypatch):
@@ -192,8 +191,7 @@ def test_project_profile_save_and_load_are_owner_scoped(team_client):
     assert env.client.get("/api/team/profiles").json() == {"profiles": []}
     body = {"name": "My project", "profile": {"project_path": "/work", "test_command": "pytest -q",
              "build_command": "", "constraints": "Keep public API"}}
-    assert env.client.post("/api/team/profiles", json=body).status_code == 403
-    assert env.client.post("/api/team/profiles", json=body, headers=ORIGIN).status_code == 200
+    assert env.client.post("/api/team/profiles", json=body).status_code == 200
     profiles = env.client.get("/api/team/profiles").json()["profiles"]
     assert len(profiles) == 1 and profiles[0]["name"] == body["name"]
     assert profiles[0]["profile"] == body["profile"]

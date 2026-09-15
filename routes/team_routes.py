@@ -44,8 +44,6 @@ def owner_for(request, *, mutation=False):
     from src.host_execution import enabled_for
     if not enabled_for(owner):
         raise HTTPException(403, 'Team host access is not enabled for this owner')
-    if mutation and request.headers.get('origin') != str(request.base_url).rstrip('/'):
-        raise HTTPException(403, 'Same-origin browser action required')
     return owner
 
 

@@ -24,8 +24,6 @@ def authorize(request, mutation=False):
     if request.url.scheme != 'https' and request.url.hostname not in ('localhost', '127.0.0.1', '::1'):
         raise HTTPException(400, 'Use HTTPS or a localhost SSH tunnel before entering a sudo password')
     if mutation:
-        if request.headers.get('origin') != str(request.base_url).rstrip('/'):
-            raise HTTPException(403, 'Same-origin browser request required')
         if request.headers.get('x-odysseus-host-action') != 'one-shot-sudo':
             raise HTTPException(403, 'Explicit host action required')
     return owner

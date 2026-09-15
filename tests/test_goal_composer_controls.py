@@ -18,6 +18,8 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     work = (root / "static" / "js" / "chat-work.js").read_text()
     renderer = (root / "static" / "js" / "chatRenderer.js").read_text()
     assert "beginGoal" in work
+    assert "action === 'cancel') snapshot.goal = null" in work
+    assert "goal.status === 'cancelled'" in work
     assert "bindUiText(state, 'Waiting for a goal')" in work
     assert "bindUiText(objective, 'Your next message becomes the active goal.')" in work
     assert "bindThinkingLabels(body)" in renderer

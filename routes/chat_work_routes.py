@@ -29,8 +29,6 @@ def _owner(request, session_id, mutation=False):
     owner = effective_user(request)
     if not owner:
         raise HTTPException(401, "Login required")
-    if mutation and request.headers.get("origin") != str(request.base_url).rstrip("/"):
-        raise HTTPException(403, "Same-origin browser action required")
     return owner
 
 

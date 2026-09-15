@@ -1,4 +1,4 @@
-"""Human-only elevation boundary: no internal/bearer or cross-origin access."""
+"""Human-only elevation boundary independent of the browser origin."""
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,10 +24,17 @@ def test_interactive_owner_can_authorize():
         assert authorize(request(), True) == 'xopmc'
 
 
+def test_interactive_owner_can_authorize_from_another_browser_origin():
+    with patch('src.host_execution.enabled_for', return_value=True):
+        assert authorize(request(headers={
+            'origin': 'https://another-device.example',
+            'x-odysseus-host-action': 'one-shot-sudo',
+        }), True) == 'xopmc'
+
+
 @pytest.mark.parametrize('changes', [
     {'cookies': {}}, {'state': SimpleNamespace(api_token=True)},
     {'headers': {'X-Odysseus-Internal-Token': 'internal'}},
-    {'headers': {'origin': 'http://evil.test', 'x-odysseus-host-action': 'one-shot-sudo'}},
     {'headers': {'origin': 'http://localhost:5131'}},
     {'url': SimpleNamespace(scheme='http', hostname='192.168.50.6')},
 ])
