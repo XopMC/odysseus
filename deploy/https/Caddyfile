@@ -1,0 +1,20 @@
+{
+	auto_https off
+	servers {
+		listener_wrappers {
+			http_redirect
+			tls
+		}
+		protocols h1 h2
+	}
+}
+:{$HTTPS_PORT:5130} {
+	tls /etc/odysseus-tls/cert.pem /etc/odysseus-tls/key.pem
+	encode zstd gzip
+
+	reverse_proxy {$ODYSSEUS_UPSTREAM:http://127.0.0.1:5131} {
+		# Streaming chat and tool progress must reach every client immediately.
+		flush_interval -1
+		header_up X-Forwarded-Proto https
+	}
+}

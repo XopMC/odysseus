@@ -430,6 +430,31 @@ To expose Odysseus on a local network or Tailscale with HTTPS:
    ```
 4. Install the `mkcert` CA on any other device you want to access Odysseus from (e.g., for iOS, email the `rootCA.pem` to yourself, install the profile, and trust it in Certificate Trust Settings).
 
+**Docker TLS proxy.** Docker deployments can keep uvicorn on loopback and put
+Caddy in front of it. Generate a private certificate (or provide a certificate
+from your own CA), then enable the HTTPS overlay:
+
+```bash
+./scripts/generate-local-tls.sh ./data/tls 192.168.1.100 server.local
+COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml docker compose up -d
+```
+
+HTTPS listens on `${HTTPS_PORT:-5130}`; the private HTTP health endpoint listens
+on `127.0.0.1:${APP_HTTP_PORT:-5131}`. Install `data/tls/rootCA.pem` on every
+client before using the generated certificate. Never copy `rootCA-key.pem` to a
+client. For a public deployment, prefer a publicly trusted certificate and keep
+`AUTH_ENABLED=true`.
+
+If a full-tunnel VPN on Linux captures replies to inbound port forwarding, the
+port can be routed back through the physical WAN persistently:
+
+```bash
+sudo ./scripts/install-public-port-route.sh 5130 eno1 192.168.1.1
+```
+
+This only fixes return-path routing on the server. Port forwarding or VPN access
+still has to be configured on the router.
+
 ### Common self-host traps (30-second fixes)
 A grab-bag of small gotchas that otherwise turn into long debugging sessions.
 
