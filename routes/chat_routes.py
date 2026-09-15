@@ -77,7 +77,7 @@ from src.tool_policy import (
 from src.tool_approvals import tool_approval_store
 from src.tool_approval_scopes import stamp_chat_session_grant
 from src.tool_security import delegated_credential_blocked_tools
-from src.chat_work_store import WorkNotFound, store as chat_work_store
+from src.chat_work_store import WorkConflict, WorkNotFound, store as chat_work_store
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +175,12 @@ def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
         db.close()
 
 
-async def _tool_approval_resolution_stream(decision: str) -> AsyncGenerator[str, None]:
+async def _tool_approval_resolution_stream(
+    decision: str, goal: Optional[Dict[str, Any]] = None,
+) -> AsyncGenerator[str, None]:
     yield f"data: {json.dumps({'type': 'tool_approval_resolved', 'decision': decision})}\n\n"
+    if goal:
+        yield f"data: {json.dumps({'type': 'goal_update', 'data': goal})}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -1216,9 +1220,20 @@ def setup_chat_routes(
                         "Tool approval %s was consumed but its persisted card could not be marked resolved",
                         tool_approval_id,
                     )
+                resumed_goal = None
+                try:
+                    waiting_goal = chat_work_store.get(owner, session).get("goal")
+                    if waiting_goal and waiting_goal.get("status") == "waiting_user":
+                        resumed_goal = chat_work_store.goal_action(
+                            owner, session, "resume", waiting_goal["revision"],
+                        )
+                except (WorkNotFound, WorkConflict, OperationalError):
+                    # Approval still has its sealed one-use meaning even when
+                    # this chat has no Goal.  A concurrent Pause/Cancel wins.
+                    resumed_goal = None
                 if decision == "deny":
                     return StreamingResponse(
-                        _tool_approval_resolution_stream(decision),
+                        _tool_approval_resolution_stream(decision, resumed_goal),
                         media_type="text/event-stream",
                     )
                 # Approval is a control-plane continuation, not a new user turn.
@@ -1705,6 +1720,7 @@ def setup_chat_routes(
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
+            nonlocal active_goal
             research_sources = None
             web_sources = ctx.web_sources
 
@@ -2411,6 +2427,12 @@ def setup_chat_routes(
                     elif _explicit_browser_intent:
                         _forced_tools = set(_BROWSER_MCP_TOOLS)
 
+                    # Goal state is durable before the detached run begins.
+                    # Publish it immediately so every connected client replaces
+                    # the draft "waiting for a goal" card before model work.
+                    if active_goal:
+                        yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
                         sess.model,
@@ -2543,6 +2565,15 @@ def setup_chat_routes(
                                         "status": failure_status,
                                         "message": failure_message,
                                     }
+                                    if active_goal and _user:
+                                        try:
+                                            active_goal = chat_work_store.record_goal_failure(
+                                                _user, session, failure_message,
+                                                {"run_failure": terminal_metadata["failure"]},
+                                            )
+                                            yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                                        except WorkNotFound:
+                                            pass
                                     terminal_content = full_response.strip()
                                     failure_note = f"[Agent stopped: {failure_message}]"
                                     if terminal_content:
@@ -2704,7 +2735,93 @@ def setup_chat_routes(
         if compare_mode:
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
-        _detached_run = agent_runs.start(session, _safe_stream())
+        _goal_terminal_controller = None
+        if active_goal and _user:
+            # Keep Goal continuation entirely server-side. The initiating tab
+            # may close immediately after this response; every later attempt
+            # is another normal detached run with the same durable replay path.
+            _controller_headers = {
+                key: request.headers[key]
+                for key in ("cookie", "authorization")
+                if request.headers.get(key)
+            }
+            _controller_headers["origin"] = str(request.base_url).rstrip("/")
+            _controller_form = {
+                "session": session,
+                "message": (
+                    "Continue the active Goal from its durable checkpoint. "
+                    "Take the next concrete safe action, change approach after a failure, "
+                    "and call complete_goal only after verified completion."
+                ),
+                "mode": "agent",
+                "goal_continuation": "true",
+                "allow_bash": "true" if str(allow_bash).lower() == "true" else "false",
+                "allow_web_search": "true" if _search_enabled else "false",
+            }
+
+            async def _continue_goal_after_terminal(_status: str) -> None:
+                try:
+                    current_goal = chat_work_store.get(_user, session).get("goal")
+                except (WorkNotFound, OperationalError):
+                    return
+                if not current_goal or current_goal.get("status") != "active":
+                    return
+                if _status == "error":
+                    try:
+                        current_goal = chat_work_store.record_goal_failure(
+                            _user, session, "Agent run failed before completion",
+                            {"reason": "detached_run_error"},
+                        )
+                    except WorkNotFound:
+                        return
+                    if current_goal.get("status") != "active":
+                        return
+                failures = max(0, int(current_goal.get("failure_count") or 0))
+                await asyncio.sleep(min(4.0, 0.35 * (2 ** max(0, failures - 1))))
+                if agent_runs.is_active(session):
+                    return
+                lease = chat_work_store.acquire_goal_lease(_user, session, ttl_seconds=90)
+                if not lease:
+                    return
+                form = dict(_controller_form)
+                form["goal_lease_token"] = lease
+                dispatch_error = None
+                try:
+                    import httpx
+                    timeout = httpx.Timeout(20.0, read=20.0)
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        async with client.stream(
+                            "POST", "http://127.0.0.1:7000/api/chat_stream",
+                            headers=_controller_headers, data=form,
+                        ) as response:
+                            if response.status_code >= 400:
+                                detail = (await response.aread())[:1000]
+                                dispatch_error = f"Goal continuation HTTP {response.status_code}"
+                                logger.error(
+                                    "Goal continuation rejected for %s: HTTP %s %r",
+                                    session, response.status_code, detail,
+                                )
+                except Exception as exc:
+                    dispatch_error = "Goal continuation connection failed"
+                    logger.error(
+                        "Goal continuation transport failed for %s: %s", session, exc,
+                    )
+                if dispatch_error:
+                    try:
+                        failed_goal = chat_work_store.record_goal_failure(
+                            _user, session, dispatch_error,
+                            {"reason": "continuation_dispatch_failed"},
+                        )
+                    except WorkNotFound:
+                        return
+                    if failed_goal.get("status") == "active":
+                        asyncio.create_task(_continue_goal_after_terminal("error"))
+
+            _goal_terminal_controller = _continue_goal_after_terminal
+
+        _detached_run = agent_runs.start(
+            session, _safe_stream(), on_terminal=_goal_terminal_controller,
+        )
         return StreamingResponse(
             agent_runs.subscribe(session, _detached_run),
             media_type="text/event-stream",
@@ -2773,8 +2890,22 @@ def setup_chat_routes(
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         _expected_run_id = request.headers.get("X-Odysseus-Run-Id")
-        stopped = agent_runs.stop(session_id, _expected_run_id)
-        return {"stopped": stopped}
+        # Acknowledge only after the partial transcript and replay timeline are
+        # durable. This prevents a history poll from repainting the pre-run
+        # snapshot while cancellation is still saving the model's output.
+        stopped = await agent_runs.stop_and_wait(session_id, _expected_run_id)
+        goal = None
+        owner = effective_user(request)
+        if stopped and owner:
+            try:
+                goal = chat_work_store.get(owner, session_id).get("goal")
+                if goal and goal.get("status") == "active":
+                    goal = chat_work_store.goal_action(
+                        owner, session_id, "pause", goal["revision"],
+                    )
+            except (WorkNotFound, OperationalError):
+                goal = None
+        return {"stopped": stopped, "goal": goal}
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
@@ -2790,9 +2921,19 @@ def setup_chat_routes(
         rec = _active_streams.get(session_id)
         if rec is None:
             if agent_runs.is_active(session_id):
-                return {"status": "streaming", "detached": True, **(agent_runs.describe_run(session_id) or {})}
+                return {
+                    **(agent_runs.describe_run(session_id) or {}),
+                    "status": "streaming",
+                    "detached": True,
+                }
             raise HTTPException(404, "No active stream for this session")
-        return {**rec, **(agent_runs.describe_run(session_id) or {})}
+        return {
+            **rec,
+            **(agent_runs.describe_run(session_id) or {}),
+            # Public discovery uses the historical `streaming` contract;
+            # agent_runs internally calls the same state `running`.
+            "status": "streaming",
+        }
 
     # ------------------------------------------------------------------ #
     # POST /api/inject_context

@@ -1481,7 +1481,17 @@ async def _execute_tool_block_impl(
     elif tool in dynamic_handlers:
         first_line = content.split(chr(10))[0][:80]
         desc = f"registry: {tool} {first_line}".strip()
-        res = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        # Project/Plan/Goal interaction tools are owner-scoped.  Dropping the
+        # request identity here made them visible to the model but unusable at
+        # runtime ("requires an active owned chat").  Keep the same identity
+        # that every preceding policy gate already validated.
+        res = await _direct_fallback(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+        )
 
         if isinstance(res, tuple):
             desc, result = res

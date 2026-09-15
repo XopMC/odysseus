@@ -14,6 +14,28 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert html.index('id="plan-toggle-btn"') < html.index('id="overflow-attach-btn"')
     assert "setGoalMode" in app and "goal_mode" in app
     assert "fd.append('goal_mode', choicesForSend.goal ? 'true' : 'false')" in chat
+    assert "window.chatWork?.beginGoal?." in chat
+    work = (root / "static" / "js" / "chat-work.js").read_text()
+    renderer = (root / "static" / "js" / "chatRenderer.js").read_text()
+    assert "beginGoal" in work
+    assert "bindUiText(state, 'Waiting for a goal')" in work
+    assert "bindUiText(objective, 'Your next message becomes the active goal.')" in work
+    assert "bindThinkingLabels(body)" in renderer
+    assert "bindThinkingLabels(b)" in renderer
+    sessions = (root / "static" / "js" / "sessions.js").read_text()
+    assert "window.chatWork?.refresh?.(null);" in sessions
+    routes = (root / "routes" / "chat_routes.py").read_text()
+    goal_publish = 'yield f\'data: {json.dumps({"type": "goal_update", "data": active_goal})}'
+    assert goal_publish in routes
+    assert routes.index(goal_publish) < routes.index("async for chunk in stream_agent_loop(")
+    stop_block = routes.split('async def chat_stop', 1)[1].split('return {"stopped": stopped, "goal": goal}', 1)[0]
+    assert 'chat_work_store.goal_action(' in stop_block
+    assert 'on_terminal=_goal_terminal_controller' in routes
+    assert 'http://127.0.0.1:7000/api/chat_stream' in routes
+    assert 'nonlocal active_goal' in routes
+    assert 'if _status == "error":' in routes
+    assert "window.chatWork?.handleEvent?.({ type: 'goal_update', data: result.goal })" in chat
+    assert "if (stopServer) {\n      window.chatWork?.pauseActiveGoal?.();" not in chat
     assert "if (active) setPlanMode" not in app
     assert 'id="chat-work-status-row"' in html
     assert "modelPickerWrap.classList.remove('model-picker-autohide')" in app

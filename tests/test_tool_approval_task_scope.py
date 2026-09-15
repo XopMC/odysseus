@@ -93,6 +93,22 @@ def test_allow_for_task_bypasses_only_the_resumed_run_gate():
     assert fresh.decision_for("bash").allowed is False
 
 
+def test_goal_and_plan_bookkeeping_does_not_require_external_context_approval():
+    context = ToolRunSecurityContext(external_untrusted_context_seen=True)
+
+    for tool_name in (
+        "get_goal",
+        "update_goal_progress",
+        "complete_goal",
+        "create_plan",
+        "update_plan",
+        "update_plan_step",
+    ):
+        assert context.decision_for(tool_name).allowed is True
+
+    assert context.decision_for("bash").allowed is False
+
+
 def test_allow_for_chat_session_applies_to_later_turns_in_only_that_chat():
     store = ToolApprovalStore()
     pending = _pending(store, selected_tools=["bash", "manage_skills"])
@@ -323,7 +339,7 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "pending_tool_approval.continuation_query" in route
     assert "persist_user_message=not tool_approval_continuation" in route
     assert "_mark_tool_approval_resolved(" in route
-    assert "_tool_approval_resolution_stream(decision)" in route
+    assert "_tool_approval_resolution_stream(decision, resumed_goal)" in route
     assert "Approved the exact" not in route
     assert "Denied the" not in route
     assert "continuation_context_message: str | None = None" in helpers
@@ -347,7 +363,7 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in capabilities
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
 
-    version = "20260819approvalcontrol1"
+    version = "20260915goalreplay3"
     assert f"chat.js?v={version}" in app
     assert f"chat.js?v={version}" in index
     assert f"chatRenderer.js?v={version}" in frontend

@@ -3,8 +3,21 @@ import json
 import tempfile
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 from src.chat_replay_log import ReplayLog, ReplayLimitError
 from src import agent_runs
+
+
+def test_stream_status_keeps_public_streaming_state_after_run_metadata_merge():
+    route = (Path(__file__).resolve().parents[1] / "routes/chat_routes.py").read_text(
+        encoding="utf-8"
+    )
+    body = route.split("async def chat_stream_status", 1)[1].split(
+        "async def inject_context", 1
+    )[0]
+
+    assert body.count('"status": "streaming"') == 2
+    assert body.rfind('"status": "streaming"') > body.rfind("describe_run")
 
 
 class ReplayTests(unittest.TestCase):
@@ -152,3 +165,51 @@ class DetachedReplayTests(unittest.IsolatedAsyncioTestCase):
             decoded.append(payload)
         tool_ids = [item['tool_call_id'] for item in decoded[1:]]
         self.assertEqual(tool_ids, [tool_ids[0]] * 3)
+
+    async def test_exact_stop_waits_for_generator_cleanup(self):
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def source():
+            try:
+                yield 'data: {"delta":"partial"}\n\n'
+                started.set()
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+
+        run = agent_runs.start('stop-wait-chat', source())
+        await started.wait()
+        self.assertTrue(await agent_runs.stop_and_wait('stop-wait-chat', run.run_id))
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(run.status, 'stopped')
+
+    async def test_terminal_controller_runs_without_a_subscriber_but_not_after_stop(self):
+        completed = asyncio.Event()
+
+        async def source():
+            yield 'data: {"delta":"done"}\n\n'
+
+        async def controller(status):
+            self.assertEqual(status, 'done')
+            completed.set()
+
+        run = agent_runs.start('goal-controller-chat', source(), on_terminal=controller)
+        await asyncio.wait_for(run.task, timeout=1)
+        await asyncio.wait_for(completed.wait(), timeout=1)
+
+        stopped_callback = asyncio.Event()
+
+        async def waiting_source():
+            yield 'data: {"delta":"partial"}\n\n'
+            await asyncio.Event().wait()
+
+        stopped = agent_runs.start(
+            'goal-controller-stop', waiting_source(),
+            on_terminal=lambda _status: stopped_callback.set(),
+        )
+        await asyncio.sleep(0)
+        self.assertTrue(await agent_runs.stop_and_wait('goal-controller-stop', stopped.run_id))
+        await asyncio.sleep(0)
+        self.assertFalse(stopped_callback.is_set())

@@ -7,7 +7,7 @@
 
 
 import uiModule from './ui.js';
-import sessionModule from './sessions.js';
+import sessionModule from './sessions.js?v=20260915goalreplay3';
 import emojiPicker from './emojiPicker.js';
 import markdownModule from './markdown.js';
 import codeRunnerModule from './codeRunner.js';

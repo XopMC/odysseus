@@ -14,6 +14,12 @@ import { matchModelKey } from './model/matchKey.js';
 import { getTools } from './appConfig.js';
 import { bindUiText } from './i18n.js';
 
+function bindThinkingLabels(root) {
+  root?.querySelectorAll?.('.thinking-header-left span').forEach(
+    node => bindUiText(node, 'View thinking process')
+  );
+}
+
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
 const CHAT_ABOUT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
@@ -1386,7 +1392,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js').then(mod => {
+    import('./sessions.js?v=20260915goalreplay3').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -2717,6 +2723,7 @@ export function addMessage(role, content, modelName, metadata) {
             agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
           }
           body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
+          bindThinkingLabels(body);
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
@@ -2810,6 +2817,39 @@ export function addMessage(role, content, modelName, metadata) {
         // removes this card; if there is none, the pending choice survives a
         // refresh.  Avoid stealing focus while the history is loading.
         renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+      }
+      // The multi-round path returns before the standard stopped-message
+      // renderer below. Preserve the interruption marker as well as the
+      // reconstructed reasoning/tool cards after Stop + reload.
+      if (metadata?.stopped) {
+        let target = lastMsgAi;
+        if (!target) {
+          target = document.createElement('div');
+          target.className = 'msg msg-ai msg-continuation';
+          const roleEl = document.createElement('div');
+          roleEl.className = 'role';
+          const pair = replyModelPair(modelName, metadata);
+          roleEl.textContent = modelRouteLabel(
+            pair.requestedModel, pair.actualModel,
+            pair.requestedEndpointLabel, pair.actualEndpointLabel,
+            pair.requestedEndpointId, pair.actualEndpointId,
+          );
+          target.appendChild(roleEl);
+          const body = document.createElement('div');
+          body.className = 'body';
+          target.appendChild(body);
+          box.appendChild(target);
+          lastWrap = target;
+        }
+        const body = target.querySelector('.body');
+        if (body && !body.querySelector('.stopped-indicator')) {
+          const indicator = document.createElement('div');
+          indicator.className = 'stopped-indicator';
+          const label = document.createElement('span');
+          label.textContent = metadata.cancelled ? '[Cancelled by user]' : '[Message interrupted]';
+          indicator.appendChild(label);
+          body.appendChild(indicator);
+        }
       }
       return lastWrap;
     }
@@ -2936,6 +2976,7 @@ export function addMessage(role, content, modelName, metadata) {
 	    } else {
 	      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
 	    }
+	    bindThinkingLabels(b);
 	    b.dataset.raw = text;
 
     // The vision/OCR caption is stripped from the displayed text above (so the

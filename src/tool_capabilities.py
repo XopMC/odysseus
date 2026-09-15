@@ -670,6 +670,20 @@ class ToolRunSecurityContext:
                     "It requires an interactive session."
                 ),
             )
+        # These owner-scoped workflow tools only maintain this chat's durable
+        # Plan/Goal state.  They do not expose arbitrary private data or cause
+        # workspace/external side effects, and their handlers still validate
+        # the exact owner and session.  Gating them after web/MCP context would
+        # deadlock autonomous Goals before they can checkpoint or complete.
+        if tool_name in {
+            "get_goal",
+            "update_goal_progress",
+            "complete_goal",
+            "create_plan",
+            "update_plan",
+            "update_plan_step",
+        }:
+            return ToolGateDecision(True)
         if self.approval_gate_bypassed:
             return ToolGateDecision(True)
         if not self.external_untrusted_context_seen:

@@ -237,8 +237,6 @@ class ChatWorkStore:
             if row.status in {"completed", "cancelled"}:
                 raise WorkConflict("Goal is already terminal")
             row.status = statuses[action]
-            if action == "resume":
-                row.attempt += 1
             row.revision += 1
             event_kind = {"pause": "goal_paused", "resume": "goal_resumed", "cancel": "goal_cancelled"}[action]
             self._event(db, owner, session_id, event_kind, row.id, row.revision, _public_goal(row))
@@ -258,8 +256,41 @@ class ChatWorkStore:
             if checkpoint is not None:
                 row.checkpoint = checkpoint
             row.status = "waiting_user" if waiting_user else "active"
+            if not waiting_user:
+                row.failure_count = 0
+                row.last_error = None
             row.revision += 1
             self._event(db, owner, session_id, "goal_progress", row.id, row.revision, {"progress": progress, "checkpoint": checkpoint or {}, "status": row.status})
+            db.flush()
+            return _public_goal(row)
+
+    def record_goal_failure(self, owner, session_id, error, checkpoint=None):
+        """Persist bounded transport/model retry state for the server controller."""
+        error = _clean_text(error, "goal error", 2000)
+        if checkpoint is not None and not isinstance(checkpoint, dict):
+            raise ValueError("Goal checkpoint must be an object")
+        with SessionLocal.begin() as db:
+            _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            if row is None or row.status in {"completed", "cancelled", "paused"}:
+                raise WorkNotFound("Active goal not found")
+            row.failure_count = int(row.failure_count or 0) + 1 if row.last_error == error else 1
+            row.last_error = error
+            row.lease_token = None
+            row.lease_expires_at = None
+            row.progress = "Model attempt failed; the server will retry automatically."
+            if checkpoint is not None:
+                row.checkpoint = checkpoint
+            if row.failure_count >= 3:
+                row.status = "waiting_user"
+                row.progress = "The model endpoint failed repeatedly; user attention is required."
+            else:
+                row.status = "active"
+            row.revision += 1
+            self._event(
+                db, owner, session_id, "goal_attempt_failed", row.id, row.revision,
+                {"error": error, "failure_count": row.failure_count, "status": row.status},
+            )
             db.flush()
             return _public_goal(row)
 

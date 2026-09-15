@@ -8,6 +8,18 @@ from pathlib import Path
 import pytest
 
 
+def test_server_authoritative_replay_is_not_blocked_by_stale_global_busy_flag():
+    source = (Path(__file__).resolve().parents[1] / "static/js/sessions.js").read_text(
+        encoding="utf-8"
+    )
+    check = source.split("async function _checkServerStream", 1)[1].split(
+        "export function clearStreamComplete", 1
+    )[0]
+
+    assert "window.__odysseusChatBusy" not in check
+    assert "window.chatModule?.resumeStream" in check
+
+
 @pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):

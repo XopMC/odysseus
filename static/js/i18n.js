@@ -9,7 +9,7 @@ const RU = Object.freeze({
   'Execute':'Выполнить', 'Edit':'Изменить', 'Cancel':'Отменить', 'Pause':'Пауза', 'Resume':'Продолжить',
   'Turn off Plan mode':'Выключить режим плана', 'Turn off Goal mode':'Выключить режим цели',
   'Waiting for a goal':'Ожидается цель', 'Your next message becomes the active goal.':'Следующее сообщение станет активной целью.',
-  'attempt':'попытка', 'active':'активна', 'paused':'на паузе', 'waiting_user':'ожидает пользователя', 'completed':'завершена', 'cancelled':'отменена',
+  'attempt':'попытка', 'starting':'запускается', 'active':'активна', 'paused':'на паузе', 'waiting_user':'ожидает пользователя', 'completed':'завершена', 'cancelled':'отменена',
   'draft':'черновик', 'approved':'утверждён', 'executing':'выполняется', 'done':'готов', 'Edit plan':'Изменить план',
   'Execute the approved plan and update each step after verification.':'Выполни утверждённый план и обновляй каждый шаг после проверки.',
   'Projects':'Проекты', 'Create project':'Создать проект', 'Project name':'Название проекта',

@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260819approvalcontrol1';
+import sessionModule from './sessions.js?v=20260915goalreplay3';
+import chatRenderer from './chatRenderer.js?v=20260915goalreplay3';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -760,11 +760,32 @@ import { bindUiText } from './i18n.js';
 
   /** POST the exact Stop for one observed run identity. */
   function _postExactStop(sessionId, runId) {
-    fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
+    return fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'X-Odysseus-Run-Id': runId },
-    }).catch(() => {});
+    }).then(async response => {
+      if (!response.ok) return false;
+      const result = await response.json().catch(() => ({}));
+      if (!result.stopped) return false;
+      if (result.goal) {
+        window.chatWork?.handleEvent?.({ type: 'goal_update', data: result.goal });
+      }
+      // The server responds after the cancelled generator has saved the
+      // canonical partial transcript. Reconcile once the local reader has
+      // released its busy guard; this also repairs the view on a second device.
+      const refresh = async (attempt = 0) => {
+        if (sessionModule.getCurrentSessionId?.() !== sessionId) return;
+        if (hasActiveStream(sessionId) || window.__odysseusChatBusy) {
+          if (attempt < 8) setTimeout(() => refresh(attempt + 1), 100 + attempt * 75);
+          return;
+        }
+        await sessionModule.refreshSessionHistory?.(sessionId);
+        window.chatWork?.refresh?.(sessionId);
+      };
+      setTimeout(refresh, 0);
+      return true;
+    }).catch(() => false);
   }
 
   /** Stop only the exact detached run whose identity this browser observed. */
@@ -1320,10 +1341,6 @@ import { bindUiText } from './i18n.js';
         });
         stoppedIndicator.appendChild(continueBtn);
         _stoppedViewHolder.querySelector('.body').appendChild(stoppedIndicator);
-
-        // Tell server to mark this message as stopped
-        const _sid = sessionModule.getCurrentSessionId();
-        if (_sid) fetch(`${API_BASE}/api/session/${_sid}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
 
         // Add footer with copy/regen if not already present
         if (!_stoppedViewHolder.querySelector('.msg-footer')) {
@@ -2002,6 +2019,9 @@ import { bindUiText } from './i18n.js';
 	      fd.append('mode', isAgentMode ? 'agent' : 'chat');
 	      fd.append('plan_mode', isPlanMode ? 'true' : 'false');
 	      fd.append('goal_mode', choicesForSend.goal ? 'true' : 'false');
+	      if (!approvalForSend && choicesForSend.goal) {
+	        window.chatWork?.beginGoal?.(String(fd.get('message') || msg || ''));
+	      }
 	      if (!isPlanMode && _pendingApprovedPlan) {
 	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
 	        _pendingApprovedPlan = '';
@@ -4578,10 +4598,6 @@ import { bindUiText } from './i18n.js';
             stoppedIndicator.appendChild(continueBtn);
             _catchViewHolder.querySelector('.body').appendChild(stoppedIndicator);
 
-            // Tell server to mark this message as stopped
-            const _sid2 = sessionModule.getCurrentSessionId();
-            if (_sid2) fetch(`${API_BASE}/api/session/${_sid2}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
-
             if (!_catchViewHolder.querySelector('.msg-footer')) {
               _catchViewHolder.appendChild(createMsgFooter(_catchViewHolder));
             }
@@ -4812,7 +4828,6 @@ import { bindUiText } from './i18n.js';
       : (active ? active.abortCtrl : currentAbort);
     let abortNow = true;
     if (stopServer) {
-      window.chatWork?.pauseActiveGoal?.();
       try {
         if (_sid) {
           // Before response headers arrive there is no safe server-side stop
@@ -4973,33 +4988,9 @@ import { bindUiText } from './i18n.js';
     if (typeof createMsgFooter === 'function' && !holder.querySelector('.msg-footer')) {
       holder.appendChild(createMsgFooter(holder));
     }
-    // Persist as an assistant message with stopped+cancelled metadata so the
-    // chat-history loader renders the same indicator after a refresh.
-    // Include the model name so the bubble header still shows which model
-    // was running when the user hit Stop.
-    const sid = sessionModule.getCurrentSessionId();
-    if (sid) {
-      let modelName = '';
-      try { modelName = sessionModule.getCurrentModel?.() || ''; } catch {}
-      // Fallback: pull from the holder's existing meta (the streaming
-      // placeholder usually has the model set in the header already).
-      if (!modelName) {
-        modelName = holder.dataset.model
-          || holder.querySelector('.msg-header .msg-model')?.textContent
-          || '';
-      }
-      fetch(`${API_BASE}/api/session/${sid}/inject_messages`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{
-            role: 'assistant',
-            content: '',
-            metadata: { stopped: true, cancelled: true, model: modelName },
-          }],
-        }),
-      }).catch(() => {});
-    }
+    // Persistence belongs to the exact server run. Client-side injection raced
+    // the cancellation save and could duplicate this placeholder or mutate the
+    // previous assistant turn.
   }
 
   /**

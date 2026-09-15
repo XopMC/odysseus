@@ -10,7 +10,7 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260819approvalcontrol1';
+import chatModule from './js/chat.js?v=20260915goalreplay3';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
@@ -22,9 +22,9 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260819approvalcontrol1';
-import sessionModule from './js/sessions.js';
-import chatWork from './js/chat-work.js?v=20260915work1';
+import chatRenderer from './js/chatRenderer.js?v=20260915goalreplay3';
+import sessionModule from './js/sessions.js?v=20260915goalreplay3';
+import chatWork from './js/chat-work.js?v=20260915goalreplay3';
 import projectsModule from './js/projects.js?v=20260915projects1';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260913team1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';

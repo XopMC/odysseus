@@ -16,13 +16,14 @@ Replay survives process restart, execution does not: unfinished runs are exposed
 as interrupted and their commands are never replayed automatically.
 """
 import asyncio
+from datetime import datetime, timedelta
 import json
 import logging
 import math
 import os
 import time
 import uuid
-from typing import AsyncGenerator, Dict, Optional
+from typing import AsyncGenerator, Awaitable, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class _Run:
     __slots__ = (
         "buffer", "subscribers", "status", "task", "evict_task", "run_id",
         "context_usage", "started_at", "round", "segment", "tool_counter",
-        "active_tool_call_id",
+        "active_tool_call_id", "on_terminal",
     )
 
     def __init__(self) -> None:
@@ -54,6 +55,7 @@ class _Run:
         self.segment: int = 0
         self.tool_counter: int = 0
         self.active_tool_call_id: Optional[str] = None
+        self.on_terminal: Optional[Callable[[str], Awaitable[None]]] = None
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -169,11 +171,16 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
     untouched so a rollback-compatible build can still render the same turn.
     """
     try:
-        from core.database import ChatMessage as DbChatMessage, SessionLocal
+        from core.database import (
+            ChatMessage as DbChatMessage,
+            Session as DbSession,
+            SessionLocal,
+        )
 
         events = []
         encoded_bytes = 0
         truncated = False
+        saved_message_id = None
         for index in range(min(len(run.buffer), 5000)):
             frame = run.buffer[index]
             raw = "\n".join(
@@ -188,6 +195,8 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
                 continue
             if not isinstance(payload, dict):
                 continue
+            if payload.get("type") == "message_saved" and payload.get("id"):
+                saved_message_id = str(payload["id"])
             item = {"seq": index, "data": payload}
             size = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
             if encoded_bytes + size > 2 * 1024 * 1024:
@@ -199,13 +208,158 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
             truncated = True
         if not events:
             return
+
+        # A normal completion already carries legacy round/tool metadata. A
+        # user Stop can happen before final metrics, so reconstruct enough of
+        # that view from the replay log to preserve separate bubbles, thinking
+        # and tool cards after reload.
+        round_parts = {}
+        tool_order = []
+        tools = {}
+        current_round = 1
+        actual_model = ""
+        actual_endpoint_id = None
+        actual_endpoint_label = None
+        substantive = False
+        for item in events:
+            payload = item["data"]
+            replay = payload.get("_replay") if isinstance(payload.get("_replay"), dict) else {}
+            raw_round = payload.get("round", replay.get("round", current_round))
+            try:
+                event_round = max(1, int(raw_round or current_round))
+            except (TypeError, ValueError):
+                event_round = current_round
+            event_type = payload.get("type")
+            if event_type == "agent_step":
+                current_round = event_round
+                continue
+            current_round = max(current_round, event_round)
+            if event_type == "model_actual":
+                actual_model = str(payload.get("model") or actual_model)
+                actual_endpoint_id = payload.get("endpoint_id", actual_endpoint_id)
+                actual_endpoint_label = payload.get("endpoint_label", actual_endpoint_label)
+            elif event_type == "context_usage" and isinstance(payload.get("data"), dict):
+                actual_model = str(payload["data"].get("model") or actual_model)
+            if payload.get("delta"):
+                substantive = True
+                parts = round_parts.setdefault(event_round, {"thinking": [], "text": []})
+                channel = payload.get("channel")
+                target = "thinking" if payload.get("thinking") is True or channel in {"thinking", "thought"} else "text"
+                parts[target].append(str(payload["delta"]))
+                continue
+            if event_type not in {"tool_start", "tool_progress", "tool_output"}:
+                continue
+            substantive = True
+            tool_id = str(payload.get("tool_call_id") or replay.get("tool_call_id") or f"tool-{len(tool_order) + 1}")
+            event = tools.get(tool_id)
+            if event is None:
+                event = {
+                    "round": event_round,
+                    "tool": str(payload.get("tool") or "Tool"),
+                    "command": str(payload.get("command") or ""),
+                    "output": "",
+                    "exit_code": None,
+                }
+                tools[tool_id] = event
+                tool_order.append(tool_id)
+            if payload.get("tool"):
+                event["tool"] = str(payload["tool"])
+            if payload.get("command"):
+                event["command"] = str(payload["command"])
+            if event_type == "tool_progress":
+                tail = payload.get("tail") or payload.get("message")
+                if tail:
+                    event["_progress_tail"] = str(tail)[-65536:]
+            elif event_type == "tool_output":
+                event["output"] = str(payload.get("output") or "")
+                event["exit_code"] = payload.get("exit_code")
+                for key in (
+                    "ask_user", "diff", "image_url", "image_prompt", "image_model",
+                    "image_size", "image_quality", "doc_id", "doc_title",
+                ):
+                    if payload.get(key) is not None:
+                        event[key] = payload[key]
+
+        max_round = max([*round_parts.keys(), *(tools[key]["round"] for key in tool_order), 0])
+        round_texts = []
+        for round_number in range(1, max_round + 1):
+            parts = round_parts.get(round_number, {"thinking": [], "text": []})
+            thinking = "".join(parts["thinking"]).strip()
+            text = "".join(parts["text"]).strip()
+            round_texts.append((f"<think>\n{thinking}\n</think>\n\n" if thinking else "") + text)
+        tool_events = []
+        for tool_id in tool_order:
+            event = tools[tool_id]
+            progress_tail = event.pop("_progress_tail", "")
+            if run.status == "stopped" and event.get("exit_code") is None:
+                event["exit_code"] = 130
+                event["output"] = ((progress_tail + "\n") if progress_tail else "") + "Interrupted by user."
+            tool_events.append(event)
+
+        legacy_metadata = {}
+        if run.status in {"stopped", "error"}:
+            legacy_metadata["stopped"] = run.status == "stopped"
+            legacy_metadata["cancelled"] = run.status == "stopped" and not substantive
+            if round_texts:
+                legacy_metadata["round_texts"] = round_texts
+            if tool_events:
+                legacy_metadata["tool_events"] = tool_events
+            if actual_model:
+                legacy_metadata["model"] = actual_model
+            if actual_endpoint_id:
+                legacy_metadata["endpoint_id"] = actual_endpoint_id
+            if actual_endpoint_label:
+                legacy_metadata["endpoint_label"] = actual_endpoint_label
+
         with SessionLocal.begin() as db:
-            row = (
-                db.query(DbChatMessage)
-                .filter(DbChatMessage.session_id == session_id, DbChatMessage.role == "assistant")
-                .order_by(DbChatMessage.timestamp.desc(), DbChatMessage.id.desc())
-                .first()
-            )
+            row = None
+            if saved_message_id:
+                row = db.query(DbChatMessage).filter(
+                    DbChatMessage.id == saved_message_id,
+                    DbChatMessage.session_id == session_id,
+                    DbChatMessage.role == "assistant",
+                ).first()
+            if row is None:
+                # Cancellation saves cannot yield message_saved. Bind only to
+                # an assistant row after this run's latest user turn, never to
+                # the previous assistant response.
+                run_start = datetime.utcfromtimestamp(run.started_at)
+                latest_user = db.query(DbChatMessage).filter(
+                    DbChatMessage.session_id == session_id,
+                    DbChatMessage.role == "user",
+                    DbChatMessage.timestamp <= run_start + timedelta(seconds=5),
+                ).order_by(DbChatMessage.timestamp.desc(), DbChatMessage.id.desc()).first()
+                if latest_user is not None:
+                    row = db.query(DbChatMessage).filter(
+                        DbChatMessage.session_id == session_id,
+                        DbChatMessage.role == "assistant",
+                        DbChatMessage.timestamp >= latest_user.timestamp,
+                    ).order_by(DbChatMessage.timestamp.desc(), DbChatMessage.id.desc()).first()
+                else:
+                    # Compatibility for system-created/test sessions which can
+                    # legitimately produce an assistant turn without a user row.
+                    row = db.query(DbChatMessage).filter(
+                        DbChatMessage.session_id == session_id,
+                        DbChatMessage.role == "assistant",
+                        DbChatMessage.timestamp >= run_start - timedelta(seconds=5),
+                    ).order_by(DbChatMessage.timestamp.desc(), DbChatMessage.id.desc()).first()
+            if row is None and run.status in {"stopped", "error"}:
+                # Tool-only/reasoning-only stops previously had no assistant DB
+                # row. Persist one canonical placeholder for history replay.
+                visible = "\n\n".join(
+                    "".join(round_parts.get(number, {}).get("text", [])).strip()
+                    for number in range(1, max_round + 1)
+                    if "".join(round_parts.get(number, {}).get("text", [])).strip()
+                )
+                row = DbChatMessage(
+                    id=str(uuid.uuid4()), session_id=session_id, role="assistant",
+                    content=visible, meta_data="{}", timestamp=datetime.utcnow(),
+                )
+                db.add(row)
+                session_row = db.query(DbSession).filter(DbSession.id == session_id).first()
+                if session_row is not None:
+                    session_row.message_count = int(session_row.message_count or 0) + 1
+                    session_row.last_message_at = datetime.utcnow()
             if row is None:
                 return
             try:
@@ -214,6 +368,7 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
                 metadata = {}
             if not isinstance(metadata, dict):
                 metadata = {}
+            metadata.update(legacy_metadata)
             metadata["timeline_v2"] = {
                 "version": 2,
                 "run_id": run.run_id,
@@ -381,13 +536,15 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         if run.status == "running":
             run.status = "done"
     except asyncio.CancelledError:
-        run.status = "stopped"
         # Let the wrapped generator's own CancelledError handler run (it saves
         # the partial response to the session).
         try:
             await agen.aclose()
         except Exception:
             pass
+        # Keep is_active() true until persistence is complete. Otherwise a
+        # concurrent browser poll can replace the live view with stale history.
+        run.status = "stopped"
         # A rapid third replacement can cancel this task while it is still
         # waiting for its predecessor. Close this run's subscribers promptly,
         # but keep the task alive until the predecessor finishes so the next
@@ -429,14 +586,35 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         # eventually freed even if nobody ever reconnects. subscribe() cancels
         # this on connect and re-arms on disconnect.
         _schedule_evict(session_id, run)
+        if run.on_terminal is not None and run.status in {"done", "error"}:
+            callback = run.on_terminal
+
+            async def _notify_terminal() -> None:
+                # Let this drain task become terminal before the controller
+                # acquires a lease and starts the next run for the same chat.
+                await asyncio.sleep(0)
+                try:
+                    await callback(run.status)
+                except Exception:
+                    logger.exception(
+                        "[agent-run] terminal controller failed for %s", session_id,
+                    )
+
+            asyncio.create_task(_notify_terminal())
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
+def start(
+    session_id: str,
+    agen: AsyncGenerator[str, None],
+    *,
+    on_terminal: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
     # Allocate storage before cancelling the current run. An unavailable disk
     # must not destroy a still-running predecessor on a failed replacement.
     run = _Run()
+    run.on_terminal = on_terminal
     if os.getenv('ODYSSEUS_DURABLE_CHAT_REPLAY') == '1':
         from src.chat_replay_log import ReplayLog
         run.buffer = ReplayLog(replay_root(), run.run_id, session_id, create=True)
@@ -534,3 +712,25 @@ def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
         run.task.cancel()
         return True
     return False
+
+
+async def stop_and_wait(
+    session_id: str,
+    expected_run_id: Optional[str] = None,
+    timeout: float = 15.0,
+) -> bool:
+    """Cancel one exact run and wait until its partial transcript is durable."""
+    run = _RUNS.get(session_id)
+    if not expected_run_id or run is None or run.run_id != expected_run_id:
+        return False
+    task = run.task
+    if task is None or task.done():
+        return False
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        logger.warning("Timed out waiting for stopped run %s to persist", run.run_id)
+    return True

@@ -1,4 +1,4 @@
-import { bindUiText, t } from './i18n.js';
+import { bindUiText, t, unbindUiText } from './i18n.js';
 
 const api = window.location.origin;
 let snapshot = { plan: null, goal: null, cursor: 0 };
@@ -60,13 +60,22 @@ function renderGoal() {
   const live = goal && !['completed', 'cancelled'].includes(goal.status);
   node.hidden = !draftEnabled && !goal;
   if (!goal) {
-    el('goal-work-state').textContent = draftEnabled ? t('Waiting for a goal') : '';
-    el('goal-work-objective').textContent = draftEnabled ? t('Your next message becomes the active goal.') : '';
+    const state = el('goal-work-state');
+    const objective = el('goal-work-objective');
+    if (draftEnabled) {
+      bindUiText(state, 'Waiting for a goal');
+      bindUiText(objective, 'Your next message becomes the active goal.');
+    } else {
+      unbindUiText(state); unbindUiText(objective);
+      state.textContent = ''; objective.textContent = '';
+    }
     el('goal-work-progress').textContent = '';
     ['goal-work-pause', 'goal-work-resume', 'goal-work-cancel'].forEach(id => { if (el(id)) el(id).hidden = true; });
     if (el('goal-mode-status-toggle')) el('goal-mode-status-toggle').hidden = !draftEnabled;
     return;
   }
+  unbindUiText(el('goal-work-state'));
+  unbindUiText(el('goal-work-objective'));
   el('goal-work-state').textContent = `${t(goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
   el('goal-work-objective').textContent = goal.objective || '';
   el('goal-work-progress').textContent = goal.progress || '';
@@ -91,6 +100,15 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
 function handleEvent(event) {
   if (event?.type === 'plan_update') snapshot.plan = event.data || null;
   if (event?.type === 'goal_update') snapshot.goal = event.data || null;
+  render();
+}
+
+function beginGoal(objective) {
+  const text = String(objective || '').trim();
+  if (!text) return;
+  // Show the submitted objective immediately. The durable goal_update from
+  // the server replaces this provisional record as soon as the run starts.
+  snapshot.goal = { objective: text, status: 'starting', attempt: 1, progress: '' };
   render();
 }
 
@@ -160,5 +178,5 @@ function bind() {
   });
 }
 
-const chatWork = { bind, refresh, render, handleEvent, onRunEnded, pauseActiveGoal, continueGoal, getSnapshot: () => snapshot };
+const chatWork = { bind, refresh, render, handleEvent, beginGoal, onRunEnded, pauseActiveGoal, continueGoal, getSnapshot: () => snapshot };
 export default chatWork;

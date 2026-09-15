@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260815toolapproval4';
+import chatRenderer from './chatRenderer.js?v=20260915goalreplay3';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260722ctxheader1';
 import themeModule from './theme.js';
@@ -2315,6 +2315,10 @@ export function createDirectChat(url, modelId, endpointId, opts = {}) {
   _skipAutoSelect = true;
   _suppressNextSessionLoading = true;
   currentSessionId = null;
+  // A pending New Chat has no server work record yet.  Clear the previous
+  // chat's Goal/Plan card immediately so its objective and controls cannot
+  // leak into the new composer while the session is materialized lazily.
+  window.chatWork?.refresh?.(null);
   try { window.__odysseusLastSelectedSessionId = ''; } catch (_) {}
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
@@ -2799,7 +2803,6 @@ async function _checkServerStream(sessionId) {
 
     // Skip if the SSE reader is still actively connected — it handles rendering
     if (window.chatModule && window.chatModule.hasActiveStream && window.chatModule.hasActiveStream(sessionId)) return;
-    if (window.__odysseusChatBusy) return;
 
     const res = await _readLiveSession(`${API_BASE}/api/chat/stream_status/${encodeURIComponent(sessionId)}`);
     if (!isCurrent()) return;
@@ -2808,7 +2811,8 @@ async function _checkServerStream(sessionId) {
       if (res.status !== 404) return;
     }
     const info = res.ok ? res.data : { status: 'idle' };
-    if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId) || window.__odysseusChatBusy) return;
+    if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId)) return;
+
     // A remote turn can finish between status probes. Compare a one-message
     // history page, then fetch/render the canonical tail only when it changed.
     const tail = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
@@ -2821,7 +2825,10 @@ async function _checkServerStream(sessionId) {
       // last row in a larger page. Retain the probe stamp to avoid reload loops.
       if (refreshed && isCurrent()) _syncedHistory.set(sessionId, _historyStamp(latest));
     }
-    if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId) || window.__odysseusChatBusy) return;
+    // A stale local busy bit must not suppress the server-authoritative live
+    // attach after reload.  The exact active-stream registry is the ownership
+    // guard; if it is empty and the server says streaming, reconnect now.
+    if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId)) return;
     if (info.status !== 'streaming') {
       _clearRunningState(sessionId);
       return;
@@ -2830,11 +2837,9 @@ async function _checkServerStream(sessionId) {
     // Skip if this is a research stream — research has its own progress UI
     if (info.mode === 'research' || info.is_research) return;
 
-    // Live-resume the detached run: replay its buffer then stream live tokens
-    // (#2539). If unavailable or disconnected, the next visible tick retries.
-    if (window.chatModule && window.chatModule.resumeStream) {
-      await window.chatModule.resumeStream(sessionId);
-    }
+    // Attach only after the saved user turn and any completed predecessor are
+    // canonical. The replay then owns all in-flight reasoning/tool/text nodes.
+    if (window.chatModule?.resumeStream) await window.chatModule.resumeStream(sessionId);
   } catch (_) {
     // Network loss is not task completion. Retry on the next visible tick.
   } finally {
