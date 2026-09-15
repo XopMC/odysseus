@@ -109,7 +109,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             or request.headers.get("X-Forwarded-Proto") == "https"
         )
         if is_https:
-            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+            if os.getenv("HSTS_ENABLED", "true").strip().lower() == "false":
+                # A TLS response is the only standards-compliant way to clear
+                # HSTS previously cached by a browser.
+                response.headers["Strict-Transport-Security"] = "max-age=0"
+            else:
+                response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         if is_report:
             response.headers["Content-Security-Policy"] = (

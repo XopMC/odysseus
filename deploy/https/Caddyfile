@@ -1,14 +1,11 @@
 {
 	auto_https off
 	servers {
-		listener_wrappers {
-			http_redirect
-			tls
-		}
 		protocols h1 h2
 	}
 }
-:{$HTTPS_PORT:5130} {
+https://:{$TLS_BACKEND_PORT:5133} {
+	bind 127.0.0.1
 	tls /etc/odysseus-tls/cert.pem /etc/odysseus-tls/key.pem
 	encode zstd gzip
 

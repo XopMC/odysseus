@@ -439,11 +439,14 @@ from your own CA), then enable the HTTPS overlay:
 COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml docker compose up -d
 ```
 
-HTTPS listens on `${HTTPS_PORT:-5130}`; the private HTTP health endpoint listens
-on `127.0.0.1:${APP_HTTP_PORT:-5131}`. Install `data/tls/rootCA.pem` on every
-client before using the generated certificate. Never copy `rootCA-key.pem` to a
-client. For a public deployment, prefer a publicly trusted certificate and keep
-`AUTH_ENABLED=true`.
+HTTP and HTTPS both listen on `${HTTPS_PORT:-5130}`. HAProxy detects the protocol,
+passes TLS to Caddy on the private `${TLS_BACKEND_PORT:-5133}`, and passes plain
+HTTP to the private app listener `${APP_HTTP_PORT:-5131}`. There is no HTTP to
+HTTPS redirect. Install `data/tls/rootCA.pem` on every client before using HTTPS;
+never copy `rootCA-key.pem` to a client. Dual mode sets `SECURE_COOKIES=false` and
+clears HSTS so HTTP remains usable, which means HTTP sessions are not protected
+against interception. For an Internet-facing deployment, prefer HTTPS with a
+publicly trusted certificate and keep `AUTH_ENABLED=true`.
 
 If a full-tunnel VPN on Linux captures replies to inbound port forwarding, the
 port can be routed back through the physical WAN persistently:

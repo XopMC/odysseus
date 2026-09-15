@@ -55,6 +55,13 @@ def test_hsts_present_via_x_forwarded_proto_https():
     )
 
 
+def test_hsts_is_cleared_for_explicit_dual_http_https_mode(monkeypatch):
+    monkeypatch.setenv("HSTS_ENABLED", "false")
+    response = _client(base_url="https://testserver").get("/")
+
+    assert response.headers["strict-transport-security"] == "max-age=0"
+
+
 def test_permissions_policy_locks_camera_and_geolocation_but_allows_self_microphone():
     response = _client().get("/")
 
