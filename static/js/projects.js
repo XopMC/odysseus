@@ -198,16 +198,8 @@ function bind() {
   const create = el('project-create-btn');
   create?.addEventListener('click', openCreate);
   if (create) { bindUiText(create, 'Create project', 'title'); bindUiText(create, 'Create project', 'aria-label'); }
-  const title = el('projects-section')?.querySelector('.section-title');
-  if (title) {
-    title.tabIndex = 0; title.setAttribute('role', 'button'); title.setAttribute('aria-expanded', 'true');
-    const toggle = () => {
-      const list = el('project-list'); if (!list) return;
-      list.classList.toggle('hidden'); title.setAttribute('aria-expanded', String(!list.classList.contains('hidden')));
-    };
-    title.addEventListener('click', event => { if (!event.target.closest('#project-create-btn')) toggle(); });
-    title.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); } });
-  }
+  // Section expansion is owned by section-management.js.  Registering a
+  // second title handler here makes one tap expand and immediately collapse.
   refresh();
 }
 export default { bind, refresh, render, openCreate, openProject, getProjects: () => projects };
