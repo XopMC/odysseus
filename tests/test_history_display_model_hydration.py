@@ -136,6 +136,46 @@ def test_paginated_history_reads_only_count_and_requested_page(monkeypatch):
     assert sum("count(" in statement for statement in chat_selects) == 1
 
 
+def test_cursor_pages_fifty_visible_messages_and_survives_tail_insert(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=65)
+    db = db_factory()
+    try:
+        for index in range(55, 65):
+            row = db.query(DbChatMessage).filter(DbChatMessage.id == f"message-{index}").one()
+            row.meta_data = json.dumps({"hidden": True})
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(object()))
+    client = TestClient(app)
+
+    first = client.get("/api/history/session-1?limit=50").json()
+    assert len(first["history"]) == 50
+    assert first["history"][0]["content"] == "content-5"
+    assert first["history"][-1]["content"] == "content-54"
+    assert first["next_cursor"]
+
+    db = db_factory()
+    try:
+        db.add(DbChatMessage(
+            id="message-new", session_id="session-1", role="assistant", content="new tail",
+            timestamp=datetime(2026, 1, 2),
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    older = client.get("/api/history/session-1", params={"limit": 50, "cursor": first["next_cursor"]}).json()
+    assert [item["content"] for item in older["history"]] == [f"content-{index}" for index in range(5)]
+    assert older["next_cursor"] is None
+    engine.dispose()
+
+
 def test_production_router_order_reaches_bounded_canonical_history(monkeypatch):
     """The assembled app must not shadow canonical history with session routes."""
     engine, db_factory = _database()

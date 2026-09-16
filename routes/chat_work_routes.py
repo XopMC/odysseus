@@ -1,6 +1,11 @@
 """Owner-scoped public API for durable Plan and Goal controls."""
+import asyncio
+import json
+import time
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.routing import APIRoute
+from fastapi.responses import StreamingResponse
 
 from routes.session_routes import _verify_session_owner
 from src.auth_helpers import effective_user
@@ -56,6 +61,38 @@ def setup_chat_work_routes():
     async def events(session_id: str, request: Request, after: int = 0, limit: int = 100):
         rows = store.events(_owner(request, session_id), session_id, after=after, limit=limit)
         return {"events": rows, "next_cursor": rows[-1]["seq"] if rows else after}
+
+    @router.get("/{session_id}/events/stream")
+    async def event_stream(session_id: str, request: Request, after: int = 0):
+        owner = _owner(request, session_id)
+        raw_cursor = request.headers.get("Last-Event-ID") or str(after)
+        try:
+            cursor = int(raw_cursor)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid event cursor") from None
+        if cursor < 0:
+            raise HTTPException(400, "Invalid event cursor")
+
+        async def generate():
+            nonlocal cursor
+            heartbeat_at = time.monotonic()
+            while not await request.is_disconnected():
+                rows = store.events(owner, session_id, after=cursor, limit=100)
+                if rows:
+                    for event in rows:
+                        cursor = int(event["seq"])
+                        yield f"id: {cursor}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    heartbeat_at = time.monotonic()
+                    continue
+                if time.monotonic() - heartbeat_at >= 15:
+                    yield ": heartbeat\n\n"
+                    heartbeat_at = time.monotonic()
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            generate(), media_type="text/event-stream",
+            headers={"Cache-Control": "private, no-store", "X-Accel-Buffering": "no"},
+        )
 
     @router.post("/{session_id}/plan")
     async def save_plan(session_id: str, request: Request):

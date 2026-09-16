@@ -5,6 +5,9 @@ let snapshot = { plan: null, goal: null, cursor: 0 };
 let sessionId = '';
 let continuationPending = false;
 let eventTimer = null;
+let eventSource = null;
+let eventSourceSession = '';
+let eventReconnectTimer = null;
 let collapseTimer = null;
 
 const el = id => document.getElementById(id);
@@ -97,10 +100,11 @@ function render() { renderPlan(); renderGoal(); }
 
 async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   sessionId = id || '';
-  if (!sessionId) { snapshot = { plan: null, goal: null, cursor: 0 }; render(); return snapshot; }
+  if (!sessionId) { closeEventStream(); snapshot = { plan: null, goal: null, cursor: 0 }; render(); return snapshot; }
   try { snapshot = await json(`${api}/api/chat/work/${encodeURIComponent(sessionId)}`); }
   catch (error) { if (error.message !== 'Chat not found') console.warn('[chat-work]', error); }
   render();
+  connectEventStream();
   return snapshot;
 }
 
@@ -185,6 +189,33 @@ async function pollEvents() {
   } catch (_) { /* reconnect on next tick/focus */ }
 }
 
+function closeEventStream() {
+  clearTimeout(eventReconnectTimer); eventReconnectTimer = null;
+  eventSource?.close?.(); eventSource = null; eventSourceSession = '';
+}
+
+function connectEventStream() {
+  if (!sessionId || document.visibilityState === 'hidden' || typeof EventSource === 'undefined') return;
+  if (eventSource && eventSourceSession === sessionId) return;
+  closeEventStream();
+  const targetSession = sessionId;
+  const source = new EventSource(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/events/stream?after=${Number(snapshot.cursor || 0)}`);
+  eventSource = source; eventSourceSession = targetSession;
+  source.onmessage = message => {
+    if (targetSession !== sessionId || source !== eventSource) return;
+    try {
+      const event = JSON.parse(message.data);
+      if (Number(event.seq || 0) <= Number(snapshot.cursor || 0)) return;
+      handleEvent(event); snapshot.cursor = Number(event.seq);
+    } catch (_) { /* malformed events never mutate the current snapshot */ }
+  };
+  source.onerror = () => {
+    if (source !== eventSource) return;
+    closeEventStream();
+    eventReconnectTimer = setTimeout(async () => { await pollEvents(); connectEventStream(); }, 1200);
+  };
+}
+
 async function reviseGoal() {
   const goal = snapshot.goal;
   const objective = el('goal-work-objective')?.value?.trim();
@@ -234,9 +265,12 @@ function bind() {
   for (const [id, label] of [['goal-work-quick-pause', 'Pause goal'], ['goal-work-quick-resume', 'Resume goal'], ['goal-work-quick-cancel', 'Delete goal']]) {
     bindUiText(el(id), label, 'aria-label'); bindUiText(el(id), label, 'title');
   }
-  if (!eventTimer) eventTimer = setInterval(pollEvents, 1200);
-  ['focus', 'online', 'pageshow'].forEach(type => window.addEventListener(type, pollEvents));
-  document.addEventListener('visibilitychange', pollEvents);
+  if (typeof EventSource === 'undefined' && !eventTimer) eventTimer = setInterval(pollEvents, 1200);
+  ['focus', 'online', 'pageshow'].forEach(type => window.addEventListener(type, () => { pollEvents(); connectEventStream(); }));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') closeEventStream();
+    else { pollEvents(); connectEventStream(); }
+  });
 }
 
 const chatWork = { bind, refresh, render, handleEvent, beginGoal, onRunEnded, pauseActiveGoal, continueGoal, getSnapshot: () => snapshot };

@@ -2556,6 +2556,7 @@ body.bg-pattern-sparkles {
 	    .chat-work-popover { display:none; padding:8px 10px 10px; max-height:min(42vh,320px); overflow:auto; }
 	    .chat-work-card.expanded { height:auto; }
 	    .chat-work-card.expanded .chat-work-popover { display:block; }
+	    .plan-work-card { position: absolute; top: 34px; right: 18px; z-index: 340; }
 	    .plan-work-card:not(.expanded) {
 	      width: 36px; height: 36px; align-self: flex-end; overflow: visible;
 	      border-radius: 11px;
@@ -2601,6 +2602,7 @@ body.bg-pattern-sparkles {
 	    @media (max-width: 768px) {
 	      .chat-work-status-row { padding: 0 8px; margin-bottom: 6px; }
 	      .chat-work-card { width:100%; border-radius: 13px; }
+	      .plan-work-card { top: 44px; right: 14px; }
 	      .plan-work-card:not(.expanded) { width:86px; }
 	      .chat-work-actions { overflow-x: auto; flex-wrap: nowrap; }
 	      .chat-work-actions button { white-space: nowrap; }

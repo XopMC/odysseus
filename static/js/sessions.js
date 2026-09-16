@@ -177,10 +177,11 @@ function _historyPageLimit() {
   return HISTORY_PAGE_LIMIT;
 }
 
-function _historyUrl(id, { limit = null, offset = null } = {}) {
+function _historyUrl(id, { limit = null, offset = null, cursor = null } = {}) {
   const url = new URL(`${API_BASE}/api/history/${id}`);
   if (limit != null) url.searchParams.set('limit', String(limit));
   if (offset != null) url.searchParams.set('offset', String(offset));
+  if (cursor) url.searchParams.set('cursor', cursor);
   return url.toString();
 }
 
@@ -257,6 +258,7 @@ function _installHistoryPager(id, pageInfo, modelName) {
   _historyPager = {
     sessionId: id,
     offset: Number(pageInfo.offset || 0),
+    cursor: pageInfo.next_cursor || pageInfo.cursor || null,
     limit: Number(pageInfo.limit || _historyPageLimit()),
     loading: false,
     done: false,
@@ -268,10 +270,11 @@ function _installHistoryPager(id, pageInfo, modelName) {
   const loadOlder = async () => {
     if (!_historyPager || _historyPager.loading || _historyPager.done) return;
     if (_historyPager.sessionId !== currentSessionId) return;
-    if (box.scrollTop > 90 || !_historyPager.userRequestedOlder) return;
+    if (box.scrollTop > 90) return;
+    if (!_historyPager.userRequestedOlder) return;
 
     const nextOffset = Math.max(0, _historyPager.offset - _historyPager.limit);
-    const nextLimit = _historyPager.offset - nextOffset;
+    const nextLimit = _historyPager.cursor ? _historyPager.limit : _historyPager.offset - nextOffset;
     if (nextLimit <= 0) {
       _historyPager.done = true;
       return;
@@ -281,7 +284,11 @@ function _installHistoryPager(id, pageInfo, modelName) {
     const anchor = box.querySelector('.msg, .agent-thread, .gallery-bubble');
     const beforeHeight = box.scrollHeight;
     try {
-      const res = await fetch(_historyUrl(_historyPager.sessionId, { limit: nextLimit, offset: nextOffset }));
+      const res = await fetch(_historyUrl(_historyPager.sessionId, {
+        limit: nextLimit,
+        cursor: _historyPager.cursor,
+        offset: _historyPager.cursor ? null : nextOffset,
+      }));
       const data = await res.json();
       if (!_historyPager || _historyPager.sessionId !== currentSessionId) return;
       const newEls = [];
@@ -294,6 +301,7 @@ function _installHistoryPager(id, pageInfo, modelName) {
         box.insertBefore(el, anchor || box.firstChild);
       }
       _historyPager.offset = Number(data.offset || nextOffset);
+      _historyPager.cursor = data.next_cursor || data.cursor || null;
       _historyPager.done = !data.has_more_before;
       if (window.hljs) {
         newEls.forEach(el => el.querySelectorAll('pre code:not(.hljs)').forEach(block => window.hljs.highlightElement(block)));
@@ -2081,6 +2089,8 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
         offset: data.offset,
         limit: data.limit,
         total: data.total,
+        cursor: data.cursor,
+        next_cursor: data.next_cursor,
         has_more_before: !!data.has_more_before,
       };
       // The model returned by /api/history is the authoritative one the

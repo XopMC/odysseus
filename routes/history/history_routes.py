@@ -1,5 +1,7 @@
 """History routes — session history, truncation, fork, conversation topics."""
 
+import base64
+import binascii
 import json
 import uuid
 import logging
@@ -8,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Request, HTTPException, Depends
+from sqlalchemy import and_, func, or_
 
 from core.models import ChatMessage
 from core.database import SessionLocal, ChatMessage as DbChatMessage, Session as DbSession
@@ -26,6 +29,26 @@ logger = logging.getLogger(__name__)
 
 _HISTORY_INLINE_MEDIA_THRESHOLD = 200_000
 _DATA_IMAGE_RE = re.compile(r"data:image/[^;,\"]+;base64,[A-Za-z0-9+/=\s]+")
+
+
+def _history_cursor(message_id: str, before: int) -> str:
+    payload = json.dumps({"id": message_id, "before": max(0, int(before))}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _history_cursor_id(value: str) -> tuple[str, int]:
+    if not value or len(value) > 512:
+        raise HTTPException(400, "Invalid history cursor")
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("utf-8")
+        payload = json.loads(raw)
+        message_id = str(payload["id"])
+        before = int(payload["before"])
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
+        raise HTTPException(400, "Invalid history cursor") from None
+    if not message_id or len(message_id) > 128 or before < 0:
+        raise HTTPException(400, "Invalid history cursor")
+    return message_id, before
 
 
 def _history_display_content(content: Any) -> Any:
@@ -187,6 +210,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         session_id: str,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        cursor: Optional[str] = None,
     ) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         if limit is not None:
@@ -202,22 +226,92 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     .filter(DbChatMessage.session_id == session_id)
                     .count()
                 )
-                page_offset = int(offset) if offset is not None else max(total - page_limit, 0)
-                page_offset = max(0, min(page_offset, total))
-                # Keep display pagination page-scoped. ``get_session`` is the
-                # full model-context hydration seam and must not be entered here.
-                rows = (
-                    db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id)
-                    .order_by(DbChatMessage.timestamp)
-                    .offset(page_offset)
-                    .limit(page_limit)
-                    .all()
-                )
-                history_dict = [
-                    entry for entry in (_db_history_entry(m) for m in rows)
-                    if not (entry.get("metadata") or {}).get("hidden")
-                ]
+                # Explicit offsets remain available for older clients. New
+                # clients use a stable opaque cursor so inserts at the tail do
+                # not shift an in-progress upward pagination session.
+                if offset is not None and cursor is None:
+                    page_offset = max(0, min(int(offset), total))
+                    rows = (
+                        db.query(DbChatMessage)
+                        .filter(DbChatMessage.session_id == session_id)
+                        .order_by(DbChatMessage.timestamp, DbChatMessage.id)
+                        .offset(page_offset)
+                        .limit(page_limit)
+                        .all()
+                    )
+                    history_dict = [
+                        entry for entry in (_db_history_entry(m) for m in rows)
+                        if not (entry.get("metadata") or {}).get("hidden")
+                    ]
+                    next_cursor = _history_cursor(rows[0].id, page_offset) if rows and page_offset > 0 else None
+                    has_more_before = page_offset > 0
+                    has_more_after = page_offset + len(rows) < total
+                else:
+                    epoch = datetime(1970, 1, 1)
+                    order_ts = func.coalesce(DbChatMessage.timestamp, epoch)
+                    query = db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id)
+                    cursor_before = total
+                    if cursor:
+                        anchor_id, cursor_before = _history_cursor_id(cursor)
+                        anchor = query.filter(DbChatMessage.id == anchor_id).first()
+                        if anchor is None:
+                            raise HTTPException(400, "Invalid history cursor")
+                        anchor_ts = anchor.timestamp or epoch
+                        query = query.filter(or_(
+                            order_ts < anchor_ts,
+                            and_(order_ts == anchor_ts, DbChatMessage.id < anchor.id),
+                        ))
+
+                    # Count *visible* messages, not raw rows: hidden compaction
+                    # summaries never reduce the requested 50-message window.
+                    visible_desc = []
+                    scanned_oldest = None
+                    batch_anchor = None
+                    raw_consumed = 0
+                    has_more_before = False
+                    batch_size = max(100, page_limit * 2)
+                    while len(visible_desc) < page_limit:
+                        batch_query = query
+                        if batch_anchor is not None:
+                            batch_ts = batch_anchor.timestamp or epoch
+                            batch_query = batch_query.filter(or_(
+                                order_ts < batch_ts,
+                                and_(order_ts == batch_ts, DbChatMessage.id < batch_anchor.id),
+                            ))
+                        fetched = (
+                            batch_query.order_by(order_ts.desc(), DbChatMessage.id.desc())
+                            .limit(batch_size + 1).all()
+                        )
+                        if not fetched:
+                            break
+                        batch = fetched[:batch_size]
+                        more_raw = len(fetched) > batch_size
+                        reached_limit = False
+                        for index, row in enumerate(batch):
+                            scanned_oldest = row
+                            raw_consumed += 1
+                            entry = _db_history_entry(row)
+                            if not (entry.get("metadata") or {}).get("hidden"):
+                                visible_desc.append(entry)
+                                if len(visible_desc) >= page_limit:
+                                    has_more_before = index + 1 < len(batch) or more_raw
+                                    reached_limit = True
+                                    break
+                        if reached_limit:
+                            break
+                        batch_anchor = scanned_oldest
+                        if not more_raw:
+                            break
+
+                    history_dict = list(reversed(visible_desc))
+                    if scanned_oldest is not None:
+                        page_offset = max(0, cursor_before - raw_consumed)
+                        next_cursor = _history_cursor(scanned_oldest.id, page_offset) if has_more_before else None
+                    else:
+                        has_more_before = False
+                        page_offset = 0
+                        next_cursor = None
+                    has_more_after = cursor is not None
                 return {
                     "history": history_dict,
                     "model": db_session.model,
@@ -226,8 +320,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     "offset": page_offset,
                     "limit": page_limit,
                     "total": total,
-                    "has_more_before": page_offset > 0,
-                    "has_more_after": page_offset + len(rows) < total,
+                    "cursor": next_cursor,
+                    "next_cursor": next_cursor,
+                    "has_more_before": has_more_before,
+                    "has_more_after": has_more_after,
                 }
             finally:
                 db.close()
