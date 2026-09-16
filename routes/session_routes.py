@@ -1112,6 +1112,9 @@ def setup_session_routes(
         # transcript is re-compacted when needed; nothing is lost.
         session.context_checkpoint = summary_msg
         session.context_checkpoint_count = len(older)
+        persist_checkpoint = getattr(session_manager, "persist_context_checkpoint", None)
+        if persist_checkpoint:
+            persist_checkpoint(session.id)
 
         return {
             "ok": True,

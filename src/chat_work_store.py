@@ -175,12 +175,38 @@ class ChatWorkStore:
                 raise WorkConflict("Plan cannot be executed in its current state")
             row.status = "executing" if action == "execute" else "cancelled"
             row.revision += 1
-            if action == "execute" and row.current_step_id is None:
-                row.current_step_id = next((s["id"] for s in row.steps if s["status"] != "done"), None)
+            if action == "execute":
+                steps = [dict(step) for step in (row.steps or [])]
+                first = next((step for step in steps if step.get("status") != "done"), None)
+                if first:
+                    first["status"] = "in_progress"
+                    row.current_step_id = first["id"]
+                    row.steps = steps
             event_kind = "plan_executed" if action == "execute" else "plan_cancelled"
             self._event(db, owner, session_id, event_kind, row.id, row.revision, _public_plan(row))
             db.flush()
             return _public_plan(row)
+
+    def revise_goal(self, owner, session_id, objective, expected_revision):
+        objective = _clean_text(objective, "goal", 12000)
+        with SessionLocal.begin() as db:
+            _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            if row is None or row.status in {"completed", "cancelled"}:
+                raise WorkNotFound("Active goal not found")
+            if row.revision != expected_revision:
+                raise WorkConflict("Goal changed; reload")
+            row.objective = objective
+            row.status = "active"
+            row.attempt = int(row.attempt or 0) + 1
+            row.progress = "Goal revised; continuing with the new objective."
+            row.checkpoint = {**dict(row.checkpoint or {}), "revision_reason": "goal_revised"}
+            row.lease_token = None
+            row.lease_expires_at = None
+            row.revision += 1
+            self._event(db, owner, session_id, "goal_revised", row.id, row.revision, _public_goal(row))
+            db.flush()
+            return _public_goal(row)
 
     def update_plan_step(self, owner, session_id, step_id, status, *, summary="", expected_revision=None):
         if status not in PLAN_STATES:

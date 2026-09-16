@@ -104,6 +104,22 @@ def setup_chat_work_routes():
                 agent_runs.stop(session_id, run["run_id"])
         return goal
 
+    @router.post("/{session_id}/goal-revise")
+    async def revise_goal(session_id: str, request: Request):
+        owner = _owner(request, session_id, mutation=True)
+        body = await _json(request)
+        if set(body) != {"objective", "expected_revision", "run_id"}:
+            raise HTTPException(400, "Exact goal objective, revision and run id required")
+        from src import agent_runs
+        run = agent_runs.describe_run(session_id)
+        active_id = run.get("run_id") if run and run.get("status") == "running" else None
+        if active_id and body["run_id"] != active_id:
+            raise HTTPException(409, "Active run changed; reload")
+        if active_id:
+            agent_runs.stop(session_id, active_id)
+        goal = store.revise_goal(owner, session_id, body["objective"], body["expected_revision"])
+        return goal
+
     @router.post("/{session_id}/goal-lease")
     async def goal_lease(session_id: str, request: Request):
         owner = _owner(request, session_id, mutation=True)

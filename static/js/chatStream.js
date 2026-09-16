@@ -6,7 +6,7 @@ import uiModule from './ui.js';
 import Storage from './storage.js';
 import themeModule from './theme.js';
 import markdownModule from './markdown.js';
-import sessionModule from './sessions.js?v=20260915goalreplay3';
+import sessionModule from './sessions.js?v=20260916livecontext1';
 import documentModule from './document.js?v=20260815approvalsave1';
 
 // Tool approvals are control-plane submits for the current chat. chat.js
@@ -190,7 +190,7 @@ export function handleUIControl(uiData) {
           if (fn) fn();
         }).catch(function(){});
       } else if (panel === 'sessions') {
-        import('./sessions.js?v=20260915goalreplay3').then(function(mod) {
+        import('./sessions.js?v=20260916livecontext1').then(function(mod) {
           var fn = mod.openLibrary || (mod.default && mod.default.openLibrary);
           if (fn) fn();
         }).catch(function(){});

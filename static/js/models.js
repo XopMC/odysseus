@@ -6,13 +6,14 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260915goalreplay3';
+import sessionModule from './sessions.js?v=20260916livecontext1';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
 import { modelRouteKey, isRouteFavorite, toggleRouteFavorite } from './model/routeIdentity.js';
+import { favoritesSnapshot, setModelFavorite } from './modelFavorites.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
@@ -39,7 +40,7 @@ function _saveCollapsed(state) {
 
 // ── Favorites persistence ──
 function _loadFavorites() {
-  return Storage.getJSON(FAVORITES_KEY, []);
+  return favoritesSnapshot();
 }
 function _saveFavorites(list) {
   Storage.setJSON(FAVORITES_KEY, list);
@@ -47,12 +48,12 @@ function _saveFavorites(list) {
 function _isFavorite(mid, url, endpointId) {
   return isRouteFavorite(_loadFavorites(), { mid, url, endpointId });
 }
-function _toggleFavorite(mid, url, endpointId) {
+async function _toggleFavorite(mid, url, endpointId) {
   const favs = _loadFavorites();
   const route = { mid, url, endpointId };
   const catalog = _cachedItems.flatMap(item => (item.models || []).concat(item.models_extra || [])
     .map(model => ({ mid: model, url: item.url, endpointId: item.endpoint_id })));
-  _saveFavorites(toggleRouteFavorite(favs, route, catalog));
+  await setModelFavorite(modelRouteKey(route), !isRouteFavorite(favs, route));
   return !isRouteFavorite(favs, route);
 }
 
@@ -112,9 +113,9 @@ function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
     fav.className = 'model-fav-btn' + (_isFavorite(mid, url, endpointId) ? ' active' : '');
   }
   fav.title = 'Toggle favorite';
-  fav.addEventListener('click', (e) => {
+  fav.addEventListener('click', async (e) => {
     e.stopPropagation();
-    const nowFav = _toggleFavorite(mid, url, endpointId);
+    const nowFav = await _toggleFavorite(mid, url, endpointId);
     fav.classList.toggle('active', nowFav);
     uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
     refreshModels();
@@ -642,3 +643,4 @@ const modelsModule = {
 
 export default modelsModule;
 window.modelsModule = modelsModule;
+window.addEventListener('odysseus:model-favorites', () => { void refreshModels(false, { cacheOnly: true }); });

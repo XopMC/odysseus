@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260915goalreplay3';
-import chatRenderer from './chatRenderer.js?v=20260915goalreplay3';
+import sessionModule from './sessions.js?v=20260916livecontext1';
+import chatRenderer from './chatRenderer.js?v=20260916livecontext1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -5310,6 +5310,17 @@ import { bindUiText } from './i18n.js';
             // foreground stream. It remains in the canonical record for the
             // dedicated thinking UI, rather than being emitted as prose.
             if (json.thinking === true || json.channel === 'thinking' || json.channel === 'thought') {
+              if (nextDeltaStartsRound) {
+                finishReplayThinking();
+                if (replayThread) replayThread.classList.add('has-bottom');
+                holder = createReplayHolder(holder);
+                contentDiv = holder.querySelector('.stream-content');
+                roundText = '';
+                replayTool = null;
+                replayThread = null;
+                nextDeltaStartsRound = false;
+                replayThinking = '';
+              }
               replayThinking += json.delta;
               rich = true;
               renderReplayThinking();
@@ -7067,6 +7078,7 @@ import { bindUiText } from './i18n.js';
     continueFrom,
     _appendViewReportLink,
     hasActiveStream,
+    getActiveRunId: sessionId => _streamRunIds.get(sessionId) || '',
   };
 
   // Single delegated handler for tool-call fold/expand. One listener on

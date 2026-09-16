@@ -8,6 +8,7 @@ import settingsModule from './settings.js';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
 import { modelRouteKey, modelEndpointLabel, isRouteFavorite, toggleRouteFavorite, resolveSavedModelRoutes } from './model/routeIdentity.js';
+import { favoritesSnapshot, refreshModelFavorites, setModelFavorite } from './modelFavorites.js';
 
 const API_BASE = window.location.origin;
 
@@ -38,11 +39,11 @@ function _pushRecent(mid) {
   next.unshift(mid);
   _saveList(RECENT_KEY, next.slice(0, RECENT_MAX));
 }
-function _loadFavorites() { return _loadList(FAVORITES_KEY); }
-function _toggleFavorite(model, catalog) {
+function _loadFavorites() { return favoritesSnapshot(); }
+async function _toggleFavorite(model, catalog) {
   const favs = _loadFavorites();
   const wasFavorite = isRouteFavorite(favs, model);
-  _saveList(FAVORITES_KEY, toggleRouteFavorite(favs, model, catalog));
+  await setModelFavorite(modelRouteKey(model), !wasFavorite);
   // Keep the sidebar Models section (same key) in sync if it's mounted.
   try {
     if (window.modelsModule && typeof window.modelsModule.refreshModels === 'function') {
@@ -507,13 +508,14 @@ function _initModelPickerDropdown() {
       _setFavState(isRouteFavorite(favs, m));
       favDot.addEventListener('click', (e) => {
         e.stopPropagation();
-        const nowFav = _toggleFavorite(m, all);
+        const nowFav = !isRouteFavorite(favs, m);
+        _toggleFavorite(m, all).catch(error => uiModule?.showError?.(error.message));
         _setFavState(nowFav);
         favDot.classList.remove('pulse');
         void favDot.offsetWidth;
         favDot.classList.add('pulse');
         // Keep our in-memory copy aligned so a follow-up re-render is correct.
-        favs = _loadFavorites();
+        favs = nowFav ? [...favs, modelRouteKey(m)] : favs.filter(value => value !== modelRouteKey(m));
         if (uiModule && uiModule.showToast) uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
         // In browse mode the Favorites section membership changed — rebuild
         // (cheap: Recent + Favorites). In search mode the row stays put, so
@@ -771,6 +773,7 @@ async function _pick(m) {
     if (menu.classList.contains('hidden') || menu.classList.contains('closing')) {
       // Force-clear any in-progress close animation
       menu.classList.remove('closing', 'hidden');
+      void refreshModelFavorites().then(() => { if (!menu.classList.contains('hidden')) _populate(search.value || ''); }).catch(() => {});
       const hasCache = _hasModelCache();
       if (hasCache) {
         _populate('');

@@ -153,6 +153,10 @@ class SessionManager:
             project_id=getattr(db_session, "project_id", None),
         )
         session.message_count = getattr(db_session, "message_count", 0) or 0
+        raw_checkpoint = getattr(db_session, "context_checkpoint", None)
+        if isinstance(raw_checkpoint, dict) and raw_checkpoint.get("role"):
+            session.context_checkpoint = ChatMessage(raw_checkpoint["role"], raw_checkpoint.get("content", ""), raw_checkpoint.get("metadata"))
+            session.context_checkpoint_count = int(getattr(db_session, "context_checkpoint_count", 0) or 0)
         return session
 
     def _db_to_session(self, db_session: DbSession, db) -> Optional[Session]:
@@ -218,6 +222,10 @@ class SessionManager:
         # number; seeding it from a drifted column would ask for a reload that
         # can never close the gap.
         session.message_count = len(history)
+        raw_checkpoint = getattr(db_session, "context_checkpoint", None)
+        if isinstance(raw_checkpoint, dict) and raw_checkpoint.get("role"):
+            session.context_checkpoint = ChatMessage(raw_checkpoint["role"], raw_checkpoint.get("content", ""), raw_checkpoint.get("metadata"))
+            session.context_checkpoint_count = int(getattr(db_session, "context_checkpoint_count", 0) or 0)
         return session
 
     # ------------------------------------------------------------------
@@ -713,6 +721,26 @@ class SessionManager:
 
     def save_sessions(self):
         """No-op for DB compatibility."""
+
+    def persist_context_checkpoint(self, session_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        db = SessionLocal()
+        try:
+            row = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if row is None:
+                return False
+            row.context_checkpoint = session.context_checkpoint.to_dict() if session.context_checkpoint else None
+            row.context_checkpoint_count = int(session.context_checkpoint_count or 0)
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to persist context checkpoint for %s", session_id)
+            return False
+        finally:
+            db.close()
 
     def ensure_task_session(self, session_id: str, name: str, endpoint_url: str, model: str, owner: str = None, task: object = None) -> Session:
         """Create a task session if it doesn't exist, or return the existing one.

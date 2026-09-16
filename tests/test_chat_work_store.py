@@ -38,6 +38,7 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
     with pytest.raises(WorkConflict):
         store.plan_action("alice", owned_chat, "execute", plan["revision"] + 1)
     plan = store.plan_action("alice", owned_chat, "execute", plan["revision"])
+    assert plan["steps"][0]["status"] == "in_progress"
     plan = store.update_plan_step("alice", owned_chat, "verify", "done", expected_revision=plan["revision"])
     assert plan["status"] == "done"
 
@@ -54,6 +55,16 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
     assert store.events("alice", owned_chat)
     with pytest.raises(WorkNotFound):
         store.get("bob", owned_chat)
+
+
+def test_goal_revision_preserves_audit_and_advances_attempt(owned_chat):
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Old objective")
+    revised = work.revise_goal("alice", owned_chat, "New objective", goal["revision"])
+    assert revised["objective"] == "New objective"
+    assert revised["attempt"] == 2
+    assert revised["status"] == "active"
+    assert work.events("alice", owned_chat)[-1]["type"] == "goal_revised"
 
 
 def test_goal_model_failures_retry_then_wait_for_user(owned_chat):

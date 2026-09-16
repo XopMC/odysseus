@@ -4,9 +4,9 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260915goalreplay3';
+import chatRenderer from './chatRenderer.js?v=20260916livecontext1';
 import { providerLogo } from './providers.js';
-import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260722ctxheader1';
+import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js';
 import spinnerModule from './spinner.js';
 
@@ -242,6 +242,10 @@ function _clearHistoryPager() {
   if (_historyPager?.handler && box) {
     box.removeEventListener('scroll', _historyPager.handler);
   }
+  if (_historyPager?.markUserScroll && box) {
+    box.removeEventListener('wheel', _historyPager.markUserScroll);
+    box.removeEventListener('touchmove', _historyPager.markUserScroll);
+  }
   _historyPager = null;
 }
 
@@ -258,12 +262,13 @@ function _installHistoryPager(id, pageInfo, modelName) {
     done: false,
     modelName,
     handler: null,
+    userRequestedOlder: false,
   };
 
   const loadOlder = async () => {
     if (!_historyPager || _historyPager.loading || _historyPager.done) return;
     if (_historyPager.sessionId !== currentSessionId) return;
-    if (box.scrollTop > 90) return;
+    if (box.scrollTop > 90 || !_historyPager.userRequestedOlder) return;
 
     const nextOffset = Math.max(0, _historyPager.offset - _historyPager.limit);
     const nextLimit = _historyPager.offset - nextOffset;
@@ -302,6 +307,14 @@ function _installHistoryPager(id, pageInfo, modelName) {
     }
   };
 
+  const markUserScroll = event => {
+    if (!_historyPager || event.isTrusted === false) return;
+    if (event.type === 'wheel' && event.deltaY >= 0) return;
+    _historyPager.userRequestedOlder = true;
+  };
+  box.addEventListener('wheel', markUserScroll, { passive: true });
+  box.addEventListener('touchmove', markUserScroll, { passive: true });
+  _historyPager.markUserScroll = markUserScroll;
   _historyPager.handler = () => {
     if (box.scrollTop <= 90) loadOlder();
   };

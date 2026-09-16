@@ -224,6 +224,8 @@ class Session(TimestampMixin, Base):
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+    context_checkpoint = Column(JSON, nullable=True)
+    context_checkpoint_count = Column(Integer, nullable=False, default=0)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -2199,6 +2201,7 @@ def init_db():
     _migrate_add_notifications_enabled()
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()
+    _migrate_add_context_checkpoint_columns()
     _migrate_add_assistant_columns()
     _migrate_add_email_smtp_security()
     _migrate_email_account_default_invariant()
@@ -2214,6 +2217,19 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+
+
+def _migrate_add_context_checkpoint_columns():
+    """Persist compaction state without modifying the canonical transcript."""
+    try:
+        with engine.begin() as conn:
+            cols = {row[1] for row in conn.execute(text("PRAGMA table_info(sessions)"))}
+            if "context_checkpoint" not in cols:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN context_checkpoint JSON"))
+            if "context_checkpoint_count" not in cols:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN context_checkpoint_count INTEGER NOT NULL DEFAULT 0"))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("context checkpoint migration failed: %s", exc)
 
 
 def _migrate_backfill_task_folders():

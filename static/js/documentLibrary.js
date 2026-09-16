@@ -6,7 +6,7 @@
 
 import { topPortalZ } from './toolWindowZOrder.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260915goalreplay3';
+import sessionModule from './sessions.js?v=20260916livecontext1';
 import spinnerModule from './spinner.js';
 import markdownModule from './markdown.js';
 import { makeWindowDraggable } from './windowDrag.js';

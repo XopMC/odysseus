@@ -858,6 +858,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             )
             session.context_checkpoint = system_summary
             session.context_checkpoint_count = len(older)
+            persist_checkpoint = getattr(session_manager, "persist_context_checkpoint", None)
+            if persist_checkpoint:
+                persist_checkpoint(session.id)
             logger.info(
                 "Compact: installed context checkpoint for %s messages; "
                 "preserved all %s transcript messages",

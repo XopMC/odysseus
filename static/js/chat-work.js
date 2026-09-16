@@ -4,6 +4,8 @@ const api = window.location.origin;
 let snapshot = { plan: null, goal: null, cursor: 0 };
 let sessionId = '';
 let continuationPending = false;
+let eventTimer = null;
+let collapseTimer = null;
 
 const el = id => document.getElementById(id);
 const json = async (url, options = {}) => {
@@ -26,7 +28,7 @@ function renderPlan() {
   if (!node) return;
   const draftEnabled = !!document.getElementById('plan-toggle')?.checked;
   const plan = snapshot.plan;
-  node.hidden = !draftEnabled && !plan;
+  node.hidden = !draftEnabled && (!plan || plan.status === 'cancelled');
   if (!plan) {
     el('plan-work-progress').textContent = draftEnabled ? t('Waiting for a plan') : '';
     el('plan-work-current').textContent = draftEnabled ? t('Send a message to create a read-only plan.') : '';
@@ -79,7 +81,7 @@ function renderGoal() {
   unbindUiText(el('goal-work-state'));
   unbindUiText(el('goal-work-objective'));
   el('goal-work-state').textContent = `${t(goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
-  el('goal-work-objective').textContent = goal.objective || '';
+  el('goal-work-objective').value = goal.objective || '';
   el('goal-work-progress').textContent = goal.progress || '';
   el('goal-work-pause').hidden = goal.status !== 'active';
   el('goal-work-resume').hidden = !['paused', 'waiting_user'].includes(goal.status);
@@ -100,9 +102,9 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
 }
 
 function handleEvent(event) {
-  if (event?.type === 'plan_update') snapshot.plan = event.data || null;
-  if (event?.type === 'goal_update') snapshot.goal = event.data || null;
-  render();
+  if (event?.type === 'plan_update') { snapshot.plan = event.data || null; render(); return; }
+  if (event?.type === 'goal_update') { snapshot.goal = event.data || null; render(); return; }
+  if (event?.type?.startsWith('plan_') || event?.type?.startsWith('goal_')) void refresh(sessionId);
 }
 
 function beginGoal(objective) {
@@ -119,6 +121,7 @@ async function mutate(kind, action) {
   if (!sessionId || !record) return;
   try {
     snapshot[kind] = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/${kind}/${action}`, { expected_revision: record.revision });
+    if (kind === 'plan' && action === 'cancel') { snapshot.plan = null; window.__odysseusSetPlanMode?.(false); }
     if (kind === 'goal' && action === 'cancel') snapshot.goal = null;
     render();
     if (kind === 'plan' && action === 'execute') {
@@ -162,6 +165,37 @@ async function pauseActiveGoal() {
   if (snapshot.goal?.status === 'active') await mutate('goal', 'pause');
 }
 
+function armCollapse(node) {
+  clearTimeout(collapseTimer);
+  collapseTimer = setTimeout(() => {
+    node.classList.remove('expanded');
+    node.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded', 'false');
+  }, 4000);
+}
+
+async function pollEvents() {
+  if (!sessionId || document.visibilityState === 'hidden') return;
+  try {
+    const data = await json(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/events?after=${Number(snapshot.cursor || 0)}&limit=100`);
+    for (const event of data.events || []) handleEvent(event);
+    snapshot.cursor = Number(data.next_cursor || snapshot.cursor || 0);
+  } catch (_) { /* reconnect on next tick/focus */ }
+}
+
+async function reviseGoal() {
+  const goal = snapshot.goal;
+  const objective = el('goal-work-objective')?.value?.trim();
+  if (!goal || !objective || objective === goal.objective) return;
+  try {
+    snapshot.goal = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/goal-revise`, {
+      objective, expected_revision: goal.revision,
+      run_id: window.chatModule?.getActiveRunId?.(sessionId) || '',
+    });
+    render();
+    setTimeout(continueGoal, 350);
+  } catch (error) { toast(error.message, true); await refresh(sessionId); }
+}
+
 function bind() {
   el('plan-work-execute')?.addEventListener('click', () => mutate('plan', 'execute'));
   el('plan-work-cancel')?.addEventListener('click', () => mutate('plan', 'cancel'));
@@ -175,10 +209,25 @@ function bind() {
   el('goal-work-pause')?.addEventListener('click', () => mutate('goal', 'pause'));
   el('goal-work-resume')?.addEventListener('click', () => mutate('goal', 'resume'));
   el('goal-work-cancel')?.addEventListener('click', () => mutate('goal', 'cancel'));
+  el('goal-work-save')?.addEventListener('click', reviseGoal);
+  document.querySelectorAll('.chat-work-card').forEach(node => {
+    const toggle = node.querySelector('.chat-work-card-toggle');
+    toggle?.addEventListener('click', () => {
+      const open = node.classList.toggle('expanded');
+      toggle.setAttribute('aria-expanded', String(open));
+      if (open) armCollapse(node);
+    });
+    ['pointermove', 'focusin', 'input'].forEach(type => node.addEventListener(type, () => {
+      if (node.classList.contains('expanded')) armCollapse(node);
+    }));
+  });
   document.querySelectorAll('.chat-work-card strong, .chat-work-card summary, .chat-work-card button').forEach(node => {
     const source = node.textContent.trim();
     if (source) bindUiText(node, source);
   });
+  if (!eventTimer) eventTimer = setInterval(pollEvents, 1200);
+  ['focus', 'online', 'pageshow'].forEach(type => window.addEventListener(type, pollEvents));
+  document.addEventListener('visibilitychange', pollEvents);
 }
 
 const chatWork = { bind, refresh, render, handleEvent, beginGoal, onRunEnded, pauseActiveGoal, continueGoal, getSnapshot: () => snapshot };

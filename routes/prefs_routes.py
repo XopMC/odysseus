@@ -1,5 +1,6 @@
 """User preferences API — per-user key/value store backed by a JSON file."""
 import json
+import threading
 from typing import Optional
 from fastapi import APIRouter, Request
 from core.atomic_io import atomic_write_json
@@ -11,6 +12,8 @@ _FOREGROUND_POLICY_KEYS = (
     "foreground_fallback_enabled",
     "foreground_model_fallbacks",
 )
+_PREFS_LOCK = threading.RLock()
+_MODEL_FAVORITES_KEY = "model_favorites_v2"
 
 
 def _load():
@@ -121,5 +124,37 @@ def setup_prefs_routes():
         prefs[key] = body.get("value")
         _save_for_user(user, prefs)
         return {"key": key, "value": prefs[key]}
+
+    @router.get("/model-favorites/snapshot")
+    async def model_favorites_snapshot(request: Request):
+        user = get_current_user(request)
+        value = _load_for_user(user).get(_MODEL_FAVORITES_KEY, {})
+        if not isinstance(value, dict):
+            value = {}
+        return {"favorites": list(value.get("favorites") or []), "revision": int(value.get("revision") or 0)}
+
+    @router.post("/model-favorites/toggle")
+    async def model_favorites_toggle(request: Request, body: dict):
+        user = get_current_user(request)
+        key = str(body.get("key") or "")
+        expected = body.get("expected_revision")
+        favorite = bool(body.get("favorite"))
+        if "::" not in key or type(expected) is not int:
+            from fastapi import HTTPException
+            raise HTTPException(400, "Exact route key and revision required")
+        with _PREFS_LOCK:
+            prefs = _load_for_user(user)
+            current = prefs.get(_MODEL_FAVORITES_KEY, {})
+            current = current if isinstance(current, dict) else {}
+            revision = int(current.get("revision") or 0)
+            if revision != expected:
+                from fastapi import HTTPException
+                raise HTTPException(409, "Favorites changed; refresh")
+            values = {str(item) for item in (current.get("favorites") or []) if "::" in str(item)}
+            (values.add if favorite else values.discard)(key)
+            result = {"favorites": sorted(values), "revision": revision + 1}
+            prefs[_MODEL_FAVORITES_KEY] = result
+            _save_for_user(user, prefs)
+        return result
 
     return router
