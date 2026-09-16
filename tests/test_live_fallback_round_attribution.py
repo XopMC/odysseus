@@ -16,7 +16,23 @@ def _resume_function_source():
     body = CHAT_JS.split("export async function resumeStream", 1)[1].split(
         "export function checkBackgroundStream", 1
     )[0]
-    return "async function resumeStream" + body.rstrip()
+    support = r"""
+const TOOL_ELAPSED_TICK_MS = 250;
+function _adaptiveLiveRenderDelay() { return 0; }
+function createLiveThinkingThrottle(commit, {prepare = value => value} = {}) {
+  let latest = null, dirty = false;
+  return {
+    update(value) { latest = value; dirty = true; commit(prepare(value)); dirty = false; },
+    flush() { if (!dirty) return false; commit(prepare(latest)); dirty = false; return true; },
+    cancel() { dirty = false; },
+  };
+}
+function _queueIncrementalStreamRender(el, value, {render = text => text} = {}) { el.innerHTML = render(value); }
+function _flushIncrementalStreamRender() {}
+function _cancelIncrementalStreamRender() {}
+function _cancelIncrementalStreamTree() {}
+"""
+    return support + "\nasync function resumeStream" + body.rstrip()
 
 
 def _run_node(source):

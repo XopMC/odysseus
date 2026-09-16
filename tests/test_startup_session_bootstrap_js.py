@@ -26,13 +26,13 @@ _IMPORT_REWRITES = {
     "import uiModule, { autoResize, styledPrompt } from './ui.js';": (
         "import uiModule, { autoResize, styledPrompt } from './ui.mjs';"
     ),
-    "import chatRenderer from './chatRenderer.js?v=20260815toolapproval4';": (
+    "import chatRenderer from './chatRenderer.js?v=20260916longrun1';": (
         "import chatRenderer from './chatRenderer.mjs';"
     ),
     "import { providerLogo } from './providers.js';": (
         "import { providerLogo } from './providers.mjs';"
     ),
-    "import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260722ctxheader1';": (
+    "import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';": (
         "import { initModelPicker, updateModelPicker } from './modelPicker.mjs';"
     ),
     "import themeModule from './theme.js';": "import themeModule from './theme.mjs';",

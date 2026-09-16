@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260916livecontext1';
-import chatRenderer from './chatRenderer.js?v=20260916livecontext1';
+import sessionModule from './sessions.js?v=20260916longrun1';
+import chatRenderer from './chatRenderer.js?v=20260916longrun1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -42,6 +42,8 @@ import { bindUiText } from './i18n.js';
   const DEFAULT_TIMEOUT_MS = 120000;
   const RUN_ID_ABORT_GRACE_MS = 2000; // timeout waits this long for a run-id header before hard-aborting
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+  const TOOL_WAVE_TICK_MS = 250;
+  const TOOL_ELAPSED_TICK_MS = 250;
 
   let API_BASE = '';
   let currentAbort = null;
@@ -626,6 +628,54 @@ import { bindUiText } from './i18n.js';
     return stripToolBlocks(_stripIncompleteRawToolJsonForChat(_stripDocumentFenceForChat(text, opts)));
   }
 
+  // Long agent runs can emit hundreds of deltas per second. Rendering every
+  // cumulative markdown value makes one long paragraph O(N^2), especially on
+  // Safari and on a second device replaying an active run. Keep the canonical
+  // text untouched, but coalesce visual commits and slow them as the live tail
+  // grows. Terminal paths flush/cancel this scheduler before their final render.
+  function _adaptiveLiveRenderDelay(value) {
+    const length = String(value ?? '').length;
+    let delay = length >= 128000 ? 400 : length >= 32000 ? 200 : length >= 8000 ? 100 : 50;
+    if (typeof document !== 'undefined' && document.hidden) delay = Math.max(delay, 500);
+    return delay;
+  }
+
+  function _queueIncrementalStreamRender(contentEl, fullText, { render, hljs } = {}) {
+    if (!contentEl) return;
+    let state = contentEl._odysseusStreamRenderState;
+    if (!state) {
+      const renderer = contentEl._streamRenderer ||
+        (contentEl._streamRenderer = createStreamRenderer(contentEl, { render, hljs }));
+      state = {
+        scheduler: createLiveThinkingThrottle((latest) => {
+          renderer.update(latest);
+          uiModule.scrollHistory();
+        }, {
+          delay: _adaptiveLiveRenderDelay,
+          prepare: (value) => String(value ?? ''),
+        }),
+      };
+      contentEl._odysseusStreamRenderState = state;
+    }
+    state.scheduler.update(fullText);
+  }
+
+  function _flushIncrementalStreamRender(contentEl) {
+    contentEl?._odysseusStreamRenderState?.scheduler?.flush();
+  }
+
+  function _cancelIncrementalStreamRender(contentEl) {
+    if (!contentEl) return;
+    contentEl._odysseusStreamRenderState?.scheduler?.cancel();
+    try { delete contentEl._odysseusStreamRenderState; } catch (_) {}
+    try { delete contentEl._streamRenderer; } catch (_) {}
+  }
+
+  function _cancelIncrementalStreamTree(root) {
+    if (!root?.querySelectorAll) return;
+    root.querySelectorAll('.stream-content, .live-reply-content').forEach(_cancelIncrementalStreamRender);
+  }
+
   function _showDocumentWritingStatus(contentEl) {
     const msg = contentEl && contentEl.closest ? contentEl.closest('.msg') : null;
     const chatBox = document.getElementById('chat-history');
@@ -656,7 +706,7 @@ import { bindUiText } from './i18n.js';
         node._waveInterval = setInterval(() => {
           waveIdx = (waveIdx + 1) % waveFrames.length;
           waveEl.textContent = waveFrames[waveIdx];
-        }, 100);
+        }, TOOL_WAVE_TICK_MS);
       }
       node._startTime = Date.now();
       node._elapsedTicker = setInterval(() => {
@@ -671,8 +721,8 @@ import { bindUiText } from './i18n.js';
           else hdr.appendChild(el);
         }
         const s = (Date.now() - node._startTime) / 1000;
-        el.textContent = s < 60 ? `${s.toFixed(2)}s` : `${Math.floor(s / 60)}m ${(s % 60).toFixed(2).padStart(5, '0')}s`;
-      }, 50);
+        el.textContent = s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${(s % 60).toFixed(1).padStart(4, '0')}s`;
+      }, TOOL_ELAPSED_TICK_MS);
     }
     msg.style.display = 'none';
   }
@@ -2533,6 +2583,7 @@ import { bindUiText } from './i18n.js';
         if (!_liveThinkRenderThrottle) {
           _liveThinkRenderThrottle = createLiveThinkingThrottle(_commitLiveThinkingText, {
             prepare: ({ text, prepared }) => prepared ? String(text ?? '') : _liveThinkingText(text),
+            delay: ({ text }) => _adaptiveLiveRenderDelay(text),
           });
         }
         return _liveThinkRenderThrottle;
@@ -2718,6 +2769,7 @@ import { bindUiText } from './i18n.js';
         }
         const body = terminalHolder.querySelector('.body');
         const content = _ensureStreamLayout(body);
+        _cancelIncrementalStreamRender(content);
         content.style.minHeight = '';
         content.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(dt));
         if (window.hljs) terminalHolder.querySelectorAll('pre code').forEach((block) => window.hljs.highlightElement(block));
@@ -2801,15 +2853,12 @@ import { bindUiText } from './i18n.js';
             replyTrimmed = _replyDisplayProjector.append(replyTrimmed, roundReplyText);
           }
           if (replyTrimmed) {
-            const r = liveReply._streamRenderer ||
-              (liveReply._streamRenderer = createStreamRenderer(liveReply, {
-                render: (t) => markdownModule.mdToHtml(markdownModule.squashOutsideCode(t)),
-                hljs: window.hljs,
-              }));
-            r.update(replyTrimmed);
+            _queueIncrementalStreamRender(liveReply, replyTrimmed, {
+              render: (t) => markdownModule.mdToHtml(markdownModule.squashOutsideCode(t)),
+              hljs: window.hljs,
+            });
           }
           // Reply empty or not — preserve thinking bar, don't fall through to full re-render
-          uiModule.scrollHistory();
           return;
         }
 
@@ -2825,6 +2874,7 @@ import { bindUiText } from './i18n.js';
 
         // If thinking is still streaming (unclosed <think>), show indicator instead of raw text
         if (!knownNormal && markdownModule.hasUnclosedThinkTag && markdownModule.hasUnclosedThinkTag(dt)) {
+          _cancelIncrementalStreamRender(contentEl);
           const thinkStart = dt.search(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i);
           const thinkContent = dt.substring(Math.max(thinkStart, 0))
             .replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought\s*\n?/i, '')
@@ -2848,17 +2898,15 @@ import { bindUiText } from './i18n.js';
         // re-parse/re-highlight of the whole message on every token.
         // See streamingRenderer.js / streamingSegmenter.js.
         if (_docFenceOpened && !dt.trim()) {
+          _cancelIncrementalStreamRender(contentEl);
           _showDocumentWritingStatus(contentEl);
           uiModule.scrollHistory();
           return;
         }
-        const renderer = contentEl._streamRenderer ||
-          (contentEl._streamRenderer = createStreamRenderer(contentEl, {
-            render: (t) => markdownModule.processWithThinking(markdownModule.squashOutsideCode(t)),
-            hljs: window.hljs,
-          }));
-        renderer.update(dt);
-        uiModule.scrollHistory();
+        _queueIncrementalStreamRender(contentEl, dt, {
+          render: (t) => markdownModule.processWithThinking(markdownModule.squashOutsideCode(t)),
+          hljs: window.hljs,
+        });
       };
 
       let _nextIsError = false;
@@ -3698,11 +3746,10 @@ import { bindUiText } from './i18n.js';
                   node._waveInterval = setInterval(() => {
                     waveIdx = (waveIdx + 1) % waveFrames.length;
                     waveEl.textContent = waveFrames[waveIdx];
-                  }, 100);
+                  }, TOOL_WAVE_TICK_MS);
                 }
-                // Smooth per-second "cooking" timer — ticks every second (not
-                // just on the 2s backend heartbeat) so a long-running tool
-                // always shows visible motion and never reads as frozen.
+                // A bounded visual timer keeps a long-running tool visibly alive
+                // without forcing layout twenty times per second.
                 node._startTime = Date.now();
                 node._elapsedTicker = setInterval(() => {
                   const hdr2 = node.querySelector('.agent-thread-header');
@@ -3717,9 +3764,9 @@ import { bindUiText } from './i18n.js';
                     else hdr2.appendChild(el2);
                   }
                   const s = (Date.now() - node._startTime) / 1000;
-                  // Hundredths so it visibly counts sub-second (1.00, 1.05, …).
-                  el2.textContent = s < 60 ? `${s.toFixed(2)}s` : `${Math.floor(s / 60)}m ${(s % 60).toFixed(2).padStart(5, '0')}s`;
-                }, 50);
+                  // Tenths are enough feedback and substantially cheaper on mobile.
+                  el2.textContent = s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${(s % 60).toFixed(1).padStart(4, '0')}s`;
+                }, TOOL_ELAPSED_TICK_MS);
                 uiModule.scrollHistory();
 
               } else if (json.type === 'tool_progress') {
@@ -5113,7 +5160,7 @@ import { bindUiText } from './i18n.js';
     const replayNodes = [];
     const createReplayHolder = (previous = null) => {
       const holder = document.createElement('div');
-      holder.className = replayHolders.length ? 'msg msg-ai msg-continuation streaming' : 'msg msg-ai';
+      holder.className = replayHolders.length ? 'msg msg-ai msg-continuation streaming' : 'msg msg-ai streaming';
       holder.innerHTML = '<div class="role">' + uiModule.esc(roleLabel) +
         ' <span class="role-timestamp">' + roleTs + '</span></div>' +
         '<div class="body"><div class="stream-content"></div></div>';
@@ -5134,6 +5181,7 @@ import { bindUiText } from './i18n.js';
     };
     const removeReplayHolders = () => {
       for (const node of replayNodes) {
+        _cancelIncrementalStreamTree(node);
         node.querySelectorAll?.('.agent-thread-node').forEach(toolNode => {
           if (toolNode._waveInterval) clearInterval(toolNode._waveInterval);
           if (toolNode._elapsedTicker) clearInterval(toolNode._elapsedTicker);
@@ -5166,6 +5214,7 @@ import { bindUiText } from './i18n.js';
     let replayThread = null;
     let nextDeltaStartsRound = false;
     let replayThinking = '';
+    let replayThinkingThrottle = null;
     const replayEvents = new Set();
     // "Rich" responses (tool calls, sources, doc streaming, multi-round) need the
     // full canonical render, which is rebuilt from the saved DB record on reload.
@@ -5176,17 +5225,8 @@ import { bindUiText } from './i18n.js';
       try { spinner.destroy(); } catch (_) {}
     };
 
-    const finishReplayThinking = () => {
-      const section = holder?.querySelector('.thinking-section');
-      if (!section) return;
-      section.querySelector('.thinking-content')?.classList.remove('expanded');
-      section.querySelector('.thinking-toggle')?.classList.remove('expanded');
-      const label = section.querySelector('.live-think-header-text');
-      if (label) { label.textContent = 'View thinking process'; bindUiText(label, 'View thinking process'); }
-    };
-
-    const renderReplayThinking = () => {
-      if (!replayThinking || !holder) return;
+    const ensureReplayThinkingSection = () => {
+      if (!holder) return null;
       let section = holder.querySelector('.thinking-section');
       if (!section) {
         const id = 'replay-think-' + Math.random().toString(36).slice(2);
@@ -5196,8 +5236,49 @@ import { bindUiText } from './i18n.js';
         bindUiText(section.querySelector('.live-think-header-text'), 'Thinking…');
         holder.querySelector('.body')?.insertBefore(section, contentDiv);
       }
+      return section;
+    };
+
+    const commitReplayThinking = (text) => {
+      const section = ensureReplayThinkingSection();
+      if (!section) return;
       const inner = section.querySelector('.thinking-content-inner');
-      if (inner) inner.innerHTML = markdownModule.mdToHtml(replayThinking);
+      if (inner) {
+        inner.style.whiteSpace = 'pre-wrap';
+        inner.textContent = String(text || '');
+      }
+      uiModule.scrollHistory();
+    };
+
+    const renderReplayThinking = () => {
+      if (!replayThinking || !holder) return;
+      if (!replayThinkingThrottle) {
+        replayThinkingThrottle = createLiveThinkingThrottle(commitReplayThinking, {
+          delay: _adaptiveLiveRenderDelay,
+          prepare: (value) => String(value ?? ''),
+        });
+      }
+      replayThinkingThrottle.update(replayThinking);
+    };
+
+    const finishReplayThinking = () => {
+      if (replayThinkingThrottle) {
+        replayThinkingThrottle.update(replayThinking);
+        replayThinkingThrottle.flush();
+        replayThinkingThrottle.cancel();
+        replayThinkingThrottle = null;
+      }
+      const section = holder?.querySelector('.thinking-section');
+      if (!section) return;
+      const inner = section.querySelector('.thinking-content-inner');
+      if (inner) {
+        inner.style.whiteSpace = '';
+        inner.innerHTML = markdownModule.mdToHtml(replayThinking);
+      }
+      section.querySelector('.thinking-content')?.classList.remove('expanded');
+      section.querySelector('.thinking-toggle')?.classList.remove('expanded');
+      const label = section.querySelector('.live-think-header-text');
+      if (label) { label.textContent = 'View thinking process'; bindUiText(label, 'View thinking process'); }
     };
 
     const ensureReplayThread = () => {
@@ -5235,7 +5316,7 @@ import { bindUiText } from './i18n.js';
         }
         const seconds = Math.max(0, (Date.now() - node._startTime) / 1000);
         elapsed.textContent = seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`;
-      }, 200);
+      }, TOOL_ELAPSED_TICK_MS);
       replayTool = { node, name };
       return replayTool;
     };
@@ -5262,11 +5343,14 @@ import { bindUiText } from './i18n.js';
       );
       const dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(visibleText, { final: docFenceOpened }));
       if (docFenceOpened && !dt.trim()) {
+        _cancelIncrementalStreamRender(contentDiv);
         _showDocumentWritingStatus(contentDiv);
       } else {
-        contentDiv.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(dt));
+        _queueIncrementalStreamRender(contentDiv, dt, {
+          render: (text) => markdownModule.mdToHtml(markdownModule.squashOutsideCode(text)),
+          hljs: window.hljs,
+        });
       }
-      uiModule.scrollHistory();
     };
 
     try {
@@ -5311,6 +5395,7 @@ import { bindUiText } from './i18n.js';
             // dedicated thinking UI, rather than being emitted as prose.
             if (json.thinking === true || json.channel === 'thinking' || json.channel === 'thought') {
               if (nextDeltaStartsRound) {
+                _flushIncrementalStreamRender(contentDiv);
                 finishReplayThinking();
                 if (replayThread) replayThread.classList.add('has-bottom');
                 holder = createReplayHolder(holder);
@@ -5324,13 +5409,13 @@ import { bindUiText } from './i18n.js';
               replayThinking += json.delta;
               rich = true;
               renderReplayThinking();
-              uiModule.scrollHistory();
               continue;
             }
             // A tool result closes the preceding model turn. New prose needs
             // a fresh bubble even when an older persisted run omitted the
             // agent_step event between the tool and its next delta.
             if (replayTool || nextDeltaStartsRound) {
+              _flushIncrementalStreamRender(contentDiv);
               finishReplayThinking();
               if (replayThread) replayThread.classList.add('has-bottom');
               holder = createReplayHolder(holder);
@@ -5430,6 +5515,7 @@ import { bindUiText } from './i18n.js';
             rich = true;
             // Avoid an empty leading duplicate, but preserve every real
             // persisted round boundary in a long-running agent timeline.
+            _flushIncrementalStreamRender(contentDiv);
             finishReplayThinking();
             nextDeltaStartsRound = Boolean(roundText.trim() || replayTool || gotDelta);
             docFenceOpened = false;
@@ -5437,6 +5523,7 @@ import { bindUiText } from './i18n.js';
           } else if (json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress') {
             rich = true;
             try { spinner.destroy(); } catch (_) {}
+            _flushIncrementalStreamRender(contentDiv);
             finishReplayThinking();
             if (json.type === 'tool_start') replayTool = startReplayTool(json);
             else replayTool = findReplayTool(json) || startReplayTool(json);
@@ -5475,6 +5562,8 @@ import { bindUiText } from './i18n.js';
       rich = true;
     }
 
+    _flushIncrementalStreamRender(contentDiv);
+    if (replayThinkingThrottle) finishReplayThinking();
     cleanup();
     if (isCurrentView()) {
       const finishedResumeSubmitBtn = document.querySelector?.('.send-btn');

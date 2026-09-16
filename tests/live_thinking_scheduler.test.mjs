@@ -60,6 +60,25 @@ test('coalesces a burst and commits only the latest text after 100 ms', () => {
   assert.deepEqual(commits, ['abc']);
 });
 
+test('accepts an adaptive delay derived from the latest cumulative value', () => {
+  const timers = fakeTimers();
+  const commits = [];
+  const throttle = createLiveThinkingThrottle((value) => commits.push(value), {
+    ...timers,
+    delay: (value) => value.length >= 100_000 ? 400 : 50,
+  });
+
+  throttle.update('short');
+  assert.deepEqual(timers.delays, [50]);
+  timers.run(timers.pendingIds()[0]);
+
+  throttle.update('x'.repeat(100_000));
+  assert.deepEqual(timers.delays, [50, 400]);
+  timers.run(timers.pendingIds()[0]);
+  assert.equal(commits.length, 2);
+  assert.equal(commits[1].length, 100_000);
+});
+
 test('commit count stays flat as the stream grows', () => {
   const timers = fakeTimers();
   const commits = [];

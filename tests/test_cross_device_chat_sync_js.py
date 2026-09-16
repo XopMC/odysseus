@@ -77,7 +77,7 @@ def test_cross_device_subscription_lifecycle(scenario):
       const code=fs.readFileSync(process.argv[1]+'/'+file,'utf8'),mod=new vm.SourceTextModule(code,{context});
       const names=new Set(['default']);
       for(const match of code.matchAll(/import(?:\s+\w+\s*,)?\s*\{([\s\S]*?)\}\s+from/g))for(const name of match[1].split(',')){const key=name.trim().split(/\s+as\s+/)[0];if(key)names.add(key);}
-      await mod.link(async spec=>new vm.SyntheticModule([...names],function(){const key=spec.split('/').pop().split('?')[0];for(const name of names)this.setExport(name,name==='default'?(modules[key]||proxy()):name==='stripToolBlocks'?(text=>text):noop);},{context}));
+          await mod.link(async spec=>new vm.SyntheticModule([...names],function(){const key=spec.split('/').pop().split('?')[0];for(const name of names)this.setExport(name,name==='default'?(modules[key]||proxy()):name==='stripToolBlocks'?(text=>text):name==='createLiveThinkingThrottle'?((commit,{prepare=(value)=>value}={})=>{let latest,dirty=false;return{update(value){latest=value;dirty=true;commit(prepare(value));dirty=false;},flush(){if(!dirty)return false;commit(prepare(latest));dirty=false;return true;},cancel(){dirty=false;}};}):name==='createStreamRenderer'?((el,{render=(value)=>value}={})=>({update(value){el.innerHTML=render(value);},finalize(){}})):noop);},{context}));
       await mod.evaluate();
       if(scenario.startsWith('idle_')||scenario==='hidden_focus'){
         mod.namespace.initDependencies();

@@ -186,7 +186,11 @@ export function createLiveThinkingThrottle(commit, {
     update(value) {
       latest = value;
       dirty = true;
-      if (timer === null) timer = schedule(commitLatest, delay);
+      if (timer === null) {
+        const requestedDelay = typeof delay === 'function' ? delay(latest) : delay;
+        const wait = Math.max(0, Number(requestedDelay) || 0);
+        timer = schedule(commitLatest, wait);
+      }
     },
     flush() {
       if (timer !== null) {

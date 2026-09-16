@@ -476,11 +476,8 @@ function stripExecutedFence(match, tag, inline, body) {
 
 async function loadExecFenceRegex() {
   try {
-    // Shared with admin.js, and — more to the point — with the other copies of
-    // this module: chatRenderer.js is imported under three different ?v= query
-    // strings, so it is instantiated three times per load and used to issue
-    // three identical /api/tools requests. appConfig.js is imported by one
-    // specifier from all of them, so they now share a single fetch.
+    // Shared with admin.js. All chatRenderer imports deliberately use one
+    // canonical versioned URL so this module and its listeners stay singleton.
     const data = await getTools();
     const tags = (data.tools || [])
       .map((t) => t.id)
@@ -1392,7 +1389,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260916livecontext1').then(mod => {
+    import('./sessions.js?v=20260916longrun1').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
