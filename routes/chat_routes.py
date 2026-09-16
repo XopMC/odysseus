@@ -190,6 +190,7 @@ def _chat_candidate_request_factory(
     *,
     session=None,
     owner: Optional[str] = None,
+    use_saved_policy: bool = True,
 ):
     """Shape one route-neutral Chat prompt for each candidate window."""
 
@@ -199,23 +200,45 @@ def _chat_candidate_request_factory(
         "trim_stats": {},
         "compactions": {},
         "was_compacted": {},
+        "context_policy": {},
     }
 
     async def factory(index, candidate_url, candidate_model, candidate_headers):
         compaction_state = {}
-        candidate_messages, context_length, was_compacted = await maybe_compact(
-            session,
-            candidate_url,
-            candidate_model,
-            list(messages),
-            candidate_headers,
-            owner=owner,
-            persist=False,
-            compaction_state=compaction_state,
-        )
+        from routes.chat_helpers import _shape_plain_chat_with_saved_policy
+        policy_result = None
+        if use_saved_policy:
+            policy_result = await _shape_plain_chat_with_saved_policy(
+                session,
+                list(messages),
+                owner=owner,
+                session_id=str(getattr(session, "id", "")),
+                endpoint_url=candidate_url,
+                model=candidate_model,
+                headers=candidate_headers,
+            )
+        if policy_result is not None:
+            candidate_messages, context_length, policy_telemetry = policy_result
+            was_compacted = policy_telemetry.get("status") == "compacted"
+            request_messages = candidate_messages
+            policy_shaped = True
+            state["context_policy"][index] = policy_telemetry
+        else:
+            candidate_messages, context_length, was_compacted = await maybe_compact(
+                session,
+                candidate_url,
+                candidate_model,
+                list(messages),
+                candidate_headers,
+                owner=owner,
+                persist=False,
+                compaction_state=compaction_state,
+            )
+            policy_shaped = False
         if not context_length:
             context_length = fallback_context_length
-        request_messages = trim_for_context(candidate_messages, context_length)
+        if not policy_shaped:
+            request_messages = trim_for_context(candidate_messages, context_length)
         state["requests"][index] = request_messages
         state["context_lengths"][index] = context_length
         state["compactions"][index] = compaction_state
@@ -1930,6 +1953,7 @@ def setup_chat_routes(
                     _selected_context_length,
                     session=sess,
                     owner=_user,
+                    use_saved_policy=not incognito,
                 )
 
             # Send model name early so the frontend can show it during streaming

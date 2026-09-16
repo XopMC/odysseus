@@ -1106,9 +1106,12 @@ def _detect_admin_intent(messages: List[Dict]) -> bool:
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
-    """Return the most recent user message as plain text."""
+    """Return the most recent real user message as plain text."""
     for msg in reversed(messages):
-        if msg.get("role") == "user":
+        if (
+            msg.get("role") == "user"
+            and (msg.get("metadata") or {}).get("trusted") is not False
+        ):
             content = msg.get("content", "")
             if isinstance(content, list):
                 content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
@@ -1120,7 +1123,10 @@ def _user_turn_count(messages: List[Dict]) -> int:
     """Count real user turns in the message list."""
     count = 0
     for msg in messages or []:
-        if msg.get("role") == "user":
+        if (
+            msg.get("role") == "user"
+            and (msg.get("metadata") or {}).get("trusted") is not False
+        ):
             count += 1
     return count
 
@@ -2197,6 +2203,51 @@ def _strip_agent_injected_messages(messages: List[Dict]) -> List[Dict]:
         elif not marker:
             stripped.append(dict(message))
     return stripped
+
+
+def _restore_durable_tool_ledger(messages: List[Dict]) -> List[Dict]:
+    """Rehydrate persisted tool results into the next model-visible context.
+
+    Chat history stores Agent tool activity in assistant ``metadata`` so the UI
+    can replay it after reload. OpenAI-compatible transports do not expose that
+    application metadata to the model, however, which meant a stopped/error
+    run or a new Goal attempt could render the old tool cards while the model
+    no longer saw their results. Insert a guarded data message after each such
+    assistant turn. It is rebuilt on every route request, can be summarized by
+    the normal context policy, and never grants authority carried by tool text.
+    """
+
+    restored: List[Dict] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        restored.append(dict(message))
+        if message.get("role") != "assistant":
+            continue
+        metadata = message.get("metadata")
+        raw_events = metadata.get("tool_events") if isinstance(metadata, dict) else None
+        if not isinstance(raw_events, list) or not raw_events:
+            continue
+        ledger = []
+        for event in raw_events:
+            if not isinstance(event, dict):
+                continue
+            item = {
+                key: event.get(key)
+                for key in ("round", "tool", "desc", "command", "output", "exit_code")
+                if event.get(key) is not None
+            }
+            if item:
+                ledger.append(item)
+        if not ledger:
+            continue
+        bridge = untrusted_context_message(
+            "durable agent tool ledger",
+            json.dumps(ledger, ensure_ascii=False, separators=(",", ":")),
+        )
+        bridge["_agent_injected"] = "durable_tool_ledger"
+        restored.append(bridge)
+    return restored
 
 
 def _prepend_agent_directive(messages: List[Dict], directive: str) -> List[Dict]:
@@ -4423,7 +4474,9 @@ async def stream_agent_loop(
         if registry_catalog is not None and suppress_tools:
             registry_catalog = {'names': frozenset(), 'schemas': []}
         route_messages, route_mcp_schemas = _build_system_prompt(
-            _strip_agent_injected_messages(compacted_source),
+            _restore_durable_tool_ledger(
+                _strip_agent_injected_messages(compacted_source)
+            ),
             candidate_model,
             _prompt_active_document,
             mcp_mgr,

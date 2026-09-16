@@ -157,12 +157,58 @@ def test_saved_policy_does_not_rewrite_observed_request(monkeypatch):
               'revisions': {'owner': 1, 'session:chat': 2}}
     monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: record)
     data = _client(monkeypatch, _history()).get('/api/session/chat/context').json()
-    assert data['auto_compact_threshold'] == 85
+    assert data['auto_compact_threshold'] == 60
+    assert data['observed_auto_compact_threshold'] == 85
+    assert data['auto_compact_enabled'] is False
     assert data['used_tokens'] == 82000
     assert data['saved_context_policy']['auto_compact'] is False
     assert data['saved_context_policy']['trigger_percent'] == 60
     assert data['saved_context_policy']['threshold_basis'] == 'input_budget'
     assert data['context_policy_error'] is False
+
+
+def test_live_request_keeps_observed_threshold_over_saved_next_request(monkeypatch):
+    from src import context_policy_runtime
+    record = {'effective': {'auto_compact': False, 'trigger_percent': 60, 'target_percent': 40},
+              'revisions': {'owner': 1, 'session:chat': 2}}
+    monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: record)
+    run = agent_runs._Run()
+    _publish(run, _snapshot(auto_compact_threshold=72, auto_compact_enabled=True))
+
+    data = _client(monkeypatch, _history(), run=run).get('/api/session/chat/context').json()
+
+    assert data['auto_compact_threshold'] == 72
+    assert data['observed_auto_compact_threshold'] == 72
+    assert data['auto_compact_enabled'] is True
+
+
+def test_active_plain_chat_without_snapshot_uses_saved_policy(monkeypatch):
+    from src import context_policy_runtime
+    record = {'effective': {'auto_compact': True, 'trigger_percent': 63, 'target_percent': 40},
+              'revisions': {'owner': 1, 'session:chat': 2}}
+    monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: record)
+
+    data = _client(monkeypatch, _history(snapshot=False), run=agent_runs._Run()).get(
+        '/api/session/chat/context'
+    ).json()
+
+    assert data['active_run'] is True
+    assert data['auto_compact_threshold'] == 63
+    assert data['auto_compact_enabled'] is True
+    assert data['observed_auto_compact_threshold'] is None
+
+
+def test_enabled_policy_runtime_uses_validated_defaults_not_legacy_85(monkeypatch):
+    from src import context_policy_runtime
+    monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: None)
+    monkeypatch.setattr(context_policy_runtime, 'enabled', lambda: True)
+
+    data = _client(monkeypatch, _history(snapshot=False)).get('/api/session/chat/context').json()
+
+    assert data['auto_compact_threshold'] == 75
+    assert data['auto_compact_enabled'] is True
+    assert data['effective_context_policy']['target_percent'] == 50
+    assert data['saved_context_policy'] is None
 
 
 def test_invalid_saved_policy_keeps_observed_usage_available(monkeypatch):

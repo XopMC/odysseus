@@ -12,7 +12,7 @@ from typing import Any, Optional
 from core.models import ChatMessage
 from core.database import SessionLocal
 from core.database import Session as DBSession, ModelEndpoint
-from src.llm_core import normalize_model_id
+from src.llm_core import llm_call_async, normalize_model_id
 from src.endpoint_resolver import normalize_base
 from src.context_compactor import maybe_compact, trim_for_context
 from src.model_context import estimate_tokens, get_context_length
@@ -124,6 +124,86 @@ class PreprocessedMessage:
     text_for_context: str
     youtube_transcripts: list
     attachment_meta: list
+
+
+async def _shape_plain_chat_with_saved_policy(
+    sess,
+    messages: list[dict[str, Any]],
+    *,
+    owner: Optional[str],
+    session_id: str,
+    endpoint_url: Optional[str] = None,
+    model: Optional[str] = None,
+    headers: Optional[dict] = None,
+) -> Optional[tuple[list[dict[str, Any]], int, dict[str, Any]]]:
+    """Apply the owner/session Context Policy to an ordinary Chat request.
+
+    ``None`` means no explicit policy is configured and preserves the legacy
+    compatibility path. A configured policy shapes only the model-visible
+    request; the canonical transcript remains append-only. Failure is explicit
+    and leaves the previous context/checkpoint untouched.
+    """
+
+    from src.context_policy import ContextPolicy
+    from src.context_policy_runtime import enabled as policy_runtime_enabled
+    from src.context_policy_runtime import owner_policy, shape_request
+
+    try:
+        record = owner_policy(owner, session_id=session_id)
+    except ValueError as exc:
+        raise HTTPException(409, f"Saved context policy is invalid: {exc}") from exc
+    if not record:
+        if not policy_runtime_enabled():
+            return None
+        # The enabled Context Policy service owns the defaults too. An owner
+        # should not have to save a no-op override merely to escape the legacy
+        # hardcoded 85% path.
+        record = {
+            "configured": False,
+            "valid": True,
+            "effective": ContextPolicy().to_dict(),
+            "revisions": {},
+        }
+
+    policy = ContextPolicy.from_dict(record["effective"])
+    request_url = endpoint_url or sess.endpoint_url
+    request_model = model or sess.model
+    request_headers = headers if headers is not None else sess.headers
+    context_length = int(get_context_length(request_url, request_model) or 0)
+    if context_length <= 0:
+        raise HTTPException(
+            409,
+            "The model context window is unknown; the saved context policy cannot be applied safely.",
+        )
+
+    async def summarize(prompt):
+        return await llm_call_async(
+            request_url,
+            request_model,
+            prompt,
+            temperature=0.2,
+            max_tokens=min(policy.summary_tokens, policy.output_reserve),
+            headers=request_headers,
+            timeout=policy.summary_timeout_seconds,
+            max_retries=1,
+            session_id=session_id,
+            require_answer_content=True,
+        )
+
+    try:
+        shaped, telemetry = await shape_request(
+            messages,
+            [],
+            record,
+            context_length,
+            summarize,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            413,
+            f"Context could not be compacted without losing required history: {exc}",
+        ) from exc
+    return shaped, context_length, telemetry
 
 
 @dataclass
@@ -803,16 +883,30 @@ async def build_chat_context(
     # for every candidate. Running selected-model compaction here would mutate
     # session history before we know which route can answer and would make a
     # later larger-context candidate unable to recover discarded history.
+    policy_shaped = False
     if defer_context_shaping or agent_mode:
         context_length = get_context_length(sess.endpoint_url, sess.model)
         was_compacted = False
     else:
-        messages, context_length, was_compacted = await maybe_compact(
-            sess, sess.endpoint_url, sess.model, messages, sess.headers, owner=user,
-        )
+        policy_result = None
+        if not incognito:
+            policy_result = await _shape_plain_chat_with_saved_policy(
+                sess,
+                messages,
+                owner=user,
+                session_id=session_id,
+            )
+        if policy_result is not None:
+            messages, context_length, policy_telemetry = policy_result
+            was_compacted = policy_telemetry.get("status") == "compacted"
+            policy_shaped = True
+        else:
+            messages, context_length, was_compacted = await maybe_compact(
+                sess, sess.endpoint_url, sess.model, messages, sess.headers, owner=user,
+            )
     _before_trim_messages = len(messages)
     _before_trim_tokens = estimate_tokens(messages)
-    if not defer_context_shaping and not agent_mode:
+    if not defer_context_shaping and not agent_mode and not policy_shaped:
         messages = trim_for_context(messages, context_length)
     _after_trim_messages = len(messages)
     _after_trim_tokens = estimate_tokens(messages)

@@ -837,20 +837,45 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             can_compact = stored_used > 0 and not active
             # Keep the observed request separate from newly saved settings. A
             # settings edit cannot retroactively change an in-flight snapshot.
-            from src.context_policy_runtime import owner_policy
+            from src.context_policy import ContextPolicy
+            from src.context_policy_runtime import enabled as context_policy_enabled, owner_policy
             saved_policy = None
+            effective_policy = None
             policy_error = False
             try:
                 record = owner_policy(getattr(session, 'owner', None), session_id=session_id)
                 if record:
+                    effective_policy = record['effective']
                     saved_policy = {
                         'auto_compact': record['effective']['auto_compact'],
                         'trigger_percent': record['effective']['trigger_percent'],
                         'target_percent': record['effective']['target_percent'],
                         'revisions': record['revisions'], 'threshold_basis': 'input_budget',
                     }
+                elif context_policy_enabled():
+                    effective_policy = ContextPolicy().to_dict()
             except ValueError:
                 policy_error = True
+            observed_threshold = snapshot.get("auto_compact_threshold") if snapshot else None
+            observed_enabled = snapshot.get("auto_compact_enabled") if snapshot else None
+            if active:
+                display_threshold = (
+                    observed_threshold
+                    if observed_threshold is not None
+                    else effective_policy.get("trigger_percent") if effective_policy else None
+                )
+                display_enabled = (
+                    observed_enabled
+                    if observed_enabled is not None
+                    else effective_policy.get("auto_compact") if effective_policy else None
+                )
+            else:
+                display_threshold = effective_policy.get("trigger_percent") if effective_policy else observed_threshold
+                display_enabled = effective_policy.get("auto_compact") if effective_policy else observed_enabled
+            if display_threshold is None:
+                display_threshold = 85
+            if display_enabled is None:
+                display_enabled = True
             return {
                 "session_id": session_id,
                 "model": session.model,
@@ -870,9 +895,15 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "context_messages": len(messages),
                 "compacted_messages": compacted_messages,
                 "can_compact": can_compact,
-                "should_compact": pct >= 70,
-                "auto_compact_threshold": snapshot.get("auto_compact_threshold", 85) if snapshot else 85,
-                "auto_compact_enabled": snapshot.get("auto_compact_enabled", True) if snapshot else True,
+                "should_compact": bool(display_enabled and pct >= float(display_threshold)),
+                # While idle, show the policy that will shape the *next*
+                # request. Preserve the last observed request separately so a
+                # settings edit never rewrites historical telemetry.
+                "auto_compact_threshold": display_threshold,
+                "auto_compact_enabled": display_enabled,
+                "observed_auto_compact_threshold": observed_threshold,
+                "observed_auto_compact_enabled": observed_enabled,
+                "effective_context_policy": effective_policy,
                 "saved_context_policy": saved_policy,
                 "context_policy_error": policy_error,
             }

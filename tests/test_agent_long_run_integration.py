@@ -7,7 +7,7 @@ import src.llm_core as llm
 from src.model_context import estimate_tokens
 
 
-def run(monkeypatch, *, failures=False):
+def run(monkeypatch, *, failures=False, initial_messages=None):
     # This fixture represents an already approved research task. The separate
     # external-context gate suite exercises approval; never disable it in app.
     context_type = al.ToolRunSecurityContext
@@ -46,7 +46,7 @@ def run(monkeypatch, *, failures=False):
     async def collect():
         return [json.loads(c[6:]) async for c in al.stream_agent_loop(
             "http://test/v1/chat/completions", "test-model",
-            [{"role": "user", "content": "Audit only: compare public sources; do not modify any contracts."}],
+            initial_messages or [{"role": "user", "content": "Audit only: compare public sources; do not modify any contracts."}],
             context_length=20000, max_tokens=512, max_rounds=12,
             relevant_tools={"web_fetch"}, disabled_tools={"bash", "python"},
         ) if c.startswith("data: ") and not c.startswith("data: [DONE]")]
@@ -72,3 +72,29 @@ def test_identical_failed_web_request_is_executed_only_twice_despite_prose(monke
     assert sum(e.get("type") == "tool_retry_blocked" for e in events) == 2
     assert len(requests) == 5
     assert any(e.get("type") == "metrics" for e in events)
+
+
+def test_restarted_agent_receives_persisted_tool_ledger(monkeypatch):
+    prior_output = "deployment probe: release e3750b1 is healthy"
+    prior = {
+        "role": "assistant",
+        "content": "I checked the deployment.",
+        "metadata": {
+            "tool_events": [{
+                "round": 1,
+                "tool": "bash",
+                "command": '{"cmd":"healthcheck"}',
+                "output": prior_output,
+                "exit_code": 0,
+            }],
+        },
+    }
+    _events, _calls, requests, _summaries = run(monkeypatch, initial_messages=[
+        {"role": "user", "content": "Keep working until verified."},
+        prior,
+        {"role": "user", "content": "Continue the active Goal from its durable checkpoint."},
+    ])
+
+    first_request = json.dumps(requests[0], ensure_ascii=False)
+    assert prior_output in first_request
+    assert "durable agent tool ledger" in first_request

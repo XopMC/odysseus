@@ -534,6 +534,7 @@ async def _build_context_owner_probe(monkeypatch, request_state, **context_optio
 
     request = SimpleNamespace(state=SimpleNamespace(**request_state))
     probe_message=context_options.pop("message", "hello")
+    incognito=context_options.pop("incognito", True)
     ctx = await build_chat_context(
         sess=sess,
         request=request,
@@ -542,7 +543,7 @@ async def _build_context_owner_probe(monkeypatch, request_state, **context_optio
         **context_options,
         message=probe_message,
         session_id="session-1",
-        incognito=True,
+        incognito=incognito,
     )
 
     return ctx, captured
@@ -574,6 +575,169 @@ async def test_build_chat_context_uses_api_token_owner_for_compaction_scope(monk
         "compact_owner": "alice",
         "use_web": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_uses_saved_context_policy(monkeypatch):
+    from src import context_policy_runtime
+
+    record = {
+        "configured": True,
+        "valid": True,
+        "effective": {
+            "auto_compact": True,
+            "requested_window": 0,
+            "output_reserve": 1024,
+            "safety_tokens": 256,
+            "safety_percent": 5,
+            "trigger_percent": 61,
+            "target_percent": 37,
+            "recent_groups": 3,
+            "recent_tokens": 700,
+            "summary_tokens": 333,
+            "summary_timeout_seconds": 44,
+        },
+        "revisions": {"owner": 4, "session:session-1": 2},
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        context_policy_runtime,
+        "owner_policy",
+        lambda owner, **scope: record,
+    )
+
+    async def fake_shape(messages, tools, actual_record, window, summarize, **kwargs):
+        captured.update(record=actual_record, window=window, tools=tools)
+        return messages, {"status": "unchanged", "trigger_messages": 4000}
+
+    monkeypatch.setattr(context_policy_runtime, "shape_request", fake_shape)
+    monkeypatch.setattr(chat_helpers, "get_context_length", lambda *_args: 8192)
+
+    ctx, _ = await _build_context_owner_probe(
+        monkeypatch,
+        {"current_user": "alice"},
+        incognito=False,
+    )
+
+    assert captured["record"] == record
+    assert captured["window"] == 8192
+    assert captured["tools"] == []
+    assert ctx.was_compacted is False
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_uses_context_policy_defaults_when_feature_enabled(monkeypatch):
+    from src import context_policy_runtime
+
+    captured = {}
+    monkeypatch.setattr(context_policy_runtime, "owner_policy", lambda *_a, **_k: None)
+    monkeypatch.setattr(context_policy_runtime, "enabled", lambda: True)
+
+    async def fake_shape(messages, tools, record, window, summarize, **kwargs):
+        captured.update(record=record, window=window)
+        return messages, {"status": "unchanged", "trigger_messages": 4000}
+
+    monkeypatch.setattr(context_policy_runtime, "shape_request", fake_shape)
+    monkeypatch.setattr(chat_helpers, "get_context_length", lambda *_args: 8192)
+
+    await _build_context_owner_probe(
+        monkeypatch,
+        {"current_user": "alice"},
+        incognito=False,
+    )
+
+    assert captured["record"]["configured"] is False
+    assert captured["record"]["effective"]["trigger_percent"] == 75
+    assert captured["record"]["effective"]["target_percent"] == 50
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_failed_policy_compaction_preserves_input(monkeypatch):
+    from src import context_policy_runtime
+
+    record = {
+        "configured": True,
+        "valid": True,
+        "effective": {
+            "auto_compact": True,
+            "requested_window": 0,
+            "output_reserve": 1024,
+            "safety_tokens": 256,
+            "safety_percent": 5,
+            "trigger_percent": 61,
+            "target_percent": 37,
+            "recent_groups": 3,
+            "recent_tokens": 700,
+            "summary_tokens": 333,
+            "summary_timeout_seconds": 44,
+        },
+        "revisions": {"owner": 1, "session:chat": 1},
+    }
+    messages = [
+        {"role": "user", "content": "original requirement"},
+        {"role": "assistant", "content": "verified result"},
+    ]
+    original = list(messages)
+    monkeypatch.setattr(context_policy_runtime, "owner_policy", lambda *_a, **_k: record)
+
+    async def failed_shape(*_args, **_kwargs):
+        raise ValueError("summarizer unavailable")
+
+    monkeypatch.setattr(context_policy_runtime, "shape_request", failed_shape)
+    monkeypatch.setattr(chat_helpers, "get_context_length", lambda *_args: 8192)
+    session = SimpleNamespace(
+        endpoint_url="http://model.test/v1",
+        model="model",
+        headers={},
+        history=original,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await chat_helpers._shape_plain_chat_with_saved_policy(
+            session,
+            messages,
+            owner="alice",
+            session_id="chat",
+        )
+
+    assert error.value.status_code == 413
+    assert messages == original
+    assert session.history == original
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_fallback_candidate_uses_same_saved_policy(monkeypatch):
+    from routes import chat_routes
+
+    shaped = [{"role": "user", "content": "policy-shaped request"}]
+    calls = []
+
+    async def fake_policy(session, messages, **kwargs):
+        calls.append(kwargs)
+        return shaped, 16384, {"status": "compacted", "trigger_messages": 7000}
+
+    monkeypatch.setattr(chat_helpers, "_shape_plain_chat_with_saved_policy", fake_policy)
+    monkeypatch.setattr(
+        chat_routes,
+        "trim_for_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("policy-shaped request must not be legacy-trimmed")
+        ),
+    )
+    factory, state = chat_routes._chat_candidate_request_factory(
+        [{"role": "user", "content": "full route-neutral request"}],
+        8192,
+        session=SimpleNamespace(id="chat"),
+        owner="alice",
+    )
+
+    request = await factory(1, "http://fallback.test/v1", "fallback-model", {})
+
+    assert request["messages"] == shaped
+    assert calls[0]["endpoint_url"] == "http://fallback.test/v1"
+    assert state["context_lengths"][1] == 16384
+    assert state["was_compacted"][1] is True
 
 
 @pytest.mark.asyncio

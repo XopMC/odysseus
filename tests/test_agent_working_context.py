@@ -118,6 +118,24 @@ def test_snapshot_uses_one_round_not_accumulated_billing():
     assert snapshot["prompt_tokens"] == 8000
 
 
+def test_untrusted_tool_ledger_is_not_a_new_user_turn():
+    from src.agent_loop import (
+        _extract_last_user_message,
+        _restore_durable_tool_ledger,
+        _user_turn_count,
+    )
+
+    messages = _restore_durable_tool_ledger([
+        {"role": "user", "content": "finish the deployment"},
+        {"role": "assistant", "content": "checking", "metadata": {
+            "tool_events": [{"tool": "bash", "output": "healthy", "exit_code": 0}],
+        }},
+    ])
+
+    assert _extract_last_user_message(messages) == "finish the deployment"
+    assert _user_turn_count(messages) == 1
+
+
 def test_signatures_do_not_collide_after_120_chars_and_json_order_is_stable():
     assert ac.call_signature("web_fetch", "x" * 120 + "a") != ac.call_signature("web_fetch", "x" * 120 + "b")
     assert ac.call_signature("web_fetch", '{"a":1,"b":2}') == ac.call_signature("web_fetch", '{"b":2, "a":1}')
