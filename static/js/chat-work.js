@@ -31,7 +31,11 @@ function renderPlan() {
   if (!node) return;
   const draftEnabled = !!document.getElementById('plan-toggle')?.checked;
   const plan = snapshot.plan;
-  node.hidden = !draftEnabled && (!plan || plan.status === 'cancelled');
+  node.hidden = plan?.status === 'cancelled' || (!draftEnabled && !plan);
+  if (plan?.status === 'cancelled') {
+    window.__odysseusSetPlanMode?.(false);
+    return;
+  }
   if (!plan) {
     el('plan-work-progress').textContent = draftEnabled ? t('Waiting for a plan') : '';
     el('plan-work-current').textContent = draftEnabled ? t('Send a message to create a read-only plan.') : '';
@@ -65,7 +69,11 @@ function renderGoal() {
   const live = goal && !['completed', 'cancelled'].includes(goal.status);
   // A cancelled goal remains in the durable audit log, but it is no longer
   // active UI state and must disappear after cancel, reload, or reconnect.
-  node.hidden = !draftEnabled && (!goal || goal.status === 'cancelled');
+  node.hidden = goal?.status === 'cancelled' || (!draftEnabled && !goal);
+  if (goal?.status === 'cancelled') {
+    window.__odysseusSetGoalMode?.(false);
+    return;
+  }
   if (!goal) {
     const state = el('goal-work-state');
     const objective = el('goal-work-objective');
@@ -129,7 +137,7 @@ async function mutate(kind, action) {
   try {
     snapshot[kind] = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/${kind}/${action}`, { expected_revision: record.revision });
     if (kind === 'plan' && action === 'cancel') { snapshot.plan = null; window.__odysseusSetPlanMode?.(false); }
-    if (kind === 'goal' && action === 'cancel') snapshot.goal = null;
+    if (kind === 'goal' && action === 'cancel') { snapshot.goal = null; window.__odysseusSetGoalMode?.(false); }
     render();
     if (kind === 'plan' && action === 'execute') {
       window.__odysseusSetPlanMode?.(false);
