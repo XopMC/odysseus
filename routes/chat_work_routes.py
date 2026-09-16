@@ -138,7 +138,10 @@ def setup_chat_work_routes():
             from src import agent_runs
             run = agent_runs.describe_run(session_id)
             if run and run["status"] == "running":
-                agent_runs.stop(session_id, run["run_id"])
+                # Return only after the partial assistant turn, timeline and
+                # model-visible context snapshot are durable. The UI refreshes
+                # context as soon as this request resolves.
+                await agent_runs.stop_and_wait(session_id, run["run_id"])
         return goal
 
     @router.post("/{session_id}/goal-revise")

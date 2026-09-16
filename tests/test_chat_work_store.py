@@ -112,6 +112,10 @@ def test_terminal_run_attaches_timeline_v2_without_removing_legacy_metadata(monk
         ))
     run = agent_runs._Run()
     run.status = "done"
+    run.context_usage = {
+        "used_tokens": 30000, "context_length": 100000,
+        "model": "test-model", "source": "estimated", "round": 3,
+    }
     agent_runs._publish(run, 'data: {"delta":"Done"}\n\n')
     agent_runs._publish(run, 'data: {"type":"tool_start","tool":"bash"}\n\n')
     agent_runs._publish(run, 'data: {"type":"tool_output","tool":"bash","output":"ok","exit_code":0}\n\n')
@@ -122,6 +126,7 @@ def test_terminal_run_attaches_timeline_v2_without_removing_legacy_metadata(monk
     assert metadata["round_texts"] == ["Done"]
     assert metadata["tool_events"] == []
     assert metadata["timeline_v2"]["run_id"] == run.run_id
+    assert metadata["working_context"]["used_tokens"] == 30000
     assert [item["seq"] for item in metadata["timeline_v2"]["events"]] == [0, 1, 2]
     assert metadata["timeline_v2"]["events"][1]["data"]["tool_call_id"] == metadata["timeline_v2"]["events"][2]["data"]["tool_call_id"]
 

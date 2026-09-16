@@ -311,6 +311,8 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
             if actual_endpoint_label:
                 legacy_metadata["endpoint_label"] = actual_endpoint_label
 
+        synced_message_id = None
+        synced_metadata = None
         with SessionLocal.begin() as db:
             row = None
             if saved_message_id:
@@ -369,6 +371,12 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
             if not isinstance(metadata, dict):
                 metadata = {}
             metadata.update(legacy_metadata)
+            # Stop, Pause and transport errors are not compaction. Preserve the
+            # exact last model-visible occupancy so the idle context endpoint
+            # cannot fall back to a smaller transcript estimate after the run
+            # becomes terminal. This snapshot is also restored after restart.
+            if run.context_usage:
+                metadata["working_context"] = dict(run.context_usage)
             metadata["timeline_v2"] = {
                 "version": 2,
                 "run_id": run.run_id,
@@ -378,6 +386,32 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
                 "truncated": truncated,
             }
             row.meta_data = json.dumps(metadata, ensure_ascii=False)
+            synced_message_id = str(row.id)
+            synced_metadata = dict(metadata)
+
+        # The context API reads the process Session cache. A direct DB metadata
+        # update would otherwise remain invisible until a restart/re-hydration,
+        # causing a transient percentage drop immediately after Pause.
+        if synced_message_id and synced_metadata is not None:
+            try:
+                from core.models import get_session_manager_instance
+                manager = get_session_manager_instance()
+                session = manager.get_session(session_id) if manager else None
+                if session is not None:
+                    for message in reversed(session.history or []):
+                        meta = getattr(message, "metadata", None) or {}
+                        if str(meta.get("_db_id") or "") != synced_message_id:
+                            continue
+                        updated = dict(synced_metadata)
+                        updated["_db_id"] = synced_message_id
+                        message.metadata = updated
+                        break
+            except Exception:
+                logger.warning(
+                    "[agent-run] in-memory context snapshot sync failed for %s",
+                    session_id,
+                    exc_info=True,
+                )
     except Exception as exc:
         # Replay remains available from the durable run log and legacy
         # round/tool metadata.  A metadata write failure must not corrupt the

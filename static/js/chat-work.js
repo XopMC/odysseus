@@ -152,6 +152,7 @@ async function mutate(kind, action) {
     if (kind === 'plan' && action === 'cancel') { snapshot.plan = null; window.__odysseusSetPlanMode?.(false); }
     if (kind === 'goal' && action === 'cancel') { snapshot.goal = null; window.__odysseusSetGoalMode?.(false); }
     render();
+    if (kind === 'goal' && action === 'pause') window.refreshChatContextHeader?.('goal-paused');
     if (kind === 'plan' && action === 'execute') {
       window.__odysseusSetPlanMode?.(false);
       const input = el('message');

@@ -44,6 +44,9 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert 'if _status == "error":' in routes
     assert "window.chatWork?.handleEvent?.({ type: 'goal_update', data: result.goal })" in chat
     assert "if (stopServer) {\n      window.chatWork?.pauseActiveGoal?.();" not in chat
+    work_routes = (root / "routes" / "chat_work_routes.py").read_text()
+    assert 'await agent_runs.stop_and_wait(session_id, run["run_id"])' in work_routes
+    assert "window.refreshChatContextHeader?.('goal-paused')" in work
     assert "if (active) setPlanMode" not in app
     assert 'id="chat-work-status-row"' in html
     assert "modelPickerWrap.classList.remove('model-picker-autohide')" in app
