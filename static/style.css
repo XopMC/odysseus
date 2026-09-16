@@ -2771,6 +2771,16 @@ body.bg-pattern-sparkles {
       color: var(--fg);
     }
     .access-mode-menu[hidden] { display: none !important; }
+    /* The composer toolbar intentionally clips surplus icon buttons. When the
+       access menu opens, JS portals this element to body and anchors it with
+       fixed coordinates so its options can never be cropped by that toolbar. */
+    .access-mode-menu.access-mode-menu-portal {
+      position: fixed;
+      bottom: auto;
+      z-index: 10050;
+      max-height: min(420px, calc(100vh - 16px));
+      overflow-y: auto;
+    }
     .access-mode-menu-title {
       padding: 4px 9px 7px;
       color: var(--accent, var(--red));

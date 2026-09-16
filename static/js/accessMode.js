@@ -22,6 +22,7 @@ let refreshPromise = null;
 let savePromise = null;
 let bound = false;
 let interval = null;
+let menuHome = null;
 
 const el = id => document.getElementById(id);
 const normalize = value => Object.hasOwn(MODES, String(value || '').trim())
@@ -100,11 +101,46 @@ async function setMode(mode) {
   return savePromise;
 }
 
+function positionMenu(menu, button) {
+  const margin = 8;
+  const rect = button.getBoundingClientRect();
+  menu.classList.add('access-mode-menu-portal');
+  menu.hidden = false;
+  menu.style.visibility = 'hidden';
+  menu.style.left = '-10000px';
+  menu.style.top = '-10000px';
+  const popup = menu.getBoundingClientRect();
+  const maxLeft = Math.max(margin, window.innerWidth - popup.width - margin);
+  const left = Math.min(Math.max(margin, rect.left), maxLeft);
+  const above = rect.top - popup.height - margin;
+  const below = rect.bottom + margin;
+  const maxTop = Math.max(margin, window.innerHeight - popup.height - margin);
+  const top = above >= margin ? above : Math.min(Math.max(margin, below), maxTop);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = '';
+}
+
+function openMenu() {
+  const menu = el('access-mode-menu');
+  const button = el('access-mode-btn');
+  if (!menu || !button) return;
+  if (!menuHome) menuHome = menu.parentElement;
+  if (menu.parentElement !== document.body) document.body.appendChild(menu);
+  positionMenu(menu, button);
+  button.setAttribute('aria-expanded', 'true');
+}
+
 function closeMenu() {
   const menu = el('access-mode-menu');
   const button = el('access-mode-btn');
   if (!menu) return;
   menu.hidden = true;
+  menu.classList.remove('access-mode-menu-portal');
+  menu.style.left = '';
+  menu.style.top = '';
+  menu.style.visibility = '';
+  if (menuHome && menu.parentElement !== menuHome) menuHome.appendChild(menu);
   button?.setAttribute('aria-expanded', 'false');
 }
 
@@ -124,9 +160,9 @@ function bind() {
   button.addEventListener('click', async event => {
     event.preventDefault();
     event.stopPropagation();
+    if (!menu.hidden) { closeMenu(); return; }
     await refresh();
-    menu.hidden = !menu.hidden;
-    button.setAttribute('aria-expanded', String(!menu.hidden));
+    openMenu();
   });
   menu.querySelectorAll('[data-access-mode]').forEach(option => {
     option.addEventListener('click', async event => {
@@ -137,13 +173,18 @@ function bind() {
     });
   });
   document.addEventListener('click', event => {
-    if (!event.target.closest?.('#access-mode-wrap')) closeMenu();
+    if (!event.target.closest?.('#access-mode-wrap, #access-mode-menu')) closeMenu();
   });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') closeMenu();
   });
   ['focus', 'pageshow', 'online'].forEach(type => window.addEventListener(type, () => { void refresh(); }));
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refresh(); });
+  const reposition = () => {
+    if (!menu.hidden) positionMenu(menu, button);
+  };
+  window.addEventListener('resize', reposition);
+  window.addEventListener('scroll', reposition, true);
   if (!interval) interval = window.setInterval(() => {
     if (document.visibilityState === 'visible' && !savePromise) void refresh();
   }, 30000);

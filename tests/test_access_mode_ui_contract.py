@@ -22,4 +22,5 @@ def test_access_mode_control_is_mode_independent_and_has_three_choices():
     assert "fd.append('access_mode'" in work
     assert "access_mode: window.accessModeModule?.getMode?.()" in team
     assert "accessModeModule from './js/accessMode.js" in app
-
+    assert "document.body.appendChild(menu)" in module
+    assert "access-mode-menu-portal" in module

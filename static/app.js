@@ -25,7 +25,7 @@ import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260916longrun1';
 import sessionModule from './js/sessions.js?v=20260916longrun1';
 import chatWork from './js/chat-work.js?v=20260916contextpause1';
-import accessModeModule from './js/accessMode.js?v=20260917access1';
+import accessModeModule from './js/accessMode.js?v=20260917access2';
 import projectsModule from './js/projects.js?v=20260915projects1';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260913team1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
