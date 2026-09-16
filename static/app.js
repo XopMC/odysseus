@@ -24,7 +24,7 @@ import {
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260916livecontext1';
 import sessionModule from './js/sessions.js?v=20260916livecontext1';
-import chatWork from './js/chat-work.js?v=20260916livecontext1';
+import chatWork from './js/chat-work.js?v=20260916goalclick1';
 import projectsModule from './js/projects.js?v=20260915projects1';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260913team1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
@@ -1788,6 +1788,7 @@ function initializeEventListeners() {
     st.plan_mode = on;
     saveToggleState(st);
     syncPlanToggle(on);
+    if (on) chatWork.prepareNewPlan?.();
     if (on) {
       const resChk = el('research-toggle');
       if (resChk && resChk.checked) _syncResearchIndicator(false);
@@ -1807,7 +1808,10 @@ function initializeEventListeners() {
     if (btn) { btn.classList.toggle('active', !!active); btn.setAttribute('aria-pressed', String(!!active)); }
   }
   function setGoalMode(active, options = {}) {
-    const st = loadToggleState(); st.goal_mode = !!active; saveToggleState(st); syncGoalToggle(!!active);
+    const on = !!active;
+    const st = loadToggleState(); st.goal_mode = on; saveToggleState(st);
+    if (on) chatWork.prepareNewGoal?.();
+    syncGoalToggle(on);
     if (!options.silent && uiModule?.showToast) uiModule.showToast(active ? 'Goal mode: work until verified completion' : 'Goal mode off', 1800);
     chatWork.render();
   }

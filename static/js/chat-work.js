@@ -131,6 +131,19 @@ function beginGoal(objective) {
   render();
 }
 
+function prepareNewPlan() {
+  if (['done', 'cancelled'].includes(snapshot.plan?.status)) snapshot.plan = null;
+  renderPlan();
+}
+
+function prepareNewGoal() {
+  // Terminal rows remain durable for audit, but they must not immediately
+  // switch off a newly selected Goal mode.  The next submitted objective will
+  // replace the terminal row server-side via ensure_goal().
+  if (['completed', 'cancelled'].includes(snapshot.goal?.status)) snapshot.goal = null;
+  renderGoal();
+}
+
 async function mutate(kind, action) {
   const record = snapshot[kind];
   if (!sessionId || !record) return;
@@ -281,5 +294,8 @@ function bind() {
   });
 }
 
-const chatWork = { bind, refresh, render, handleEvent, beginGoal, onRunEnded, pauseActiveGoal, continueGoal, getSnapshot: () => snapshot };
+const chatWork = {
+  bind, refresh, render, handleEvent, beginGoal, prepareNewPlan, prepareNewGoal,
+  onRunEnded, pauseActiveGoal, continueGoal, getSnapshot: () => snapshot,
+};
 export default chatWork;

@@ -13,11 +13,16 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert 'id="plan-toggle-btn"' in html and 'id="goal-toggle-btn"' in html
     assert html.index('id="plan-toggle-btn"') < html.index('id="overflow-attach-btn"')
     assert "setGoalMode" in app and "goal_mode" in app
+    assert "if (on) chatWork.prepareNewGoal?.();" in app
+    assert "if (on) chatWork.prepareNewPlan?.();" in app
     assert "fd.append('goal_mode', choicesForSend.goal ? 'true' : 'false')" in chat
     assert "window.chatWork?.beginGoal?." in chat
     work = (root / "static" / "js" / "chat-work.js").read_text()
     renderer = (root / "static" / "js" / "chatRenderer.js").read_text()
     assert "beginGoal" in work
+    assert "function prepareNewGoal()" in work
+    assert "['completed', 'cancelled'].includes(snapshot.goal?.status)" in work
+    assert "function prepareNewPlan()" in work
     assert "action === 'cancel') { snapshot.goal = null; window.__odysseusSetGoalMode?.(false); }" in work
     assert "goal?.status === 'cancelled'" in work
     assert "plan?.status === 'cancelled'" in work
