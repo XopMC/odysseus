@@ -14,6 +14,7 @@ def test_model_picker_preserves_endpoint_identity():
     script = r"""
       const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
       const noop=()=>{},store=new Map(),requests=[],docListeners={};
+      let favoriteRevision=0,favoriteServer=[];
       class Element {
         constructor(){this.children=[];this.listeners={};this.dataset={};this.style={};this._classes=new Set();this.value='';this._text='';
           this.classList={add:(...xs)=>xs.forEach(x=>this._classes.add(x)),remove:(...xs)=>xs.forEach(x=>this._classes.delete(x)),contains:x=>this._classes.has(x),toggle:(x,on)=>{on=on??!this._classes.has(x);on?this._classes.add(x):this._classes.delete(x);return on;}};}
@@ -39,9 +40,17 @@ def test_model_picker_preserves_endpoint_identity():
       ];
       let pending=null,currentId='chat';const session={id:'chat',model:shared,endpoint_id:'mac',endpoint_url:items[1].url};
       const document={getElementById:id=>ids[id]||null,createElement:()=>new Element(),createTextNode:text=>({textContent:text}),addEventListener:(key,fn)=>{(docListeners[key]??=[]).push(fn);},dispatchEvent:noop};
-      const window={location:{origin:'http://odysseus.test'},innerWidth:1280,modelsModule:{getCachedItems:()=>items}};
+      const window={location:{origin:'http://odysseus.test'},innerWidth:1280,modelsModule:{getCachedItems:()=>items},addEventListener:noop,dispatchEvent:noop};
       const context=vm.createContext({console,window,document,URL,FormData,CustomEvent:class{},localStorage:{getItem:key=>store.get(key)||null,setItem:(key,value)=>store.set(key,value)},
-        setTimeout:()=>0,clearTimeout:noop,fetch:async(url,options)=>{requests.push({url,model:options.body.get('model'),endpoint:options.body.get('endpoint_id'),address:options.body.get('endpoint_url')});return{ok:true};}});
+        setTimeout:()=>0,clearTimeout:noop,fetch:async(url,options={})=>{
+          if(url.endsWith('/api/prefs/model-favorites/snapshot'))return{ok:true,status:200,json:async()=>({favorites:favoriteServer.slice(),revision:favoriteRevision})};
+          if(url.endsWith('/api/prefs/model-favorites/toggle')){
+            const body=JSON.parse(options.body);assert.equal(body.expected_revision,favoriteRevision);
+            favoriteServer=body.favorite?[...new Set([...favoriteServer,body.key])]:favoriteServer.filter(key=>key!==body.key);favoriteRevision++;
+            return{ok:true,status:200,json:async()=>({favorites:favoriteServer.slice(),revision:favoriteRevision})};
+          }
+          requests.push({url,model:options.body.get('model'),endpoint:options.body.get('endpoint_id'),address:options.body.get('endpoint_url')});return{ok:true,status:200};
+        }});
       const stubs={'ui.js':{default:{showToast:noop,showError:message=>{throw Error(message);}}},'settings.js':{default:{}},'providers.js':{providerLogo:()=>''},'spinner.js':{default:{}}};
       const cache=new Map();async function load(filename){
         if(cache.has(filename))return cache.get(filename);
@@ -72,11 +81,13 @@ def test_model_picker_preserves_endpoint_identity():
       // Mark only Mac as favorite; a sibling serving the same model stays separate.
       ids['model-picker-search'].value='mac';await ids['model-picker-search'].emit('input');
       await rows()[0].querySelector('.mp-fav-dot').emit('click');
-      assert.deepEqual(JSON.parse(store.get('odysseus-model-favorites')),['mac::'+shared]);
+      await Promise.resolve();await Promise.resolve();
+      assert.deepEqual(favoriteServer,['mac::'+shared]);
+      ids['model-picker-search'].value='';await ids['model-picker-search'].emit('input');
       await open();assert.equal(rows().length,4);assert.equal(rows().filter(row=>row.querySelector('.mp-fav-dot').classList.contains('active')).length,1);
-      // Old bare-ID favorites preserve all endpoints, never pick an arbitrary first.
+      // Browser-local favorites are deliberately ignored: the account snapshot is authoritative.
       store.set('odysseus-model-favorites',JSON.stringify([shared]));await open();assert.equal(rows().length,4);
-      assert.equal(rows().filter(row=>row.querySelector('.mp-fav-dot').classList.contains('active')).length,4);
+      assert.equal(rows().filter(row=>row.querySelector('.mp-fav-dot').classList.contains('active')).length,1);
       currentId=null;pending={url:items[1].url,modelId:shared,endpointId:'mac',source:'manual'};
       mod.namespace.updateModelPicker();assert(ids['model-picker-label'].textContent.includes('mac'));
       items.reverse();mod.namespace.updateModelPicker();assert.equal(pending.endpointId,'mac','catalog order must not change route');
