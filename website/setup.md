@@ -443,10 +443,12 @@ HTTP and HTTPS both listen on `${HTTPS_PORT:-5130}`. HAProxy detects the protoco
 passes TLS to Caddy on the private `${TLS_BACKEND_PORT:-5133}`, and passes plain
 HTTP to the private app listener `${APP_HTTP_PORT:-5131}`. There is no HTTP to
 HTTPS redirect. Install `data/tls/rootCA.pem` on every client before using HTTPS;
-never copy `rootCA-key.pem` to a client. Dual mode sets `SECURE_COOKIES=false` and
-clears HSTS so HTTP remains usable, which means HTTP sessions are not protected
-against interception. For an Internet-facing deployment, prefer HTTPS with a
-publicly trusted certificate and keep `AUTH_ENABLED=true`.
+never copy `rootCA-key.pem` to a client. Dual mode keeps HSTS disabled and uses
+separate `odysseus_session_http` and `odysseus_session_https` cookies: HTTP
+remains usable without a redirect, while the HTTPS cookie is always Secure.
+HTTP sessions are still vulnerable to interception, so Internet-facing users
+should prefer HTTPS with a publicly trusted certificate and keep
+`AUTH_ENABLED=true`.
 
 If a full-tunnel VPN on Linux captures replies to inbound port forwarding, the
 port can be routed back through the physical WAN persistently:
@@ -517,7 +519,7 @@ Odysseus is a self-hosted workspace with powerful local tools: shell access, fil
 
 - Keep `AUTH_ENABLED=true` for any network-accessible deployment.
 - Keep `LOCALHOST_BYPASS=false` outside local development.
-- Leave `SECURE_COOKIES` unset unless you need to override it: session cookies are marked `Secure` whenever the request arrives over HTTPS. Use `SECURE_COOKIES=true` to force it on for a proxy whose scheme Odysseus cannot see, or `SECURE_COOKIES=false` to force it off while you still serve plain HTTP alongside HTTPS.
+- Leave `SECURE_COOKIES` unset unless you need to force Secure on a plain-HTTP proxy. HTTPS cookies are always marked `Secure`; `SECURE_COOKIES=false` cannot weaken a TLS request in dual-scheme mode.
 - Do not expose it directly to the public internet without HTTPS and a trusted reverse proxy or private access layer.
 - Keep `.env`, `data/`, `logs/`, databases, uploads, generated media, backups, auth/session files, API keys, and model/provider tokens out of Git and private shares. They are ignored by default.
 - Review `data/auth.json` after first boot: disable open signup unless you intentionally want it, make only your own account admin, and keep demo/test accounts non-admin.
@@ -528,13 +530,10 @@ Odysseus is a self-hosted workspace with powerful local tools: shell access, fil
 - Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only. Expose only the authenticated Odysseus web/API entrypoint through your trusted proxy or private access layer.
 - Before publishing a fork, run `git status --short` and confirm no private files from `.env`, `data/`, `logs/`, uploads, backups, or local databases are staged.
 
-> **Upgrading an existing install:** `SECURE_COOKIES` used to default to
-> `false`, so an install set up before scheme derivation may still carry
-> `SECURE_COOKIES=false` in its own `.env`. That explicit value stays
-> authoritative, so HTTPS logins keep getting a non-`Secure` session cookie.
-> Pulling this change updates the tracked Compose files, but nothing rewrites
-> your `.env` — drop the line from it unless you deliberately serve plain HTTP
-> alongside HTTPS and want the escape hatch.
+> **Upgrading an existing install:** the legacy `odysseus_session` cookie is
+> accepted once as a migration fallback. The next login creates a
+> scheme-specific cookie and expires the legacy one. Existing explicit
+> `SECURE_COOKIES=false` values no longer weaken HTTPS cookies.
 
 ### Private or proxied deployments
 Odysseus serves plain HTTP on its app port. Docker Compose binds Odysseus and the bundled services to `127.0.0.1` by default, so a typical production/private setup is:
@@ -682,11 +681,11 @@ Three things bite when moving an existing install behind TLS:
   Gmail redirect URI it cannot be derived from a request — it is registered
   with each MCP authorization server up front — so set it to the external
   origin if you use remote MCP servers over OAuth.
-- Odysseus sends `Strict-Transport-Security` once it sees `X-Forwarded-Proto:
-  https`. HSTS applies to the whole hostname and ignores the port, so any other
-  plain-HTTP service on that same hostname becomes unreachable in browsers that
-  have visited Odysseus. Give Odysseus its own hostname, or strip the header at
-  the proxy (`header_down -Strict-Transport-Security` in Caddy).
+- HSTS is disabled by default so the explicit HTTP entrypoint remains usable.
+  If an operator enables `HSTS_ENABLED=true`, remember that HSTS applies to the
+  whole hostname and ignores the port; any other plain-HTTP service on that
+  hostname can become unreachable in browsers that visited Odysseus. Give
+  Odysseus its own hostname or leave HSTS disabled for dual-scheme mode.
 
 Server-sent events are not buffered by this configuration, so chat streaming
 arrives token by token; add `flush_interval -1` inside the `reverse_proxy`

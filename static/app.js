@@ -202,7 +202,46 @@ function initRailHoverLabels() {
 
 // Redirect to login on 401 from any fetch
 const _origFetch = window.fetch;
+let _csrfTokenPromise = null;
+function _readCsrfCookie() {
+  const scheme = location.protocol === 'https:' ? 'odysseus_csrf_https' : 'odysseus_csrf_http';
+  const part = document.cookie.split('; ').find(v => v.startsWith(`${scheme}=`));
+  return part ? decodeURIComponent(part.slice(scheme.length + 1)) : '';
+}
+async function _csrfToken() {
+  const existing = _readCsrfCookie();
+  if (existing) return existing;
+  if (!_csrfTokenPromise) {
+    _csrfTokenPromise = _origFetch('/api/auth/csrf', { credentials: 'same-origin', cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null).then(d => d && d.csrf_token || '')
+      .finally(() => { _csrfTokenPromise = null; });
+  }
+  return _csrfTokenPromise;
+}
 window.fetch = async function(...args) {
+  const input = args[0];
+  const options = args[1] || {};
+  const method = String(options.method || (input && input.method) || 'GET').toUpperCase();
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  let requestUrl = null;
+  try { requestUrl = new URL(url || location.href, location.href); } catch (_) {}
+  const sameOriginApi = requestUrl
+    && requestUrl.origin === location.origin
+    && requestUrl.pathname.startsWith('/api/');
+  const needsCsrf = !['GET', 'HEAD', 'OPTIONS'].includes(method)
+    && sameOriginApi
+    && !requestUrl.pathname.startsWith('/api/auth/login')
+    && !requestUrl.pathname.startsWith('/api/auth/setup')
+    && !requestUrl.pathname.startsWith('/api/auth/signup')
+    && !requestUrl.pathname.startsWith('/api/auth/csrf');
+  if (needsCsrf) {
+    const token = await _csrfToken();
+    if (token) {
+      const headers = new Headers(options.headers || (input && input.headers) || {});
+      headers.set('X-Odysseus-CSRF', token);
+      args[1] = { ...options, headers };
+    }
+  }
   const res = await _origFetch.apply(this, args);
   if (res.status === 401 && !String(args[0]).includes('/api/auth/')) {
     window.location.href = '/login';

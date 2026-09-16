@@ -37,8 +37,15 @@ def owner_for(request, *, mutation=False):
     if getattr(request.state, 'api_token', False) or request.headers.get('X-Odysseus-Internal-Token'):
         raise HTTPException(403, 'Interactive owner login required')
     manager = getattr(request.app.state, 'auth_manager', None)
-    token = request.cookies.get('odysseus_session')
-    owner = manager.get_username_for_token(token) if manager and token else None
+    # AuthMiddleware already selected and validated the scheme-specific
+    # session cookie. Prefer that identity so a browser carrying both HTTP and
+    # HTTPS cookies cannot be attributed to the wrong session. The fallback
+    # keeps this helper compatible with direct route tests/callers.
+    owner = getattr(getattr(request, 'state', None), 'current_user', None)
+    if not owner:
+        from core.auth import session_cookie_for_request, SESSION_COOKIE
+        token = request.cookies.get(session_cookie_for_request(request)) or request.cookies.get(SESSION_COOKIE)
+        owner = manager.get_username_for_token(token) if manager and token else None
     if not owner:
         raise HTTPException(401, 'Login required')
     from src.host_execution import enabled_for

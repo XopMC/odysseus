@@ -183,7 +183,7 @@ def setup_embedding_routes():
             return {"status": "downloaded", "model": model_name}
         except Exception as e:
             logger.error(f"Failed to download {model_name}: {e}")
-            raise HTTPException(500, f"Download failed: {str(e)}")
+            raise HTTPException(500, "Download failed")
         finally:
             _downloading.pop(model_name, None)
 

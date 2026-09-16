@@ -8,7 +8,10 @@ import settingsModule from './settings.js';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
 import { modelRouteKey, modelEndpointLabel, isRouteFavorite, toggleRouteFavorite, resolveSavedModelRoutes } from './model/routeIdentity.js';
-import { favoritesSnapshot, refreshModelFavorites, setModelFavorite } from './modelFavorites.js';
+import {
+  favoritesSnapshot, refreshModelFavorites, setModelFavorite,
+  legacyFavoritesSnapshot, importLegacyFavorites,
+} from './modelFavorites.js';
 
 const API_BASE = window.location.origin;
 
@@ -441,6 +444,30 @@ function _initModelPickerDropdown() {
     if (!hasAnyModel) return; // collapsed empty list — nothing to render
 
     let favs = _loadFavorites();
+    const legacyFavorites = legacyFavoritesSnapshot();
+    if (legacyFavorites.length) {
+      const importButton = document.createElement('button');
+      importButton.type = 'button';
+      importButton.className = 'model-favorites-import';
+      importButton.textContent = t('Import local favorites');
+      bindUiText(importButton, 'Import local favorites');
+      importButton.addEventListener('click', async event => {
+        event.stopPropagation();
+        importButton.disabled = true;
+        try {
+          const catalog = all.map(item => ({
+            mid: item.mid, url: item.url, endpointId: item.endpointId,
+          }));
+          favs = await importLegacyFavorites(catalog);
+          importButton.remove();
+          _populate(search?.value || '');
+        } catch (error) {
+          importButton.disabled = false;
+          uiModule?.showError?.(error.message || t('Failed to import local favorites'));
+        }
+      });
+      listEl.appendChild(importButton);
+    }
 
     function _addSection(label) {
       const el = document.createElement('div');

@@ -5,7 +5,7 @@ import shlex
 import subprocess
 from copy import deepcopy
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from core.platform_compat import run_ssh_command
 from routes._validators import validate_remote_host, validate_ssh_port
@@ -24,6 +24,25 @@ def _validate_detection_target(host: str = "", ssh_port: str = "") -> tuple[str,
     if port_value and not host_value:
         raise HTTPException(400, "ssh_port requires host")
     return host_value, port_value
+
+
+def _require_remote_probe_access(request: Request | None, host: str) -> None:
+    """Remote hardware probes are privileged SSH operations.
+
+    Local hardware ranking remains available to an authenticated user, but a
+    caller cannot turn the probe endpoint into arbitrary SSH against another
+    machine. A future registered-host capability can relax this per owner;
+    until then admin is the explicit, auditable permission.
+    """
+    if not host:
+        return
+    if request is None:
+        return  # direct unit calls; HTTP requests always carry Request
+    user = getattr(getattr(request, "state", None), "current_user", None)
+    auth = getattr(getattr(request, "app", None), "state", None)
+    manager = getattr(auth, "auth_manager", None)
+    if not user or user == "internal-tool" or not manager or not manager.is_admin(user):
+        raise HTTPException(403, "Administrator permission required for remote hardware probes")
 
 
 def _apply_manual_hardware(system, manual_mode="", manual_gpu_count="", manual_vram_gb="", manual_ram_gb="", manual_backend=""):
@@ -183,15 +202,16 @@ def setup_hwfit_routes():
     router = APIRouter(prefix="/api/hwfit", tags=["hwfit"])
 
     @router.get("/system")
-    def get_system(host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False):
+    def get_system(request: Request = None, host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False):
         """Detect and return current system hardware info. Pass host=user@server for remote.
         fresh=true bypasses the per-host cache (the Rescan button)."""
         from services.hwfit.hardware import detect_system
         host, ssh_port = _validate_detection_target(host, ssh_port)
+        _require_remote_probe_access(request, host)
         return detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh)
 
     @router.get("/models")
-    def get_models(use_case: str = "", sort: str = "newest", limit: int = 50, search: str = "", host: str = "", quant: str = "", ctx: str = "", gpu_count: str = "", gpu_group: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, refresh_catalog: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False, fit_only: bool = False):
+    def get_models(request: Request = None, use_case: str = "", sort: str = "newest", limit: int = 50, search: str = "", host: str = "", quant: str = "", ctx: str = "", gpu_count: str = "", gpu_group: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, refresh_catalog: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False, fit_only: bool = False):
         """Rank LLM models against detected hardware and return scored results.
         gpu_count: override GPU count (0 = CPU only, 1-N = simulate N GPUs of the
             active group). gpu_group: index into system.gpu_groups (the homogeneous
@@ -202,6 +222,7 @@ def setup_hwfit_routes():
         from services.hwfit.fit import rank_models
         from services.hwfit.models import get_models, model_catalog_path, refresh_dynamic_catalogs
         host, ssh_port = _validate_detection_target(host, ssh_port)
+        _require_remote_probe_access(request, host)
         system = deepcopy(detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh))
         if system.get("error"):
             return {"system": system, "models": [], "error": system["error"]}
@@ -316,7 +337,7 @@ def setup_hwfit_routes():
         return payload
 
     @router.get("/profiles")
-    def get_serve_profiles(model: str = "", model_path: str = "", host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, serve_weights_gb: float = 0.0, serve_quant: str = ""):
+    def get_serve_profiles(request: Request = None, model: str = "", model_path: str = "", host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, serve_weights_gb: float = 0.0, serve_quant: str = ""):
         """Compute llama.cpp serve profiles (Quality/Balanced/Speed) for `model`
         against the detected hardware on `host` (or local). Returns concrete
         flags (n_gpu_layers, n_cpu_moe, cache_type, ctx) the serve UI can apply.
@@ -329,6 +350,7 @@ def setup_hwfit_routes():
         from services.hwfit.models import get_models
         from services.hwfit.profiles import compute_serve_profiles
         host, ssh_port = _validate_detection_target(host, ssh_port)
+        _require_remote_probe_access(request, host)
         system = detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh)
         if system.get("error"):
             return {"system": system, "profiles": [], "error": system["error"]}
@@ -410,11 +432,12 @@ def setup_hwfit_routes():
         }
 
     @router.get("/image-models")
-    def get_image_models(sort: str = "fit", search: str = "", host: str = "", gpu_count: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False):
+    def get_image_models(request: Request = None, sort: str = "fit", search: str = "", host: str = "", gpu_count: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False):
         """Rank image generation models against detected hardware."""
         from services.hwfit.hardware import detect_system
         from services.hwfit.image_models import rank_image_models
         host, ssh_port = _validate_detection_target(host, ssh_port)
+        _require_remote_probe_access(request, host)
         system = deepcopy(detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh))
         if system.get("error"):
             return {"system": system, "models": [], "error": system["error"]}

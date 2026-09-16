@@ -25,6 +25,7 @@ from src.context_compactor import (
     _content_as_text,
     maybe_compact,
     trim_for_context,
+    ProtectedContextTooLarge,
 )
 
 
@@ -107,6 +108,15 @@ class TestTrimForContext:
         assert trimmed[-1]["role"] == "user"
         assert "pasted message was too large" in trimmed[-1]["content"]
         assert "old-0" not in "\n".join(str(m.get("content", "")) for m in trimmed)
+
+    def test_strict_mode_refuses_oversized_protected_evidence(self):
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "finish the task"},
+            {"role": "user", "content": "PINNED " + ("evidence " * 8000), "_protected": True},
+        ]
+        with pytest.raises(ProtectedContextTooLarge):
+            trim_for_context(messages, context_length=1024, reserve_tokens=256, strict_protected=True)
 
 
 class TestContentAsText:

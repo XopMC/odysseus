@@ -16,11 +16,14 @@ Replay survives process restart, execution does not: unfinished runs are exposed
 as interrupted and their commands are never replayed automatically.
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 import math
 import os
+from pathlib import Path
+import re
 import time
 import uuid
 from typing import AsyncGenerator, Awaitable, Callable, Dict, Optional
@@ -33,11 +36,38 @@ def replay_root():
     return os.path.join(DATA_DIR, 'chat-replay')
 
 
+def delete_replays_for_session(session_id: str) -> int:
+    """Delete only replay artifacts whose sidecar hashes this session."""
+    try:
+        from src.chat_replay_log import _key
+        root = replay_root()
+        removed = 0
+        for sidecar in Path(root).glob("*.json"):
+            try:
+                meta = json.loads(sidecar.read_text())
+                if meta.get("session_hash") != _key(str(session_id)):
+                    continue
+                run_id = sidecar.stem
+                if not re.fullmatch(r"[0-9a-f]{32}", run_id):
+                    continue
+                for suffix in (".events", ".index", ".json"):
+                    sidecar.with_suffix(suffix).unlink(missing_ok=True)
+                    removed += 1
+            except (OSError, TypeError, ValueError):
+                continue
+        return removed
+    except Exception:
+        logger.warning("[agent-run] replay cleanup failed for deleted session", exc_info=True)
+        return 0
+
+
 class _Run:
     __slots__ = (
         "buffer", "subscribers", "status", "task", "evict_task", "run_id",
         "context_usage", "started_at", "round", "segment", "tool_counter",
-        "active_tool_call_id", "on_terminal",
+        "active_tool_call_id", "on_terminal", "context_revision", "terminal_status",
+        "owner", "session_id", "continuation", "durable_seq", "ledger_hash", "terminal_at",
+        "compaction_pending",
     )
 
     def __init__(self) -> None:
@@ -56,6 +86,17 @@ class _Run:
         self.tool_counter: int = 0
         self.active_tool_call_id: Optional[str] = None
         self.on_terminal: Optional[Callable[[str], Awaitable[None]]] = None
+        # Monotonic request-context ledger.  Reconnect/approval telemetry must
+        # not replace a newer measurement with a smaller stored-chat estimate.
+        self.context_revision: int = 0
+        self.terminal_status: Optional[str] = None
+        self.owner: Optional[str] = None
+        self.session_id: Optional[str] = None
+        self.continuation: dict = {}
+        self.durable_seq: int = -1
+        self.ledger_hash: Optional[str] = None
+        self.terminal_at: Optional[float] = None
+        self.compaction_pending: bool = False
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -65,6 +106,84 @@ _RUNS: Dict[str, _Run] = {}
 # replay the result. After this, the run is evicted to bound memory — without
 # it, every session that ever streamed kept its entire event log forever.
 _EVICT_GRACE_S = 180
+
+
+def _ledger_hash(run: _Run) -> str:
+    """Hash the latest model-visible context snapshot without storing secrets."""
+    payload = {
+        "run_id": run.run_id,
+        "context_revision": run.context_revision,
+        "context_usage": run.context_usage or {},
+        "last_seq": len(run.buffer) - 1,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool = False) -> None:
+    """Persist a small owner-scoped run checkpoint; never persist secrets."""
+    if not run.owner:
+        return
+    try:
+        from core.database import ChatRunState, SessionLocal, utcnow_naive
+        effective_status = status or run.terminal_status or run.status
+        run.ledger_hash = _ledger_hash(run)
+        run.durable_seq = len(run.buffer) - 1
+        with SessionLocal.begin() as db:
+            row = db.query(ChatRunState).filter(ChatRunState.run_id == run.run_id).first()
+            if row is None:
+                row = ChatRunState(
+                    run_id=run.run_id,
+                    session_id=getattr(run, "session_id", "") or "",
+                    owner=run.owner,
+                    status=effective_status,
+                    started_at=datetime.utcfromtimestamp(run.started_at),
+                    last_seq=len(run.buffer) - 1,
+                    durable_seq=run.durable_seq,
+                )
+                db.add(row)
+            row.status = effective_status
+            row.last_seq = len(run.buffer) - 1
+            row.durable_seq = run.durable_seq if durable else max(row.durable_seq or -1, run.durable_seq)
+            row.context_revision = run.context_revision
+            row.ledger_hash = run.ledger_hash
+            row.context_snapshot = dict(run.context_usage) if run.context_usage else None
+            row.continuation = dict(run.continuation or {}) or None
+            if effective_status != "running":
+                row.terminal_at = utcnow_naive()
+                run.terminal_at = row.terminal_at.timestamp()
+    except Exception:
+        logger.warning("[agent-run] durable run-state checkpoint failed", exc_info=True)
+
+
+def _seed_context_ledger(run: _Run) -> None:
+    """Carry the last model-visible ledger into a replacement attempt.
+
+    Goal continuation, approval continuation, and a normal retry create a new
+    run ID.  Seeding from the latest durable row keeps the occupancy high-water
+    mark and revision session-scoped, so a transport/Stop boundary cannot look
+    like an unexplained compaction.  The next explicit ``compacted`` event is
+    allowed to lower it again.
+    """
+    if not run.owner or not run.session_id:
+        return
+    try:
+        from core.database import ChatRunState, SessionLocal
+        with SessionLocal() as db:
+            row = db.query(ChatRunState).filter(
+                ChatRunState.session_id == run.session_id,
+                ChatRunState.owner == run.owner,
+            ).order_by(ChatRunState.updated_at.desc()).first()
+            if row is None or not row.context_snapshot:
+                return
+            run.context_usage = dict(row.context_snapshot)
+            run.context_revision = int(row.context_revision or 0)
+            run.ledger_hash = row.ledger_hash
+    except Exception:
+        # The additive table may not exist in a legacy test/development DB;
+        # live streaming remains fully functional without the seed.
+        logger.debug("[agent-run] context ledger seed unavailable", exc_info=True)
 
 
 def _annotate_event(run: _Run, ev: str, seq: int) -> str:
@@ -133,6 +252,7 @@ def _publish(run: _Run, ev: str) -> None:
     """Append one SSE event and fan it out to every live subscriber."""
     seq = len(run.buffer)
     ev = _annotate_event(run, ev, seq)
+    event_type = None
     # Bind measurements to this exact run, not a session lookup: a cancelled
     # predecessor can still publish while its replacement is being started.
     try:
@@ -140,12 +260,69 @@ def _publish(run: _Run, ev: str) -> None:
             line[5:].lstrip() for line in ev.splitlines() if line.startswith("data:")
         ))
         if isinstance(payload, dict) and payload.get("type") == "context_usage":
+            event_type = "context_usage"
             snapshot = normalize_context_usage(payload.get("data"))
             if snapshot is not None:
-                run.context_usage = snapshot
+                previous = run.context_usage
+                previous_compactions = int((previous or {}).get("compactions", 0) or 0)
+                current_compactions = int(snapshot.get("compactions", 0) or 0)
+                # Keep stale events in the replay log for audit, but do not
+                # lower the live high-water mark without a real compaction.
+                stale = bool(
+                    previous and not run.compaction_pending and (
+                        current_compactions < previous_compactions
+                        or (
+                            current_compactions == previous_compactions
+                            and snapshot.get("used_tokens", 0) < previous.get("used_tokens", 0)
+                        )
+                    )
+                )
+                if not stale:
+                    run.context_revision += 1
+                    snapshot["context_revision"] = run.context_revision
+                    snapshot["context_reason"] = (
+                        "compaction" if run.compaction_pending or current_compactions > previous_compactions else "measurement"
+                    )
+                    run.context_usage = snapshot
+                    run.compaction_pending = False
+                else:
+                    snapshot = {
+                        **snapshot,
+                        "context_revision": run.context_revision,
+                        "context_reason": "measurement",
+                        "stale": True,
+                    }
+                # Carry the server's accepted revision in replay metadata.  Do
+                # not change the legacy ``data`` shape: older clients compare
+                #/persist that payload verbatim.  New clients merge these
+                # fields before applying the measurement so a stale lower
+                # value can never replace the live high-water mark.
+                replay_meta = payload.setdefault("_replay", {})
+                if isinstance(replay_meta, dict):
+                    replay_meta["context_revision"] = run.context_revision
+                    replay_meta["context_reason"] = snapshot.get("context_reason", "measurement")
+                    if snapshot.get("stale"):
+                        replay_meta["stale"] = True
+                try:
+                    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    lines = ev.splitlines()
+                    data_idx = next(i for i, line in enumerate(lines) if line.startswith("data:"))
+                    lines[data_idx] = f"data: {encoded}"
+                    ev = "\n".join(lines) + "\n\n"
+                except (StopIteration, TypeError, ValueError):
+                    pass
+        elif isinstance(payload, dict):
+            event_type = payload.get("type")
+            if event_type == "compacted":
+                # The following context_usage frame is the first measurement
+                # after an explicit successful compaction and may legitimately
+                # be lower than the prior run's high-water mark.
+                run.compaction_pending = True
     except (TypeError, ValueError):
         pass  # Other SSE events, comments and [DONE] are not measurements.
     run.buffer.append(ev)
+    if event_type in {"context_usage", "tool_output", "agent_step", "ask_user", "goal_update", "plan_update"}:
+        _persist_run_state(run)
     for q in list(run.subscribers):
         try:
             q.put_nowait(True)
@@ -162,7 +339,7 @@ def _wake_run_subscribers(run: _Run) -> None:
             pass
 
 
-def _persist_timeline_v2(session_id: str, run: _Run) -> None:
+def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = None) -> None:
     """Attach the bounded canonical replay timeline to the saved assistant turn.
 
     The agent generator persists the assistant message before it returns.  The
@@ -259,6 +436,8 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
                     "command": str(payload.get("command") or ""),
                     "output": "",
                     "exit_code": None,
+                    "tool_call_id": tool_id,
+                    "_replay": {"run_id": run.run_id, "seq": item["seq"], "tool_call_id": tool_id},
                 }
                 tools[tool_id] = event
                 tool_order.append(tool_id)
@@ -291,15 +470,16 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
         for tool_id in tool_order:
             event = tools[tool_id]
             progress_tail = event.pop("_progress_tail", "")
-            if run.status == "stopped" and event.get("exit_code") is None:
+            if (status or run.status) == "stopped" and event.get("exit_code") is None:
                 event["exit_code"] = 130
                 event["output"] = ((progress_tail + "\n") if progress_tail else "") + "Interrupted by user."
             tool_events.append(event)
 
         legacy_metadata = {}
-        if run.status in {"stopped", "error"}:
-            legacy_metadata["stopped"] = run.status == "stopped"
-            legacy_metadata["cancelled"] = run.status == "stopped" and not substantive
+        terminal_status = status or run.status
+        if terminal_status in {"stopped", "error"}:
+            legacy_metadata["stopped"] = terminal_status == "stopped"
+            legacy_metadata["cancelled"] = terminal_status == "stopped" and not substantive
             if round_texts:
                 legacy_metadata["round_texts"] = round_texts
             if tool_events:
@@ -345,7 +525,11 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
                         DbChatMessage.role == "assistant",
                         DbChatMessage.timestamp >= run_start - timedelta(seconds=5),
                     ).order_by(DbChatMessage.timestamp.desc(), DbChatMessage.id.desc()).first()
-            if row is None and run.status in {"stopped", "error"}:
+            terminal_status_for_row = status or run.status
+            if row is None and (
+                terminal_status_for_row in {"stopped", "error"}
+                or (terminal_status_for_row == "done" and substantive)
+            ):
                 # Tool-only/reasoning-only stops previously had no assistant DB
                 # row. Persist one canonical placeholder for history replay.
                 visible = "\n\n".join(
@@ -376,12 +560,16 @@ def _persist_timeline_v2(session_id: str, run: _Run) -> None:
             # cannot fall back to a smaller transcript estimate after the run
             # becomes terminal. This snapshot is also restored after restart.
             if run.context_usage:
-                metadata["working_context"] = dict(run.context_usage)
+                metadata["working_context"] = {
+                    **run.context_usage,
+                    "context_revision": run.context_revision,
+                    "context_reason": run.context_usage.get("context_reason", "measurement"),
+                }
             metadata["timeline_v2"] = {
                 "version": 2,
                 "run_id": run.run_id,
                 "started_at": run.started_at,
-                "status": run.status,
+                "status": terminal_status,
                 "events": events,
                 "truncated": truncated,
             }
@@ -469,7 +657,30 @@ def describe_run(session_id: str) -> Optional[dict]:
     """Return the owner-gated route's public snapshot of the current run."""
     run = _RUNS.get(session_id)
     if run is None:
-        return None
+        # A process restart clears the live registry, but the additive run
+        # state row still gives the UI an honest interrupted identity/cursor.
+        try:
+            from core.database import ChatRunState, SessionLocal
+            with SessionLocal() as db:
+                row = db.query(ChatRunState).filter(
+                    ChatRunState.session_id == session_id,
+                ).order_by(ChatRunState.updated_at.desc()).first()
+                if row is None:
+                    return None
+                return {
+                    "run_id": row.run_id,
+                    "status": row.status,
+                    "started_at": row.started_at.replace(tzinfo=timezone.utc).timestamp() if row.started_at else None,
+                    "last_seq": row.last_seq,
+                    "next_seq": (row.last_seq or -1) + 1,
+                    "context_usage": dict(row.context_snapshot or {}) or None,
+                    "context_revision": row.context_revision or 0,
+                    "durable_seq": row.durable_seq,
+                    "ledger_hash": row.ledger_hash,
+                }
+        except Exception:
+            logger.debug("[agent-run] durable run-state lookup failed", exc_info=True)
+            return None
     return {
         "run_id": run.run_id,
         "status": run.status,
@@ -477,7 +688,73 @@ def describe_run(session_id: str) -> Optional[dict]:
         "last_seq": len(run.buffer) - 1,
         "next_seq": len(run.buffer),
         "context_usage": dict(run.context_usage) if run.context_usage else None,
+        "context_revision": run.context_revision,
+        "durable_seq": run.durable_seq,
+        "ledger_hash": run.ledger_hash,
     }
+
+
+def recover_durable_runs() -> list[dict]:
+    """Materialize interrupted replay runs after a web-process restart.
+
+    Tool calls are never re-executed.  The persisted frames are attached to
+    the canonical assistant turn (including partial tool/reasoning evidence),
+    the artifact is checkpointed as interrupted, and callers may then start a
+    fresh Goal attempt from the durable session ledger.
+    """
+    recovered = []
+    try:
+        from core.database import ChatRunState, SessionLocal, utcnow_naive
+        from src.chat_replay_log import ReplayLog
+        with SessionLocal() as db:
+            rows = [
+                {
+                    "run_id": row.run_id,
+                    "session_id": row.session_id,
+                    "owner": row.owner,
+                    "started_at": row.started_at.replace(tzinfo=timezone.utc).timestamp() if row.started_at else time.time(),
+                    "context_revision": int(row.context_revision or 0),
+                    "context_snapshot": dict(row.context_snapshot or {}) or None,
+                    "continuation": dict(row.continuation or {}),
+                }
+                for row in db.query(ChatRunState).filter(ChatRunState.status == "running").all()
+            ]
+        for state in rows:
+            try:
+                log = ReplayLog(replay_root(), state["run_id"], state["session_id"])
+                run = _Run()
+                run.run_id = state["run_id"]
+                run.session_id = state["session_id"]
+                run.owner = state["owner"]
+                run.started_at = state["started_at"]
+                run.buffer = log
+                run.context_revision = state["context_revision"]
+                run.context_usage = state["context_snapshot"]
+                run.status = "stopped"
+                run.terminal_status = "stopped"
+                _persist_timeline_v2(state["session_id"], run, status="stopped")
+                try:
+                    log.checkpoint("stopped")
+                except OSError:
+                    logger.warning("[agent-run] unable to checkpoint interrupted replay %s", state["run_id"])
+                with SessionLocal.begin() as db:
+                    row = db.query(ChatRunState).filter(ChatRunState.run_id == state["run_id"]).first()
+                    if row is not None:
+                        row.status = "interrupted"
+                        row.terminal_at = utcnow_naive()
+                        row.last_seq = len(log) - 1
+                        row.durable_seq = row.last_seq
+                recovered.append(state)
+            except (FileNotFoundError, ValueError, OSError):
+                logger.warning("[agent-run] skipping unavailable interrupted replay %s", state["run_id"])
+                with SessionLocal.begin() as db:
+                    row = db.query(ChatRunState).filter(ChatRunState.run_id == state["run_id"]).first()
+                    if row is not None:
+                        row.status = "interrupted"
+                        row.terminal_at = utcnow_naive()
+    except Exception:
+        logger.warning("[agent-run] durable run recovery failed", exc_info=True)
+    return recovered
 
 
 def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Optional[dict]:
@@ -486,7 +763,49 @@ def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Opt
         raise ValueError("Invalid replay cursor or page size")
     run = _RUNS.get(session_id)
     if run is None:
-        return None
+        # After a process restart the in-memory registry is empty, but the
+        # owner-gated API can still page the durable replay artifact by the
+        # session/run mapping stored in ChatRunState.
+        try:
+            from core.database import ChatRunState, SessionLocal
+            from src.chat_replay_log import ReplayLog
+            with SessionLocal() as db:
+                state = db.query(ChatRunState).filter(
+                    ChatRunState.session_id == session_id,
+                ).order_by(ChatRunState.updated_at.desc()).first()
+                if state is None:
+                    return None
+                log = ReplayLog(replay_root(), state.run_id, session_id)
+                page = log.page(after_seq, limit, active=False)
+            rows = []
+            for item in page.get("events", []):
+                raw = "\n".join(
+                    line[5:].lstrip() for line in item["event"].splitlines()
+                    if line.startswith("data:")
+                )
+                try:
+                    data = json.loads(raw)
+                except (TypeError, ValueError):
+                    data = {"type": "opaque"}
+                rows.append({"seq": item["seq"], "data": data})
+            return {
+                "run_id": state.run_id,
+                "status": page.get("status") or state.status,
+                "started_at": state.started_at.replace(tzinfo=timezone.utc).timestamp() if state.started_at else None,
+                "last_seq": len(log) - 1,
+                "next_seq": page.get("next_seq", after_seq),
+                "events": rows,
+                "has_more": page.get("has_more", False),
+                "context_usage": dict(state.context_snapshot or {}) or None,
+                "context_revision": state.context_revision or 0,
+                "durable_seq": state.durable_seq,
+                "ledger_hash": state.ledger_hash,
+            }
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+        except Exception:
+            logger.debug("[agent-run] durable event-page lookup failed", exc_info=True)
+            return None
     count = len(run.buffer)
     if after_seq >= count and count:
         raise ValueError("Replay cursor is ahead of the log")
@@ -530,6 +849,12 @@ def normalize_context_usage(data) -> Optional[dict]:
         value = data.get(key)
         if type(value) is int and value >= 0:
             result[key] = value
+    revision = data.get("context_revision")
+    if type(revision) is int and revision >= 0:
+        result["context_revision"] = revision
+    reason = data.get("context_reason")
+    if reason in {"measurement", "compaction"}:
+        result["context_reason"] = reason
     threshold = data.get("auto_compact_threshold")
     if type(threshold) in (int, float) and 0 <= threshold <= 100 and math.isfinite(threshold):
         result["auto_compact_threshold"] = threshold
@@ -539,9 +864,16 @@ def normalize_context_usage(data) -> Optional[dict]:
     return result
 
 
-def get_context_usage(session_id: str) -> Optional[dict]:
-    """Copy the active run's latest measurement; terminal history is read separately."""
-    run = get_active_run(session_id)
+def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Optional[dict]:
+    """Copy the run ledger measurement.
+
+    The legacy active-only behavior remains the default.  Context readers can
+    include a just-terminal run to avoid flashing a smaller transcript
+    estimate while approval/Stop/error persistence is being completed.
+    """
+    run = _RUNS.get(session_id)
+    if not run or (run.status != "running" and not include_terminal):
+        return None
     return dict(run.context_usage) if run and run.context_usage is not None else None
 
 
@@ -568,7 +900,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         async for ev in agen:
             _publish(run, ev)
         if run.status == "running":
-            run.status = "done"
+            run.terminal_status = "done"
     except asyncio.CancelledError:
         # Let the wrapped generator's own CancelledError handler run (it saves
         # the partial response to the session).
@@ -578,7 +910,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
             pass
         # Keep is_active() true until persistence is complete. Otherwise a
         # concurrent browser poll can replace the live view with stale history.
-        run.status = "stopped"
+        run.terminal_status = "stopped"
         # A rapid third replacement can cancel this task while it is still
         # waiting for its predecessor. Close this run's subscribers promptly,
         # but keep the task alive until the predecessor finishes so the next
@@ -591,7 +923,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
                 pass
     except Exception as e:
         logger.error("[agent-run] %s failed: %s", session_id, e, exc_info=True)
-        run.status = "error"
+        run.terminal_status = "error"
         try:
             await agen.aclose()
         except Exception:
@@ -608,17 +940,23 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
             # to persist another error or silently continue effectful tools.
             logger.error('[agent-run] replay storage unavailable; run stopped')
     finally:
-        _persist_timeline_v2(session_id, run)
+        terminal_status = run.terminal_status or run.status
+        # Persist the final ledger/timeline before exposing terminal status.
+        # This is important for approval and Stop: history readers must never
+        # observe the short stored-chat estimate in that handoff window.
+        _persist_timeline_v2(session_id, run, status=terminal_status)
         if hasattr(run.buffer, 'checkpoint'):
             try:
-                run.buffer.checkpoint(run.status)
+                run.buffer.checkpoint(terminal_status)
             except OSError:
                 logger.error('[agent-run] replay checkpoint unavailable')
+        _persist_run_state(run, status=terminal_status, durable=True)
         # Wake every subscriber with the end sentinel so their SSE closes.
         _wake_subscribers()
         # Run is terminal — arm the grace timer so it (and its buffer) is
         # eventually freed even if nobody ever reconnects. subscribe() cancels
         # this on connect and re-arms on disconnect.
+        run.status = terminal_status
         _schedule_evict(session_id, run)
         if run.on_terminal is not None and run.status in {"done", "error"}:
             callback = run.on_terminal
@@ -642,6 +980,8 @@ def start(
     agen: AsyncGenerator[str, None],
     *,
     on_terminal: Optional[Callable[[str], Awaitable[None]]] = None,
+    owner: Optional[str] = None,
+    continuation: Optional[dict] = None,
 ) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
@@ -649,9 +989,14 @@ def start(
     # must not destroy a still-running predecessor on a failed replacement.
     run = _Run()
     run.on_terminal = on_terminal
+    run.session_id = str(session_id)
+    run.owner = str(owner or "").strip() or None
+    run.continuation = dict(continuation or {})
+    _seed_context_ledger(run)
     if os.getenv('ODYSSEUS_DURABLE_CHAT_REPLAY') == '1':
         from src.chat_replay_log import ReplayLog
         run.buffer = ReplayLog(replay_root(), run.run_id, session_id, create=True)
+    _persist_run_state(run)
     prev = _RUNS.get(session_id)
     prev_task: Optional[asyncio.Task] = None
     if prev:
@@ -663,6 +1008,7 @@ def start(
             # when the task had already started.
             if prev.status == "running":
                 prev.status = "stopped"
+                _persist_run_state(prev, status="stopped", durable=True)
                 _wake_run_subscribers(prev)
             prev.task.cancel()
             prev_task = prev.task   # new run awaits this before it starts writing
@@ -764,7 +1110,11 @@ async def stop_and_wait(
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))
     except asyncio.CancelledError:
+        # The run task handles its own cancellation and performs the durable
+        # timeline/checkpoint write before completing.  A cancellation raised
+        # here therefore still needs the completion check below.
         pass
     except asyncio.TimeoutError:
         logger.warning("Timed out waiting for stopped run %s to persist", run.run_id)
-    return True
+        return False
+    return bool(task.done() and run.status != "running")

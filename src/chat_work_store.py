@@ -8,8 +8,10 @@ session/owner context supplied by the server-side dispatcher.
 from __future__ import annotations
 
 from datetime import timedelta
+import hashlib
 import re
 import uuid
+from sqlalchemy import or_
 
 from core.database import (
     ChatGoal, ChatPlan, ChatWorkEvent, Session as DbSession, SessionLocal,
@@ -82,7 +84,7 @@ def checklist_steps(markdown):
     for index, (checked, text) in enumerate(lines[:100], 1):
         clean = _clean_text(text, "plan step", 1000)
         steps.append({
-            "id": f"step-{index}", "text": clean,
+            "id": _stable_step_id(clean, index), "text": clean,
             "status": "done" if checked.lower() == "x" else "pending",
             "required": True,
         })
@@ -92,6 +94,16 @@ def checklist_steps(markdown):
     if first:
         first["status"] = "in_progress"
     return steps
+
+
+def _stable_step_id(text, ordinal=1):
+    """Return an opaque, deterministic ID for legacy markdown steps.
+
+    IDs must survive a reparse/reorder of the same plan.  The ordinal only
+    disambiguates duplicate step text; authored IDs are still preferred.
+    """
+    digest = hashlib.sha256(str(text).strip().casefold().encode("utf-8")).hexdigest()[:20]
+    return f"step-{digest}-{int(ordinal)}"
 
 
 class ChatWorkStore:
@@ -108,6 +120,12 @@ class ChatWorkStore:
             goal = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
             cursor = db.query(ChatWorkEvent.id).filter_by(owner=owner, session_id=session_id).order_by(ChatWorkEvent.id.desc()).limit(1).scalar()
             return {"plan": _public_plan(plan), "goal": _public_goal(goal), "cursor": cursor or 0}
+
+    def list_active_goals(self):
+        """Return owner/session pairs that must be resumed by the server controller."""
+        with SessionLocal() as db:
+            rows = db.query(ChatGoal).filter(ChatGoal.status == "active").all()
+            return [_public_goal(row) for row in rows]
 
     def events(self, owner, session_id, after=0, limit=100):
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 200:
@@ -138,7 +156,7 @@ class ChatWorkStore:
             if status not in PLAN_STATES:
                 raise ValueError("Invalid plan step status")
             normalized.append({
-                "id": str(item.get("id") or f"step-{index}")[:120],
+                "id": str(item.get("id") or _stable_step_id(item.get("text"), index))[:120],
                 "text": _clean_text(item.get("text"), "plan step", 1000),
                 "status": status, "required": item.get("required") is not False,
             })
@@ -152,10 +170,24 @@ class ChatWorkStore:
                 db.add(row)
                 db.flush()
             else:
+                if row.status in {"cancelled", "done"}:
+                    raise WorkConflict("Plan is no longer mutable")
                 if expected_revision is not None and row.revision != expected_revision:
                     raise WorkConflict("Plan changed; reload")
                 row.revision += 1
-            row.title, row.steps, row.status = title, normalized, "draft"
+            # Legacy update_plan is an adapter.  Once execution has started it
+            # must not silently turn the plan back into a draft.  Reconcile
+            # omitted IDs by matching old text so old clients keep stable IDs.
+            if row is not None and row.steps:
+                old_by_text = {str(step.get("text", "")).strip().casefold(): step.get("id") for step in row.steps if step.get("id")}
+                for step in normalized:
+                    # Text is the only identity available to legacy clients;
+                    # preserve a previously authored opaque ID whenever it
+                    # matches, including old positional IDs such as step-1.
+                    step["id"] = old_by_text.get(step["text"].strip().casefold(), step["id"])
+            prior_status = row.status if row is not None else "draft"
+            status = prior_status if prior_status in {"executing", "done"} else "draft"
+            row.title, row.steps, row.status = title, normalized, status
             row.current_step_id = next((s["id"] for s in normalized if s["status"] in {"pending", "in_progress"}), None)
             self._event(db, owner, session_id, "plan_saved", row.id, row.revision, _public_plan(row))
             db.flush()
@@ -194,6 +226,8 @@ class ChatWorkStore:
             row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled"}:
                 raise WorkNotFound("Active goal not found")
+            if row.status != "active":
+                raise WorkConflict("Resume the Goal before completing it")
             if row.revision != expected_revision:
                 raise WorkConflict("Goal changed; reload")
             row.objective = objective
@@ -216,6 +250,10 @@ class ChatWorkStore:
             row = db.query(ChatPlan).filter_by(owner=owner, session_id=session_id).first()
             if row is None:
                 raise WorkNotFound("Plan not found")
+            if row.status in {"cancelled", "done"}:
+                raise WorkConflict("Plan is no longer mutable")
+            if row.status != "executing":
+                raise WorkConflict("Approve the plan before updating its steps")
             if expected_revision is not None and row.revision != expected_revision:
                 raise WorkConflict("Plan changed; reload")
             steps = [dict(step) for step in (row.steps or [])]
@@ -276,11 +314,14 @@ class ChatWorkStore:
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
-            if row is None or row.status in {"completed", "cancelled"}:
+            if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:
                 raise WorkNotFound("Active goal not found")
             row.progress = progress
             if checkpoint is not None:
-                row.checkpoint = checkpoint
+                # Progress/tool checkpoints are partial updates. Never erase
+                # the durable model ledger, prior tool results, or approval
+                # provenance when a later event only carries one field.
+                row.checkpoint = {**dict(row.checkpoint or {}), **checkpoint}
             row.status = "waiting_user" if waiting_user else "active"
             if not waiting_user:
                 row.failure_count = 0
@@ -298,7 +339,7 @@ class ChatWorkStore:
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
-            if row is None or row.status in {"completed", "cancelled", "paused"}:
+            if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:
                 raise WorkNotFound("Active goal not found")
             row.failure_count = int(row.failure_count or 0) + 1 if row.last_error == error else 1
             row.last_error = error
@@ -306,7 +347,7 @@ class ChatWorkStore:
             row.lease_expires_at = None
             row.progress = "Model attempt failed; the server will retry automatically."
             if checkpoint is not None:
-                row.checkpoint = checkpoint
+                row.checkpoint = {**dict(row.checkpoint or {}), **checkpoint}
             if row.failure_count >= 3:
                 row.status = "waiting_user"
                 row.progress = "The model endpoint failed repeatedly; user attention is required."
@@ -347,14 +388,17 @@ class ChatWorkStore:
         token = uuid.uuid4().hex
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
-            if row is None or row.status != "active":
-                return None
-            if row.lease_token and row.lease_expires_at and row.lease_expires_at > now:
-                return None
-            row.lease_token = token
-            row.lease_expires_at = now + timedelta(seconds=max(15, min(int(ttl_seconds), 300)))
-            return token
+            expires = now + timedelta(seconds=max(15, min(int(ttl_seconds), 300)))
+            # Conditional UPDATE makes lease acquisition a real CAS. Two web
+            # workers recovering the same Goal cannot both observe an empty
+            # lease and then dispatch duplicate autonomous attempts.
+            changed = db.query(ChatGoal).filter(
+                ChatGoal.owner == owner,
+                ChatGoal.session_id == session_id,
+                ChatGoal.status == "active",
+                or_(ChatGoal.lease_token.is_(None), ChatGoal.lease_expires_at.is_(None), ChatGoal.lease_expires_at <= now),
+            ).update({"lease_token": token, "lease_expires_at": expires}, synchronize_session=False)
+            return token if changed == 1 else None
 
     def consume_goal_lease(self, owner, session_id, token):
         token = _clean_text(token, "goal continuation token", 200)

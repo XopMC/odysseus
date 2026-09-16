@@ -74,7 +74,12 @@ from core.middleware import (
     path_is_route_or_child,
     with_asgi_root_path,
 )
-from core.auth import AuthManager, normalize_known_username
+from core.auth import (
+    AuthManager, normalize_known_username, SESSION_COOKIE,
+    session_cookie_for_request, csrf_request_valid,
+    SESSION_COOKIE_HTTP, SESSION_COOKIE_HTTPS,
+    CSRF_COOKIE_HTTP, CSRF_COOKIE_HTTPS, request_scheme,
+)
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
     LLMServiceError, WebSearchError,
@@ -147,6 +152,7 @@ app.add_middleware(
         "X-Auth-Token",
         "X-Odysseus-Internal-Token",
         "X-Odysseus-Owner",
+        "X-Odysseus-CSRF",
         "X-Requested-With",
         "X-TZ-Offset",
     ],
@@ -467,7 +473,28 @@ if AUTH_ENABLED:
                 return JSONResponse(status_code=401, content={"error": "Invalid API token"})
 
             # --- Cookie-based session auth ---
-            token = request.cookies.get(SESSION_COOKIE)
+            # Select only the cookie belonging to the externally visible
+            # scheme. Keep the legacy shared cookie as a compatibility
+            # fallback for clients that have not logged in since migration.
+            scheme_cookie = session_cookie_for_request(request)
+            scheme_token = request.cookies.get(scheme_cookie)
+            legacy_migration = not scheme_token and bool(request.cookies.get(SESSION_COOKIE))
+            token = scheme_token
+            if not token:
+                token = request.cookies.get(SESSION_COOKIE)
+            # New scheme-specific browser sessions use a double-submit CSRF
+            # token. Legacy shared-cookie clients remain readable for
+            # compatibility, but a freshly authenticated browser must prove
+            # possession of the non-HttpOnly token on every mutation. This is
+            # not an Origin check, so a phone/second browser works normally.
+            if (
+                request.method not in {"GET", "HEAD", "OPTIONS"}
+                and request.cookies.get(session_cookie_for_request(request))
+                and not path.startswith(("/api/auth/login", "/api/auth/setup", "/api/auth/signup", "/api/auth/csrf"))
+                and path not in {"/api/client-perf", "/api/activity/heartbeat"}
+                and not csrf_request_valid(request)
+            ):
+                return JSONResponse(status_code=403, content={"error": "CSRF token required"})
             if not auth_manager.validate_token(token):
                 if path.startswith("/api/"):
                     return JSONResponse(status_code=401, content={"error": "Not authenticated"})
@@ -479,7 +506,23 @@ if AUTH_ENABLED:
             # Attach current username to request state for downstream routes
             request.state.current_user = auth_manager.get_username_for_token(token)
             request.state.api_token = False
-            return await call_next(request)
+            response = await call_next(request)
+            if legacy_migration:
+                # One-way migration: keep the validated token scoped to the
+                # visible scheme, mint the matching CSRF double-submit value,
+                # and retire the old shared cookie so it cannot cross schemes.
+                is_https = request_scheme(request) == "https"
+                csrf_name = CSRF_COOKIE_HTTPS if is_https else CSRF_COOKIE_HTTP
+                response.set_cookie(
+                    key=scheme_cookie, value=token, httponly=True,
+                    samesite="lax", secure=is_https, path="/",
+                )
+                response.set_cookie(
+                    key=csrf_name, value=secrets.token_urlsafe(32), httponly=False,
+                    samesite="lax", secure=is_https, path="/",
+                )
+                response.delete_cookie(SESSION_COOKIE, path="/")
+            return response
 
     app.add_middleware(AuthMiddleware)
     logger.info("Auth middleware enabled (AUTH_ENABLED=true)")
@@ -1075,6 +1118,81 @@ async def _startup_event():
         if os.environ.get('ODYSSEUS_ENGINEERING_ENABLED') == '1':
             from src.engineering_operations import get_manager
             _startup_tasks.append(get_manager(get_runtime().store).start())
+
+    async def _recover_detached_chat_work():
+        """Rehydrate interrupted replay and resume active Goals server-side."""
+        try:
+            # Let uvicorn finish binding its listener before the internal
+            # controller posts the first continuation request.
+            await asyncio.sleep(0.5)
+            from src import agent_runs
+            from src.chat_work_store import store as chat_work_store
+            recovered = await asyncio.to_thread(agent_runs.recover_durable_runs)
+            recovered_by_session = {
+                str(item.get("session_id")): item.get("continuation") or {}
+                for item in recovered
+                if item.get("session_id")
+            }
+            if recovered:
+                logger.info("[startup] recovered %d interrupted chat run(s)", len(recovered))
+            goals = await asyncio.to_thread(chat_work_store.list_active_goals)
+            if not goals:
+                return
+            from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+            import httpx
+            for goal in goals:
+                session_id = str(goal.get("session_id") or "")
+                owner = str(goal.get("owner") or "")
+                if not session_id or not owner or agent_runs.is_active(session_id):
+                    continue
+                lease = await asyncio.to_thread(chat_work_store.acquire_goal_lease, owner, session_id)
+                if not lease:
+                    continue
+                checkpoint = goal.get("checkpoint") if isinstance(goal.get("checkpoint"), dict) else {}
+                prior = recovered_by_session.get(session_id, {})
+                form = {
+                    "session": session_id,
+                    "message": "Continue the active goal from its durable checkpoint. Take the next safe action and call complete_goal only after verified completion.",
+                    "mode": "agent",
+                    "goal_continuation": "true",
+                    "goal_lease_token": lease,
+                    "allow_bash": "true" if (prior.get("allow_bash") is True or checkpoint.get("allow_bash") is True) else "false",
+                    "allow_web_search": "true" if (prior.get("allow_web_search") is True or checkpoint.get("allow_web_search") is True) else "false",
+                }
+                headers = {
+                    INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN,
+                    "X-Odysseus-Owner": owner,
+                    "Origin": "http://127.0.0.1:7000",
+                }
+                dispatch_error = None
+                for attempt in range(3):
+                    try:
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, read=20.0)) as client:
+                            async with client.stream(
+                                "POST", "http://127.0.0.1:7000/api/chat_stream",
+                                headers=headers, data=form,
+                            ) as response:
+                                if response.status_code < 400:
+                                    dispatch_error = None
+                                    break
+                                dispatch_error = f"Goal recovery HTTP {response.status_code}"
+                    except Exception:
+                        dispatch_error = "Goal recovery connection failed"
+                    await asyncio.sleep(min(4.0, 0.5 * (attempt + 1)))
+                if dispatch_error:
+                    logger.warning("[startup] %s for session %s", dispatch_error, session_id)
+                    try:
+                        await asyncio.to_thread(
+                            chat_work_store.record_goal_failure,
+                            owner, session_id, dispatch_error,
+                            {"reason": "startup_recovery_failed"},
+                        )
+                    except Exception:
+                        logger.warning("[startup] failed to persist Goal recovery error", exc_info=True)
+        except Exception:
+            logger.warning("[startup] detached chat recovery failed", exc_info=True)
+
+    _startup_tasks.append(asyncio.create_task(_recover_detached_chat_work()))
     if upload_cleanup_func:
         upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
     # Always-on monitor that auto-continues the agent when a background bash

@@ -4,7 +4,7 @@ import threading
 from typing import Optional
 from fastapi import APIRouter, Request
 from core.atomic_io import atomic_write_json
-from src.auth_helpers import get_current_user
+from src.auth_helpers import get_current_user, effective_user
 from src.constants import USER_PREFS_FILE
 
 PREFS_FILE = USER_PREFS_FILE
@@ -14,6 +14,14 @@ _FOREGROUND_POLICY_KEYS = (
 )
 _PREFS_LOCK = threading.RLock()
 _MODEL_FAVORITES_KEY = "model_favorites_v2"
+
+
+def _favorites_owner(request: Request):
+    """Resolve the account owner while keeping lightweight test adapters
+    compatible with the historic ``get_current_user`` hook."""
+    if getattr(getattr(request, "state", None), "api_token", False):
+        return effective_user(request)
+    return get_current_user(request)
 
 
 def _load():
@@ -120,14 +128,19 @@ def setup_prefs_routes():
     @router.put("/{key}")
     async def set_pref(request: Request, key: str, body: dict):
         user = get_current_user(request)
-        prefs = _load_for_user(user)
-        prefs[key] = body.get("value")
-        _save_for_user(user, prefs)
-        return {"key": key, "value": prefs[key]}
+        # Serialize generic preference writes with the model-favorites CAS
+        # path. Without this lock a concurrent theme/setting update could load
+        # an older JSON snapshot and overwrite a just-added favorite.
+        with _PREFS_LOCK:
+            prefs = _load_for_user(user)
+            prefs[key] = body.get("value")
+            _save_for_user(user, prefs)
+            value = prefs[key]
+        return {"key": key, "value": value}
 
     @router.get("/model-favorites/snapshot")
     async def model_favorites_snapshot(request: Request):
-        user = get_current_user(request)
+        user = _favorites_owner(request)
         value = _load_for_user(user).get(_MODEL_FAVORITES_KEY, {})
         if not isinstance(value, dict):
             value = {}
@@ -135,7 +148,7 @@ def setup_prefs_routes():
 
     @router.post("/model-favorites/toggle")
     async def model_favorites_toggle(request: Request, body: dict):
-        user = get_current_user(request)
+        user = _favorites_owner(request)
         key = str(body.get("key") or "")
         expected = body.get("expected_revision")
         favorite = bool(body.get("favorite"))

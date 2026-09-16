@@ -395,15 +395,24 @@ class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
         # One shared connect budget: each attempt gets the time left until the
         # original deadline, so N dead addresses can't stretch the connect
         # phase to N * timeout.
+        if not self._ips:
+            raise httpcore.ConnectError("No validated address available")
         deadline = None if timeout is None else time.monotonic() + timeout
         last_exc: Optional[Exception] = None
-        for ip in self._ips:
+        for index, ip in enumerate(self._ips):
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            # Reserve a fair slice for every not-yet-tried validated address.
+            # A dead IPv6/loopback route can otherwise consume the complete
+            # httpcore deadline and prevent a healthy A record from being
+            # tried at all (especially on dual-stack hosts).
+            if remaining is not None:
+                attempts_left = len(self._ips) - index
+                remaining = remaining / attempts_left
             try:
                 return await self._real.connect_tcp(
                     ip, port, remaining, local_address, socket_options
                 )
-            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+            except (httpcore.ConnectError, httpcore.ConnectTimeout, httpcore.NetworkError) as exc:
                 last_exc = exc
                 if deadline is not None and time.monotonic() >= deadline:
                     break

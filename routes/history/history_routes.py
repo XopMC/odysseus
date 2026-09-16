@@ -396,7 +396,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
         except Exception as e:
             logger.error(f"Truncate error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Truncate failed")
 
     @router.post("/api/session/{session_id}/message")
     async def add_message(request: Request, session_id: str):
@@ -477,7 +477,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
         except Exception as e:
             logger.error(f"Delete messages error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Message deletion failed")
 
     @router.post("/api/session/{session_id}/edit-message")
     async def edit_message(request: Request, session_id: str):
@@ -532,7 +532,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise
         except Exception as e:
             logger.error(f"Edit message error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Message edit failed")
 
     @router.post("/api/session/{session_id}/mark-stopped")
     async def mark_stopped(request: Request, session_id: str):
@@ -587,7 +587,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
         except Exception as e:
             logger.error(f"Mark stopped error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Could not mark the message as stopped")
 
     @router.post("/api/session/{session_id}/update-last-meta")
     async def update_last_meta(request: Request, session_id: str):
@@ -638,7 +638,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
         except Exception as e:
             logger.error(f"Update last meta error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Could not update message metadata")
 
     @router.post("/api/session/{session_id}/merge-last-assistant")
     async def merge_last_assistant(request: Request, session_id: str):
@@ -727,7 +727,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
         except Exception as e:
             logger.error(f"Merge assistant error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Could not merge assistant messages")
 
     @router.post("/api/session/{session_id}/fork")
     async def fork_session(request: Request, session_id: str):
@@ -786,7 +786,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise
         except Exception as e:
             logger.error(f"Fork error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Could not fork the session")
 
     @router.get("/api/conversations/topics")
     async def get_conversation_topics(request: Request) -> Dict[str, Any]:
@@ -795,7 +795,8 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         try:
             return analyze_topics(session_manager, owner=user or None)
         except Exception as e:
-            raise HTTPException(500, f"Topic analysis failed: {e}")
+            logger.error("Topic analysis failed", exc_info=True)
+            raise HTTPException(500, "Topic analysis failed")
 
     @router.get("/api/session/{session_id}/context")
     async def get_session_context_usage(request: Request, session_id: str) -> Dict[str, Any]:
@@ -814,10 +815,14 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             messages = session.get_context_messages()
             stored_used = int(estimate_tokens(messages))
             active = is_active(session_id)
-            snapshot = get_context_usage(session_id)
+            # Include the just-terminal detached run.  Its exact request
+            # ledger is still authoritative during approval/Stop/error
+            # persistence; falling back immediately to stored-chat tokens can
+            # falsely jump from e.g. 40% to 7% without compaction.
+            snapshot = get_context_usage(session_id, include_terminal=True)
             if snapshot and not _context_route_matches(snapshot, session):
                 snapshot = None
-            status = "active_request" if snapshot else "stored_chat"
+            status = ("active_request" if active else "last_request") if snapshot else "stored_chat"
             if not active and snapshot is None:
                 snapshot = _last_request_context(session)
                 if snapshot:
@@ -891,6 +896,8 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "prompt_tokens": snapshot.get("prompt_tokens") if snapshot else None,
                 "round": snapshot.get("round") if snapshot else None,
                 "compactions": snapshot.get("compactions", 0) if snapshot else 0,
+                "context_revision": snapshot.get("context_revision") if snapshot else None,
+                "context_reason": snapshot.get("context_reason") if snapshot else None,
                 "messages": visible_messages,
                 "context_messages": len(messages),
                 "compacted_messages": compacted_messages,
@@ -909,7 +916,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             }
         except Exception as e:
             logger.error(f"Context usage error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Context usage unavailable")
 
     @router.post("/api/session/{session_id}/compact")
     async def compact_session(request: Request, session_id: str):
@@ -1010,6 +1017,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
         except Exception as e:
             logger.error(f"Manual compact error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Context compaction failed")
 
     return router

@@ -37,10 +37,13 @@ def setup_project_routes():
         response = await call(body['host_id'], 'file.call', {
             'tool': 'ls', 'cwd': path, 'content': {'path': path},
         }, owner=owner, scope='project-folder-picker')
-        if not response.get('ok'):
+        # Host-runner may return a transport-level OK while the tool itself
+        # failed. Never present that as a valid folder listing.
+        result = response.get('result') if isinstance(response.get('result'), dict) else {}
+        if not response.get('ok') or result.get('exit_code', 0) != 0:
             raise HTTPException(409, 'Directory is unavailable or unreadable')
         entries = []
-        for item in response.get('result', {}).get('entries', []):
+        for item in result.get('entries', []):
             child = item.get('path')
             if item.get('is_dir') and isinstance(child, str) and posixpath.dirname(child) == path:
                 entries.append({'name': item.get('name') or posixpath.basename(child), 'path': child})
@@ -89,6 +92,24 @@ def setup_project_routes():
         rows = store.list_memory(owner, project_id, after_id=after_id, limit=limit)
         return {'items': rows, 'next_cursor': rows[-1]['id'] if len(rows) == limit else None}
 
+    @router.post('/{project_id}/memory')
+    async def save_memory(project_id: str, request: Request):
+        owner, store = context(request, mutation=True)
+        body = await body_object(request, 24576)
+        required = {'memory_id', 'kind', 'text', 'source', 'state', 'expected_revision', 'confirmation'}
+        if set(body) != required:
+            raise HTTPException(400, 'Exact project-memory fields and revision required')
+        return store.save_memory(owner, project_id, **body)
+
+    @router.delete('/{project_id}/memory/{memory_id}')
+    async def delete_memory(project_id: str, memory_id: str, request: Request):
+        owner, store = context(request, mutation=True)
+        body = await body_object(request, 1024)
+        if set(body) != {'expected_revision', 'confirmation'}:
+            raise HTTPException(400, 'Exact project-memory deletion confirmation and revision required')
+        store.delete_memory(owner, project_id, memory_id, **body)
+        return {'deleted': True}
+
     @router.get('/{project_id}/skills')
     async def skills(project_id: str, request: Request, after_id: str = '', limit: int = 100):
         owner, store = context(request)
@@ -117,7 +138,8 @@ def setup_project_routes():
             'tool': 'ls', 'cwd': project['root'],
             'content': {'path': '.odysseus/skills'}, 'model_policy': policy,
         }, owner=owner, scope='project-skill-import-' + project_id)
-        if not listing.get('ok'):
+        listing_result = listing.get('result') if isinstance(listing.get('result'), dict) else {}
+        if not listing.get('ok') or listing_result.get('exit_code', 0) != 0:
             raise HTTPException(409, 'Project skill directory is unavailable')
         existing = {row['name']: row for row in store.list_skills(owner, project_id, limit=200)}
         imported = []
@@ -149,5 +171,25 @@ def setup_project_routes():
         owner, store = context(request, mutation=True)
         store.delete_skill(owner, project_id, skill_id, expected_revision=expected_revision)
         return {'deleted': True}
+
+    @router.post('/{project_id}/skills/{skill_id}/toggle')
+    async def toggle_skill(project_id: str, skill_id: str, request: Request):
+        owner, store = context(request, mutation=True)
+        body = await body_object(request, 2048)
+        if set(body) != {'enabled', 'expected_revision'} or not isinstance(body['enabled'], bool):
+            raise HTTPException(400, 'Exact skill state and revision required')
+        store.initialize()
+        with store.team._tx() as db:
+            store._project(db, owner, project_id)
+            row = db.execute('SELECT * FROM engineering_project_skills WHERE id=? AND project_id=? AND owner=?', (skill_id, project_id, owner)).fetchone()
+            if row is None:
+                raise HTTPException(404, 'Project skill not found')
+            if row['revision'] != body['expected_revision']:
+                raise HTTPException(409, 'Project skill changed; reload before updating')
+            now = store.team.clock()
+            db.execute('UPDATE engineering_project_skills SET enabled=?,revision=revision+1,updated_at=? WHERE id=?', (1 if body['enabled'] else 0, now, skill_id))
+            store._event(db, project_id, 'project_skill_saved', {'skill_id': skill_id, 'enabled': body['enabled']})
+            result = db.execute('SELECT id,project_id,owner,name,source,digest,enabled,revision,created_at,updated_at FROM engineering_project_skills WHERE id=?', (skill_id,)).fetchone()
+            return dict(result)
 
     return router

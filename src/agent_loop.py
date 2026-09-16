@@ -75,6 +75,23 @@ from src.agent_tools import (
 
 logger = logging.getLogger(__name__)
 
+
+def _trim_context_compat(trim_fn, messages, context_length, **kwargs):
+    """Preserve compatibility with legacy trimmer callables.
+
+    Production ``trim_for_context`` supports strict protected-context
+    enforcement.  A few integrations still expose the old two-argument
+    callable; retry only when the failure explicitly identifies that keyword
+    as unsupported, and never mask unrelated TypeErrors.
+    """
+    try:
+        return trim_fn(messages, context_length, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'strict_protected'" not in str(exc):
+            raise
+        kwargs.pop("strict_protected", None)
+        return trim_fn(messages, context_length, **kwargs)
+
 _BROWSER_MCP_PREFIX = "mcp__builtin_browser__"
 
 
@@ -4424,10 +4441,12 @@ async def stream_agent_loop(
                 budget_is_explicit,
                 hard_max=hard_max,
             )
-            trimmed_messages = trim_for_context(
+            trimmed_messages = _trim_context_compat(
+                trim_for_context,
                 route_messages,
                 effective_budget,
                 reserve_tokens=reserve_tokens,
+                strict_protected=True,
             )
             after_trim_tokens = estimate_tokens(trimmed_messages)
             if after_trim_tokens < before_trim_tokens:
@@ -4442,6 +4461,9 @@ async def stream_agent_loop(
                 )
             return _without_protection(trimmed_messages)
         except Exception as e:
+            from src.context_compactor import ProtectedContextTooLarge
+            if isinstance(e, ProtectedContextTooLarge):
+                raise
             logger.warning(
                 "[agent] Soft context trim skipped for route model=%s: %s",
                 candidate_model,

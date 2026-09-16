@@ -18,6 +18,15 @@ from core.models import ChatMessage
 logger = logging.getLogger(__name__)
 
 
+class ProtectedContextTooLarge(ValueError):
+    """Raised when pinned model-visible evidence cannot fit the window.
+
+    Silently dropping a pinned document/tool ledger is worse than refusing the
+    request: the canonical transcript remains intact and the UI can ask the
+    user to choose a larger-context route or reduce the attachment.
+    """
+
+
 def _content_as_text(content: Any) -> str:
     """Flatten a message's content to plain text.
 
@@ -221,7 +230,13 @@ def _truncate_message_to_token_budget(msg: Dict[str, Any], token_budget: int) ->
     return _truncate_tool_call_args(out, token_budget)
 
 
-def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: int = 512) -> List[Dict]:
+def trim_for_context(
+    messages: List[Dict],
+    context_length: int,
+    reserve_tokens: int = 512,
+    *,
+    strict_protected: bool = False,
+) -> List[Dict]:
     """Trim system messages to fit within context_length.
 
     For small-context models, progressively strips:
@@ -249,8 +264,25 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
         else:
             convo_msgs.append(msg)
 
-    # Protected messages count toward budget but are never dropped
+    # Research-spinoff reports are intentionally user-role untrusted data, not
+    # system instructions.  Keep them pinned during budget trimming anyway:
+    # they are the only knowledge base for that discussion and dropping them
+    # would silently turn a grounded follow-up into a guess.
+    research_convo = [m for m in convo_msgs if (m.get("metadata") or {}).get("research_spinoff_from")]
+    if research_convo:
+        protected_msgs.extend(research_convo)
+        convo_msgs = [m for m in convo_msgs if m not in research_convo]
+
+    # Protected messages count toward budget but are never dropped.  In strict
+    # agent mode an oversized pinned document is a hard, explicit refusal; a
+    # partially truncated document would make the model believe it saw the
+    # complete evidence and could lead to unsafe edits.
     protected_tokens = estimate_tokens(protected_msgs)
+    total_budget = max(0, context_length - reserve_tokens)
+    if protected_tokens > total_budget and strict_protected:
+        raise ProtectedContextTooLarge(
+            "Pinned context exceeds the model context window; choose a larger window or reduce the document."
+        )
     budget -= protected_tokens
 
     # Priority: keep first system msg (preset prompt), drop others (memory, RAG, memo).

@@ -273,7 +273,11 @@ class Runner:
     def _kill(proc, sig=signal.SIGKILL):
         try:
             os.killpg(proc.pid, sig)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # The child may have exited/reaped between ``poll`` and the
+            # group-kill (or the test/runner may run under a different UID).
+            # Treat that as already stopped; the monitor still records the
+            # terminal state and removes the process entry.
             pass
 
     def _monitor(self, identity):

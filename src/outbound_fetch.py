@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import ssl
+import time
 from typing import Callable, Iterable, cast
 from urllib.parse import urljoin, urlparse
 
@@ -117,10 +118,16 @@ def _resolve_public_ips(
 
 
 class _PinnedBackend(httpcore.NetworkBackend):
-    """Network backend that connects to a pre-resolved IP."""
+    """Network backend that connects to pre-resolved IPs in order.
 
-    def __init__(self, ip: ipaddress._BaseAddress):
-        self._ip = str(ip)
+    The complete validated set is retained so a dead first DNS answer does
+    not make an otherwise healthy multi-address endpoint fail.
+    """
+
+    def __init__(self, ips: ipaddress._BaseAddress | list[ipaddress._BaseAddress]):
+        if isinstance(ips, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            ips = [ips]
+        self._ips = [str(ip) for ip in ips]
         self._real = httpcore.SyncBackend()
 
     def connect_tcp(
@@ -131,9 +138,19 @@ class _PinnedBackend(httpcore.NetworkBackend):
         local_address: str | None = None,
         socket_options=None,
     ):
-        return self._real.connect_tcp(
-            self._ip, port, timeout, local_address, socket_options
-        )
+        deadline = None if timeout is None else time.monotonic() + timeout
+        last_exc = None
+        for index, ip in enumerate(self._ips):
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if remaining is not None:
+                remaining /= max(1, len(self._ips) - index)
+            try:
+                return self._real.connect_tcp(ip, port, remaining, local_address, socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout, httpcore.NetworkError) as exc:
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        raise httpcore.ConnectError("No validated address available")
 
     def connect_unix_socket(self, path, timeout=None, socket_options=None):
         return self._real.connect_unix_socket(path, timeout, socket_options)
@@ -163,12 +180,12 @@ _HTTPCORE_TO_HTTPX_EXC = {
 class _PinnedTransport(httpx.BaseTransport):
     """Transport that pins every TCP connect to a pre-resolved IP."""
 
-    def __init__(self, ip: ipaddress._BaseAddress, *, http2: bool = False):
+    def __init__(self, ips: ipaddress._BaseAddress | list[ipaddress._BaseAddress], *, http2: bool = False):
         self._pool = httpcore.ConnectionPool(
             ssl_context=ssl.create_default_context(),
             http1=True,
             http2=http2,
-            network_backend=_PinnedBackend(ip),
+            network_backend=_PinnedBackend(ips),
         )
 
     def __enter__(self):
@@ -292,7 +309,10 @@ def _get_public_url(
             headers=req_headers,
             timeout=timeout,
             follow_redirects=False,
-            transport=transport_factory(ips[0]),
+            # Pass the entire DNS-validated set. A transport must never
+            # re-resolve the hostname, but it may safely try another address
+            # from this same validated set after a connection refusal.
+            transport=transport_factory(ips),
         ) as client:
             with client.stream("GET", current) as response:
                 if response.status_code in (301, 302, 303, 307, 308):

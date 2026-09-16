@@ -52,6 +52,43 @@ from src.owner_identity import RESERVED_AUTH_USERNAMES
 DEFAULT_AUTH_PATH = AUTH_FILE
 TOKEN_TTL = 60 * 60 * 24 * 7  # 7 days
 
+# Keep HTTP and HTTPS sessions separate.  This is intentional for deployments
+# which expose both schemes without redirecting: a non-Secure cookie must not
+# be sent as the credential for a TLS request, and a TLS credential must never
+# be sent over cleartext.  ``SESSION_COOKIE`` remains the legacy name so old
+# clients can migrate without being logged out.
+SESSION_COOKIE = "odysseus_session"
+SESSION_COOKIE_HTTP = "odysseus_session_http"
+SESSION_COOKIE_HTTPS = "odysseus_session_https"
+SESSION_COOKIE_NAMES = (SESSION_COOKIE_HTTP, SESSION_COOKIE_HTTPS, SESSION_COOKIE)
+CSRF_COOKIE_HTTP = "odysseus_csrf_http"
+CSRF_COOKIE_HTTPS = "odysseus_csrf_https"
+
+
+def request_scheme(request) -> str:
+    """Return the externally visible request scheme behind common proxies."""
+    headers = getattr(request, "headers", {}) or {}
+    forwarded = str(headers.get("x-forwarded-proto", "")).split(",", 1)[0]
+    url = getattr(request, "url", None)
+    scheme = getattr(url, "scheme", "http")
+    return "https" if (scheme == "https" or forwarded.strip().lower() == "https") else "http"
+
+
+def session_cookie_for_request(request) -> str:
+    """Select the scheme-specific cookie, never the other scheme's token."""
+    return SESSION_COOKIE_HTTPS if request_scheme(request) == "https" else SESSION_COOKIE_HTTP
+
+
+def csrf_cookie_for_request(request) -> str:
+    return CSRF_COOKIE_HTTPS if session_cookie_for_request(request) == SESSION_COOKIE_HTTPS else CSRF_COOKIE_HTTP
+
+
+def csrf_request_valid(request) -> bool:
+    """Validate the double-submit token for a mutating browser request."""
+    expected = request.cookies.get(csrf_cookie_for_request(request))
+    supplied = request.headers.get("x-odysseus-csrf", "")
+    return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+
 # Usernames the auth + middleware layer reserves for request sentinels and
 # internal storage owners; they must never belong to a real login account.
 # "internal-tool" is the most dangerous because `core.middleware.require_admin`

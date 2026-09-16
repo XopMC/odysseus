@@ -6,13 +6,18 @@ from typing import Optional
 import asyncio
 import logging
 import os
+import secrets
 
 import json
 import re
 from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
-from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
+from core.auth import (
+    AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL,
+    SESSION_COOKIE, SESSION_COOKIE_HTTP, SESSION_COOKIE_HTTPS,
+    SESSION_COOKIE_NAMES, session_cookie_for_request,
+)
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
@@ -83,19 +88,26 @@ class SetAdminRequest(BaseModel):
 class SetOpenRegistrationRequest(BaseModel):
     enabled: bool
 
-SESSION_COOKIE = "odysseus_session"
+CSRF_COOKIE_HTTP = "odysseus_csrf_http"
+CSRF_COOKIE_HTTPS = "odysseus_csrf_https"
+
+
+def _csrf_cookie_for_request(request: Request) -> str:
+    return CSRF_COOKIE_HTTPS if session_cookie_for_request(request) == SESSION_COOKIE_HTTPS else CSRF_COOKIE_HTTP
+
+
+def _session_token_for_request(request: Request) -> Optional[str]:
+    """Read the current scheme token, with one-way legacy compatibility."""
+    return request.cookies.get(session_cookie_for_request(request)) or request.cookies.get(SESSION_COOKIE)
 
 
 def _secure_cookie(request: Request) -> bool:
     """Decide the ``Secure`` attribute of the session cookie.
 
-    ``SECURE_COOKIES`` stays authoritative when it holds an explicit value:
-    ``true`` always marks the cookie Secure (the documented knob for a TLS
-    proxy), ``false`` never does, which is the escape hatch for an install
-    that still answers on plain HTTP alongside HTTPS. Anything else —
-    unset, or the present-but-empty value docker-compose injects for a
-    variable the host has not defined — derives it from the request, so an
-    HTTPS login gets a Secure cookie without any configuration.
+    HTTPS is always Secure now that HTTP and HTTPS use separate cookie names.
+    ``SECURE_COOKIES=true`` can still force Secure on a plain-HTTP proxy; an
+    explicit ``false`` only affects the HTTP cookie and can no longer weaken a
+    TLS response.
 
     Either the connection scheme or ``X-Forwarded-Proto`` saying https is
     enough, which is the same test ``core/middleware.py`` applies before it
@@ -105,12 +117,11 @@ def _secure_cookie(request: Request) -> bool:
     that a client talking to the app directly can set the header and lock
     its own session out over plain HTTP.
     """
-    configured = os.getenv("SECURE_COOKIES", "").strip().lower()
-    if configured in ("true", "false"):
-        return configured == "true"
     # A chained proxy sends a list — the client-facing hop comes first.
     forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0]
-    return request.url.scheme == "https" or forwarded_proto.strip().lower() == "https"
+    is_https = request.url.scheme == "https" or forwarded_proto.strip().lower() == "https"
+    configured = os.getenv("SECURE_COOKIES", "").strip().lower()
+    return is_https or configured == "true"
 
 
 def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
@@ -121,7 +132,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     _setup_limiter = RateLimiter(max_requests=3, window_seconds=300)
 
     def _get_current_user(request: Request) -> Optional[str]:
-        token = request.cookies.get(SESSION_COOKIE)
+        # Prefer the credential for the current external scheme.  The legacy
+        # cookie is accepted only as a migration fallback for old clients.
+        token = _session_token_for_request(request)
         return auth_manager.get_username_for_token(token)
 
     @router.post("/setup")
@@ -182,7 +195,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if not token:
             raise HTTPException(401, "Invalid credentials")
         cookie_kwargs = dict(
-            key=SESSION_COOKIE,
+            key=session_cookie_for_request(request),
             value=token,
             httponly=True,
             samesite="lax",
@@ -192,19 +205,59 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if body.remember:
             cookie_kwargs["max_age"] = TOKEN_TTL
         response.set_cookie(**cookie_kwargs)
+        # Double-submit CSRF token is scoped to the same scheme as the
+        # session. It is deliberately readable by the browser and is not an
+        # Origin allowlist: remote browsers may manage the account equally.
+        csrf_kwargs = dict(
+            key=_csrf_cookie_for_request(request),
+            value=secrets.token_urlsafe(32),
+            httponly=False,
+            samesite="lax",
+            secure=_secure_cookie(request),
+            path="/",
+        )
+        if body.remember:
+            csrf_kwargs["max_age"] = TOKEN_TTL
+        response.set_cookie(**csrf_kwargs)
+        # Retire the old shared cookie after a successful login. Existing
+        # sessions remain valid through the fallback until the next login.
+        if hasattr(response, "delete_cookie"):
+            response.delete_cookie(SESSION_COOKIE, path="/")
         return {"ok": True, "username": username}
 
     @router.post("/logout")
     async def logout(request: Request, response: Response):
-        token = request.cookies.get(SESSION_COOKIE)
-        if token:
-            auth_manager.revoke_token(token)
-        response.delete_cookie(SESSION_COOKIE, path="/")
+        for cookie_name in SESSION_COOKIE_NAMES:
+            token = request.cookies.get(cookie_name)
+            if token:
+                auth_manager.revoke_token(token)
+            response.delete_cookie(cookie_name, path="/")
+        response.delete_cookie(CSRF_COOKIE_HTTP, path="/")
+        response.delete_cookie(CSRF_COOKIE_HTTPS, path="/")
         return {"ok": True}
+
+    @router.get("/csrf")
+    async def csrf_token(request: Request, response: Response):
+        """Return the owner-scoped browser mutation token for this scheme.
+
+        The token is a double-submit value, not an Origin restriction. This
+        keeps account controls usable from a phone or another browser while
+        preventing a cross-site form from replaying a session cookie.
+        """
+        user = _get_current_user(request)
+        if not user:
+            raise HTTPException(401, "Not authenticated")
+        name = _csrf_cookie_for_request(request)
+        token = request.cookies.get(name) or secrets.token_urlsafe(32)
+        response.set_cookie(
+            key=name, value=token, httponly=False, samesite="lax",
+            secure=_secure_cookie(request), path="/", max_age=TOKEN_TTL,
+        )
+        return {"csrf_token": token, "scheme": "https" if name == CSRF_COOKIE_HTTPS else "http"}
 
     @router.get("/status")
     async def auth_status(request: Request):
-        token = request.cookies.get(SESSION_COOKIE)
+        token = _session_token_for_request(request)
         result = auth_manager.status(token)
         result["signup_enabled"] = auth_manager.signup_enabled
         # Include the caller's effective privileges so the frontend can
@@ -231,7 +284,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(401, "Not authenticated")
         if len(body.new_password) < PASSWORD_MIN_LENGTH:
             raise HTTPException(400, f"Password must be at least {PASSWORD_MIN_LENGTH} characters")
-        current_token = request.cookies.get(SESSION_COOKIE)
+        current_token = _session_token_for_request(request)
         ok = await asyncio.to_thread(auth_manager.change_password, user, body.current_password, body.new_password)
         if not ok:
             raise HTTPException(400, "Current password is incorrect")

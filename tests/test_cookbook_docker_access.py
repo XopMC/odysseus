@@ -1,4 +1,7 @@
 import socket
+import tempfile
+import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -59,7 +62,7 @@ async def test_container_cli_only_is_rejected(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch, tmp_path):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
-    socket_path = tmp_path / "docker.sock"
+    socket_path = Path(tempfile.gettempdir()) / f"odysseus-{uuid.uuid4().hex}.sock"
 
     with socket.socket(socket.AF_UNIX) as unix_socket:
         unix_socket.bind(str(socket_path))
@@ -73,6 +76,7 @@ async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch, tmp_pat
         )
 
     assert available is True
+    socket_path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio

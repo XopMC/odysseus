@@ -8,6 +8,7 @@ read complete frames but must report an unfinished run as interrupted.
 """
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ MAX_EVENT_BYTES = 2 * 1024 * 1024
 MAX_RUN_BYTES = 256 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 RETENTION_SECONDS = 7 * 24 * 3600
+logger = logging.getLogger(__name__)
 
 
 class ReplayLimitError(OSError):
@@ -52,6 +54,12 @@ class ReplayLog:
         if meta.get('session_hash') != self.session_hash:
             raise FileNotFoundError('Replay not found')
         self.metadata = meta
+        # Keep an O(1) running total for append-time quota checks.  The old
+        # implementation walked every artifact on every SSE event, which made
+        # long runs progressively slower as the replay directory grew.
+        self._total_bytes = sum(
+            p.stat().st_size for p in self.root.iterdir() if p.is_file()
+        )
 
     def path(self, suffix):
         return self.base.with_suffix(suffix)
@@ -67,7 +75,14 @@ class ReplayLog:
         for path in self.root.glob('*.json'):
             if not re.fullmatch(r'[0-9a-f]{32}', path.stem):
                 continue
-            meta = json.loads(path.read_text())
+            try:
+                meta = json.loads(path.read_text())
+            except (OSError, TypeError, ValueError):
+                # A torn/corrupt sidecar must not prevent a new chat run from
+                # starting.  Keep it for operator inspection; only prune
+                # artifacts whose terminal metadata is valid.
+                logger.warning("Skipping corrupt replay metadata: %s", path)
+                continue
             if (meta.get('status') in ('done', 'error', 'stopped') and
                     time.time() - meta.get('updated_at', time.time()) > RETENTION_SECONDS):
                 for suffix in ('.events', '.index', '.json'):
@@ -101,14 +116,14 @@ class ReplayLog:
             raise ReplayLimitError('Replay run exceeds storage limit')
         # Enforce a global ceiling including abandoned/crashed artifacts. These
         # are not silently discarded; an operator can inspect them first.
-        total = sum(p.stat().st_size for p in self.root.iterdir() if p.is_file())
-        if total + len(raw) + 16 > MAX_TOTAL_BYTES:
+        if self._total_bytes + len(raw) + 16 > MAX_TOTAL_BYTES:
             raise ReplayLimitError('Replay storage is full')
         with self.path('.events').open('ab', buffering=0) as data:
             data.write(_WORD.pack(len(raw)) + raw)
         # Publish the index only after the complete event frame was written.
         with self.path('.index').open('ab', buffering=0) as index:
             index.write(_WORD.pack(offset))
+        self._total_bytes += len(raw) + _WORD.size
 
     def checkpoint(self, status):
         if status not in ('done', 'error', 'stopped'):

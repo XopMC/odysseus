@@ -304,6 +304,29 @@ class ChatWorkEvent(Base):
     __table_args__ = (Index("ix_chat_work_events_cursor", "owner", "session_id", "id"),)
 
 
+class ChatRunState(TimestampMixin, Base):
+    """Durable identity and last checkpoint for a detached chat run.
+
+    Replay frames remain in the bounded artifact store; this row lets a fresh
+    web process discover the owner/session/run relationship without guessing a
+    session from an opaque replay filename.  It contains no provider secrets.
+    """
+    __tablename__ = "chat_run_states"
+    run_id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="running", index=True)
+    started_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    terminal_at = Column(DateTime, nullable=True)
+    last_seq = Column(Integer, nullable=False, default=-1)
+    durable_seq = Column(Integer, nullable=False, default=-1)
+    context_revision = Column(Integer, nullable=False, default=0)
+    ledger_hash = Column(String, nullable=True)
+    context_snapshot = Column(JSON, nullable=True)
+    continuation = Column(JSON, nullable=True)
+    __table_args__ = (Index("ix_chat_run_states_owner_session", "owner", "session_id", "updated_at"),)
+
+
 class ChatMessage(Base):
     """
     SQLAlchemy model for ChatMessage table.

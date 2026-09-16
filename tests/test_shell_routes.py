@@ -7,6 +7,8 @@ import json
 import os
 import socket
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -297,7 +299,7 @@ class TestHostDockerAccess:
         tmp_path,
         flag,
     ):
-        socket_path = tmp_path / "docker.sock"
+        socket_path = Path(tempfile.gettempdir()) / f"odysseus-{uuid.uuid4().hex}.sock"
         with socket.socket(socket.AF_UNIX) as unix_socket:
             unix_socket.bind(str(socket_path))
             if flag is None:
@@ -306,18 +308,20 @@ class TestHostDockerAccess:
                 monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", flag)
 
             assert _host_docker_access_enabled(str(socket_path)) is False
+        socket_path.unlink(missing_ok=True)
 
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
         monkeypatch,
         tmp_path,
     ):
-        socket_path = tmp_path / "docker.sock"
+        socket_path = Path(tempfile.gettempdir()) / f"odysseus-{uuid.uuid4().hex}.sock"
         with socket.socket(socket.AF_UNIX) as unix_socket:
             unix_socket.bind(str(socket_path))
             monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
 
             assert _host_docker_access_enabled(str(socket_path)) is True
+        socket_path.unlink(missing_ok=True)
 
 
 class TestPackageProbeStatus:

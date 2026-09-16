@@ -111,6 +111,12 @@ def setup_chat_work_routes():
         body = await _json(request)
         if set(body) != {"expected_revision"}:
             raise HTTPException(400, "Exact plan revision required")
+        if action == "cancel":
+            from src import agent_runs
+            run = agent_runs.describe_run(session_id)
+            if run and run.get("status") == "running":
+                if not await agent_runs.stop_and_wait(session_id, run["run_id"]):
+                    raise HTTPException(409, "The current plan attempt is still stopping; retry shortly")
         try:
             return store.plan_action(owner, session_id, action, body["expected_revision"])
         except WorkConflict as exc:
@@ -130,18 +136,20 @@ def setup_chat_work_routes():
         body = await _json(request)
         if set(body) != {"expected_revision"}:
             raise HTTPException(400, "Exact goal revision required")
+        # Stop the exact detached attempt before changing durable Goal state.
+        # Otherwise a slow run can publish progress after Cancel/Pause and
+        # resurrect the goal on another browser.
+        if action in {"pause", "cancel"}:
+            from src import agent_runs
+            run = agent_runs.describe_run(session_id)
+            if run and run["status"] == "running":
+                stopped = await agent_runs.stop_and_wait(session_id, run["run_id"])
+                if not stopped:
+                    raise HTTPException(409, "The current attempt is still stopping; retry shortly")
         try:
             goal = store.goal_action(owner, session_id, action, body["expected_revision"])
         except WorkConflict as exc:
             raise HTTPException(409, str(exc)) from None
-        if action == "pause":
-            from src import agent_runs
-            run = agent_runs.describe_run(session_id)
-            if run and run["status"] == "running":
-                # Return only after the partial assistant turn, timeline and
-                # model-visible context snapshot are durable. The UI refreshes
-                # context as soon as this request resolves.
-                await agent_runs.stop_and_wait(session_id, run["run_id"])
         return goal
 
     @router.post("/{session_id}/goal-revise")
@@ -156,7 +164,11 @@ def setup_chat_work_routes():
         if active_id and body["run_id"] != active_id:
             raise HTTPException(409, "Active run changed; reload")
         if active_id:
-            agent_runs.stop(session_id, active_id)
+            # Wait for the exact attempt to persist its terminal snapshot
+            # before changing the objective and starting a continuation.
+            stopped = await agent_runs.stop_and_wait(session_id, active_id)
+            if not stopped:
+                raise HTTPException(409, "The current attempt is still stopping; retry shortly")
         goal = store.revise_goal(owner, session_id, body["objective"], body["expected_revision"])
         return goal
 

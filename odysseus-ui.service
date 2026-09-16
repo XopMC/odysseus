@@ -13,6 +13,8 @@ ExecStart=/home/YOURUSER/odysseus-ui/venv/bin/uvicorn app:app --port 7000 --host
 Restart=always
 RestartSec=3
 EnvironmentFile=-/home/YOURUSER/odysseus-ui/.env
+# Keep detached runs and the complete timeline across tab/process restarts.
+Environment=ODYSSEUS_DURABLE_CHAT_REPLAY=1
 
 [Install]
 WantedBy=multi-user.target

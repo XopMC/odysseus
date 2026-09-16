@@ -661,8 +661,11 @@ class GlobTool:
                             matched.append((mtime, full))
                     if len(matched) > cap:
                         break
-            except OSError as _e:
-                return None, f"glob: {_e}"
+            except OSError:
+                # Do not echo the model-supplied pattern or OS path. Besides
+                # leaking host layout, an escaping glob can turn this error
+                # into a path-existence oracle.
+                return None, "glob: unable to enumerate requested files"
             matched.sort(key=lambda t: t[0], reverse=True)
             return [pth for _, pth in matched[:_CODENAV_MAX_HITS]], None
 
@@ -670,7 +673,10 @@ class GlobTool:
         if err:
             return {"error": err, "exit_code": 1}
         if not paths:
-            return {"output": f"No files matching {pattern!r} under {root}", "exit_code": 0}
+            # Patterns may contain absolute paths or sensitive fragments.
+            # Keep the stable user-facing prefix for compatibility, but never
+            # reflect attacker-controlled path text back into the transcript.
+            return {"output": "No files matching the requested pattern", "exit_code": 0}
         out = "\n".join(paths)
         if len(paths) >= _CODENAV_MAX_HITS:
             out += f"\n... [capped at {_CODENAV_MAX_HITS} files]"

@@ -87,9 +87,9 @@ explicitly.
   reviewed check commands, acceptance criteria, tool availability diagnostics,
   configurable context-compaction policies, and a read-only LSP discovery
   panel. Language-server availability is reported per execution host; the
-  Jetson release includes user-level Python/Pyright, TypeScript, C/C++, Swift,
-  Go, Rust and Solidity toolchains. Discovery reports only servers that the
-  persistent runner can actually start.
+  runner advertises only toolchains it can actually start (the current Jetson
+  baseline is Python/Pyright, with other languages shown as unavailable until
+  installed and verified).
 - **Reviewed Team MCP** — the owner can inspect an exact current MCP schema in
   the engineering UI and explicitly enable only public/brokered read access
   for selected Team roles. Every grant is owner-scoped, revision-bound and can
@@ -104,6 +104,9 @@ explicitly.
   to external models.
 - **Russian UI** — the shipped Team, engineering and context-policy panels are
   localized; endpoint labels in model selectors are not truncated.
+- **Context continuity** — approval, Stop, pause and provider errors retain the
+  last model-visible checkpoint; the displayed percentage cannot fall unless
+  an explicit compaction succeeds.
 
 ### Важно
 
@@ -117,9 +120,9 @@ explicitly.
 Мастер проектов проверяет папку на выбранном runner и не доверяет пути из
 браузера. Режим изоляции доступен только при подтверждённой поддержке runner;
 скрытого перехода к доверенному хосту нет.
-На Jetson проверены запуск и остановка LSP для Python, TypeScript, C/C++, Swift,
-Go, Rust и Solidity. Также реально собраны smoke-примеры C++, CUDA, Swift, Go,
-Rust и Solidity. Это не делает Linux-устройство заменой Mac: Xcode и Metal-профили
+На Jetson UI показывает только языковые серверы и toolchain, которые фактически
+установлены и прошли smoke-проверку. Отсутствующие Rust/Go/Swift/CUDA-профили
+помечаются как недоступные и не считаются работающими. Xcode и Metal-профили
 по-прежнему запускаются только на явно выбранном Mac-host.
 
 **Память проекта** хранит факты, источник и состояние проверки (`предложено`,
@@ -154,6 +157,10 @@ Rust и Solidity. Это не делает Linux-устройство замен
 `SKILL.md` из `.odysseus/skills/` изолированы по проекту; навыки являются
 недоверенным контекстом и не расширяют доступ к машине.
 
+HTTP и HTTPS работают одновременно без редиректа и без HSTS. Они используют
+раздельные cookies; HTTPS-cookie всегда `Secure`, а HTTP-сессия считается
+небезопасной для публичной сети.
+
 ### Important
 
 The extension is for operator-owned, trusted machines. Shell, file and network
@@ -165,9 +172,9 @@ on the selected host; its presence is not full IDE support.
 The project wizard validates the folder on the selected runner. Isolation is
 offered only when the runner reports verified support; there is no silent
 fallback to trusted-host execution.
-Jetson has verified LSP start/stop coverage for Python, TypeScript, C/C++, Swift,
-Go, Rust and Solidity, plus real C++, CUDA, Swift, Go, Rust and Solidity compiler smoke
-checks. This does not turn Linux into a Mac replacement: Xcode and Metal
+Jetson reports only language servers and toolchains that are installed and pass
+smoke checks. Missing Rust/Go/Swift/CUDA profiles are shown as unavailable, not
+as working. This does not turn Linux into a Mac replacement: Xcode and Metal
 profiles remain available only on an explicitly selected Mac execution host.
 
 Reviewed MCP tools are not treated as safe based on a description or
@@ -178,6 +185,10 @@ mutation, secret or host authority.
 Reviewed Browser MCP screenshots are retained as bounded, owner-scoped task
 artifacts in the Team evidence panel. They are untrusted evidence, not an
 automatic pass verdict for a task or UI check.
+
+HTTP and HTTPS intentionally remain available without an HSTS policy or redirect.
+They use separate session cookies; the HTTPS cookie is always Secure, while the
+HTTP session is suitable only for trusted/private networks.
 
 ## Demo
 

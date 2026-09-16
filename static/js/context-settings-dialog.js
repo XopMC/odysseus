@@ -26,18 +26,37 @@ export function openContextSettings({ getSessionId, fetchImpl = globalThis.fetch
   };
   closeCurrent = cleanup;
   close.addEventListener('click', cleanup); dialog.addEventListener('close', cleanup);
-  destroy = mountEngineeringWorkspace(root, { contextOnly: true, sessionId,
-    request: async (path, options = {}) => {
-      if (disposed || getSessionId() !== sessionId) throw new Error('Chat changed. Reopen context settings.');
-      const response = await fetchImpl(path, { ...options, credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }) });
-      const result = await response.json();
-      if (!response.ok) { const error = new Error(result.detail || 'Request failed'); error.status = response.status; throw error; }
-      if (!disposed && getSessionId() === sessionId && options.method === 'POST' && path === '/api/team/engineering/context-policy') onSaved();
-      return result;
-    } });
+  // Open the shell before mounting.  A synchronous mount/import failure must
+  // remain visible as an actionable dialog instead of making the button look
+  // dead (the old order never reached showModal()).
+  try {
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  } catch (error) {
+    console.error('[context-settings] dialog open failed:', error);
+    dialog.setAttribute('open', '');
+  }
+  try {
+    destroy = mountEngineeringWorkspace(root, { contextOnly: true, sessionId,
+      request: async (path, options = {}) => {
+        if (disposed || getSessionId() !== sessionId) throw new Error('Chat changed. Reopen context settings.');
+        const response = await fetchImpl(path, { ...options, credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }) });
+        const result = await response.json();
+        if (!response.ok) { const error = new Error(result.detail || 'Request failed'); error.status = response.status; throw error; }
+        if (!disposed && getSessionId() === sessionId && options.method === 'POST' && path === '/api/team/engineering/context-policy') onSaved();
+        return result;
+      } });
+  } catch (error) {
+    console.error('[context-settings] workspace mount failed:', error);
+    const message = document.createElement('p');
+    message.textContent = 'Context settings could not be loaded. Refresh the page and try again.';
+    bindUiText(message, 'Context settings could not be loaded. Refresh the page and try again.');
+    message.setAttribute('role', 'alert');
+    root.replaceChildren(message);
+  }
   timer = setInterval(() => { if (getSessionId() !== sessionId) cleanup(); }, 100);
-  dialog.showModal(); close.focus();
+  close.focus();
   return cleanup;
 }

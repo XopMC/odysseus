@@ -57,6 +57,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # dockerd but not the client binary on slim, so grab the static client
 # tarball from download.docker.com instead.
 ARG DOCKER_CLI_VERSION=29.6.2
+ARG DOCKER_CLI_SHA256_AMD64=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74
+ARG DOCKER_CLI_SHA256_ARM64=8d16d8b3b158c132a9fb9963d4b4345746f925e287e154c9ed880ac257baf292
 RUN ARCH="$(dpkg --print-architecture)" \
     && case "$ARCH" in \
          amd64) DARCH=x86_64 ;; \
@@ -65,6 +67,11 @@ RUN ARCH="$(dpkg --print-architecture)" \
        esac \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${DARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
        -o /tmp/docker.tgz \
+    && case "$ARCH" in \
+         amd64) expected="$DOCKER_CLI_SHA256_AMD64" ;; \
+         arm64) expected="$DOCKER_CLI_SHA256_ARM64" ;; \
+       esac \
+    && echo "$expected  /tmp/docker.tgz" | sha256sum -c - \
     && tar -xzf /tmp/docker.tgz -C /tmp \
     && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz

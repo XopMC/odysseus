@@ -22,6 +22,7 @@ import codeRunnerModule from './codeRunner.js';
 import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js?v=20260815approvalsave1';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
+import { createTimelineReducer } from './timelineReducer.js';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
 import {
   createIncrementalDisplayProjector,
@@ -246,9 +247,19 @@ import { bindUiText } from './i18n.js';
     settingsBtn.textContent = 'Context settings'; bindUiText(settingsBtn, 'Context settings');
     settingsBtn.addEventListener('click', async event => {
       event.stopPropagation(); _closeContextHeaderPopup();
-      const { openContextSettings } = await import('./context-settings-dialog.js');
-      openContextSettings({ getSessionId: () => sessionModule.getCurrentSessionId(),
-        onSaved: () => void refreshChatContextHeader('policy-saved') });
+      try {
+        const { openContextSettings } = await import('./context-settings-dialog.js');
+        openContextSettings({ getSessionId: () => sessionModule.getCurrentSessionId(),
+          onSaved: () => void refreshChatContextHeader('policy-saved') });
+      } catch (err) {
+        // Dynamic module failures used to leave the user with no dialog and
+        // no explanation (especially after a stale Service Worker deploy).
+        console.error('[context-settings] unable to open:', err);
+        try {
+          const ui = await import('./ui.js');
+          ui.showError?.('Context settings could not be opened. Refresh the page and try again.');
+        } catch (_) { window.alert?.('Context settings could not be opened. Refresh the page and try again.'); }
+      }
     });
     popup.appendChild(settingsBtn);
     if (d.can_compact) {
@@ -345,15 +356,34 @@ import { bindUiText } from './i18n.js';
   // A background or stale SSE reader must never paint another chat's header.
   // Measurements are streamed directly, avoiding one model-discovery HTTP
   // request per agent round. Re-entry/reload reads the same snapshot from API.
-  export function applyStreamContextUsage(data, sessionId) {
+  export function applyStreamContextUsage(data, sessionId, replayMeta = null) {
     const sm = _liveSessionModule();
     if (!sm || !sm.getCurrentSessionId || sm.getCurrentSessionId() !== sessionId) return false;
-    if (!data || !Number.isInteger(data.used_tokens) || data.used_tokens < 0
+    // New replay frames carry revision/reason in the metadata envelope so the
+    // legacy ``data`` payload stays byte-compatible for older clients.
+    if (replayMeta && typeof replayMeta === 'object') {
+      const revision = Number(replayMeta.context_revision || 0);
+      if (revision > 0 && (!data || Number(data.context_revision || 0) < revision)) {
+        data = { ...(data || {}), context_revision: revision };
+      }
+      if (replayMeta.context_reason && (!data || !data.context_reason)) {
+        data = { ...(data || {}), context_reason: replayMeta.context_reason };
+      }
+      if (replayMeta.stale === true) data = { ...(data || {}), stale: true };
+    }
+    if (!data || data.stale === true
+        || !Number.isInteger(data.used_tokens) || data.used_tokens < 0
         || !Number.isInteger(data.context_length) || data.context_length <= 0
         || !['backend', 'estimated'].includes(data.source) || !data.model) return false;
     const selected = sm.getSessions && sm.getSessions().find(s => s.id === sessionId);
     if (selected && selected.model && selected.model !== data.model) return false;
     const previous = _contextHeaderData && _contextHeaderData.session_id === sessionId ? _contextHeaderData : {};
+    const incomingRevision = Number(data.context_revision || 0);
+    const previousRevision = Number(previous.context_revision || 0);
+    if (incomingRevision > 0 && previousRevision > 0 && incomingRevision <= previousRevision
+        && Number(data.compactions || 0) <= Number(previous.compactions || 0)) return false;
+    if (Number(previous.compactions || 0) === Number(data.compactions || 0)
+        && Number(previous.used_tokens || 0) > Number(data.used_tokens || 0)) return false;
     if (data.endpoint_key !== undefined) {
       if (typeof data.endpoint_key !== 'string' || !/^[a-f0-9]{64}$/.test(data.endpoint_key)) return false;
       const pinned = previous.current_endpoint_key && selected?.endpoint_url
@@ -806,6 +836,40 @@ import { bindUiText } from './i18n.js';
   function _metricsCostRecordId(runId, event) {
     if (!runId) return '';
     return `${runId}:${event && event.teacher ? 'teacher' : 'primary'}`;
+  }
+
+  function _lazyToolOutputMarkup(toolEvent) {
+    const output = String(toolEvent?.output || '');
+    const replay = toolEvent?._replay || {};
+    const runId = String(replay.run_id || '');
+    const seq = Number.isInteger(replay.seq) ? replay.seq : -1;
+    if (!output || !runId || seq < 0 || output.length <= 8192) {
+      return output ? `<details class="agent-tool-output"><summary>Output</summary><pre>${uiModule.esc(output)}</pre></details>` : '';
+    }
+    const preview = output.slice(0, 2048);
+    return `<details class="agent-tool-output agent-tool-output-lazy" data-artifact-run="${uiModule.esc(runId)}" data-artifact-seq="${seq}"><summary>Output (load full)</summary><pre>${uiModule.esc(preview)}\n…</pre></details>`;
+  }
+
+  function _bindLazyToolOutput(node, toolEvent, sessionId) {
+    const details = node?.querySelector?.('.agent-tool-output-lazy');
+    if (!details || details.dataset.loaded === 'true') return;
+    details.addEventListener('toggle', async () => {
+      if (!details.open || details.dataset.loaded === 'true' || details.dataset.loading === 'true') return;
+      details.dataset.loading = 'true';
+      try {
+        const runId = details.dataset.artifactRun;
+        const seq = details.dataset.artifactSeq;
+        const response = await fetch(`/api/chat/run/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(runId)}/${encodeURIComponent(seq)}`, { credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const pre = details.querySelector('pre');
+        if (pre) pre.textContent = String(data.output || '');
+        details.dataset.loaded = 'true';
+      } catch (_) {
+        const pre = details.querySelector('pre');
+        if (pre) pre.textContent += '\n[Full output unavailable]';
+      } finally { delete details.dataset.loading; }
+    });
   }
 
   /** POST the exact Stop for one observed run identity. */
@@ -2319,6 +2383,7 @@ import { bindUiText } from './i18n.js';
       _sendPerf.mark('reader_ready');
       _sendPerf.report('reader_ready');
       const decoder = new TextDecoder();
+      const timelineReducer = createTimelineReducer();
       let buffer = '';
       let metrics = null;
       let isThinking = false;
@@ -3033,6 +3098,7 @@ import { bindUiText } from './i18n.js';
             }
             try {
               const json = JSON.parse(data);
+              if (!timelineReducer.apply(json).accepted) continue;
               // Handle SSE error events (e.g. HTTP 404 from provider)
               if (_nextIsError || json.status >= 400) {
                 _nextIsError = false;
@@ -3596,7 +3662,7 @@ import { bindUiText } from './i18n.js';
                 // The session identity check also handles a background POST
                 // whose session has just become foreground again.
                 if (_streamGenerations.get(streamSessionId) === streamGeneration) {
-                  applyStreamContextUsage(json.data, streamSessionId);
+                  applyStreamContextUsage(json.data, streamSessionId, json._replay);
                 }
               } else if (json.type === 'compacted') {
                 if (!_isBg) {
@@ -3833,7 +3899,7 @@ import { bindUiText } from './i18n.js';
                   const cmd = json.command || '';
                   let outHtml = '';
                   if (json.output && json.output.trim()) {
-                    outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(json.output)}</pre></details>`;
+                    outHtml = _lazyToolOutputMarkup(json);
                   }
                   // File-write diff (write_file): show a before/after unified diff.
                   let diffHtml = '';
@@ -3871,6 +3937,7 @@ import { bindUiText } from './i18n.js';
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '');
                   currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   chatRenderer.localizeToolNode?.(currentToolBubble);
+                  _bindLazyToolOutput(currentToolBubble, json, streamSessionId);
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -5220,6 +5287,12 @@ import { bindUiText } from './i18n.js';
     // full canonical render, which is rebuilt from the saved DB record on reload.
     // Plain text replies can be finalized in place without a reload.
     let rich = false;
+    // Some legacy embedders load chat.js without the optional reducer module.
+    // Keep replay functional (and deduplicated by SSE id) in that case while
+    // the normal application always uses the shared reducer import.
+    const timelineReducer = typeof createTimelineReducer === 'function'
+      ? (createTimelineReducer() || { apply: () => ({ accepted: true }) })
+      : { apply: () => ({ accepted: true }) };
 
     const cleanup = () => {
       try { spinner.destroy(); } catch (_) {}
@@ -5387,6 +5460,7 @@ import { bindUiText } from './i18n.js';
           }
           let json;
           try { json = JSON.parse(payload); } catch (_) { continue; }
+          if (!timelineReducer.apply(json, eventId == null ? null : Number(eventId)).accepted) continue;
           if (eventIsError) {
             replayError = createTerminalStreamError(json);
           } else if (json.delta) {
@@ -5443,7 +5517,7 @@ import { bindUiText } from './i18n.js';
           } else if (json.type === 'context_usage') {
             if (_streamGenerations.get(sessionId) === resumeGeneration
                 && (!resumeRunId || _streamRunIds.get(sessionId) === resumeRunId)) {
-              applyStreamContextUsage(json.data, sessionId);
+              applyStreamContextUsage(json.data, sessionId, json._replay);
             }
           } else if (json.type === 'metrics') {
             metricsData = json.data || metricsData;
@@ -5545,9 +5619,10 @@ import { bindUiText } from './i18n.js';
               const ok = json.exit_code == null || json.exit_code === 0;
               node.className = 'agent-thread-node' + (ok ? '' : ' error');
               const command = json.command ? `<pre class="agent-thread-cmd">${uiModule.esc(String(json.command))}</pre>` : '';
-              const output = json.output ? `<details class="agent-tool-output"><summary>Output</summary><pre>${uiModule.esc(String(json.output).slice(-65536))}</pre></details>` : '';
+              const output = json.output ? _lazyToolOutputMarkup(json) : '';
               node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '✓' : '✗'}</span><span class="agent-thread-tool">${uiModule.esc(replayTool.name)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">▶</span></div><div class="agent-thread-content">${command}${output}</div>`;
               chatRenderer.localizeToolNode?.(node);
+              _bindLazyToolOutput(node, json, sessionId);
             }
             uiModule.scrollHistory();
           } else if (json.type === 'web_sources' || json.type === 'rag_sources' ||

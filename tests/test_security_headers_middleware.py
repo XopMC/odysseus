@@ -43,7 +43,7 @@ def test_hsts_present_for_direct_https_requests():
     response = _client(base_url="https://testserver").get("/")
 
     assert response.headers["strict-transport-security"] == (
-        "max-age=31536000; includeSubDomains"
+        "max-age=0"
     )
 
 
@@ -51,7 +51,7 @@ def test_hsts_present_via_x_forwarded_proto_https():
     response = _client().get("/", headers={"X-Forwarded-Proto": "https"})
 
     assert response.headers["strict-transport-security"] == (
-        "max-age=31536000; includeSubDomains"
+        "max-age=0"
     )
 
 

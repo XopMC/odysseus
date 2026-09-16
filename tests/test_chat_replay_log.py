@@ -185,6 +185,27 @@ class DetachedReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleaned.is_set())
         self.assertEqual(run.status, 'stopped')
 
+    async def test_terminal_snapshot_is_persisted_before_status_is_visible(self):
+        observed = []
+
+        async def source():
+            yield 'data: ' + json.dumps({
+                'type': 'context_usage',
+                'data': {
+                    'used_tokens': 40000, 'context_length': 100000,
+                    'model': 'fixture', 'source': 'backend',
+                },
+            }) + '\n\n'
+
+        def persist(_session_id, run, *, status=None):
+            observed.append((run.status, status, run.context_usage['used_tokens']))
+
+        with patch('src.agent_runs._persist_timeline_v2', persist):
+            run = agent_runs.start('terminal-order', source())
+            await run.task
+        self.assertEqual(observed, [('running', 'done', 40000)])
+        self.assertEqual(run.status, 'done')
+
     async def test_terminal_controller_runs_without_a_subscriber_but_not_after_stop(self):
         completed = asyncio.Event()
 

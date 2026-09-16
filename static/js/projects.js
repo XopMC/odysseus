@@ -22,28 +22,38 @@ function chatRow(chat) {
 
 function projectRow(project) {
   const wrap = document.createElement('div'); wrap.className = 'project-sidebar-item';
-  const head = document.createElement('button'); head.type = 'button'; head.className = 'list-item project-sidebar-head';
-  head.innerHTML = '<span class="project-chevron">›</span><span class="grow"></span><span class="project-open" aria-hidden="true">•••</span><span class="project-new-chat">+</span>';
-  head.querySelector('.grow').textContent = project.name;
+  // Keep controls as sibling buttons. Nested interactive elements inside the
+  // old header button made the plus click bubble into the expand handler and
+  // appear to open/close instantly on Safari/mobile.
+  const head = document.createElement('div'); head.className = 'list-item project-sidebar-head';
+  const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'project-toggle'; toggle.setAttribute('aria-expanded', 'false');
+  toggle.innerHTML = '<span class="project-chevron">›</span><span class="grow"></span>';
+  toggle.querySelector('.grow').textContent = project.name;
+  const open = document.createElement('button'); open.type = 'button'; open.className = 'project-open'; open.textContent = '•••';
+  const add = document.createElement('button'); add.type = 'button'; add.className = 'project-new-chat'; add.textContent = '+';
   const chats = document.createElement('div'); chats.className = 'project-chat-list hidden';
-  const add = head.querySelector('.project-new-chat');
   add.title = t('New chat in project');
+  bindUiText(add, 'New chat in project', 'title');
   add.addEventListener('click', event => {
     event.stopPropagation();
     sessionStorage.setItem('odysseus-pending-project-id', project.id);
+    // Dispatch through the same user-facing entry point as the sidebar. The
+    // click is kept synchronous so mobile browsers preserve the gesture.
     el('sidebar-new-chat-btn')?.click();
   });
-  const open = head.querySelector('.project-open');
   open.title = t('Open project');
+  bindUiText(open, 'Open project', 'title');
   open.addEventListener('click', event => { event.stopPropagation(); void openProject(project); });
-  head.addEventListener('click', () => {
-    chats.classList.toggle('hidden');
-    head.querySelector('.project-chevron').textContent = chats.classList.contains('hidden') ? '›' : '⌄';
+  toggle.addEventListener('click', () => {
+    const collapsed = chats.classList.toggle('hidden');
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.querySelector('.project-chevron').textContent = collapsed ? '›' : '⌄';
   });
   const projectChats = window.sessionModule?.getSessions?.().filter(chat => chat.project_id === project.id && !chat.archived) || [];
   if (!projectChats.length) {
     const empty = document.createElement('div'); empty.className = 'project-empty'; empty.textContent = t('No chats yet'); chats.appendChild(empty);
   } else projectChats.forEach(chat => chats.appendChild(chatRow(chat)));
+  head.append(toggle, open, add);
   wrap.append(head, chats); return wrap;
 }
 
@@ -86,7 +96,20 @@ async function loadProjectDetails(project) {
     const title = document.createElement('strong'); title.textContent = `${item.kind} · ${item.state}`;
     const text = document.createElement('div'); text.textContent = item.text;
     const source = document.createElement('small'); source.textContent = item.source;
-    row.append(title, text, source); memories.appendChild(row);
+    const actions = document.createElement('div'); actions.className = 'project-detail-actions';
+    const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = t('Edit');
+    edit.addEventListener('click', async () => {
+      const value = prompt(t('Edit project memory'), item.text); if (value == null || !value.trim()) return;
+      try { await post(`${api}/api/projects/${encodeURIComponent(project.id)}/memory`, {memory_id:item.id,kind:item.kind,text:value.trim(),source:item.source,state:item.state,expected_revision:item.revision,confirmation:true}); await loadProjectDetails(project); }
+      catch (error) { window.uiModule?.showError?.(t(error.message)); }
+    });
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = t('Delete');
+    remove.addEventListener('click', async () => {
+      if (!confirm(t('Delete project memory?'))) return;
+      try { await request(`${api}/api/projects/${encodeURIComponent(project.id)}/memory/${encodeURIComponent(item.id)}`, {method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:item.revision,confirmation:true})}); await loadProjectDetails(project); }
+      catch (error) { window.uiModule?.showError?.(t(error.message)); }
+    });
+    actions.append(edit, remove); row.append(title, text, source, actions); memories.appendChild(row);
   }
   if (!memories.children.length) memories.textContent = t('No project memory yet');
   const skills = el('project-details-skills'); skills.replaceChildren();
@@ -94,10 +117,15 @@ async function loadProjectDetails(project) {
     const row = document.createElement('article'); row.className = 'project-detail-row';
     const title = document.createElement('strong'); title.textContent = item.name;
     const source = document.createElement('small'); source.textContent = `${item.source} · ${item.digest.slice(0, 12)} · r${item.revision}`;
-    row.append(title, source); skills.appendChild(row);
+    const actions = document.createElement('div'); actions.className = 'project-detail-actions';
+    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.textContent = item.enabled ? t('Disable') : t('Enable');
+    toggle.addEventListener('click', async () => { try { await post(`${api}/api/projects/${encodeURIComponent(project.id)}/skills/${encodeURIComponent(item.id)}/toggle`, {enabled:!item.enabled,expected_revision:item.revision}); await loadProjectDetails(project); } catch (error) { window.uiModule?.showError?.(t(error.message)); } });
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = t('Delete');
+    remove.addEventListener('click', async () => { if (!confirm(t('Delete project skill?'))) return; try { await request(`${api}/api/projects/${encodeURIComponent(project.id)}/skills/${encodeURIComponent(item.id)}?expected_revision=${item.revision}`, {method:'DELETE'}); await loadProjectDetails(project); } catch (error) { window.uiModule?.showError?.(t(error.message)); } });
+    actions.append(toggle, remove); row.append(title, source, actions); skills.appendChild(row);
   }
   if (!skills.children.length) skills.textContent = t('No project skills yet');
-  el('project-details-access').textContent = `${t('Execution host')}: ${project.host_id}\n${t('Project folder')}: ${project.root}\n${t('Access mode')}: ${project.access_mode || 'read_only'}`;
+  el('project-details-access').textContent = `${t('Execution host')}: ${project.host_id}\n${t('Project folder')}: ${project.root}\n${t('Access mode')}: ${t(project.access_mode === 'read_only' ? 'Read-only' : project.access_mode || 'Read-only')}`;
 }
 
 async function openProject(project) {
@@ -141,7 +169,7 @@ function modal() {
     <div class="modal-header"><h4>Create project</h4><button type="button" class="close-btn">×</button></div>
     <div class="modal-body"><label><span data-project-label>Project name</span><input id="project-name" maxlength="200"></label>
     <label><span data-project-label>Execution host</span><select id="project-host"></select></label>
-    <label><span data-project-label>Project folder</span><div class="project-path-row"><input id="project-root" value="/home/xopmc"><button type="button" id="project-browse">Browse</button></div></label>
+    <label><span data-project-label>Project folder</span><div class="project-path-row"><input id="project-root" placeholder="Absolute folder path"><button type="button" id="project-browse">Browse</button></div></label>
     <div id="project-folders" class="project-folder-list"></div>
     <label><span data-project-label>Access mode</span><select id="project-access"><option value="read_only">Read-only</option><option value="trusted_host">Trusted host</option><option value="isolated">Isolation</option></select></label>
     <p class="project-safety">Selecting a folder does not grant execution. Trusted host and isolation are explicit project permissions.</p>

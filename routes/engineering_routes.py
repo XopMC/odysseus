@@ -32,6 +32,32 @@ def context(request, *, mutation=False):
     return owner, EngineeringStore(runtime.store)
 
 
+def context_policy_context(request, *, mutation=False):
+    """Authenticate context-policy settings without requiring host execution.
+
+    Context sizing is a per-owner preference and does not run a command or
+    grant a host permission.  Coupling this read/write UI to
+    ``host_execution.enabled_for`` made the chat's Context settings button
+    unusable for otherwise authenticated users.  Keep the Team interactive
+    owner/API-token boundary, but deliberately omit the host capability gate.
+    """
+    if not enabled():
+        raise HTTPException(404, 'Engineering workspace is disabled')
+    from src import team_config
+    if not team_config.enabled():
+        raise HTTPException(404, 'Team mode is disabled')
+    if getattr(request.state, 'api_token', False) or request.headers.get('X-Odysseus-Internal-Token'):
+        raise HTTPException(403, 'Interactive owner login required')
+    manager = getattr(request.app.state, 'auth_manager', None)
+    from core.auth import session_cookie_for_request, SESSION_COOKIE
+    token = request.cookies.get(session_cookie_for_request(request)) or request.cookies.get(SESSION_COOKIE)
+    owner = manager.get_username_for_token(token) if manager and token else None
+    if not owner:
+        raise HTTPException(401, 'Login required')
+    from src.team_runtime import get_runtime
+    return owner, EngineeringStore(get_runtime().store)
+
+
 def setup_engineering_routes():
     router = APIRouter(prefix='/api/team/engineering', route_class=EngineeringRoute)
 
@@ -64,7 +90,7 @@ def setup_engineering_routes():
 
     @router.get('/context-policy')
     async def context_policy(request: Request, project_id: str = '', task_id: str = '', worker_id: str = '', session_id: str = ''):
-        owner, store = context(request)
+        owner, store = context_policy_context(request)
         from src.context_policy_store import ContextPolicyStore
         policies = ContextPolicyStore(store.team)
         scope = dict(project_id=project_id, task_id=task_id, worker_id=worker_id, session_id=session_id)
@@ -73,7 +99,7 @@ def setup_engineering_routes():
 
     @router.post('/context-policy')
     async def save_context_policy(request: Request):
-        owner, store = context(request, mutation=True)
+        owner, store = context_policy_context(request, mutation=True)
         body = await body_object(request, 16384)
         if set(body) - {'session_id'} != {'project_id', 'task_id', 'worker_id', 'overrides', 'expected_revisions'}:
             raise HTTPException(400, 'Exact context scope, overrides and revision vector required')
@@ -87,20 +113,20 @@ def setup_engineering_routes():
 
     @router.get('/context-policy/events')
     async def context_policy_events(request: Request, after_seq: int = 0, limit: int = 100):
-        owner, store = context(request)
+        owner, store = context_policy_context(request)
         from src.context_policy_store import ContextPolicyStore
         events = ContextPolicyStore(store.team).events(owner, after_seq=after_seq, limit=limit)
         return {'events': events, 'next_cursor': events[-1]['seq'] if events else after_seq}
 
     @router.get('/context-presets')
     async def context_presets(request: Request, after_seq: int = 0, limit: int = 50, query: str = ''):
-        owner, store = context(request)
+        owner, store = context_policy_context(request)
         from src.context_policy_store import ContextPolicyStore
         return ContextPolicyStore(store.team).list_presets(owner, after_seq=after_seq, limit=limit, query=query)
 
     @router.post('/context-presets')
     async def save_context_preset(request: Request):
-        owner, store = context(request, mutation=True)
+        owner, store = context_policy_context(request, mutation=True)
         body = await body_object(request, 16384)
         if set(body) - {'kind'} != {'name', 'values', 'preset_id', 'expected_revision'}:
             raise HTTPException(400, 'Exact preset fields and revision required')
@@ -109,7 +135,7 @@ def setup_engineering_routes():
 
     @router.patch('/context-presets/{preset_id}')
     async def rename_context_preset(request: Request, preset_id: str):
-        owner, store = context(request, mutation=True)
+        owner, store = context_policy_context(request, mutation=True)
         body = await body_object(request, 2048)
         if set(body) != {'name', 'expected_revision'}:
             raise HTTPException(400, 'Preset rename requires only name and revision')
@@ -118,7 +144,7 @@ def setup_engineering_routes():
 
     @router.delete('/context-presets/{preset_id}')
     async def delete_context_preset(request: Request, preset_id: str, expected_revision: int):
-        owner, store = context(request, mutation=True)
+        owner, store = context_policy_context(request, mutation=True)
         from src.context_policy_store import ContextPolicyStore
         ContextPolicyStore(store.team).delete_preset(owner, preset_id, expected_revision=expected_revision)
         return {'deleted': True}
@@ -193,9 +219,18 @@ def setup_engineering_routes():
         body = await body_object(request, 16384)
         if set(body) != {'name', 'root', 'host_id'}:
             raise HTTPException(400, 'Only name, root and configured host_id are accepted')
-        from src.engineering_hosts import public_hosts
+        from src.engineering_hosts import call, public_hosts
         if body['host_id'] not in {host['id'] for host in public_hosts(owner)}:
             raise HTTPException(400, 'Execution host is not configured for this owner')
+        from src.engineering_store import project_root
+        root = project_root(body['root'])
+        probe = await call(body['host_id'], 'file.call', {
+            'tool': 'ls', 'cwd': root, 'content': {'path': root},
+        }, owner=owner, scope='legacy-project-create')
+        result = probe.get('result') if isinstance(probe.get('result'), dict) else {}
+        if not probe.get('ok') or result.get('exit_code') != 0:
+            raise HTTPException(409, 'Project folder is unavailable or unreadable')
+        body['root'] = root
         return store.create_project(owner, **body)
 
     @router.get('/projects/{project_id}')

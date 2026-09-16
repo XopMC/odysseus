@@ -119,10 +119,10 @@ class UpdatePlanTool:
                     owner, session_id, (current or {}).get("title") or "Plan", plan,
                     expected_revision=(current or {}).get("revision", 0),
                 )
-                # A legacy full-checklist update during execution remains in
-                # execution state; the model cannot silently unapprove it.
-                if current and current.get("status") == "executing":
-                    saved = store.plan_action(owner, session_id, "execute", saved["revision"])
+                # ``save_plan`` preserves an already executing/done status and
+                # reconciles the existing step IDs. Calling plan_action here
+                # would try to execute an already executing plan and turn a
+                # valid progress update into a conflict.
                 plan_update = saved
             except Exception as exc:
                 return "update_plan: failed", {"error": str(exc), "exit_code": 1}

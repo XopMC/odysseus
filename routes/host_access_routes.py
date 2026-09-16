@@ -17,7 +17,8 @@ def authorize(request, mutation=False):
             or request.headers.get('X-Odysseus-Internal-Token')):
         raise HTTPException(403, 'Interactive owner login required')
     manager = getattr(request.app.state, 'auth_manager', None)
-    cookie = request.cookies.get('odysseus_session')
+    from core.auth import session_cookie_for_request, SESSION_COOKIE
+    cookie = request.cookies.get(session_cookie_for_request(request)) or request.cookies.get(SESSION_COOKIE)
     owner = manager.get_username_for_token(cookie) if manager and cookie else None
     if not owner or not enabled_for(owner):
         raise HTTPException(403, 'Host access is not enabled for this account')

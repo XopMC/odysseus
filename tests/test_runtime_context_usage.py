@@ -71,6 +71,31 @@ def test_invalid_context_events_do_not_replace_valid_snapshot(monkeypatch, inval
     assert agent_runs.get_context_usage("a")["used_tokens"] == 82000
 
 
+def test_context_ledger_rejects_lower_measurement_without_compaction(monkeypatch):
+    run = agent_runs._Run()
+    monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})
+    _publish(run, _snapshot(used_tokens=100000, compactions=2))
+    _publish(run, _snapshot(used_tokens=7000, compactions=2))
+    current = agent_runs.get_context_usage("a")
+    assert current["used_tokens"] == 100000
+    assert current["context_revision"] == 1
+
+    _publish(run, _snapshot(used_tokens=12000, compactions=3))
+    current = agent_runs.get_context_usage("a")
+    assert current["used_tokens"] == 12000
+    assert current["context_revision"] == 2
+    assert current["context_reason"] == "compaction"
+
+
+def test_terminal_context_snapshot_is_available_only_when_requested(monkeypatch):
+    run = agent_runs._Run()
+    monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})
+    _publish(run, _snapshot(used_tokens=90000))
+    run.status = "done"
+    assert agent_runs.get_context_usage("a") is None
+    assert agent_runs.get_context_usage("a", include_terminal=True)["used_tokens"] == 90000
+
+
 def _client(monkeypatch, history, run=None, owner_error=False):
     # Load collaborators before installing this route's fixed token estimator;
     # lazy imports must not capture the fixture function for later Agent tests.

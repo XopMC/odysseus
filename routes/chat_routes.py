@@ -59,6 +59,7 @@ from routes.model_routes import _visible_models
 from routes.chat_helpers import (
     resolve_session_auth,
     build_chat_context,
+    _trim_context_compat,
     save_assistant_response,
     run_post_response_tasks,
     accumulate_token_usage,
@@ -238,7 +239,13 @@ def _chat_candidate_request_factory(
         if not context_length:
             context_length = fallback_context_length
         if not policy_shaped:
-            request_messages = trim_for_context(candidate_messages, context_length)
+            from src.context_compactor import ProtectedContextTooLarge
+            try:
+                request_messages = _trim_context_compat(
+                    candidate_messages, context_length, strict_protected=True,
+                )
+            except ProtectedContextTooLarge as exc:
+                raise HTTPException(413, str(exc)) from exc
         state["requests"][index] = request_messages
         state["context_lengths"][index] = context_length
         state["compactions"][index] = compaction_state
@@ -1337,6 +1344,12 @@ def setup_chat_routes(
                 work_state["goal"] = active_goal
             else:
                 active_goal = work_state.get("goal")
+            # A paused/cancelled/completed Goal must not silently re-enter the
+            # agent prompt just because the user sends an unrelated chat turn.
+            # Explicit Resume (or an approval decision) is the only transition
+            # back to autonomous Goal execution.
+            if active_goal and active_goal.get("status") not in {"active", "waiting_user"}:
+                active_goal = None
             durable_plan = work_state.get("plan")
             if not plan_mode and durable_plan and durable_plan.get("status") in {"approved", "executing"}:
                 approved_plan = "\n".join(
@@ -1478,10 +1491,11 @@ def setup_chat_routes(
                 _project_memory = _project_store.list_memory(ctx.user, _project_id, limit=100)
                 _project_skills = _project_store.enabled_skill_context(ctx.user, _project_id)
                 _parts = []
-                if _project_memory:
+                _verified_memory = [item for item in _project_memory if item.get('state') == 'verified']
+                if _verified_memory:
                     _parts.append("Project memory:\n" + "\n".join(
-                        f"- [{item['state']}] {item['text']} (source: {item['source']})"
-                        for item in _project_memory if item.get('state') != 'stale'
+                        f"- [verified] {item['text']} (source: {item['source']})"
+                        for item in _verified_memory
                     ))
                 if _project_skills:
                     _parts.append("Project skills (procedures, not permissions):\n" + "\n\n".join(
@@ -2769,6 +2783,13 @@ def setup_chat_routes(
                 for key in ("cookie", "authorization")
                 if request.headers.get(key)
             }
+            # Internal continuation is dispatched by the server after the
+            # browser may have gone away.  Use the same authenticated
+            # loopback channel as other in-process work so CSRF/browser-origin
+            # state cannot block autonomous Goal progress.
+            from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+            _controller_headers[INTERNAL_TOOL_HEADER] = INTERNAL_TOOL_TOKEN
+            _controller_headers["X-Odysseus-Owner"] = _user
             _controller_headers["origin"] = str(request.base_url).rstrip("/")
             _controller_form = {
                 "session": session,
@@ -2844,7 +2865,15 @@ def setup_chat_routes(
             _goal_terminal_controller = _continue_goal_after_terminal
 
         _detached_run = agent_runs.start(
-            session, _safe_stream(), on_terminal=_goal_terminal_controller,
+            session,
+            _safe_stream(),
+            on_terminal=_goal_terminal_controller,
+            owner=_user,
+            continuation={
+                "allow_bash": str(allow_bash).lower() == "true",
+                "allow_web_search": bool(_search_enabled),
+                "goal": bool(active_goal),
+            },
         )
         return StreamingResponse(
             agent_runs.subscribe(session, _detached_run),
@@ -2905,6 +2934,52 @@ def setup_chat_routes(
         if snapshot is None:
             raise HTTPException(404, "No run for this session")
         return snapshot
+
+    @router.get("/api/chat/run/{session_id}/artifacts/{run_id}/{seq}")
+    async def chat_run_artifact(request: Request, session_id: str, run_id: str, seq: int):
+        """Fetch one bounded tool output on demand.
+
+        The timeline carries the compact tool card and identity; expanding a
+        large output can ask for this owner-scoped artifact without reloading
+        the whole chat or exposing an arbitrary filesystem path.
+        """
+        _verify_session_owner(request, session_id)
+        if not re.fullmatch(r"[0-9a-f]{32}", str(run_id)) or seq < 0:
+            raise HTTPException(400, "Invalid tool artifact identity")
+        frame = None
+        active = agent_runs.get_active_run(session_id)
+        if active is not None:
+            if active.run_id != run_id:
+                raise HTTPException(404, "Tool artifact not found")
+            try:
+                frame = active.buffer[seq]
+            except (IndexError, OSError, ValueError):
+                frame = None
+        if frame is None and os.getenv("ODYSSEUS_DURABLE_CHAT_REPLAY") == "1":
+            try:
+                from src.chat_replay_log import ReplayLog
+                frame = ReplayLog(agent_runs.replay_root(), run_id, session_id)[seq]
+            except (FileNotFoundError, IndexError, OSError, ValueError):
+                frame = None
+        if frame is None:
+            raise HTTPException(404, "Tool artifact not found")
+        raw = "\n".join(line[5:].lstrip() for line in frame.splitlines() if line.startswith("data:"))
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(404, "Tool artifact not found") from None
+        if not isinstance(payload, dict) or payload.get("type") not in {"tool_output", "tool_progress"}:
+            raise HTTPException(404, "Tool artifact not found")
+        value = payload.get("output") if payload.get("type") == "tool_output" else payload.get("tail", payload.get("message", ""))
+        value = str(value or "")
+        return {
+            "run_id": run_id,
+            "seq": seq,
+            "tool": str(payload.get("tool") or "Tool"),
+            "tool_call_id": payload.get("tool_call_id") or (payload.get("_replay") or {}).get("tool_call_id"),
+            "output": value[-2 * 1024 * 1024:],
+            "truncated": len(value) > 2 * 1024 * 1024,
+        }
 
     # ------------------------------------------------------------------ #
     # POST /api/chat/stop — cancel a detached run (Stop button). Closing the SSE
@@ -3106,8 +3181,8 @@ def setup_chat_routes(
                             session_manager.save_sessions()
                         yield chunk
             except Exception as e:
-                logger.error("Rewrite stream error: %s", e)
-                yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 500})}\n\n'
+                logger.error("Rewrite stream error: %s", e, exc_info=True)
+                yield f'event: error\ndata: {json.dumps({"error": "Rewrite failed", "status": 500})}\n\n'
 
         return StreamingResponse(stream_rewrite(), media_type="text/event-stream")
 

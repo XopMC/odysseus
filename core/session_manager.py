@@ -388,6 +388,13 @@ class SessionManager:
                     )
 
             db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
+            # Detached-run metadata is owner/session scoped and must not leave
+            # a ghost that can be recovered after the chat itself is gone.
+            try:
+                from core.database import ChatRunState
+                db.query(ChatRunState).filter(ChatRunState.session_id == session_id).delete()
+            except Exception:
+                logger.debug("Run-state cleanup skipped for %s", session_id, exc_info=True)
             now = datetime.now(timezone.utc)
             for i, message in enumerate(messages):
                 msg_id = str(uuid.uuid4())
@@ -630,6 +637,11 @@ class SessionManager:
                 # Commit the document-detach / message-delete above (a no-op when
                 # the ghost had no rows) together with the session delete.
                 db.commit()
+                try:
+                    from src import agent_runs
+                    agent_runs.delete_replays_for_session(session_id)
+                except Exception:
+                    logger.debug("Replay cleanup skipped for deleted session %s", session_id, exc_info=True)
                 logger.info(f"Deleted session {session_id}")
                 return True
             return False

@@ -9,6 +9,7 @@ from core.database import ChatMessage, Session, SessionLocal
 from src import agent_runs
 from src.agent_tools import ToolBlock
 from src.chat_work_store import ChatWorkStore, WorkConflict, WorkNotFound
+from src.chat_work_store import checklist_steps
 import src.agent_loop as agent_loop
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 
@@ -55,6 +56,18 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
     assert store.events("alice", owned_chat)
     with pytest.raises(WorkNotFound):
         store.get("bob", owned_chat)
+
+
+def test_legacy_plan_steps_have_stable_ids_and_cancel_fence(owned_chat):
+    first = checklist_steps("- [ ] Inspect source\n- [ ] Run tests")
+    reordered = checklist_steps("- [ ] Run tests\n- [ ] Inspect source")
+    assert first[0]["id"] != first[1]["id"]
+    assert first[0]["id"].rsplit('-', 1)[0] == reordered[1]["id"].rsplit('-', 1)[0]
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Release", "- [ ] Inspect source")
+    plan = work.plan_action("alice", owned_chat, "cancel", plan["revision"])
+    with pytest.raises(WorkConflict):
+        work.update_plan_step("alice", owned_chat, plan["steps"][0]["id"], "done", expected_revision=plan["revision"])
 
 
 def test_goal_revision_preserves_audit_and_advances_attempt(owned_chat):

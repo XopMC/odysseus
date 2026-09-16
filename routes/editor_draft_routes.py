@@ -181,7 +181,7 @@ def setup_editor_draft_routes() -> APIRouter:
             raise
         except Exception as e:
             db.rollback()
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, "Could not delete draft")
         finally:
             db.close()
 

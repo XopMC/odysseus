@@ -583,6 +583,52 @@ function buildFolderSubmenu(sessionId, currentFolder, dropdown) {
   return moveItem;
 }
 
+/** Build the owner-scoped project submenu for an idle chat. */
+function buildProjectSubmenu(sessionId, currentProjectId, dropdown) {
+  const projects = window.projectsModule?.getProjects?.() || [];
+  const item = document.createElement('div');
+  item.className = 'dropdown-item-compact'; item.style.position = 'relative';
+  item.innerHTML = '<span class="dropdown-icon">▣</span><span>Move to project</span>';
+  bindUiText(item.querySelector('span:not(.dropdown-icon)'), 'Move to project');
+  const sub = document.createElement('div'); sub.className = 'dropdown session-folder-submenu';
+  const none = document.createElement('div'); none.className = 'dropdown-item-compact';
+  none.textContent = '(No project)'; bindUiText(none, '(No project)');
+  none.addEventListener('click', async event => {
+    event.stopPropagation();
+    try {
+      const fd = new FormData(); fd.append('project_id', '');
+      await fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`, { method: 'PATCH', body: fd });
+      const session = sessions.find(value => value.id === sessionId);
+      if (session) session.project_id = null;
+      dropdown.style.display = 'none'; sub.style.display = 'none';
+      renderSessionList(); window.projectsModule?.refresh?.();
+    } catch (error) { uiModule.showError(error.message || 'Failed to move chat'); }
+  });
+  sub.appendChild(none);
+  for (const project of projects) {
+    const option = document.createElement('div'); option.className = 'dropdown-item-compact';
+    option.textContent = project.name; option.style.opacity = project.id === currentProjectId ? '0.5' : '';
+    option.addEventListener('click', async event => {
+      event.stopPropagation();
+      try {
+        const fd = new FormData(); fd.append('project_id', project.id);
+        await fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`, { method: 'PATCH', body: fd });
+        const session = sessions.find(value => value.id === sessionId);
+        if (session) session.project_id = project.id;
+        dropdown.style.display = 'none'; sub.style.display = 'none';
+        renderSessionList(); window.projectsModule?.refresh?.();
+      } catch (error) { uiModule.showError(error.message || 'Failed to move chat'); }
+    });
+    sub.appendChild(option);
+  }
+  item.addEventListener('click', event => {
+    event.stopPropagation();
+    sub.style.display = sub.style.display === 'block' ? 'none' : 'block';
+  });
+  item.appendChild(sub);
+  return item;
+}
+
 /** Create a single session list-item element. */
 function createSessionItem(s) {
   const div = document.createElement('div');
@@ -882,8 +928,10 @@ function createSessionItem(s) {
 
   // Copy & Move to folder
   const folderItem = buildFolderSubmenu(s.id, s.folder, dropdown);
+  const projectItem = buildProjectSubmenu(s.id, s.project_id, dropdown);
   dropdown.appendChild(copyItem);
   dropdown.appendChild(folderItem);
+  if (window.projectsModule?.getProjects?.().length) dropdown.appendChild(projectItem);
 
   // Separator before destructive actions
   const _sep = document.createElement('div');

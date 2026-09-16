@@ -355,9 +355,9 @@ def test_secure_cookies_true_forces_secure_on_plain_http(tmp_path, monkeypatch):
     assert _login_secure_flag(tmp_path, "http") is True
 
 
-def test_secure_cookies_false_forces_insecure_on_https(tmp_path, monkeypatch):
-    # The escape hatch for an install still answering on both HTTP and
-    # HTTPS: an explicit false wins over the request scheme.
+def test_secure_cookies_false_cannot_weaken_https(tmp_path, monkeypatch):
+    # Dual-scheme mode uses separate cookie names; an explicit false may keep
+    # the HTTP cookie plain but must never weaken the HTTPS credential.
     monkeypatch.setenv("SECURE_COOKIES", "false")
 
-    assert _login_secure_flag(tmp_path, "https") is False
+    assert _login_secure_flag(tmp_path, "https") is True

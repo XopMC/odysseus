@@ -77,13 +77,16 @@ function renderGoal() {
   if (!goal) {
     const state = el('goal-work-state');
     const objective = el('goal-work-objective');
+    const preview = el('goal-work-objective-preview');
     if (draftEnabled) {
       bindUiText(state, 'Waiting for a goal');
       bindUiText(objective, 'Your next message becomes the active goal.');
     } else {
       unbindUiText(state); unbindUiText(objective);
-      state.textContent = ''; objective.textContent = '';
+      state.textContent = '';
+      if (objective) objective.value = '';
     }
+    if (preview) preview.textContent = draftEnabled ? t('Goal pending') : '';
     el('goal-work-progress').textContent = '';
     ['goal-work-pause', 'goal-work-resume', 'goal-work-cancel', 'goal-work-quick-pause', 'goal-work-quick-resume', 'goal-work-quick-cancel'].forEach(id => { if (el(id)) el(id).hidden = true; });
     if (el('goal-mode-status-toggle')) el('goal-mode-status-toggle').hidden = !draftEnabled;
@@ -91,6 +94,11 @@ function renderGoal() {
   }
   unbindUiText(el('goal-work-state'));
   unbindUiText(el('goal-work-objective'));
+  const preview = el('goal-work-objective-preview');
+  if (preview) {
+    preview.textContent = goal.objective || '';
+    preview.title = goal.objective || '';
+  }
   el('goal-work-state').textContent = `${t(goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
   el('goal-work-objective').value = goal.objective || '';
   el('goal-work-progress').textContent = goal.progress || '';

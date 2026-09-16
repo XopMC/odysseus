@@ -641,9 +641,9 @@ def setup_session_routes(
         return {"ok": True, "count": len(messages)}
 
     @router.post("/session/{sid}/delete")
-    def delete_session_beacon(request: Request, sid: str):
+    async def delete_session_beacon(request: Request, sid: str):
         """Delete session via POST (for navigator.sendBeacon on page close)."""
-        return delete_session(request, sid)
+        return await delete_session(request, sid)
 
     @router.post("/sessions/bulk-delete")
     async def bulk_delete_sessions(request: Request):
@@ -658,6 +658,11 @@ def setup_session_routes(
         for sid in ids:
             try:
                 _verify_session_owner(request, sid, session_manager)
+                from src import agent_runs
+                active_run = agent_runs.describe_run(sid)
+                if active_run and active_run.get("status") == "running":
+                    if not await agent_runs.stop_and_wait(sid, active_run["run_id"]):
+                        continue
                 
                 # Enforce "starred" protection consistent with single-session delete
                 db = SessionLocal()
@@ -675,10 +680,18 @@ def setup_session_routes(
         return {"deleted": deleted_count}
 
     @router.delete("/session/{sid}")
-    def delete_session(request: Request, sid: str):
+    async def delete_session(request: Request, sid: str):
         """Permanently delete a session and all its messages."""
         _verify_session_owner(request, sid, session_manager)
         try:
+            # Fence a detached agent before deleting its owning session.  The
+            # run is addressed by its exact ID; a later run cannot be stopped
+            # accidentally if the session is reused.
+            from src import agent_runs
+            active_run = agent_runs.describe_run(sid)
+            if active_run and active_run.get("status") == "running":
+                if not await agent_runs.stop_and_wait(sid, active_run["run_id"]):
+                    raise HTTPException(409, "The current run is still stopping; retry shortly")
             # Block deletion of starred/favorited sessions
             db = SessionLocal()
             try:

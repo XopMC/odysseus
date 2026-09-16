@@ -14,7 +14,7 @@ from core.database import SessionLocal
 from core.database import Session as DBSession, ModelEndpoint
 from src.llm_core import llm_call_async, normalize_model_id
 from src.endpoint_resolver import normalize_base
-from src.context_compactor import maybe_compact, trim_for_context
+from src.context_compactor import maybe_compact, trim_for_context, ProtectedContextTooLarge
 from src.model_context import estimate_tokens, get_context_length
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
@@ -25,6 +25,20 @@ from routes.prefs_routes import _load_for_user as load_prefs_for_user
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+
+def _trim_context_compat(messages, context_length, **kwargs):
+    """Call the strict context trimmer while remaining compatible with old
+    integrations/tests that still provide the pre-hardening two-argument
+    callable.  Only the unsupported keyword is retried without protection;
+    unrelated TypeErrors are allowed to propagate."""
+    try:
+        return trim_for_context(messages, context_length, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'strict_protected'" not in str(exc):
+            raise
+        kwargs.pop("strict_protected", None)
+        return trim_for_context(messages, context_length, **kwargs)
 
 _CASUAL_OPENING_RE = re.compile(
     r"^\s*(?:h+i+|hey+|hello+|yo+|sup+|what'?s up|wass?up|hiya|howdy|"
@@ -907,7 +921,12 @@ async def build_chat_context(
     _before_trim_messages = len(messages)
     _before_trim_tokens = estimate_tokens(messages)
     if not defer_context_shaping and not agent_mode and not policy_shaped:
-        messages = trim_for_context(messages, context_length)
+        try:
+            messages = _trim_context_compat(
+                messages, context_length, strict_protected=True,
+            )
+        except ProtectedContextTooLarge as exc:
+            raise HTTPException(413, str(exc)) from exc
     _after_trim_messages = len(messages)
     _after_trim_tokens = estimate_tokens(messages)
     _context_trimmed = _after_trim_messages < _before_trim_messages or _after_trim_tokens < _before_trim_tokens

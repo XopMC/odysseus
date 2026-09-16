@@ -57,11 +57,16 @@ function init(apiBase) {
   // Clean up unsaved compare sessions on page close/refresh
   window.addEventListener('beforeunload', () => {
     if (!state._saveOnClose && state._paneSessionIds.length > 0) {
-      // sendBeacon uses POST — use the bulk delete endpoint
-      navigator.sendBeacon(
-        `${state.API_BASE}/api/sessions/bulk-delete`,
-        new Blob([JSON.stringify({ ids: state._paneSessionIds })], { type: 'application/json' })
-      );
+      // Keep the cleanup request authenticated with the same CSRF-aware
+      // fetch wrapper as the rest of the UI.  A raw sendBeacon cannot carry
+      // the owner-scoped CSRF header and would be rejected after login.
+      fetch(`${state.API_BASE}/api/sessions/bulk-delete`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: state._paneSessionIds }),
+      }).catch(() => {});
     }
   });
 }

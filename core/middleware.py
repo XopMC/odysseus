@@ -109,7 +109,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             or request.headers.get("X-Forwarded-Proto") == "https"
         )
         if is_https:
-            if os.getenv("HSTS_ENABLED", "true").strip().lower() == "false":
+            # Dual-scheme deployments intentionally keep HTTP available.  Do
+            # not opt a fresh install into browser-wide HSTS unless an
+            # operator explicitly enables it; ``HSTS_ENABLED=false`` still
+            # emits max-age=0 to clear a policy cached earlier.
+            if os.getenv("HSTS_ENABLED", "false").strip().lower() == "false":
                 # A TLS response is the only standards-compliant way to clear
                 # HSTS previously cached by a browser.
                 response.headers["Strict-Transport-Security"] = "max-age=0"

@@ -45,6 +45,40 @@ export function safeToolScreenshotSrc(raw) {
   return '';
 }
 
+function _historyToolOutputMarkup(event) {
+  const output = String(event?.output || '');
+  const replay = event?._replay || {};
+  const runId = String(replay.run_id || '');
+  const seq = Number.isInteger(replay.seq) ? replay.seq : -1;
+  if (!output || !runId || seq < 0 || output.length <= 8192) {
+    return output ? `<details class="agent-tool-output"><summary>Output</summary><pre>${uiModule.esc(output)}</pre></details>` : '';
+  }
+  return `<details class="agent-tool-output agent-tool-output-lazy" data-artifact-run="${uiModule.esc(runId)}" data-artifact-seq="${seq}"><summary>Output (load full)</summary><pre>${uiModule.esc(output.slice(0, 2048))}\n…</pre></details>`;
+}
+
+function _bindHistoryToolOutput(node) {
+  const details = node?.querySelector?.('.agent-tool-output-lazy');
+  if (!details) return;
+  details.addEventListener('toggle', async () => {
+    if (!details.open || details.dataset.loaded === 'true' || details.dataset.loading === 'true') return;
+    details.dataset.loading = 'true';
+    try {
+      const sid = window.sessionModule?.getCurrentSessionId?.();
+      const runId = details.dataset.artifactRun, seq = details.dataset.artifactSeq;
+      if (!sid) throw new Error('chat unavailable');
+      const response = await fetch(`/api/chat/run/${encodeURIComponent(sid)}/artifacts/${encodeURIComponent(runId)}/${encodeURIComponent(seq)}`, { credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const pre = details.querySelector('pre');
+      if (pre) pre.textContent = String(data.output || '');
+      details.dataset.loaded = 'true';
+    } catch (_) {
+      const pre = details.querySelector('pre');
+      if (pre) pre.textContent += '\n[Full output unavailable]';
+    } finally { delete details.dataset.loading; }
+  });
+}
+
 // Call only with an authored tool node, never a model-content container. The
 // direct-child selectors exclude command/output text, tool IDs and diff paths.
 export function localizeToolNode(node) {
@@ -2748,7 +2782,7 @@ export function addMessage(role, content, modelName, metadata) {
             const ok = (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
-              outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
+              outHtml = _historyToolOutputMarkup(ev);
             }
             const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
             if (screenshotSrc) {
@@ -2782,6 +2816,7 @@ export function addMessage(role, content, modelName, metadata) {
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
             node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
             localizeToolNode(node);
+            _bindHistoryToolOutput(node);
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
