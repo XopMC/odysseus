@@ -24,3 +24,7 @@ def test_access_mode_control_is_mode_independent_and_has_three_choices():
     assert "accessModeModule from './js/accessMode.js" in app
     assert "document.body.appendChild(menu)" in module
     assert "access-mode-menu-portal" in module
+    css = (ROOT / "static/style.css").read_text(encoding="utf-8")
+    assert ".access-mode-option {" in css
+    assert "min-height: 76px;" in css
+    assert "grid-template-columns: 13px minmax(0, 1fr);" in css

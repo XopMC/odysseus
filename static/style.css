@@ -2789,7 +2789,13 @@ body.bg-pattern-sparkles {
     }
     .access-mode-option {
       width: 100%;
-      display: flex;
+      height: auto;
+      /* These descriptions are deliberately explanatory and can take three
+         lines in Russian.  Do not inherit the toolbar's 32px button height. */
+      min-height: 76px;
+      box-sizing: border-box;
+      display: grid;
+      grid-template-columns: 13px minmax(0, 1fr);
       align-items: flex-start;
       gap: 8px;
       padding: 8px 9px;
@@ -2798,6 +2804,7 @@ body.bg-pattern-sparkles {
       color: inherit;
       background: transparent;
       text-align: left;
+      white-space: normal;
       cursor: pointer;
       font: inherit;
     }
@@ -2819,10 +2826,11 @@ body.bg-pattern-sparkles {
     .access-mode-option.active .access-mode-option-mark {
       border: 4px solid var(--accent, var(--red));
     }
+    .access-mode-option > span:last-child { min-width: 0; }
     .access-mode-option strong,
     .access-mode-option small { display: block; }
     .access-mode-option strong { font-size: 12px; line-height: 1.2; }
-    .access-mode-option small { margin-top: 2px; opacity: .65; font-size: 10px; line-height: 1.25; }
+    .access-mode-option small { margin-top: 2px; opacity: .65; font-size: 10px; line-height: 1.25; overflow-wrap: anywhere; }
     .access-mode-option-danger,
     .access-mode-option-danger strong { color: #ff4f4f; }
     .access-mode-option-danger.active { border-color: color-mix(in srgb, #ff4f4f 68%, transparent); background: color-mix(in srgb, #ff4f4f 12%, transparent); }
