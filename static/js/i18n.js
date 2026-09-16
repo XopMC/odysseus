@@ -7,6 +7,7 @@ const RU = Object.freeze({
   'Waiting for a plan':'Ожидается план', 'Send a message to create a read-only plan.':'Отправьте сообщение, чтобы создать план без выполнения.',
   'All required steps are complete.':'Все обязательные шаги завершены.', 'Show steps':'Показать шаги',
   'Execute':'Выполнить', 'Edit':'Изменить', 'Cancel':'Отменить', 'Pause':'Пауза', 'Resume':'Продолжить',
+  'Pause goal':'Приостановить цель', 'Resume goal':'Продолжить цель', 'Delete goal':'Удалить цель',
   'Save goal':'Сохранить цель', 'Goal objective':'Текст цели',
   'Turn off Plan mode':'Выключить режим плана', 'Turn off Goal mode':'Выключить режим цели',
   'Waiting for a goal':'Ожидается цель', 'Your next message becomes the active goal.':'Следующее сообщение станет активной целью.',

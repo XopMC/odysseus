@@ -2556,7 +2556,36 @@ body.bg-pattern-sparkles {
 	    .chat-work-popover { display:none; padding:8px 10px 10px; max-height:min(42vh,320px); overflow:auto; }
 	    .chat-work-card.expanded { height:auto; }
 	    .chat-work-card.expanded .chat-work-popover { display:block; }
-	    .plan-work-card:not(.expanded) { width: 86px; align-self:flex-start; }
+	    .plan-work-card:not(.expanded) {
+	      width: 36px; height: 36px; align-self: flex-end; overflow: visible;
+	      border-radius: 11px;
+	    }
+	    .plan-work-card:not(.expanded) .chat-work-card-head { padding: 0; justify-content: center; overflow: visible; }
+	    .plan-work-card:not(.expanded) .plan-mode-status-label { font-size: 0; }
+	    .plan-work-card:not(.expanded) .plan-mode-status-label::before { content: '\2637'; font-size: 18px; line-height: 1; }
+	    .plan-work-card:not(.expanded) #plan-work-progress {
+	      position: absolute; top: -7px; right: -7px; min-width: 17px; height: 17px;
+	      padding: 0 4px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center;
+	      border: 1px solid var(--panel); background: var(--accent, var(--red)); color: var(--panel);
+	      font-size: 8px; line-height: 1; font-weight: 800; overflow: hidden; max-width: 38px;
+	    }
+	    .plan-work-card.expanded { width: min(calc(100% - 16px), 480px); align-self: flex-end; }
+	    .goal-work-card { width: 100%; }
+	    .goal-work-card-head { padding: 0 6px 0 10px; cursor: default; }
+	    .goal-work-card-main {
+	      min-width: 0; flex: 1; height: 34px; padding: 0; border: 0;
+	      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+	      color: var(--accent, var(--red)); background: transparent; cursor: pointer;
+	    }
+	    .goal-work-card-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	    .goal-work-quick-actions { display: flex; align-items: center; gap: 4px; margin-left: 8px; flex-shrink: 0; }
+	    .goal-work-quick-actions button {
+	      width: 28px; height: 28px; padding: 0; border-radius: 8px;
+	      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 38%, transparent);
+	      color: var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+	      line-height: 1; cursor: pointer;
+	    }
+	    .goal-work-quick-actions button:hover { background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent); }
 	    .chat-work-current { margin-top: 5px; overflow-wrap: anywhere; }
 	    textarea.chat-work-current { width:100%; min-height:60px; resize:vertical; box-sizing:border-box; color:inherit; background:color-mix(in srgb,var(--panel) 80%,transparent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent); border-radius:8px; padding:7px; }
 	    .chat-work-card details { margin-top: 5px; }

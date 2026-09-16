@@ -74,7 +74,7 @@ function renderGoal() {
       state.textContent = ''; objective.textContent = '';
     }
     el('goal-work-progress').textContent = '';
-    ['goal-work-pause', 'goal-work-resume', 'goal-work-cancel'].forEach(id => { if (el(id)) el(id).hidden = true; });
+    ['goal-work-pause', 'goal-work-resume', 'goal-work-cancel', 'goal-work-quick-pause', 'goal-work-quick-resume', 'goal-work-quick-cancel'].forEach(id => { if (el(id)) el(id).hidden = true; });
     if (el('goal-mode-status-toggle')) el('goal-mode-status-toggle').hidden = !draftEnabled;
     return;
   }
@@ -86,6 +86,9 @@ function renderGoal() {
   el('goal-work-pause').hidden = goal.status !== 'active';
   el('goal-work-resume').hidden = !['paused', 'waiting_user'].includes(goal.status);
   el('goal-work-cancel').hidden = !live;
+  el('goal-work-quick-pause').hidden = goal.status !== 'active';
+  el('goal-work-quick-resume').hidden = !['paused', 'waiting_user'].includes(goal.status);
+  el('goal-work-quick-cancel').hidden = !live;
   el('goal-mode-status-toggle').hidden = true;
   if (goal.status === 'completed') window.__odysseusSetGoalMode?.(false);
 }
@@ -209,6 +212,9 @@ function bind() {
   el('goal-work-pause')?.addEventListener('click', () => mutate('goal', 'pause'));
   el('goal-work-resume')?.addEventListener('click', () => mutate('goal', 'resume'));
   el('goal-work-cancel')?.addEventListener('click', () => mutate('goal', 'cancel'));
+  el('goal-work-quick-pause')?.addEventListener('click', () => mutate('goal', 'pause'));
+  el('goal-work-quick-resume')?.addEventListener('click', () => mutate('goal', 'resume'));
+  el('goal-work-quick-cancel')?.addEventListener('click', () => mutate('goal', 'cancel'));
   el('goal-work-save')?.addEventListener('click', reviseGoal);
   document.querySelectorAll('.chat-work-card').forEach(node => {
     const toggle = node.querySelector('.chat-work-card-toggle');
@@ -225,6 +231,9 @@ function bind() {
     const source = node.textContent.trim();
     if (source) bindUiText(node, source);
   });
+  for (const [id, label] of [['goal-work-quick-pause', 'Pause goal'], ['goal-work-quick-resume', 'Resume goal'], ['goal-work-quick-cancel', 'Delete goal']]) {
+    bindUiText(el(id), label, 'aria-label'); bindUiText(el(id), label, 'title');
+  }
   if (!eventTimer) eventTimer = setInterval(pollEvents, 1200);
   ['focus', 'online', 'pageshow'].forEach(type => window.addEventListener(type, pollEvents));
   document.addEventListener('visibilitychange', pollEvents);
