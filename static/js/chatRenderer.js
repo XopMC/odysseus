@@ -20,6 +20,31 @@ function bindThinkingLabels(root) {
   );
 }
 
+// Older saved assistant rows kept one combined `thinking` field and the
+// replay sidecar kept channelized deltas only inside timeline_v2. Normalize
+// both shapes into the same per-round array used by live replay so history on
+// a second device never renders empty thinking cards.
+function historyRoundReasonings(metadata, roundCount = 0) {
+  const values = Array.isArray(metadata?.round_reasonings)
+    ? metadata.round_reasonings.map(value => String(value || ''))
+    : [];
+  const timeline = metadata?.timeline_v2?.events;
+  if (!values.some(value => value.trim()) && Array.isArray(timeline)) {
+    for (const item of timeline) {
+      const payload = item?.data && typeof item.data === 'object' ? item.data : item;
+      if (!payload || typeof payload !== 'object' || !payload.delta) continue;
+      if (payload.thinking !== true && !['thinking', 'thought'].includes(payload.channel)) continue;
+      const round = Math.max(1, Number(payload.round || payload._replay?.round || 1));
+      values[round - 1] = `${values[round - 1] || ''}${String(payload.delta)}`;
+    }
+  }
+  if (!values.some(value => value.trim()) && metadata?.thinking) {
+    const index = Math.max(0, Math.min(Math.max(roundCount - 1, 0), values.length || roundCount || 1) - 1);
+    values[index] = String(metadata.thinking);
+  }
+  return values;
+}
+
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
 const CHAT_ABOUT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
@@ -2671,6 +2696,7 @@ export function addMessage(role, content, modelName, metadata) {
       )
     ) {
       const roundTexts = metadata.round_texts || [];
+      const roundReasonings = historyRoundReasonings(metadata, roundTexts.length);
       const roundModels = metadata.round_models || [];
       const roundEndpointIds = metadata.round_endpoint_ids || [];
       const roundEndpointLabels = metadata.round_endpoint_labels || [];
@@ -2693,11 +2719,18 @@ export function addMessage(role, content, modelName, metadata) {
       const firstRound = (toolsByRound[0] || []).length ? 0 : 1;
       for (let roundNum = firstRound; roundNum <= maxRound; roundNum++) {
         const r = roundNum - 1;
-        const txt = r >= 0
+        const rawTxt = r >= 0
           ? resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata)
           : '';
+        const parsedRound = markdownModule.extractThinkingBlocks(rawTxt);
+        const embeddedThinking = (parsedRound.thinkingBlocks || []).join('\n\n').trim();
+        const reasoning = String(roundReasonings[r] || '').trim();
+        const txt = (parsedRound.content || (embeddedThinking ? '' : rawTxt)).trim();
+        const renderSource = reasoning && !embeddedThinking
+          ? `<think>${reasoning}</think>\n\n${txt}`
+          : rawTxt;
 
-        if (txt) {
+        if (txt || reasoning || embeddedThinking) {
           const wrap = document.createElement('div');
           wrap.className = 'msg msg-ai' + (r > 0 ? ' msg-continuation' : '');
           const roleEl = document.createElement('div');
@@ -2730,7 +2763,12 @@ export function addMessage(role, content, modelName, metadata) {
               + ' (' + pair.requestedEndpointLabel + ' -> ' + contEndpointLabel + ')';
           }
           applyModelColor(roleEl, contModel);
-          if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
+          const roundStamp = Array.isArray(metadata?.round_timestamps)
+            ? metadata.round_timestamps[r]
+            : metadata?.timestamp;
+          const stampValue = typeof roundStamp === 'number' && roundStamp < 1e12
+            ? roundStamp * 1000 : roundStamp;
+          roleEl.appendChild(roleTimestamp(stampValue));
           wrap.appendChild(roleEl);
           const body = document.createElement('div');
           body.className = 'body';
@@ -2753,10 +2791,10 @@ export function addMessage(role, content, modelName, metadata) {
           if (isLastTextRound && metadata?.rag_sources?.length) {
             agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
           }
-          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
+          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(renderSource)) + agentFindingsSuffix;
           bindThinkingLabels(body);
           wrap.appendChild(body);
-          wrap.dataset.raw = txt;
+          wrap.dataset.raw = renderSource || txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
           box.appendChild(wrap);
           lastWrap = wrap;
@@ -2999,10 +3037,13 @@ export function addMessage(role, content, modelName, metadata) {
       findingsSuffix += buildRagSourcesBox(metadata.rag_sources);
     }
     // If thinking is stored in metadata (not in text), reconstruct the full display
-    if (role === 'assistant' && metadata?.thinking) {
+    const storedThinking = role === 'assistant'
+      ? String(metadata?.thinking || historyRoundReasonings(metadata, 1).filter(Boolean).join('\n\n') || '')
+      : '';
+    if (role === 'assistant' && storedThinking) {
       const thinkTime = metadata.thinking_time || null;
       const thinkHtml = markdownModule.processWithThinking(
-        '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + metadata.thinking + '</think>\n\n' + text
+        '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + storedThinking + '</think>\n\n' + text
       );
       b.innerHTML = sourcesPrefix + thinkHtml + findingsSuffix;
 	    } else {

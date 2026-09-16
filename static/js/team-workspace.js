@@ -138,7 +138,10 @@ export function normalizeTeamStart(draft, models) {
   }));
   const payload = { title: String(draft.title || 'Team task'), goal: String(draft.goal).trim(),
     project_path: String(draft.project_path).trim(), leader: route(draft.leader), workers, config,
-    budget_microusd: Number(draft.budget_microusd || 0), external_approvals: [] };
+    budget_microusd: Number(draft.budget_microusd || 0),
+    access_mode: ['ask_every_time', 'ask_important', 'full_access'].includes(draft.access_mode)
+      ? draft.access_mode : 'ask_important',
+    external_approvals: [] };
   if (!safeInteger(payload.budget_microusd)) throw new Error('Budget must be a nonnegative integer in micro-USD.');
   for (const approval of draft.external_approvals || []) {
     if (!approval.endpoint_id || approval.consent !== true || !safeInteger(approval.limit_microusd) || !approval.limit_microusd) throw new Error('External approval needs explicit consent, an endpoint, and a positive budget.');
@@ -855,7 +858,9 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
       leader: selectedRoute(ui.leader), workers: manualWorkers, config: { ...Object.fromEntries(Object.entries(ui.toggles).map(([k, v]) => [k, v.control.checked])), preset: ui.preset.value,
         project_profile: { install_command: ui.installCommand.control.value, run_command: ui.runCommand.control.value,
           test_command: ui.testCommand.control.value, build_command: ui.buildCommand.control.value, constraints: ui.constraints.control.value } },
-      budget_microusd: Number(ui.budget.control.value), external_approvals }, models);
+      budget_microusd: Number(ui.budget.control.value),
+      access_mode: window.accessModeModule?.getMode?.() || 'ask_important',
+      external_approvals }, models);
     if (selectedEngineeringProject) {
       payload.project_id = selectedEngineeringProject.id;
       payload.project_revision = selectedEngineeringProject.revision;

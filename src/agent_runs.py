@@ -101,6 +101,16 @@ class _Run:
 
 _RUNS: Dict[str, _Run] = {}
 
+# Auth-disabled/single-user deployments still need a durable context ledger so
+# Stop, approval and Goal continuation cannot fall back to a tiny stored-chat
+# estimate. Keep the DB owner column non-null without inventing an account that
+# could collide with an authenticated owner.
+_SINGLE_USER_OWNER_KEY = "__odysseus_single_user__"
+
+
+def _storage_owner(run: _Run) -> str:
+    return str(run.owner or _SINGLE_USER_OWNER_KEY)
+
 # How long a FINISHED run (and its full replay buffer) is retained after the
 # last subscriber disconnects, so a reconnect within the window can still
 # replay the result. After this, the run is evicted to bound memory — without
@@ -123,8 +133,6 @@ def _ledger_hash(run: _Run) -> str:
 
 def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool = False) -> None:
     """Persist a small owner-scoped run checkpoint; never persist secrets."""
-    if not run.owner:
-        return
     try:
         from core.database import ChatRunState, SessionLocal, utcnow_naive
         effective_status = status or run.terminal_status or run.status
@@ -136,7 +144,7 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
                 row = ChatRunState(
                     run_id=run.run_id,
                     session_id=getattr(run, "session_id", "") or "",
-                    owner=run.owner,
+                    owner=_storage_owner(run),
                     status=effective_status,
                     started_at=datetime.utcfromtimestamp(run.started_at),
                     last_seq=len(run.buffer) - 1,
@@ -166,14 +174,14 @@ def _seed_context_ledger(run: _Run) -> None:
     like an unexplained compaction.  The next explicit ``compacted`` event is
     allowed to lower it again.
     """
-    if not run.owner or not run.session_id:
+    if not run.session_id:
         return
     try:
         from core.database import ChatRunState, SessionLocal
         with SessionLocal() as db:
             row = db.query(ChatRunState).filter(
                 ChatRunState.session_id == run.session_id,
-                ChatRunState.owner == run.owner,
+                ChatRunState.owner == _storage_owner(run),
             ).order_by(ChatRunState.updated_at.desc()).first()
             if row is None or not row.context_snapshot:
                 return
@@ -397,6 +405,7 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
         actual_model = ""
         actual_endpoint_id = None
         actual_endpoint_label = None
+        round_timestamps = {}
         substantive = False
         for item in events:
             payload = item["data"]
@@ -411,6 +420,9 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
                 current_round = event_round
                 continue
             current_round = max(current_round, event_round)
+            replay_created_at = replay.get("created_at") if isinstance(replay, dict) else None
+            if replay_created_at is not None and event_round not in round_timestamps:
+                round_timestamps[event_round] = replay_created_at
             if event_type == "model_actual":
                 actual_model = str(payload.get("model") or actual_model)
                 actual_endpoint_id = payload.get("endpoint_id", actual_endpoint_id)
@@ -461,11 +473,13 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
 
         max_round = max([*round_parts.keys(), *(tools[key]["round"] for key in tool_order), 0])
         round_texts = []
+        round_reasonings = []
         for round_number in range(1, max_round + 1):
             parts = round_parts.get(round_number, {"thinking": [], "text": []})
             thinking = "".join(parts["thinking"]).strip()
             text = "".join(parts["text"]).strip()
             round_texts.append((f"<think>\n{thinking}\n</think>\n\n" if thinking else "") + text)
+            round_reasonings.append(thinking)
         tool_events = []
         for tool_id in tool_order:
             event = tools[tool_id]
@@ -480,8 +494,6 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
         if terminal_status in {"stopped", "error"}:
             legacy_metadata["stopped"] = terminal_status == "stopped"
             legacy_metadata["cancelled"] = terminal_status == "stopped" and not substantive
-            if round_texts:
-                legacy_metadata["round_texts"] = round_texts
             if tool_events:
                 legacy_metadata["tool_events"] = tool_events
             if actual_model:
@@ -490,6 +502,16 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
                 legacy_metadata["endpoint_id"] = actual_endpoint_id
             if actual_endpoint_label:
                 legacy_metadata["endpoint_label"] = actual_endpoint_label
+        # Keep the canonical per-round thinking alongside the legacy text/tool
+        # arrays for every terminal status. Older clients only know
+        # ``round_texts``; newer renderers use this parallel array to restore
+        # non-empty collapsible thinking blocks after reload.
+        if round_texts:
+            legacy_metadata["round_texts"] = round_texts
+            legacy_metadata["round_reasonings"] = round_reasonings
+            legacy_metadata["round_timestamps"] = [
+                round_timestamps.get(number) for number in range(1, max_round + 1)
+            ]
 
         synced_message_id = None
         synced_metadata = None
@@ -711,7 +733,7 @@ def recover_durable_runs() -> list[dict]:
                 {
                     "run_id": row.run_id,
                     "session_id": row.session_id,
-                    "owner": row.owner,
+                    "owner": None if row.owner == _SINGLE_USER_OWNER_KEY else row.owner,
                     "started_at": row.started_at.replace(tzinfo=timezone.utc).timestamp() if row.started_at else time.time(),
                     "context_revision": int(row.context_revision or 0),
                     "context_snapshot": dict(row.context_snapshot or {}) or None,

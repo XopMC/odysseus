@@ -216,6 +216,8 @@ class TeamRuntime:
         config = {'auto_dispatch': True, 'auto_continue': True, 'reviewer': True,
                   'web': False, 'external': False, 'trusted_host': True, 'mcp': False,
                   **body.get('config', {})}
+        from src.access_policy import normalize_access_mode
+        access_mode = normalize_access_mode(body.get('access_mode'))
         for key in ('auto_dispatch', 'auto_continue', 'reviewer', 'web', 'external', 'trusted_host', 'mcp'):
             if type(config[key]) is not bool:
                 raise ValueError('Task permissions must be explicit booleans')
@@ -230,6 +232,7 @@ class TeamRuntime:
         task = self.store.create_task(owner, str(body.get('title') or goal[:100]),
                 budget_microusd=int(body.get('budget_microusd') or 0),
                 metadata={'session_id': session_id, 'goal': goal, 'project_path': path,
+                          'access_mode': access_mode,
                           'config': config, 'leader': leader, 'participants': participants,
                           'phase': 'planning', **({'engineering_project_id': project['id'],
                            'execution_host_id': project['host_id'], 'required_runtime': 'engineering-v1'} if project else {})})

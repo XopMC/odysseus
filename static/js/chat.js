@@ -37,7 +37,7 @@ import {
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
 import { loadPanel } from './panels.js';
-import { bindUiText } from './i18n.js';
+import { bindUiText, t } from './i18n.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -344,7 +344,7 @@ import { bindUiText } from './i18n.js';
     _renderContextHeaderRing(pill, pct);
     _renderCompactMenuContextIcon(pct);
     pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${_contextSourceLabel(data)} · ${String(data.model || '').split('/').pop()}`;
-    pill.classList.remove('warn', 'danger', 'loading');
+    pill.classList.remove('warn', 'danger', 'loading', 'stale');
     const colorClass = _contextColorClass(pct);
     if (colorClass) pill.classList.add(colorClass);
     if (pill.classList.contains('open')) {
@@ -437,10 +437,20 @@ import { bindUiText } from './i18n.js';
       _applyContextHeaderData(data);
     } catch (err) {
       if (seq !== _contextHeaderSeq) return;
-      _contextHeaderData = null;
-      pill.hidden = true;
+      // A transient reload/second-device request must not erase the last
+      // server measurement or replace it with a tiny stored-chat estimate.
+      // Keep the previous percentage visible and mark it stale until the next
+      // authoritative snapshot arrives.
+      const previous = _contextHeaderData;
+      if (previous && previous.session_id === sid) {
+        _applyContextHeaderData({ ...previous, context_status: 'stale' });
+        pill.classList.add('stale');
+        pill.title = `${pill.title || ''} · ${t('Context measurement temporarily unavailable')}`;
+      } else {
+        pill.hidden = true;
+        _closeContextHeaderPopup();
+      }
       pill.classList.remove('loading', 'warn', 'danger');
-      _closeContextHeaderPopup();
       console.warn('context header refresh failed:', reason, err);
     }
   }
@@ -873,12 +883,30 @@ import { bindUiText } from './i18n.js';
   }
 
   /** POST the exact Stop for one observed run identity. */
-  function _postExactStop(sessionId, runId) {
-    return fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'X-Odysseus-Run-Id': runId },
-    }).then(async response => {
+  async function _postExactStop(sessionId, runId) {
+    const currentLocation = (typeof location !== 'undefined' && location)
+      || (typeof window !== 'undefined' && window.location) || { protocol: 'http:' };
+    const cookie = typeof document !== 'undefined' ? String(document.cookie || '') : '';
+    const csrfName = currentLocation.protocol === 'https:' ? 'odysseus_csrf_https' : 'odysseus_csrf_http';
+    const csrfPart = cookie.split('; ').find(value => value.startsWith(`${csrfName}=`));
+    const headers = { 'X-Odysseus-Run-Id': runId };
+    if (csrfPart) headers['X-Odysseus-CSRF'] = decodeURIComponent(csrfPart.slice(csrfName.length + 1));
+    let response = await fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
+      method: 'POST', credentials: 'same-origin', headers,
+    });
+    // A freshly opened second device may not have received the readable CSRF
+    // cookie yet. Prime it once and retry the same exact run ID; never fall
+    // back to a session-wide/headerless stop.
+    if (response.status === 403) {
+      try { await fetch('/api/auth/csrf', { credentials: 'same-origin', cache: 'no-store' }); } catch (_) {}
+      const refreshed = (typeof document !== 'undefined' ? String(document.cookie || '') : '')
+        .split('; ').find(value => value.startsWith(`${csrfName}=`));
+      if (refreshed) headers['X-Odysseus-CSRF'] = decodeURIComponent(refreshed.slice(csrfName.length + 1));
+      response = await fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
+        method: 'POST', credentials: 'same-origin', headers,
+      });
+    }
+    try {
       if (!response.ok) return false;
       const result = await response.json().catch(() => ({}));
       if (!result.stopped) return false;
@@ -899,7 +927,7 @@ import { bindUiText } from './i18n.js';
       };
       setTimeout(refresh, 0);
       return true;
-    }).catch(() => false);
+    } catch (_) { return false; }
   }
 
   /** Stop only the exact detached run whose identity this browser observed. */
@@ -907,6 +935,24 @@ import { bindUiText } from './i18n.js';
     if (!sessionId) return false;
     const runId = _streamRunIds.get(sessionId);
     if (!runId) {
+      // A reload/second device may have an active detached run before this
+      // reader has received its response headers. Resolve the server's exact
+      // opaque identity immediately so Stop cannot wait forever for a future
+      // reconnect event.
+      const canProbeRemoteRun = typeof window !== 'undefined' && !!window.location;
+      if (canProbeRemoteRun) void fetch(`/api/chat/stream_status/${encodeURIComponent(sessionId)}`, {
+        credentials: 'same-origin', cache: 'no-store',
+      }).then(response => response.ok ? response.json() : null).then(info => {
+        const resolved = String(info?.run_id || '');
+        if (!resolved || info?.status !== 'streaming') return;
+        if (_streamGenerations.get(sessionId) !== generation) return;
+        _streamRunIds.set(sessionId, resolved);
+        void _postExactStop(sessionId, resolved);
+        if (abortCtrl && !abortCtrl.signal.aborted) {
+          abortCtrl._reason = 'user-stop';
+          abortCtrl.abort();
+        }
+      }).catch(() => {});
       // Queue against the CURRENT send's generation: its POST is the only
       // identity channel that can name the run, so the Stop fires from that
       // send's own header arrival even if a replacement starts meanwhile.
@@ -1497,6 +1543,7 @@ import { bindUiText } from './i18n.js';
         goal: !!stored.goal_mode,
         web: checked('web-toggle'),
         bash: checked('bash-toggle'),
+        accessMode: window.accessModeModule?.getMode?.() || 'ask_important',
         research: checked('research-toggle'),
         rag: control('rag-toggle') ? checked('rag-toggle') : true,
         incognito: checked('incognito-toggle'),
@@ -2132,7 +2179,8 @@ import { bindUiText } from './i18n.js';
 	      }
 	      fd.append('mode', isAgentMode ? 'agent' : 'chat');
 	      fd.append('plan_mode', isPlanMode ? 'true' : 'false');
-	      fd.append('goal_mode', choicesForSend.goal ? 'true' : 'false');
+      fd.append('goal_mode', choicesForSend.goal ? 'true' : 'false');
+      fd.append('access_mode', choicesForSend.accessMode);
 	      if (!approvalForSend && choicesForSend.goal) {
 	        window.chatWork?.beginGoal?.(String(fd.get('message') || msg || ''));
 	      }
@@ -5223,14 +5271,22 @@ import { bindUiText } from './i18n.js';
     const roleLabel = _shortModel(meta && meta.model);
     const resumeStartedAt = Number(res.headers.get('X-Odysseus-Started-At') || 0) * 1000;
     const roleTs = new Date(resumeStartedAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    let nextRoundTimestamp = 0;
     const replayHolders = [];
     const replayNodes = [];
-    const createReplayHolder = (previous = null) => {
+    const createReplayHolder = (previous = null, timestampSeconds = 0) => {
       const holder = document.createElement('div');
       holder.className = replayHolders.length ? 'msg msg-ai msg-continuation streaming' : 'msg msg-ai streaming';
+      const stamp = Number(timestampSeconds) > 0
+        ? new Date(Number(timestampSeconds) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : roleTs;
       holder.innerHTML = '<div class="role">' + uiModule.esc(roleLabel) +
-        ' <span class="role-timestamp">' + roleTs + '</span></div>' +
+        ' <span class="role-timestamp">' + stamp + '</span></div>' +
         '<div class="body"><div class="stream-content"></div></div>';
+      if (Number(timestampSeconds) > 0) {
+        const parsedStamp = new Date(Number(timestampSeconds) * 1000);
+        if (!Number.isNaN(parsedStamp.getTime())) holder.querySelector('.role-timestamp').title = parsedStamp.toLocaleString();
+      }
       holder._requestedModel = meta && meta.model;
       holder._actualModel = holder._requestedModel;
       if (previous) {
@@ -5472,7 +5528,8 @@ import { bindUiText } from './i18n.js';
                 _flushIncrementalStreamRender(contentDiv);
                 finishReplayThinking();
                 if (replayThread) replayThread.classList.add('has-bottom');
-                holder = createReplayHolder(holder);
+                holder = createReplayHolder(holder, nextRoundTimestamp);
+                nextRoundTimestamp = 0;
                 contentDiv = holder.querySelector('.stream-content');
                 roundText = '';
                 replayTool = null;
@@ -5492,7 +5549,8 @@ import { bindUiText } from './i18n.js';
               _flushIncrementalStreamRender(contentDiv);
               finishReplayThinking();
               if (replayThread) replayThread.classList.add('has-bottom');
-              holder = createReplayHolder(holder);
+              holder = createReplayHolder(holder, nextRoundTimestamp);
+              nextRoundTimestamp = 0;
               contentDiv = holder.querySelector('.stream-content');
               roundText = '';
               docFenceOpened = false;
@@ -5591,6 +5649,11 @@ import { bindUiText } from './i18n.js';
             // persisted round boundary in a long-running agent timeline.
             _flushIncrementalStreamRender(contentDiv);
             finishReplayThinking();
+            // The detached run annotates each boundary with server time. Keep
+            // per-round cards aligned with the actual event rather than the
+            // original run-start timestamp (which made every old bubble show
+            // the same minute on another device).
+            nextRoundTimestamp = Number(json._replay?.created_at) || 0;
             nextDeltaStartsRound = Boolean(roundText.trim() || replayTool || gotDelta);
             docFenceOpened = false;
             replayThinking = '';

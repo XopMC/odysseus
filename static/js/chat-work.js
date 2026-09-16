@@ -180,6 +180,7 @@ async function continueGoal() {
     fd.append('session', sessionId);
     fd.append('message', 'Continue the active goal from its durable checkpoint. Change approach after repeated failures; complete it only with verified evidence.');
     fd.append('mode', 'agent'); fd.append('goal_continuation', 'true'); fd.append('goal_lease_token', lease.lease_token);
+    fd.append('access_mode', window.accessModeModule?.getMode?.() || 'ask_important');
     fd.append('allow_bash', el('bash-toggle')?.checked ? 'true' : 'false');
     fd.append('allow_web_search', el('web-toggle')?.checked ? 'true' : 'false');
     const res = await fetch(`${api}/api/chat_stream`, { method: 'POST', body: fd, credentials: 'same-origin' });
@@ -195,6 +196,10 @@ async function continueGoal() {
 
 async function onRunEnded(id) {
   await refresh(id);
+  // Reconcile the header from the owner-scoped database count, not the
+  // number of transient DOM bubbles (which can differ on two devices during
+  // replay). This keeps desktop/mobile badges identical after completion.
+  await window.sessionModule?.refreshSessionMessageCount?.(id);
   if (id === sessionId && snapshot.goal?.status === 'active') setTimeout(continueGoal, 300);
 }
 

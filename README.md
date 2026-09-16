@@ -157,6 +157,13 @@ explicitly.
 `SKILL.md` из `.odysseus/skills/` изолированы по проекту; навыки являются
 недоверенным контекстом и не расширяют доступ к машине.
 
+**Настройки доступа:** щит в composer задаёт owner-scoped режим для Agent,
+Chat и Team/Command: «Спрашивать каждый раз», «Спрашивать только важные» или
+«Полный доступ». Полный доступ убирает обычные карточки подтверждения для
+включённых инструментов, но не отключает проверку владельца, проекта/хоста,
+делегированных токенов, внешнего недоверенного контекста и неизвестных
+побочных эффектов.
+
 HTTP и HTTPS работают одновременно без редиректа и без HSTS. Они используют
 раздельные cookies; HTTPS-cookie всегда `Secure`, а HTTP-сессия считается
 небезопасной для публичной сети.
@@ -185,6 +192,12 @@ mutation, secret or host authority.
 Reviewed Browser MCP screenshots are retained as bounded, owner-scoped task
 artifacts in the Team evidence panel. They are untrusted evidence, not an
 automatic pass verdict for a task or UI check.
+
+The composer shield stores one owner-scoped access mode for Agent, Chat and
+Team/Command: “Ask every time”, “Ask only important”, or the red “Full access”.
+Full access suppresses routine approval cards for enabled tools; it does not
+remove owner/project/host checks, delegated-token restrictions, external
+untrusted-context gates, or unknown-side-effect protection.
 
 HTTP and HTTPS intentionally remain available without an HSTS policy or redirect.
 They use separate session cookies; the HTTPS cookie is always Secure, while the

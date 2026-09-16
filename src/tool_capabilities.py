@@ -626,6 +626,9 @@ class ToolRunSecurityContext:
     external_untrusted_context_seen: bool = False
     external_sources: list[str] = field(default_factory=list)
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Owner-selected approval preference.  Empty keeps the legacy behavior for
+    # direct library callers; chat routes always pass the server-owned value.
+    access_mode: str = ""
     # Task-scope approval sets this for the resumed in-memory run. Chat-scope
     # approval is projected from the server-owned session history marker below.
     # The bypass affects only this automatic gate; current tool policy, ownership,
@@ -684,8 +687,35 @@ class ToolRunSecurityContext:
             "update_plan_step",
         }:
             return ToolGateDecision(True)
-        if self.approval_gate_bypassed:
+        from src.access_policy import (
+            ACCESS_MODE_ASK_EVERY_TIME,
+            ACCESS_MODE_FULL,
+            access_mode_requires_approval,
+            normalize_access_mode,
+        )
+
+        access_mode = normalize_access_mode(self.access_mode, default=None)
+        # Full access suppresses routine approval cards, but the external
+        # untrusted-context gate below remains deliberately independent.  This
+        # prevents pasted reports/web/MCP text from becoming authority merely
+        # because a UI preference was changed.
+        if access_mode == ACCESS_MODE_FULL and not self.external_untrusted_context_seen:
             return ToolGateDecision(True)
+        # A task/chat-scope exact approval may cover the remaining important
+        # actions.  "Ask every time" intentionally does not inherit that
+        # bypass: only the sealed action is released before the next card.
+        if self.approval_gate_bypassed and access_mode != ACCESS_MODE_ASK_EVERY_TIME:
+            return ToolGateDecision(True)
+        if access_mode and access_mode_requires_approval(
+            access_mode, capabilities_for_action(tool_name, content)
+        ):
+            return ToolGateDecision(
+                False,
+                (
+                    "The current access setting requires approval before this "
+                    f"{access_mode.replace('_', ' ')} action."
+                ),
+            )
         if not self.external_untrusted_context_seen:
             return ToolGateDecision(True)
         capabilities = capabilities_for_action(tool_name, content)

@@ -6,6 +6,13 @@ from fastapi import APIRouter, Request
 from core.atomic_io import atomic_write_json
 from src.auth_helpers import get_current_user, effective_user
 from src.constants import USER_PREFS_FILE
+from src.access_policy import (
+    ACCESS_MODE_FULL,
+    ACCESS_MODE_ASK_EVERY_TIME,
+    ACCESS_MODE_ASK_IMPORTANT,
+    DEFAULT_ACCESS_MODE,
+    normalize_access_mode,
+)
 
 PREFS_FILE = USER_PREFS_FILE
 _FOREGROUND_POLICY_KEYS = (
@@ -14,6 +21,7 @@ _FOREGROUND_POLICY_KEYS = (
 )
 _PREFS_LOCK = threading.RLock()
 _MODEL_FAVORITES_KEY = "model_favorites_v2"
+_ACCESS_MODE_KEY = "access_mode_v1"
 
 
 def _favorites_owner(request: Request):
@@ -111,6 +119,15 @@ def _save_for_user(user: Optional[str], prefs: dict):
     _save(all_prefs)
 
 
+def get_access_mode_for_user(user: Optional[str] = None) -> str:
+    """Read the owner-scoped approval mode used at every chat request boundary."""
+
+    value = _load_for_user(user).get(_ACCESS_MODE_KEY)
+    if isinstance(value, dict):
+        value = value.get("mode")
+    return normalize_access_mode(value) or DEFAULT_ACCESS_MODE
+
+
 def setup_prefs_routes():
     router = APIRouter(prefix="/api/prefs", tags=["preferences"])
 
@@ -118,6 +135,53 @@ def setup_prefs_routes():
     async def get_all_prefs(request: Request):
         user = get_current_user(request)
         return _load_for_user(user)
+
+    # Keep this static route before /{key}; Starlette matches in declaration
+    # order and the legacy generic preference endpoint must not swallow it.
+    @router.get("/access-mode")
+    async def access_mode_snapshot(request: Request):
+        user = _favorites_owner(request)
+        value = _load_for_user(user).get(_ACCESS_MODE_KEY)
+        if not isinstance(value, dict):
+            value = {}
+        mode = normalize_access_mode(value.get("mode")) or DEFAULT_ACCESS_MODE
+        try:
+            revision = max(0, int(value.get("revision") or 0))
+        except (TypeError, ValueError):
+            revision = 0
+        return {
+            "mode": mode,
+            "revision": revision,
+            "modes": [
+                ACCESS_MODE_ASK_EVERY_TIME,
+                ACCESS_MODE_ASK_IMPORTANT,
+                ACCESS_MODE_FULL,
+            ],
+        }
+
+    @router.put("/access-mode")
+    async def set_access_mode(request: Request, body: dict):
+        user = _favorites_owner(request)
+        mode = normalize_access_mode(body.get("mode"), default=None)
+        expected = body.get("expected_revision")
+        if mode is None or type(expected) is not int or expected < 0:
+            from fastapi import HTTPException
+            raise HTTPException(400, "Access mode and revision are required")
+        with _PREFS_LOCK:
+            prefs = _load_for_user(user)
+            current = prefs.get(_ACCESS_MODE_KEY, {})
+            current = current if isinstance(current, dict) else {}
+            try:
+                revision = max(0, int(current.get("revision") or 0))
+            except (TypeError, ValueError):
+                revision = 0
+            if revision != expected:
+                from fastapi import HTTPException
+                raise HTTPException(409, "Access settings changed; refresh")
+            result = {"mode": mode, "revision": revision + 1}
+            prefs[_ACCESS_MODE_KEY] = result
+            _save_for_user(user, prefs)
+        return result
 
     @router.get("/{key}")
     async def get_pref(request: Request, key: str):

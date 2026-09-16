@@ -169,7 +169,8 @@ class SessionManager:
                 meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}
                 if meta is None: meta = {}
                 meta['_db_id'] = db_msg.id
-                meta.setdefault('timestamp', _message_timestamp_iso(db_msg.timestamp))
+                if db_msg.timestamp:
+                    meta['timestamp'] = _message_timestamp_iso(db_msg.timestamp)
                 history.append(ChatMessage(
                     role=db_msg.role,
                     content=_parse_msg_content(db_msg.content),
@@ -184,7 +185,8 @@ class SessionManager:
                 meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}
                 if meta is None: meta = {}
                 meta['_db_id'] = db_msg.id
-                meta.setdefault('timestamp', _message_timestamp_iso(db_msg.timestamp))
+                if db_msg.timestamp:
+                    meta['timestamp'] = _message_timestamp_iso(db_msg.timestamp)
                 history.append(ChatMessage(
                     role=db_msg.role,
                     content=_parse_msg_content(db_msg.content),

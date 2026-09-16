@@ -198,7 +198,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 meta = json.loads(m.meta_data) or {}
             except (json.JSONDecodeError, ValueError):
                 meta = {}
-        if m.timestamp and "timestamp" not in meta:
+        # The DB row is canonical. A replay/timeline merge may carry an older
+        # metadata timestamp; always refresh it from the persisted message time
+        # so every device renders the same minute.
+        if m.timestamp:
             meta["timestamp"] = m.timestamp.isoformat() + "Z"
         if meta:
             entry["metadata"] = meta
@@ -226,6 +229,13 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     .filter(DbChatMessage.session_id == session_id)
                     .count()
                 )
+                # The header count is server-authoritative. Do not derive it
+                # from each client's rendered DOM: live/replay bubbles differ
+                # transiently between devices. The raw DB total remains the
+                # compatibility count; hidden checkpoint rows are excluded
+                # from the page itself and therefore never enter the visible
+                # DOM count.
+                visible_total = total
                 # Explicit offsets remain available for older clients. New
                 # clients use a stable opaque cursor so inserts at the tail do
                 # not shift an in-progress upward pagination session.
@@ -320,6 +330,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     "offset": page_offset,
                     "limit": page_limit,
                     "total": total,
+                    "visible_total": visible_total,
                     "cursor": next_cursor,
                     "next_cursor": next_cursor,
                     "has_more_before": has_more_before,
@@ -382,6 +393,8 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             "model": session.model,
             "endpoint_url": session.endpoint_url,
             "name": session.name,
+            "total": len(history_dict),
+            "visible_total": len(history_dict),
         }
 
     @router.post("/api/session/{session_id}/truncate")

@@ -245,10 +245,10 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260916longrun1">
+  <link rel="stylesheet" href="/static/style.css?v=20260917access1">
   <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260913team1">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260916longrun1">
+  <link rel="modulepreload" href="/static/app.js?v=20260917access1">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260916longrun1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js?v=20260916longrun1">
@@ -1201,6 +1201,28 @@
               <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
             </svg>
           </button>
+          <!-- Owner-scoped approval policy. This control is mode-independent:
+               Agent, Chat and Team/Command all use the same server setting. -->
+          <div class="access-mode-wrap" id="access-mode-wrap">
+            <button type="button" class="input-icon-btn access-mode-btn" id="access-mode-btn" title="Access settings" aria-label="Access settings" aria-haspopup="menu" aria-expanded="false">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3 20 6v5c0 4.7-3.1 8.6-8 10-4.9-1.4-8-5.3-8-10V6z"/>
+                <path d="M12 8v4"/><circle cx="12" cy="15.5" r=".8" fill="currentColor" stroke="none"/>
+              </svg>
+            </button>
+            <div class="access-mode-menu" id="access-mode-menu" role="menu" aria-labelledby="access-mode-btn" hidden>
+              <div class="access-mode-menu-title">Access settings</div>
+              <button type="button" class="access-mode-option" data-access-mode="ask_every_time" role="menuitemradio" aria-checked="false">
+                <span class="access-mode-option-mark" aria-hidden="true"></span><span><strong>Ask every time</strong><small>Ask before each effectful action.</small></span>
+              </button>
+              <button type="button" class="access-mode-option" data-access-mode="ask_important" role="menuitemradio" aria-checked="false">
+                <span class="access-mode-option-mark" aria-hidden="true"></span><span><strong>Ask only important</strong><small>Ask before code, writes, network and destructive actions.</small></span>
+              </button>
+              <button type="button" class="access-mode-option access-mode-option-danger" data-access-mode="full_access" role="menuitemradio" aria-checked="false">
+                <span class="access-mode-option-mark" aria-hidden="true"></span><span><strong>Full access</strong><small>No routine prompts for enabled tools in this account.</small></span>
+              </button>
+            </div>
+          </div>
           <!-- Workspace indicator (hidden until a folder is set) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Workspace - click to clear" id="workspace-indicator-btn" aria-label="Clear workspace" style="display:none;">
             <svg class="workspace-indicator-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -2643,7 +2665,7 @@
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260815approvalsave1"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260916longrun1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260917access1"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

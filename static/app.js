@@ -25,6 +25,7 @@ import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260916longrun1';
 import sessionModule from './js/sessions.js?v=20260916longrun1';
 import chatWork from './js/chat-work.js?v=20260916contextpause1';
+import accessModeModule from './js/accessMode.js?v=20260917access1';
 import projectsModule from './js/projects.js?v=20260915projects1';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260913team1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
@@ -63,6 +64,7 @@ window.teamWorkspace = teamWorkspace;
 window.themeModule = themeModule;
 window.sessionModule = sessionModule;
 window.chatWork = chatWork;
+window.accessModeModule = accessModeModule;
 window.projectsModule = projectsModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
@@ -358,10 +360,29 @@ function initializeEventListeners() {
   const _chatHistEl = el('chat-history');
   if (_metaCountEl && _chatHistEl) {
     let _countScheduled = false;
+    let _authoritativeCountSession = null;
+    let _authoritativeCount = null;
     const _updateMsgCount = () => {
       _countScheduled = false;
-      const n = _chatHistEl.querySelectorAll(':scope > .msg').length;
+      const currentSession = window.sessionModule?.getCurrentSessionId?.() || null;
+      const useServerCount = currentSession
+        && currentSession === _authoritativeCountSession
+        && Number.isInteger(_authoritativeCount);
+      const n = useServerCount
+        ? _authoritativeCount
+        : _chatHistEl.querySelectorAll(':scope > .msg').length;
       _metaCountEl.textContent = n ? `· ${n} msg${n === 1 ? '' : 's'}` : '';
+    };
+    window.__odysseusSetServerMessageCount = (sessionId, count) => {
+      const parsed = Number(count);
+      _authoritativeCountSession = sessionId ? String(sessionId) : null;
+      _authoritativeCount = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+      _updateMsgCount();
+    };
+    window.__odysseusClearServerMessageCount = () => {
+      _authoritativeCountSession = null;
+      _authoritativeCount = null;
+      _updateMsgCount();
     };
     const _scheduleCount = () => {
       if (_countScheduled) return;
@@ -3768,6 +3789,7 @@ function startOdysseusApp() {
   // Initialize all event listeners
   try { initializeEventListeners(); } catch(e) { console.error('Event init error:', e); }
   try { chatWork.bind(); chatWork.refresh(); } catch(e) { console.error('Chat work init error:', e); }
+  try { accessModeModule.init(API_BASE); } catch(e) { console.error('Access mode init error:', e); }
   try { projectsModule.bind(); } catch(e) { console.error('Projects init error:', e); }
 
   // Reveal the toolbar now that all toggle/overflow state is resolved

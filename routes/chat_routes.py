@@ -1038,6 +1038,14 @@ def setup_chat_routes(
         goal_mode = str(form_data.get("goal_mode") or (body or {}).get("goal_mode") or "").lower() == "true"
         goal_continuation = str(form_data.get("goal_continuation") or (body or {}).get("goal_continuation") or "").lower() == "true"
         goal_lease_token = str(form_data.get("goal_lease_token") or (body or {}).get("goal_lease_token") or "").strip()
+        # The browser sends this as a display hint, but the server-owned
+        # owner preference below is authoritative for every run (including
+        # detached Goal continuations).
+        requested_access_mode = str(
+            form_data.get("access_mode")
+            or (body or {}).get("access_mode")
+            or ""
+        ).strip()
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
         tool_approval_id = (
             form_data.get("tool_approval_id")
@@ -1199,6 +1207,18 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            try:
+                from routes.prefs_routes import get_access_mode_for_user
+                access_mode = get_access_mode_for_user(owner)
+            except Exception:
+                # Keep legacy test adapters and pre-migration deployments
+                # usable; unknown client hints still normalize to the safe
+                # default and never grant a new capability by themselves.
+                from src.access_policy import DEFAULT_ACCESS_MODE, normalize_access_mode
+                access_mode = normalize_access_mode(
+                    requested_access_mode, default=DEFAULT_ACCESS_MODE
+                ) or DEFAULT_ACCESS_MODE
+            logger.info("[access-mode] owner=%r mode=%s", owner, access_mode)
             if tool_approval_id:
                 _reject_delegated_tool_approval(request)
                 pending_tool_approval = tool_approval_store.peek(tool_approval_id)
@@ -2510,6 +2530,7 @@ def setup_chat_routes(
                         external_untrusted_context_seen=external_untrusted_context_seen,
                         delegated_credential=_delegated_credential,
                         exact_approval=exact_tool_approval,
+                        access_mode=access_mode,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -2537,7 +2558,7 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                     "goal_update",
-                                    "context_usage", "compacted", "tool_retry_blocked",
+                                    "context_usage", "compacted", "context_compaction_failed", "tool_retry_blocked",
                                     "agent_prep",
                                 ):
                                     if data.get("type") == "agent_step":
@@ -2557,6 +2578,16 @@ def setup_chat_routes(
                                         )
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
+                                    elif data.get("type") == "context_compaction_failed":
+                                        # Keep the failure as a distinct replay
+                                        # event; never turn it into assistant
+                                        # prose that a Goal controller can
+                                        # mistake for successful progress.
+                                        last_metrics = {
+                                            **(last_metrics or {}),
+                                            "context_compaction_failed": True,
+                                            "context_compaction_reason": data.get("reason") or "failed",
+                                        }
                                     yield chunk
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
@@ -2591,24 +2622,41 @@ def setup_chat_routes(
                                     terminal_metadata = dict(data.get("data") or {})
                                     last_metrics = terminal_metadata
                                     failure = terminal_metadata.get("failure") or {}
+                                    failure_kind = str(failure.get("kind") or "")
                                     failure_status = _normalize_http_status(
                                         failure.get("status")
                                     )
-                                    failure_message = (
-                                        f"Model request failed (HTTP {failure_status})"
-                                        if failure_status is not None
-                                        else "Model request failed"
-                                    )
-                                    terminal_metadata["failure"] = {
+                                    if failure_kind == "context_compaction":
+                                        failure_message = str(
+                                            failure.get("message")
+                                            or "Context checkpoint failed"
+                                        )
+                                    elif failure_status is not None:
+                                        failure_message = f"Model request failed (HTTP {failure_status})"
+                                    else:
+                                        failure_message = "Model request failed"
+                                    sanitized_failure = {
                                         "status": failure_status,
                                         "message": failure_message,
                                     }
+                                    if failure_kind:
+                                        sanitized_failure["kind"] = failure_kind
+                                    terminal_metadata["failure"] = sanitized_failure
                                     if active_goal and _user:
                                         try:
-                                            active_goal = chat_work_store.record_goal_failure(
-                                                _user, session, failure_message,
-                                                {"run_failure": terminal_metadata["failure"]},
-                                            )
+                                            if failure_kind == "context_compaction":
+                                                active_goal = chat_work_store.update_goal(
+                                                    _user,
+                                                    session,
+                                                    "Context checkpoint failed; update the context policy or retry explicitly.",
+                                                    {"reason": "context_compaction", "run_failure": terminal_metadata["failure"]},
+                                                    waiting_user=True,
+                                                )
+                                            else:
+                                                active_goal = chat_work_store.record_goal_failure(
+                                                    _user, session, failure_message,
+                                                    {"run_failure": terminal_metadata["failure"]},
+                                                )
                                             yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                                         except WorkNotFound:
                                             pass
@@ -2895,11 +2943,20 @@ def setup_chat_routes(
         _active_run = agent_runs.get_active_run(session_id)
         if _active_run is None:
             raise HTTPException(404, "No active run for this session")
-        raw_cursor = request.headers.get("Last-Event-ID") or request.query_params.get("after_seq") or "-1"
-        try:
-            after_seq = int(raw_cursor)
-        except (TypeError, ValueError):
-            raise HTTPException(400, "Invalid replay cursor") from None
+        raw_header = request.headers.get("Last-Event-ID")
+        raw_query = request.query_params.get("after_seq")
+        if raw_header is None and raw_query is None:
+            # A fresh device already loaded the last 50 canonical messages.
+            # Start replay at a bounded tail of the active run so it reaches
+            # the current model activity immediately instead of replaying the
+            # entire historical run from seq 0. Explicit cursors retain the
+            # exact SSE resume contract for reconnects.
+            after_seq = max(-1, len(_active_run.buffer) - 201)
+        else:
+            try:
+                after_seq = int(raw_header if raw_header is not None else raw_query)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "Invalid replay cursor") from None
         if after_seq < -1:
             raise HTTPException(400, "Invalid replay cursor")
         return StreamingResponse(

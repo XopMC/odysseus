@@ -57,6 +57,22 @@ async function _readLiveSession(url) {
   }
 }
 
+export async function refreshSessionMessageCount(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const res = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
+    if (!res.ok || !res.data) return null;
+    const raw = Number.isFinite(Number(res.data.visible_total))
+      ? Number(res.data.visible_total) : Number(res.data.total);
+    if (Number.isFinite(raw) && raw >= 0) {
+      const count = Math.floor(raw);
+      window.__odysseusSetServerMessageCount?.(sessionId, count);
+      return count;
+    }
+  } catch (_) { /* keep the last known authoritative count */ }
+  return null;
+}
+
 // Refresh canonical messages without navigating: do not clear a draft, switch
 // tools/presets, focus the composer, or detach another local send.
 export async function refreshSessionHistory(sessionId) {
@@ -85,6 +101,10 @@ export async function refreshSessionHistory(sessionId) {
     updateModelPicker();
   }
   _syncedHistory.set(sessionId, _historyStamp(data));
+  window.__odysseusSetServerMessageCount?.(
+    sessionId,
+    Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
+  );
   if (nearBottom) uiModule.scrollHistoryInstant();
   else box.scrollTop = Math.max(0, oldTop + box.scrollHeight - oldHeight);
   window.refreshChatContextHeader?.('remote-history');
@@ -365,6 +385,7 @@ function _deselectCurrentSession(sid) {
   currentSessionId = null;
   uiModule.el('chat-history').innerHTML = '';
   uiModule.el('current-meta').textContent = 'Odysseus Chat';
+  window.__odysseusClearServerMessageCount?.();
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
   if (window.chatModule && window.chatModule.showWelcomeScreen) {
@@ -423,6 +444,10 @@ function _ensureLiveSessionSync() {
   if (_liveSessionTimer !== null) return;
   const check = () => {
     if (document.visibilityState === 'hidden' || !currentSessionId) return;
+    // Keep the visible badge identical across devices while a detached run is
+    // active; the DOM contains different transient replay nodes on each
+    // client, so a local element count is never authoritative.
+    void refreshSessionMessageCount(currentSessionId);
     return _checkServerStream(currentSessionId);
   };
   _liveSessionTimer = setInterval(check, LIVE_SESSION_POLL_MS);
@@ -2009,6 +2034,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       try { window.documentModule.clearSelection(); } catch {}
     }
     currentSessionId = id;
+    if (prevSessionId !== id) window.__odysseusClearServerMessageCount?.();
     try { window.__odysseusLastSelectedSessionId = id; } catch (_) {}
     // Identify Assistant / task-output sessions so we don't "trap" the user
     // there on return. Skipped from both `lastSessionId` persistence and the
@@ -2137,10 +2163,15 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
         offset: data.offset,
         limit: data.limit,
         total: data.total,
+        visible_total: data.visible_total,
         cursor: data.cursor,
         next_cursor: data.next_cursor,
         has_more_before: !!data.has_more_before,
       };
+      window.__odysseusSetServerMessageCount?.(
+        id,
+        Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
+      );
       // The model returned by /api/history is the authoritative one the
       // backend will use for this session. Write it back into the cached
       // session meta and refresh the picker so the displayed model can
@@ -2216,6 +2247,19 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       }
     }
     uiModule.scrollHistoryInstant();
+    // Large messages, thinking blocks and tool cards settle their heights on
+    // the next layout pass. Pin the initial view to the newest loaded page
+    // only while live-follow is still enabled; an explicit upward gesture
+    // remains authoritative and is never overridden.
+    const pinTail = () => {
+      if (currentSessionId !== id || uiModule.getAutoScroll?.() === false) return;
+      const currentBox = document.getElementById('chat-history');
+      if (currentBox) currentBox.scrollTop = currentBox.scrollHeight;
+    };
+    try {
+      requestAnimationFrame(pinTail);
+      requestAnimationFrame(() => requestAnimationFrame(pinTail));
+    } catch (_) { setTimeout(pinTail, 0); }
     if (historySnapshot) _syncedHistory.set(id, _historyStamp(historySnapshot));
     if (!isOC && msgHistory.length) {
       _installHistoryPager(id, pageInfo, modelName);
@@ -3805,6 +3849,7 @@ const sessionModule = {
   getCurrentSessionId,
   getSessionViewToken,
   refreshSessionHistory,
+  refreshSessionMessageCount,
   getSessions,
   getCurrentModel,
   getCurrentEndpointUrl,

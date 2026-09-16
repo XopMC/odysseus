@@ -3239,6 +3239,8 @@ def _compute_final_metrics(
     has_real_usage: bool,
     tool_events: list,
     round_texts: list,
+    round_reasonings: Optional[list] = None,
+    round_timestamps: Optional[list] = None,
     model: str = "",
     round_models: Optional[list] = None,
     round_endpoint_ids: Optional[list] = None,
@@ -3312,6 +3314,8 @@ def _compute_final_metrics(
         metrics["tool_events"] = tool_events
     if round_texts:
         metrics["round_texts"] = round_texts
+        metrics["round_reasonings"] = list(round_reasonings or [])
+        metrics["round_timestamps"] = list(round_timestamps or [])
         metrics["round_models"] = list(round_models or [])
         metrics["round_endpoint_ids"] = list(round_endpoint_ids or [])
         metrics["round_endpoint_labels"] = list(round_endpoint_labels or [])
@@ -3580,6 +3584,7 @@ async def stream_agent_loop(
     external_untrusted_context_seen: bool = False,
     delegated_credential: bool = False,
     exact_approval: Optional[ExactToolApproval] = None,
+    access_mode: str = "",
     _is_teacher_run: bool = False,
     history_session=None,
     defer_context_shaping: bool = False,
@@ -3605,8 +3610,11 @@ async def stream_agent_loop(
             or messages_contain_external_untrusted_context(messages)
         ),
         approval_gate_bypassed=bool(
-            exact_approval and exact_approval.allow_remaining_actions
+            exact_approval
+            and exact_approval.allow_remaining_actions
+            and str(access_mode or "").strip().casefold() != "ask_every_time"
         ),
+        access_mode=access_mode,
         delegated_credential=bool(delegated_credential),
     )
     mcp_mgr = get_mcp_manager()
@@ -3810,6 +3818,8 @@ async def stream_agent_loop(
                 "requested_endpoint_id": requested_endpoint_id,
                 "requested_endpoint_label": requested_endpoint_label,
                 "round_texts": [terminal_round],
+                "round_reasonings": [direct_reasoning.strip()],
+                "round_timestamps": [direct_start],
                 "round_models": [direct_actual_model],
                 "round_endpoint_ids": [direct_actual_endpoint_id],
                 "round_endpoint_labels": [direct_actual_endpoint_label],
@@ -4608,6 +4618,8 @@ async def stream_agent_loop(
     first_token_received = False
     tool_events = []   # Persist tool executions for history reload
     round_texts = []   # Cleaned text per round for history reload
+    round_reasonings = []  # Separate reasoning per round for history reload
+    round_timestamps = []  # Server epoch seconds for each round bubble
     round_models = []  # Actual model for each corresponding round
     round_endpoint_ids = []
     round_endpoint_labels = []
@@ -5010,6 +5022,7 @@ async def stream_agent_loop(
     _goal_stall_signature = None
     _goal_stall_count = 0
     for round_num in range(1, max_rounds + 1):
+        round_started_at = time.time()
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
@@ -5046,10 +5059,31 @@ async def stream_agent_loop(
         except ValueError:
             _invalid_context_event = {
                 "type": "context_compaction_failed",
-                "delta": "\\n[Context profile is invalid. Update the settings before continuing.]",
+                "reason": "invalid_policy",
+                "message": "Context profile is invalid. Update the settings before continuing.",
             }
             yield f'data: {json.dumps(_invalid_context_event)}\n\n'
-            break
+            _invalid_context_terminal = {
+                "type": "agent_terminal",
+                "data": {
+                    "failed": True,
+                    "failure": {
+                        "kind": "context_compaction",
+                        "status": None,
+                        "message": "Context profile is invalid. Update the settings before continuing.",
+                    },
+                    "model": actual_model,
+                    "requested_model": requested_model,
+                    "endpoint_id": actual_endpoint_id,
+                    "endpoint_label": actual_endpoint_label,
+                    "round_texts": list(round_texts),
+                    "round_reasonings": list(round_reasonings),
+                    "round_timestamps": list(round_timestamps),
+                    "tool_events": list(tool_events),
+                },
+            }
+            yield f'data: {json.dumps(_invalid_context_terminal)}\n\n'
+            return
         _configured_policy = ContextPolicy.from_dict(_context_profile['effective']) if _context_profile else None
         # Shape the growing WORKING history on every round, not only at the
         # beginning of a chat turn. The full transcript remains untouched.
@@ -5111,11 +5145,34 @@ async def stream_agent_loop(
             # summary succeeded. The user can retry after the provider recovers.
             _checkpoint_failure_event = {
                 "type": "context_compaction_failed",
-                "delta": "\\n[Context checkpoint failed; stopping safely without discarding the conversation. Please retry.]",
+                "reason": _compact_status,
+                "message": "Context checkpoint failed; stopping safely without discarding the conversation.",
             }
             yield f'data: {json.dumps(_checkpoint_failure_event)}\n\n'
-            full_response += "\n[Context checkpoint failed; stopped without discarding the conversation.]"
-            break
+            # Emit a terminal failure instead of falling through to a
+            # successful [DONE]. This gives Goal continuation a bounded,
+            # explicit recovery state and prevents endless identical retries.
+            _context_terminal = {
+                "type": "agent_terminal",
+                "data": {
+                    "failed": True,
+                    "failure": {
+                        "kind": "context_compaction",
+                        "status": None,
+                        "message": "Context checkpoint failed; stopping safely without discarding the conversation.",
+                    },
+                    "model": actual_model,
+                    "requested_model": requested_model,
+                    "endpoint_id": actual_endpoint_id,
+                    "endpoint_label": actual_endpoint_label,
+                    "round_texts": list(round_texts),
+                    "round_reasonings": list(round_reasonings),
+                    "round_timestamps": list(round_timestamps),
+                    "tool_events": list(tool_events),
+                },
+            }
+            yield f'data: {json.dumps(_context_terminal)}\n\n'
+            return
         _estimated_prompt = int(estimate_tokens(_active_route_state.get("request_messages", messages)) * _context_calibration) + _schema_tokens
         _working_context = context_snapshot(
             model=model, context_length=_last_route_context_length, endpoint_url=endpoint_url,
@@ -5432,6 +5489,8 @@ async def stream_agent_loop(
                         "requested_endpoint_label": requested_endpoint_label,
                         "tool_events": tool_events,
                         "round_texts": [*round_texts, terminal_round],
+                        "round_reasonings": [*round_reasonings, round_reasoning.strip()],
+                        "round_timestamps": [*round_timestamps, round_started_at],
                         "round_models": [*round_models, _round_actual_model],
                         "round_endpoint_ids": [*round_endpoint_ids, _round_actual_endpoint_id],
                         "round_endpoint_labels": [*round_endpoint_labels, _round_actual_endpoint_label],
@@ -5861,6 +5920,8 @@ async def stream_agent_loop(
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_round_native_builtins and not used_native)).strip()
         round_texts.append(cleaned_round)
+        round_reasonings.append(round_reasoning.strip())
+        round_timestamps.append(round_started_at)
         round_models.append(_round_actual_model)
         round_endpoint_ids.append(_round_actual_endpoint_id)
         round_endpoint_labels.append(_round_actual_endpoint_label)
@@ -6906,7 +6967,10 @@ async def stream_agent_loop(
     metrics = _compute_final_metrics(
         _last_route_request_messages, full_response, total_duration, time_to_first_token,
         _last_route_context_length, real_input_tokens, real_output_tokens,
-        has_real_usage, tool_events, round_texts, model=actual_model,
+        has_real_usage, tool_events, round_texts,
+        round_reasonings=round_reasonings,
+        round_timestamps=round_timestamps,
+        model=actual_model,
         round_models=round_models,
         round_endpoint_ids=round_endpoint_ids,
         round_endpoint_labels=round_endpoint_labels,
@@ -6941,6 +7005,8 @@ async def stream_agent_loop(
             )
     metrics["requested_endpoint_id"] = requested_endpoint_id
     metrics["requested_endpoint_label"] = requested_endpoint_label
+    if access_mode:
+        metrics["access_mode"] = str(access_mode)
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.
