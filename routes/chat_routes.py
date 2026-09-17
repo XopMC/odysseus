@@ -2582,7 +2582,7 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                     "goal_update",
-                                    "context_usage", "compacted", "context_compaction_failed", "tool_retry_blocked",
+                                    "context_usage", "context_checkpoint", "compacted", "context_compaction_failed", "tool_retry_blocked",
                                     "agent_prep",
                                 ):
                                     if data.get("type") == "agent_step":
@@ -2666,7 +2666,7 @@ def setup_chat_routes(
                                     if failure_kind:
                                         sanitized_failure["kind"] = failure_kind
                                     terminal_metadata["failure"] = sanitized_failure
-                                    if active_goal and _user:
+                                    if active_goal:
                                         try:
                                             if failure_kind == "context_compaction":
                                                 active_goal = chat_work_store.update_goal(
@@ -2846,7 +2846,7 @@ def setup_chat_routes(
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
         _goal_terminal_controller = None
-        if active_goal and _user:
+        if active_goal:
             # Keep Goal continuation entirely server-side. The initiating tab
             # may close immediately after this response; every later attempt
             # is another normal detached run with the same durable replay path.
@@ -2860,8 +2860,9 @@ def setup_chat_routes(
             # loopback channel as other in-process work so CSRF/browser-origin
             # state cannot block autonomous Goal progress.
             from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
-            _controller_headers[INTERNAL_TOOL_HEADER] = INTERNAL_TOOL_TOKEN
-            _controller_headers["X-Odysseus-Owner"] = _user
+            if _user:
+                _controller_headers[INTERNAL_TOOL_HEADER] = INTERNAL_TOOL_TOKEN
+                _controller_headers["X-Odysseus-Owner"] = _user
             _controller_headers["origin"] = str(request.base_url).rstrip("/")
             _controller_form = {
                 "session": session,

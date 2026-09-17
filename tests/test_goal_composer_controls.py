@@ -39,6 +39,9 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     stop_block = routes.split('async def chat_stop', 1)[1].split('return {"stopped": stopped, "goal": goal}', 1)[0]
     assert 'chat_work_store.goal_action(' in stop_block
     assert 'on_terminal=_goal_terminal_controller' in routes
+    assert 'if active_goal:' in routes
+    assert 'if active_goal and _user:' not in routes
+    assert '"context_usage", "context_checkpoint", "compacted"' in routes
     assert 'f"{internal_api_base()}/api/chat_stream"' in routes
     assert 'nonlocal active_goal' in routes
     assert 'if _status == "error":' in routes
