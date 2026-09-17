@@ -106,6 +106,39 @@ def test_model_checkpoint_is_durable_but_removed_from_public_replay(monkeypatch)
     assert '"message_count":3' in run.buffer[-1]
 
 
+def test_session_high_water_survives_lower_measurement_on_new_run(monkeypatch):
+    import core.database as database
+    from types import SimpleNamespace
+    prior = SimpleNamespace(
+        run_id="prior", context_snapshot=_snapshot(
+            used_tokens=100000, compactions=8, context_revision=20,
+        ),
+    )
+    current = SimpleNamespace(
+        run_id="current", context_snapshot=None, continuation=None,
+        status="running", last_seq=-1, durable_seq=-1, context_revision=0,
+        ledger_hash=None, terminal_at=None,
+    )
+    class Query:
+        def filter(self, *_args, **_kwargs): return self
+        def all(self): return [prior]
+        def first(self): return current
+    class Db:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def query(self, *_args, **_kwargs): return Query()
+    class Factory:
+        def begin(self): return Db()
+    monkeypatch.setattr(database, "SessionLocal", Factory())
+    run = agent_runs._Run()
+    run.run_id = "current"
+    run.session_id = "same-session"
+    run.context_usage = _snapshot(used_tokens=40000, compactions=1)
+    agent_runs._persist_run_state(run, status="stopped", durable=True)
+    assert run.context_usage["used_tokens"] == 100000
+    assert run.context_usage["compactions"] == 8
+
+
 def test_terminal_context_snapshot_is_available_only_when_requested(monkeypatch):
     run = agent_runs._Run()
     monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})

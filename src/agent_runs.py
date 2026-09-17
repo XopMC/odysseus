@@ -136,9 +136,50 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
     try:
         from core.database import ChatRunState, SessionLocal, utcnow_naive
         effective_status = status or run.terminal_status or run.status
-        run.ledger_hash = _ledger_hash(run)
         run.durable_seq = len(run.buffer) - 1
         with SessionLocal.begin() as db:
+            accepted_context = dict(run.context_usage) if run.context_usage else None
+            if accepted_context:
+                # Context occupancy is a session high-water mark. A fresh Goal
+                # attempt or Pause/Stop boundary often has a shorter current
+                # request than the prior in-flight request; that is not
+                # compaction and must never look like lost model context.
+                prior_rows = db.query(ChatRunState).filter(
+                    ChatRunState.session_id == run.session_id,
+                    ChatRunState.run_id != run.run_id,
+                ).all()
+                prior_contexts = []
+                for prior in prior_rows:
+                    value = dict(prior.context_snapshot or {}) if prior.context_snapshot else None
+                    if not value:
+                        continue
+                    if value.get("model") != accepted_context.get("model"):
+                        continue
+                    if value.get("endpoint_key") and accepted_context.get("endpoint_key") \
+                            and value.get("endpoint_key") != accepted_context.get("endpoint_key"):
+                        continue
+                    prior_contexts.append(value)
+                if prior_contexts:
+                    previous = max(prior_contexts, key=lambda value: int(value.get("used_tokens", 0) or 0))
+                    current_compactions = int(accepted_context.get("compactions", 0) or 0)
+                    previous_compactions = int(previous.get("compactions", 0) or 0)
+                    if accepted_context.get("context_reason") != "compaction" \
+                            and current_compactions <= previous_compactions \
+                            and int(accepted_context.get("used_tokens", 0) or 0) < int(previous.get("used_tokens", 0) or 0):
+                        accepted_context = {
+                            **previous,
+                            "context_revision": max(
+                                int(previous.get("context_revision", 0) or 0),
+                                int(accepted_context.get("context_revision", 0) or 0),
+                            ),
+                            "context_reason": "measurement",
+                        }
+                    elif accepted_context.get("context_reason") == "compaction" \
+                            and current_compactions <= previous_compactions:
+                        accepted_context["compactions"] = previous_compactions + 1
+            if accepted_context is not None:
+                run.context_usage = accepted_context
+            run.ledger_hash = _ledger_hash(run)
             row = db.query(ChatRunState).filter(ChatRunState.run_id == run.run_id).first()
             if row is None:
                 row = ChatRunState(
@@ -287,6 +328,15 @@ def _publish(run: _Run, ev: str) -> None:
                 )
                 if not stale:
                     run.context_revision += 1
+                    # Compaction generations are monotonic across replacement
+                    # runs even when the local loop was recreated with a
+                    # zero-based counter.
+                    if run.compaction_pending and previous:
+                        current_compactions = max(
+                            current_compactions,
+                            previous_compactions + 1,
+                        )
+                        snapshot["compactions"] = current_compactions
                     snapshot["context_revision"] = run.context_revision
                     snapshot["context_reason"] = (
                         "compaction" if run.compaction_pending or current_compactions > previous_compactions else "measurement"
