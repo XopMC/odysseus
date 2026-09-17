@@ -139,6 +139,34 @@ def test_session_high_water_survives_lower_measurement_on_new_run(monkeypatch):
     assert run.context_usage["compactions"] == 8
 
 
+def test_context_read_uses_session_high_water_when_latest_run_counter_reset(monkeypatch):
+    import core.database as database
+    from types import SimpleNamespace
+    latest = SimpleNamespace(context_snapshot=_snapshot(
+        used_tokens=40000, compactions=1, context_revision=514,
+        context_reason="measurement",
+    ))
+    previous = SimpleNamespace(context_snapshot=_snapshot(
+        used_tokens=66000, compactions=8, context_revision=503,
+        context_reason="measurement",
+    ))
+    class Query:
+        def filter(self, *_args, **_kwargs): return self
+        def order_by(self, *_args, **_kwargs): return self
+        def all(self): return [latest, previous]
+    class Db:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def query(self, *_args, **_kwargs): return Query()
+    class Factory:
+        def __call__(self): return Db()
+    monkeypatch.setattr(database, "SessionLocal", Factory())
+    monkeypatch.setattr(agent_runs, "_RUNS", {})
+    current = agent_runs.get_context_usage("same-session", include_terminal=True)
+    assert current["used_tokens"] == 66000
+    assert current["compactions"] == 8
+
+
 def test_terminal_context_snapshot_is_available_only_when_requested(monkeypatch):
     run = agent_runs._Run()
     monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})
@@ -158,6 +186,7 @@ def test_terminal_context_snapshot_survives_in_memory_run_eviction(monkeypatch):
     class Query:
         def filter(self, *_args, **_kwargs): return self
         def order_by(self, *_args, **_kwargs): return self
+        def all(self): return [saved]
         def first(self): return saved
     class Db:
         def __enter__(self): return self

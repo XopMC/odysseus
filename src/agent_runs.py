@@ -979,27 +979,39 @@ def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Opt
     estimate while approval/Stop/error persistence is being completed.
     """
     run = _RUNS.get(session_id)
-    if run is not None:
-        if run.status != "running" and not include_terminal:
-            return None
-        if run.context_usage is not None:
-            return dict(run.context_usage)
+    if run is not None and run.status != "running" and not include_terminal:
+        return None
+    run_context = dict(run.context_usage) if run is not None and run.context_usage else None
     # A pause/Stop followed by a reload can legitimately have no in-memory
     # _Run object (the process may have evicted it or restarted). Keep serving
     # the exact durable terminal measurement instead of replacing it with the
-    # much smaller stored-transcript estimate.
+    # much smaller stored-transcript estimate. Read all session rows because a
+    # replacement run may carry a reset legacy compaction counter; until an
+    # explicit compaction, the session's context is a high-water mark.
     if include_terminal:
         try:
             from core.database import ChatRunState, SessionLocal
             with SessionLocal() as db:
-                row = db.query(ChatRunState).filter(
+                rows = db.query(ChatRunState).filter(
                     ChatRunState.session_id == session_id,
-                ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).first()
-                if row is not None and row.context_snapshot:
-                    return dict(row.context_snapshot)
+                ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).all()
+                contexts = [dict(row.context_snapshot or {}) for row in rows if row.context_snapshot]
+                if run_context:
+                    contexts.append(run_context)
+                if contexts:
+                    latest = contexts[0]
+                    max_compactions = max(int(value.get("compactions", 0) or 0) for value in contexts)
+                    latest_compactions = int(latest.get("compactions", 0) or 0)
+                    if latest.get("context_reason") == "compaction" or latest_compactions >= max_compactions:
+                        same_generation = [
+                            value for value in contexts
+                            if int(value.get("compactions", 0) or 0) == max_compactions
+                        ]
+                        return dict(max(same_generation, key=lambda value: int(value.get("used_tokens", 0) or 0)))
+                    return dict(max(contexts, key=lambda value: int(value.get("used_tokens", 0) or 0)))
         except Exception:
             logger.debug("[agent-run] durable context lookup failed", exc_info=True)
-    return None
+    return run_context
 
 
 def continuation_for_session(session_id: str) -> dict:
