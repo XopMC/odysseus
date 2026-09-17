@@ -203,6 +203,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         # so every device renders the same minute.
         if m.timestamp:
             meta["timestamp"] = m.timestamp.isoformat() + "Z"
+        # Stable identity lets live/reconnect reconciliation append only new
+        # canonical rows instead of replacing the already loaded older page.
+        meta["_db_id"] = m.id
         if meta:
             entry["metadata"] = meta
         return entry

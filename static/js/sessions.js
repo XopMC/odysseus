@@ -91,16 +91,42 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   const oldTop = box.scrollTop;
   const oldHeight = box.scrollHeight;
-  _clearHistoryPager();
   chatRenderer.hideWelcomeScreen?.();
-  // Keep the current live/replay DOM attached until the canonical replacement
-  // is completely rendered. Appending the canonical nodes synchronously and
-  // removing the old set afterwards avoids the visible blank/flicker and lost
-  // scroll anchor caused by clearing chat-history first.
-  const priorNodes = Array.from(box.children);
-  for (const msg of data.history) _renderHistoryMessage(msg, data.model || null);
-  for (const node of priorNodes) node.remove();
-  _installHistoryPager(sessionId, data, data.model || null);
+  // Reconcile in place. A Goal revise/reconnect can arrive after the user has
+  // loaded older pages; replacing the last-50 window here made those messages
+  // appear to disappear even though they remained in SQLite. Remove only
+  // temporary replay/live nodes, then append canonical rows whose stable DB id
+  // (or legacy role/content fingerprint) is not already present.
+  const temporary = Array.from(box.querySelectorAll('.streaming, .msg-user-queued'));
+  temporary.forEach(node => node.remove());
+  const existingIds = new Set(
+    Array.from(box.querySelectorAll('[data-db-id]')).map(node => String(node.dataset.dbId)),
+  );
+  const existingKeys = new Set(
+    Array.from(box.querySelectorAll('.msg')).map(node => {
+      const role = node.classList.contains('msg-user') ? 'user' : 'assistant';
+      return `${role}|${String(node.dataset.raw || node.querySelector('.body')?.textContent || '').trim()}`;
+    }),
+  );
+  for (const msg of data.history) {
+    const id = String(msg?.metadata?._db_id || '');
+    const role = String(msg?.role || '');
+    const content = String(msg?.content || '').trim();
+    const key = `${role}|${content}`;
+    if ((id && existingIds.has(id)) || existingKeys.has(key)) continue;
+    const rendered = _renderHistoryMessage(msg, data.model || null);
+    const nodes = Array.isArray(rendered) ? rendered : (rendered ? [rendered] : []);
+    for (const node of nodes) {
+      if (id) { node.dataset.dbId = id; existingIds.add(id); }
+      existingKeys.add(key);
+    }
+  }
+  if (!_historyPager || _historyPager.sessionId !== sessionId) {
+    _installHistoryPager(sessionId, data, data.model || null);
+  } else {
+    _historyPager.modelName = data.model || _historyPager.modelName;
+    _historyPager.limit = Number(data.limit || _historyPager.limit);
+  }
   const meta = sessions.find(s => s.id === sessionId);
   if (meta && data.model && meta.model !== data.model) {
     meta.model = data.model;
