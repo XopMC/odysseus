@@ -87,6 +87,75 @@ def test_context_ledger_rejects_lower_measurement_without_compaction(monkeypatch
     assert current["context_reason"] == "compaction"
 
 
+def test_context_ledger_reconciles_reset_compaction_counter_on_new_attempt(monkeypatch):
+    """A replacement loop must not freeze telemetry at the prior high-water."""
+    import core.database as database
+    from types import SimpleNamespace
+
+    prior = SimpleNamespace(
+        run_id="prior",
+        context_snapshot=_snapshot(
+            used_tokens=38095, compactions=11, context_revision=541,
+        ),
+    )
+
+    class Query:
+        def filter(self, *_args, **_kwargs): return self
+        def all(self): return [prior]
+        def first(self): return None
+
+    class Db:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def query(self, *_args, **_kwargs): return Query()
+        def add(self, *_args, **_kwargs): return None
+
+    class Factory:
+        def begin(self): return Db()
+        def __call__(self): return Db()
+
+    monkeypatch.setattr(database, "SessionLocal", Factory())
+    run = agent_runs._Run()
+    run.run_id = "current"
+    run.session_id = "same-session"
+    run.context_usage = _snapshot(
+        used_tokens=38095, compactions=11, context_revision=541,
+    )
+    run.context_revision = 541
+    monkeypatch.setattr(agent_runs, "_RUNS", {"same-session": run})
+
+    # The new agent loop reports a zero-based counter, but its request is now
+    # larger than the previous run. It must be accepted as generation 11.
+    _publish(run, _snapshot(used_tokens=56000, compactions=0))
+    current = agent_runs.get_context_usage("same-session")
+    assert current["used_tokens"] == 56000
+    assert current["compactions"] == 11
+    assert current["context_revision"] == 542
+    assert current["context_reason"] == "measurement"
+    replayed = json.loads(next(
+        line[6:] for line in run.buffer[-1].splitlines() if line.startswith("data: ")
+    ))
+    assert replayed["data"]["compactions"] == 11
+    assert replayed["_replay"]["context_revision"] == 542
+
+
+def test_checkpoint_generation_is_reconciled_with_seeded_context(monkeypatch):
+    run = agent_runs._Run()
+    run.context_usage = _snapshot(used_tokens=56000, compactions=11)
+    run.context_revision = 542
+    monkeypatch.setattr(agent_runs, "_RUNS", {"same-session": run})
+    messages = [{"role": "user", "content": "continue"}]
+    agent_runs._publish(run, "data: " + json.dumps({
+        "type": "context_checkpoint", "messages": messages,
+        "ledger_hash": "b" * 64, "compactions": 0,
+    }) + "\n\n")
+    assert run.continuation["working_checkpoint"]["compactions"] == 11
+    public = json.loads(next(
+        line[6:] for line in run.buffer[-1].splitlines() if line.startswith("data: ")
+    ))
+    assert public["compactions"] == 11
+
+
 def test_model_checkpoint_is_durable_but_removed_from_public_replay(monkeypatch):
     run = agent_runs._Run()
     monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})

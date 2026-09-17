@@ -1,7 +1,7 @@
 // Search Chat Module — Ctrl+K command palette for searching conversations
 
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260917sync3';
+import sessionModule from './sessions.js?v=20260917sync4';
 
 let API_BASE = '';
 let debounceTimer = null;

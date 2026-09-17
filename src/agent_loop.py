@@ -3629,6 +3629,7 @@ async def stream_agent_loop(
     delegated_credential: bool = False,
     exact_approval: Optional[ExactToolApproval] = None,
     access_mode: str = "",
+    initial_context_compactions: int = 0,
     _is_teacher_run: bool = False,
     history_session=None,
     defer_context_shaping: bool = False,
@@ -4692,7 +4693,14 @@ async def stream_agent_loop(
     _last_route_request_messages = _initial_route_request_messages
     _last_route_endpoint_url = endpoint_url
     _last_route_context_length = _initial_route_context_length
-    _context_compactions = _prior_context_compactions(messages)
+    try:
+        _initial_context_compactions = max(0, int(initial_context_compactions or 0))
+    except (TypeError, ValueError):
+        _initial_context_compactions = 0
+    _context_compactions = max(
+        _prior_context_compactions(messages),
+        _initial_context_compactions,
+    )
     _context_calibration = 1.0
     _working_context = None
     _working_limit = max(1, int(_last_route_context_length * .85))

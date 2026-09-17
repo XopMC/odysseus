@@ -315,10 +315,35 @@ def _publish(run: _Run, ev: str) -> None:
                 previous = run.context_usage
                 previous_compactions = int((previous or {}).get("compactions", 0) or 0)
                 current_compactions = int(snapshot.get("compactions", 0) or 0)
+                same_route = bool(
+                    previous
+                    and previous.get("model") == snapshot.get("model")
+                    and (
+                        not previous.get("endpoint_key")
+                        or not snapshot.get("endpoint_key")
+                        or previous.get("endpoint_key") == snapshot.get("endpoint_key")
+                    )
+                )
+                # A replacement attempt starts a fresh in-memory agent loop,
+                # so its local compaction counter can legitimately reset to
+                # zero even though the durable session ledger is already at a
+                # later generation. That reset is a transport/attempt
+                # boundary, not a compaction. Carry the generation forward
+                # before applying the high-water comparison; otherwise every
+                # measurement in the new run is marked stale and the UI stays
+                # frozen at the previous percentage (the observed 30% bug).
+                if (
+                    previous
+                    and same_route
+                    and not run.compaction_pending
+                    and current_compactions < previous_compactions
+                ):
+                    current_compactions = previous_compactions
+                    snapshot["compactions"] = current_compactions
                 # Keep stale events in the replay log for audit, but do not
                 # lower the live high-water mark without a real compaction.
                 stale = bool(
-                    previous and not run.compaction_pending and (
+                    previous and same_route and not run.compaction_pending and (
                         current_compactions < previous_compactions
                         or (
                             current_compactions == previous_compactions
@@ -350,6 +375,15 @@ def _publish(run: _Run, ev: str) -> None:
                         "context_reason": "measurement",
                         "stale": True,
                     }
+                # Keep the generation visible to clients as well as in the
+                # durable ledger.  The loop's local counter is the value that
+                # reset; exposing it unchanged would make the browser believe
+                # the generation went backwards on the next refresh.
+                payload_data = payload.get("data")
+                if isinstance(payload_data, dict) and "compactions" in payload_data:
+                    payload_data["compactions"] = int(
+                        snapshot.get("compactions", current_compactions) or 0
+                    )
                 # Carry the server's accepted revision in replay metadata.  Do
                 # not change the legacy ``data`` shape: older clients compare
                 #/persist that payload verbatim.  New clients merge these
@@ -385,9 +419,18 @@ def _publish(run: _Run, ev: str) -> None:
                     }
             elif event_type == "context_checkpoint" and isinstance(payload.get("messages"), list):
                 messages = payload["messages"]
+                checkpoint_compactions = int(payload.get("compactions") or 0)
+                if run.context_usage and not run.compaction_pending:
+                    # The agent loop may have recreated its local counter for
+                    # this attempt. Keep the durable model ledger on the same
+                    # monotonic generation as the accepted request snapshot.
+                    checkpoint_compactions = max(
+                        checkpoint_compactions,
+                        int(run.context_usage.get("compactions", 0) or 0),
+                    )
                 run.continuation["working_checkpoint"] = {
                     "messages": messages,
-                    "compactions": int(payload.get("compactions") or 0),
+                    "compactions": checkpoint_compactions,
                     "ledger_hash": str(payload.get("ledger_hash") or "")[:128],
                 }
                 # The ledger belongs in the protected run-state artifact, not
@@ -1018,14 +1061,34 @@ def continuation_for_session(session_id: str) -> dict:
     """Return non-secret execution toggles for a replacement Goal attempt."""
     run = _RUNS.get(session_id)
     if run is not None and run.continuation:
-        return dict(run.continuation)
+        result = dict(run.continuation)
+        checkpoint = result.get("working_checkpoint")
+        if isinstance(checkpoint, dict) and run.context_usage:
+            checkpoint = dict(checkpoint)
+            checkpoint["compactions"] = max(
+                int(checkpoint.get("compactions", 0) or 0),
+                int(run.context_usage.get("compactions", 0) or 0),
+            )
+            result["working_checkpoint"] = checkpoint
+        return result
     try:
         from core.database import ChatRunState, SessionLocal
         with SessionLocal() as db:
             row = db.query(ChatRunState).filter(
                 ChatRunState.session_id == session_id,
             ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).first()
-            return dict(row.continuation or {}) if row is not None else {}
+            if row is None:
+                return {}
+            result = dict(row.continuation or {})
+            checkpoint = result.get("working_checkpoint")
+            if isinstance(checkpoint, dict) and row.context_snapshot:
+                checkpoint = dict(checkpoint)
+                checkpoint["compactions"] = max(
+                    int(checkpoint.get("compactions", 0) or 0),
+                    int((row.context_snapshot or {}).get("compactions", 0) or 0),
+                )
+                result["working_checkpoint"] = checkpoint
+            return result
     except Exception:
         logger.debug("[agent-run] continuation lookup failed", exc_info=True)
         return {}

@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260917sync3';
-import chatRenderer from './chatRenderer.js?v=20260917sync3';
+import sessionModule from './sessions.js?v=20260917sync4';
+import chatRenderer from './chatRenderer.js?v=20260917sync4';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -380,7 +380,12 @@ import { bindUiText, t } from './i18n.js';
     const previous = _contextHeaderData && _contextHeaderData.session_id === sessionId ? _contextHeaderData : {};
     const incomingRevision = Number(data.context_revision || 0);
     const previousRevision = Number(previous.context_revision || 0);
-    if (incomingRevision > 0 && previousRevision > 0 && incomingRevision <= previousRevision
+    // A replay page can legitimately carry the same revision more than once
+    // (for example after a replacement attempt seeded from the durable
+    // ledger). Reject only an older revision: an equal-revision measurement
+    // with a larger used_tokens value is still useful live progress and must
+    // not leave the header frozen at its first value.
+    if (incomingRevision > 0 && previousRevision > 0 && incomingRevision < previousRevision
         && Number(data.compactions || 0) <= Number(previous.compactions || 0)) return false;
     if (Number(previous.compactions || 0) === Number(data.compactions || 0)
         && Number(previous.used_tokens || 0) > Number(data.used_tokens || 0)) return false;

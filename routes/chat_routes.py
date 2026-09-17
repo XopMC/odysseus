@@ -26,6 +26,7 @@ from src.llm_core import (
 from src.agent_loop import stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
+from src.agent_context import context_endpoint_key
 from src.context_compactor import (
     apply_compaction_state,
     maybe_compact,
@@ -1537,6 +1538,7 @@ def setup_chat_routes(
         # Goal replacement attempts inherit the last successful working summary.
         # Runtime policies and tool schemas are rebuilt for this request; the
         # summary remains untrusted context and cannot grant permissions.
+        durable_checkpoint = None
         if active_goal:
             durable_checkpoint = agent_runs.context_checkpoint_for_session(session)
             if durable_checkpoint:
@@ -2005,6 +2007,26 @@ def setup_chat_routes(
                 "requests": {0: messages},
                 "trim_stats": {},
             }
+            # Replacement/Goal attempts can rebuild the agent loop with a
+            # zero-based local compaction counter. Seed it from the same
+            # owner/session ledger used by the context header so compaction
+            # generations and live telemetry remain continuous.
+            _initial_context_compactions = 0
+            try:
+                _prior_usage = agent_runs.get_context_usage(session, include_terminal=True)
+                if (
+                    isinstance(_prior_usage, dict)
+                    and _prior_usage.get("model") == sess.model
+                    and (
+                        not _prior_usage.get("endpoint_key")
+                        or _prior_usage.get("endpoint_key") == context_endpoint_key(sess.endpoint_url)
+                    )
+                ):
+                    _initial_context_compactions = max(
+                        0, int(_prior_usage.get("compactions", 0) or 0)
+                    )
+            except (TypeError, ValueError):
+                _initial_context_compactions = 0
             if _foreground_policy.enabled:
                 _chat_request_factory, _chat_request_state = _chat_candidate_request_factory(
                     messages,
@@ -2555,6 +2577,7 @@ def setup_chat_routes(
                         delegated_credential=_delegated_credential,
                         exact_approval=exact_tool_approval,
                         access_mode=access_mode,
+                        initial_context_compactions=_initial_context_compactions,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
