@@ -48,7 +48,9 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert 'await agent_runs.stop_and_wait(session_id, run["run_id"])' in work_routes
     assert "window.refreshChatContextHeader?.('goal-paused')" in work
     assert "additional guidance for the active goal" in chat
-    assert "goalGuidance && queueStreamingComposerRequest()" in chat
+    assert "await window.chatWork.addGuidance(goalGuidance)" in chat
+    assert "/goal-guidance" in work
+    assert "appendGoalGuidance" in chat and "appendGoalGuidance" in work
     assert "setTimeout(continueGoal, 350)" not in work
     assert "if (active) setPlanMode" not in app
     assert 'id="chat-work-status-row"' in html

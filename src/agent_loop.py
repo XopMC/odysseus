@@ -5065,11 +5065,37 @@ async def stream_agent_loop(
 
     _goal_stall_signature = None
     _goal_stall_count = 0
+    _initial_goal_guidance = ((active_goal or {}).get("checkpoint") or {}).get("guidance", [])
+    if not isinstance(_initial_goal_guidance, list):
+        _initial_goal_guidance = []
+    _goal_guidance_seen = {
+        str(item.get("id"))
+        for item in _initial_goal_guidance
+        if isinstance(item, dict) and item.get("id")
+    }
     for round_num in range(1, max_rounds + 1):
         round_started_at = time.time()
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
+
+        if active_goal and session_id:
+            try:
+                from src.chat_work_store import store as _chat_work_store
+                _goal_latest = _chat_work_store.get(owner, session_id).get("goal")
+                _latest_guidance = ((_goal_latest or {}).get("checkpoint") or {}).get("guidance", [])
+                if not isinstance(_latest_guidance, list):
+                    _latest_guidance = []
+                for item in _latest_guidance:
+                    if not isinstance(item, dict) or not item.get("id") or item["id"] in _goal_guidance_seen:
+                        continue
+                    _goal_guidance_seen.add(item["id"])
+                    messages.append({
+                        "role": "user",
+                        "content": "Additional user guidance for the active Goal:\n" + str(item.get("text") or ""),
+                    })
+            except Exception:
+                logger.exception("Failed to refresh active Goal guidance")
 
         _active_route_state = {
             "messages": messages,
@@ -6104,7 +6130,7 @@ async def stream_agent_loop(
             # Goal uses an explicit completion handshake. A prose answer is a
             # checkpoint, not completion, so the detached server run continues
             # even after the initiating browser disconnects.
-            if active_goal and owner and session_id and not _force_answer:
+            if active_goal and session_id and not _force_answer:
                 try:
                     from src.chat_work_store import store as _chat_work_store
                     _goal_now = _chat_work_store.get(owner, session_id).get("goal")
@@ -6568,7 +6594,7 @@ async def stream_agent_loop(
                     yield 'data: ' + json.dumps({"delta": _auq_delta}) + '\n\n'
                 _pending_ask_user_event = _auq
                 _awaiting_user = True
-                if active_goal and owner and session_id:
+                if active_goal and session_id:
                     try:
                         from src.chat_work_store import store as _chat_work_store
                         active_goal = _chat_work_store.update_goal(

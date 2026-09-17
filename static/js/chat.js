@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260917sync1';
-import chatRenderer from './chatRenderer.js?v=20260917sync1';
+import sessionModule from './sessions.js?v=20260917sync2';
+import chatRenderer from './chatRenderer.js?v=20260917sync2';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -1175,6 +1175,7 @@ import { bindUiText, t } from './i18n.js';
   const PLAN_STORAGE_KEY = 'odysseus-active-plan';
 
   const _queuedAgentRequests = [];
+  const _renderedGoalGuidance = new Set();
   let _queuedDrainTimer = null;
   let _queuedPromoteTimer = null;
   let _queuedRequestSeq = 0;
@@ -1237,6 +1238,16 @@ import { bindUiText, t } from './i18n.js';
 
   function _escapeQueueText(s) {
     return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  export function appendGoalGuidance(item) {
+    const id = String(item?.id || '');
+    const text = String(item?.text || '').trim();
+    if (!id || !text || _renderedGoalGuidance.has(id)) return false;
+    _renderedGoalGuidance.add(id);
+    chatRenderer.addMessage('user', text, null, { goal_guidance: true, guidance_id: id });
+    uiModule.scrollHistory();
+    return true;
   }
 
   function _ensureQueuedBubbleHost() {
@@ -1402,9 +1413,21 @@ import { bindUiText, t } from './i18n.js';
       const goalGuidance = activeGoal?.status === 'active'
         && String(uiModule.el('message')?.value || '').trim();
       // A message sent while a Goal is running is guidance for that Goal. Queue
-      // it behind the exact detached attempt; never reinterpret it as Stop,
-      // which would pause the Goal and create a false context boundary.
-      if (goalGuidance && queueStreamingComposerRequest()) return;
+      // it durably on the server and let the running loop consume it at the
+      // next round; never reinterpret it as Stop or keep it browser-owned.
+      if (goalGuidance && window.chatWork?.addGuidance) {
+        try {
+          if (await window.chatWork.addGuidance(goalGuidance)) {
+            const input = uiModule.el('message');
+            if (input) { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }
+            await sessionModule.refreshSessionMessageCount?.(sessionId);
+            return;
+          }
+        } catch (error) {
+          uiModule.showError?.(error?.message || 'Failed to save Goal guidance');
+          return;
+        }
+      }
       const queueRequestedAt = Number(window.__odysseusQueueStreamingSubmit || 0);
       const shouldQueueStreamingSubmit = queueRequestedAt && Date.now() - queueRequestedAt < 1200;
       window.__odysseusQueueStreamingSubmit = 0;

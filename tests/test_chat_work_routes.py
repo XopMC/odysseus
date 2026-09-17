@@ -93,3 +93,19 @@ def test_goal_resume_dispatches_server_controller_before_return(monkeypatch):
         response = client.post("/api/chat/work/chat-1/goal/resume", json={"expected_revision": 4})
     assert response.status_code == 200
     assert calls == [("alice", "chat-1", "goal_resumed")]
+
+
+def test_goal_guidance_route_keeps_goal_active(monkeypatch):
+    class GuidanceStore:
+        def add_goal_guidance(self, owner, session_id, message):
+            assert (owner, session_id, message) == ("alice", "chat-1", "check mobile too")
+            return {"goal": {"status": "active"}, "guidance": {"id": "g1", "text": message}}
+
+    monkeypatch.setattr(chat_work_routes, "store", GuidanceStore())
+    monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: "alice")
+    app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
+    with TestClient(app) as client:
+        response = client.post("/api/chat/work/chat-1/goal-guidance", json={"message": "check mobile too"})
+    assert response.status_code == 200
+    assert response.json()["goal"]["status"] == "active"

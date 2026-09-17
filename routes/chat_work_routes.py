@@ -178,6 +178,14 @@ def setup_chat_work_routes():
         await dispatch_goal_continuation(owner, session_id, reason="goal_revised")
         return goal
 
+    @router.post("/{session_id}/goal-guidance")
+    async def goal_guidance(session_id: str, request: Request):
+        owner = _owner(request, session_id, mutation=True)
+        body = await _json(request)
+        if set(body) != {"message"}:
+            raise HTTPException(400, "A single guidance message is required")
+        return store.add_goal_guidance(owner, session_id, body["message"])
+
     @router.post("/{session_id}/goal-lease")
     async def goal_lease(session_id: str, request: Request):
         owner = _owner(request, session_id, mutation=True)

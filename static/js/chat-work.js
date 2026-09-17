@@ -127,6 +127,12 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
 function handleEvent(event) {
   if (event?.type === 'plan_update') { snapshot.plan = event.data || null; render(); return; }
   if (event?.type === 'goal_update') { snapshot.goal = event.data || null; render(); return; }
+  if (event?.type === 'goal_guidance') {
+    if (event.data?.goal) snapshot.goal = event.data.goal;
+    window.chatModule?.appendGoalGuidance?.(event.data?.guidance);
+    window.sessionModule?.refreshSessionMessageCount?.(sessionId);
+    render(); return;
+  }
   if (event?.type?.startsWith('plan_') || event?.type?.startsWith('goal_')) void refresh(sessionId);
 }
 
@@ -205,6 +211,16 @@ async function onRunEnded(id) {
 
 async function pauseActiveGoal() {
   if (snapshot.goal?.status === 'active') await mutate('goal', 'pause');
+}
+
+async function addGuidance(message) {
+  const text = String(message || '').trim();
+  if (!sessionId || !text || snapshot.goal?.status !== 'active') return false;
+  const result = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/goal-guidance`, { message: text });
+  if (result?.goal) snapshot.goal = result.goal;
+  window.chatModule?.appendGoalGuidance?.(result?.guidance);
+  render();
+  return true;
 }
 
 function armCollapse(node) {
@@ -309,6 +325,6 @@ function bind() {
 
 const chatWork = {
   bind, refresh, render, handleEvent, beginGoal, prepareNewPlan, prepareNewGoal,
-  onRunEnded, pauseActiveGoal, continueGoal, getSnapshot: () => snapshot,
+  onRunEnded, pauseActiveGoal, addGuidance, continueGoal, getSnapshot: () => snapshot,
 };
 export default chatWork;

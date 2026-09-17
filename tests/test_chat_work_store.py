@@ -153,6 +153,22 @@ def test_goal_tools_receive_the_validated_owner_and_session(owned_chat):
     assert store.get("alice", owned_chat)["goal"]["checkpoint"] == {"round": 1}
 
 
+def test_goal_guidance_is_durable_and_does_not_pause_goal(owned_chat):
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Ship the release")
+    result = store.add_goal_guidance("alice", owned_chat, "Also verify HTTP and HTTPS")
+    assert result["goal"]["status"] == "active"
+    assert result["guidance"]["text"] == "Also verify HTTP and HTTPS"
+    current = store.get("alice", owned_chat)["goal"]
+    assert current["status"] == "active"
+    assert current["checkpoint"]["guidance"][-1]["id"] == result["guidance"]["id"]
+    with SessionLocal() as db:
+        saved = db.query(ChatMessage).filter_by(
+            session_id=owned_chat, role="user", content="Also verify HTTP and HTTPS",
+        ).one()
+        assert json.loads(saved.meta_data)["goal_guidance"] is True
+
+
 def test_terminal_run_attaches_timeline_v2_without_removing_legacy_metadata(monkeypatch, owned_chat):
     # Some legacy suites temporarily replace core.database.SessionLocal at
     # module scope. Pin the durable writer to the fixture's actual database so

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from datetime import timedelta
 import hashlib
+import json
 import re
 import uuid
 from sqlalchemy import or_
 
 from core.database import (
-    ChatGoal, ChatPlan, ChatWorkEvent, Session as DbSession, SessionLocal,
+    ChatGoal, ChatMessage, ChatPlan, ChatWorkEvent, Session as DbSession, SessionLocal,
     utcnow_naive,
 )
 
@@ -325,6 +326,39 @@ class ChatWorkStore:
             self._event(db, owner, session_id, event_kind, row.id, row.revision, _public_goal(row))
             db.flush()
             return _public_goal(row)
+
+    def add_goal_guidance(self, owner, session_id, message):
+        """Durably append human guidance without pausing the active Goal."""
+        message = _clean_text(message, "goal guidance", 12000)
+        now = utcnow_naive()
+        with SessionLocal.begin() as db:
+            session = _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+            ).first()
+            if row is None or row.status != "active":
+                raise WorkConflict("Goal is not active")
+            guidance = dict(row.checkpoint or {}).get("guidance") or []
+            guidance = list(guidance) if isinstance(guidance, list) else []
+            item = {"id": uuid.uuid4().hex, "text": message, "created_at": now.isoformat()}
+            guidance.append(item)
+            guidance = guidance[-100:]
+            row.checkpoint = {**dict(row.checkpoint or {}), "guidance": guidance}
+            row.progress = "Additional user guidance received; continuing the active Goal."
+            row.revision += 1
+            db.add(ChatMessage(
+                id=uuid.uuid4().hex, session_id=session_id, role="user", content=message,
+                meta_data=json.dumps({"goal_guidance": True, "guidance_id": item["id"]}),
+                timestamp=now,
+            ))
+            session.message_count = int(session.message_count or 0) + 1
+            session.last_message_at = now
+            self._event(
+                db, owner, session_id, "goal_guidance", row.id, row.revision,
+                {"guidance": item, "goal": _public_goal(row)},
+            )
+            db.flush()
+            return {"goal": _public_goal(row), "guidance": item}
 
     def update_goal(self, owner, session_id, progress, checkpoint=None, *, waiting_user=False):
         progress = _clean_text(progress, "goal progress", 12000)
