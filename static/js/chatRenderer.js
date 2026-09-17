@@ -24,23 +24,34 @@ function bindThinkingLabels(root) {
 // replay sidecar kept channelized deltas only inside timeline_v2. Normalize
 // both shapes into the same per-round array used by live replay so history on
 // a second device never renders empty thinking cards.
-function historyRoundReasonings(metadata, roundCount = 0) {
+export function historyRoundReasonings(metadata, roundCount = 0) {
   const values = Array.isArray(metadata?.round_reasonings)
     ? metadata.round_reasonings.map(value => String(value || ''))
     : [];
+  while (values.length < roundCount) values.push('');
   const timeline = metadata?.timeline_v2?.events;
-  if (!values.some(value => value.trim()) && Array.isArray(timeline)) {
+  if (Array.isArray(timeline)) {
     for (const item of timeline) {
-      const payload = item?.data && typeof item.data === 'object' ? item.data : item;
+      let payload = item?.data && typeof item.data === 'object' ? item.data : item;
+      if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch (_) { payload = null; }
+      }
       if (!payload || typeof payload !== 'object' || !payload.delta) continue;
       if (payload.thinking !== true && !['thinking', 'thought'].includes(payload.channel)) continue;
       const round = Math.max(1, Number(payload.round || payload._replay?.round || 1));
-      values[round - 1] = `${values[round - 1] || ''}${String(payload.delta)}`;
+      // Older metadata sometimes contains reasoning for only the newest
+      // rounds. Fill each missing round from timeline_v2 without duplicating
+      // values that were already persisted in round_reasonings.
+      if (!String(values[round - 1] || '').trim()) {
+        values[round - 1] = `${values[round - 1] || ''}${String(payload.delta)}`;
+      }
     }
   }
   if (!values.some(value => value.trim()) && metadata?.thinking) {
-    const index = Math.max(0, Math.min(Math.max(roundCount - 1, 0), values.length || roundCount || 1) - 1);
-    values[index] = String(metadata.thinking);
+    // ``thinking`` is a legacy aggregate. Keep it together in the first
+    // round rather than assigning it to a newly-created final empty card;
+    // this guarantees old reasoning remains accessible after reload.
+    values[0] = String(metadata.thinking);
   }
   return values;
 }
@@ -1448,7 +1459,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260917sync2').then(mod => {
+    import('./sessions.js?v=20260917sync3').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -2725,7 +2736,14 @@ export function addMessage(role, content, modelName, metadata) {
         const parsedRound = markdownModule.extractThinkingBlocks(rawTxt);
         const embeddedThinking = (parsedRound.thinkingBlocks || []).join('\n\n').trim();
         const reasoning = String(roundReasonings[r] || '').trim();
-        const txt = (parsedRound.content || (embeddedThinking ? '' : rawTxt)).trim();
+        let txt = (parsedRound.content || (embeddedThinking ? '' : rawTxt)).trim();
+        // A stopped provider can leave an empty ``<think></think>`` wrapper.
+        // Do not create a visually non-empty assistant card whose thinking
+        // section has no body.
+        if (!parsedRound.content && !embeddedThinking && !reasoning
+            && /^<think(?:ing)?(?:\s+[^>]*)?>\s*<\/think(?:ing)?>$/i.test(txt)) {
+          txt = '';
+        }
         const renderSource = reasoning && !embeddedThinking
           ? `<think>${reasoning}</think>\n\n${txt}`
           : rawTxt;
@@ -3287,6 +3305,7 @@ const chatRenderer = {
   showWelcomeScreen,
   createMsgFooter,
   displayMetrics,
+  historyRoundReasonings,
   addMessage,
   buildAttachCards,
   updateMessageAttachments,

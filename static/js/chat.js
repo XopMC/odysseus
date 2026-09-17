@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260917sync2';
-import chatRenderer from './chatRenderer.js?v=20260917sync2';
+import sessionModule from './sessions.js?v=20260917sync3';
+import chatRenderer from './chatRenderer.js?v=20260917sync3';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -5513,9 +5513,18 @@ import { bindUiText, t } from './i18n.js';
       const section = holder?.querySelector('.thinking-section');
       if (!section) return;
       const inner = section.querySelector('.thinking-content-inner');
+      let thinkingText = replayThinking;
+      // The shared reducer is the source of truth for replayed deltas. A
+      // throttled render can be interrupted by the next tool/round boundary
+      // before its local accumulator commits; recover that segment here so a
+      // second device never shows an empty historical thinking card.
+      if (!String(thinkingText || '').trim() && inner && !String(inner.textContent || '').trim()) {
+        const segments = timelineReducer.snapshot?.().segments || [];
+        thinkingText = [...segments].reverse().find(segment => String(segment?.thinking || '').trim())?.thinking || '';
+      }
       if (inner) {
         inner.style.whiteSpace = '';
-        inner.innerHTML = markdownModule.mdToHtml(replayThinking);
+        inner.innerHTML = markdownModule.mdToHtml(thinkingText);
       }
       section.querySelector('.thinking-content')?.classList.remove('expanded');
       section.querySelector('.thinking-toggle')?.classList.remove('expanded');

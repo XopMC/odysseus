@@ -100,4 +100,4 @@ def test_every_changed_approval_module_is_cache_busted_together():
     assert f"compare/index.js?v={version}" in app
     assert f"stream.js?v={version}" in compare_index
     # One chatRenderer instance, so the ask_user keydown listener binds once.
-    assert "chatRenderer.js?v=20260917sync2" in compare_stream
+    assert "chatRenderer.js?v=20260917sync3" in compare_stream
