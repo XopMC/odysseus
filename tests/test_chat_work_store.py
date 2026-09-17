@@ -60,8 +60,17 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
 
 def test_single_user_goal_and_model_tools_accept_null_request_owner(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from core.database import Base, ChatGoal, ChatPlan, ChatWorkEvent, ChatMessage as DbChatMessage
+    import src.chat_work_store as work_module
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[Session.__table__, DbChatMessage.__table__, ChatPlan.__table__, ChatGoal.__table__, ChatWorkEvent.__table__])
+    monkeypatch.setattr(work_module, "SessionLocal", sessionmaker(bind=engine, autocommit=False, autoflush=False))
     session_id = "single-work-" + uuid.uuid4().hex
-    with SessionLocal.begin() as db:
+    factory = work_module.SessionLocal
+    with factory.begin() as db:
         db.add(Session(
             id=session_id, name="Single user work",
             endpoint_url="http://model.test/v1", model="test-model", owner=None,
@@ -80,10 +89,7 @@ def test_single_user_goal_and_model_tools_accept_null_request_owner(monkeypatch)
         assert result["exit_code"] == 0
         assert store.get(None, session_id)["goal"]["checkpoint"]["stage"] == 1
     finally:
-        with SessionLocal.begin() as db:
-            row = db.query(Session).filter_by(id=session_id).first()
-            if row is not None:
-                db.delete(row)
+        engine.dispose()
 
 
 def test_legacy_plan_steps_have_stable_ids_and_cancel_fence(owned_chat):

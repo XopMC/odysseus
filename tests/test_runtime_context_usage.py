@@ -115,6 +115,28 @@ def test_terminal_context_snapshot_is_available_only_when_requested(monkeypatch)
     assert agent_runs.get_context_usage("a", include_terminal=True)["used_tokens"] == 90000
 
 
+def test_terminal_context_snapshot_survives_in_memory_run_eviction(monkeypatch):
+    from types import SimpleNamespace
+    import core.database as database
+    session_id = "durable-context-" + str(id(monkeypatch))
+    saved = SimpleNamespace(
+        context_snapshot=_snapshot(used_tokens=151000, compactions=3),
+    )
+    class Query:
+        def filter(self, *_args, **_kwargs): return self
+        def order_by(self, *_args, **_kwargs): return self
+        def first(self): return saved
+    class Db:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def query(self, *_args, **_kwargs): return Query()
+    monkeypatch.setattr(database, "SessionLocal", lambda: Db())
+    monkeypatch.setattr(agent_runs, "_RUNS", {})
+    current = agent_runs.get_context_usage(session_id, include_terminal=True)
+    assert current["used_tokens"] == 151000
+    assert current["compactions"] == 3
+
+
 def _client(monkeypatch, history, run=None, owner_error=False):
     # Load collaborators before installing this route's fixed token estimator;
     # lazy imports must not capture the fixture function for later Agent tests.

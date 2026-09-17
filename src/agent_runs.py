@@ -929,9 +929,27 @@ def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Opt
     estimate while approval/Stop/error persistence is being completed.
     """
     run = _RUNS.get(session_id)
-    if not run or (run.status != "running" and not include_terminal):
-        return None
-    return dict(run.context_usage) if run and run.context_usage is not None else None
+    if run is not None:
+        if run.status != "running" and not include_terminal:
+            return None
+        if run.context_usage is not None:
+            return dict(run.context_usage)
+    # A pause/Stop followed by a reload can legitimately have no in-memory
+    # _Run object (the process may have evicted it or restarted). Keep serving
+    # the exact durable terminal measurement instead of replacing it with the
+    # much smaller stored-transcript estimate.
+    if include_terminal:
+        try:
+            from core.database import ChatRunState, SessionLocal
+            with SessionLocal() as db:
+                row = db.query(ChatRunState).filter(
+                    ChatRunState.session_id == session_id,
+                ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).first()
+                if row is not None and row.context_snapshot:
+                    return dict(row.context_snapshot)
+        except Exception:
+            logger.debug("[agent-run] durable context lookup failed", exc_info=True)
+    return None
 
 
 def continuation_for_session(session_id: str) -> dict:
