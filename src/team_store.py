@@ -50,6 +50,7 @@ _UNSET = object()
 _TASK_STATES = {"pending", "running", "done", "accepted", "failed", "waiting_approval",
                 "blocked", "cancelled", "paused"}
 _WORKER_IDLE = {"pending", "failed", "waiting_approval", "blocked", "paused"}
+_CHECKPOINT_RETENTION = 32
 
 
 def _integer(value, name, minimum=0, maximum=_MAX_INT):
@@ -744,6 +745,13 @@ class TeamStore:
             seq = db.execute("SELECT coalesce(max(seq),0)+1 FROM team_checkpoints WHERE worker_id=?", (worker_id,)).fetchone()[0]
             checkpoint_id = uuid.uuid4().hex
             db.execute("INSERT INTO team_checkpoints VALUES (?,?,?,?,?,?,?)", (checkpoint_id, task_id, worker_id, worker["attempt_id"], seq, _json(payload), self.clock()))
+            # Recovery reads only the latest checkpoint. Retain a bounded audit
+            # window instead of rewriting the growing model ledger hundreds of
+            # times into an unbounded SQLite table during long Team runs.
+            db.execute(
+                "DELETE FROM team_checkpoints WHERE worker_id=? AND seq<=?",
+                (worker_id, max(0, seq - _CHECKPOINT_RETENTION)),
+            )
             self._event(db, task_id, "checkpoint_saved", {"worker_id": worker_id, "seq": seq})
             return _row(db.execute("SELECT * FROM team_checkpoints WHERE id=?", (checkpoint_id,)).fetchone())
 

@@ -39,7 +39,7 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     stop_block = routes.split('async def chat_stop', 1)[1].split('return {"stopped": stopped, "goal": goal}', 1)[0]
     assert 'chat_work_store.goal_action(' in stop_block
     assert 'on_terminal=_goal_terminal_controller' in routes
-    assert 'http://127.0.0.1:7000/api/chat_stream' in routes
+    assert 'f"{internal_api_base()}/api/chat_stream"' in routes
     assert 'nonlocal active_goal' in routes
     assert 'if _status == "error":' in routes
     assert "window.chatWork?.handleEvent?.({ type: 'goal_update', data: result.goal })" in chat
@@ -47,6 +47,9 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     work_routes = (root / "routes" / "chat_work_routes.py").read_text()
     assert 'await agent_runs.stop_and_wait(session_id, run["run_id"])' in work_routes
     assert "window.refreshChatContextHeader?.('goal-paused')" in work
+    assert "additional guidance for the active goal" in chat
+    assert "goalGuidance && queueStreamingComposerRequest()" in chat
+    assert "setTimeout(continueGoal, 350)" not in work
     assert "if (active) setPlanMode" not in app
     assert 'id="chat-work-status-row"' in html
     assert "modelPickerWrap.classList.remove('model-picker-autohide')" in app
@@ -67,8 +70,10 @@ try { for (const viewport of [{width:1280,height:900},{width:390,height:844}]) {
  const page=await browser.newPage({viewport});
  await page.setContent(`<main style="padding:8px"><div id="chat-work-status-row" class="chat-work-status-row"><section class="chat-work-card"><div class="chat-work-card-head"><strong>Цель</strong><span>активна · попытка 2</span></div><div class="chat-work-current">Проверить релиз с длинным текстом цели</div></section></div><div class="chat-input-bar"><div class="chat-input-top"><textarea id="message">текст</textarea><div id="model-picker-wrap" class="model-picker-wrap picker-auto-hidden"><button class="model-picker-btn"><span id="model-picker-label">qwen3.8-27b</span></button><div class="model-picker-list"><div class="model-switch-item"><span class="mp-model-name">qwen</span><span class="model-switch-ep">http://192.168.50.6:11434/v1</span></div></div></div></div></div></main>`);
  await page.addStyleTag({path:process.argv[1]+'/static/style.css'});
- const boxes=await page.evaluate(()=>{const a=document.querySelector('.chat-work-card').getBoundingClientRect(),b=document.querySelector('.chat-input-bar').getBoundingClientRect(),m=document.getElementById('model-picker-wrap').getBoundingClientRect(),ep=document.querySelector('.model-switch-ep');return {a:{top:a.top,bottom:a.bottom},b:{top:b.top,bottom:b.bottom},m:{width:m.width,height:m.height,display:getComputedStyle(document.getElementById('model-picker-wrap')).display,opacity:getComputedStyle(document.getElementById('model-picker-wrap')).opacity},ep:{overflow:getComputedStyle(ep).overflow,textOverflow:getComputedStyle(ep).textOverflow,whiteSpace:getComputedStyle(ep).whiteSpace}}});
+ const boxes=await page.evaluate(()=>{const a=document.querySelector('.chat-work-card').getBoundingClientRect(),b=document.querySelector('.chat-input-bar').getBoundingClientRect(),m=document.getElementById('model-picker-wrap').getBoundingClientRect(),ep=document.querySelector('.model-switch-ep');return {a:{top:a.top,bottom:a.bottom,left:a.left,right:a.right,width:a.width},b:{top:b.top,bottom:b.bottom,left:b.left,right:b.right,width:b.width},m:{width:m.width,height:m.height,display:getComputedStyle(document.getElementById('model-picker-wrap')).display,opacity:getComputedStyle(document.getElementById('model-picker-wrap')).opacity},ep:{overflow:getComputedStyle(ep).overflow,textOverflow:getComputedStyle(ep).textOverflow,whiteSpace:getComputedStyle(ep).whiteSpace}}});
  assert(boxes.a.bottom<=boxes.b.top,'goal card overlaps composer');assert.notEqual(boxes.m.display,'none');assert.equal(boxes.m.opacity,'1');assert(boxes.m.width>0&&boxes.m.height>0);assert.equal(boxes.ep.textOverflow,'clip');assert.equal(boxes.ep.whiteSpace,'normal');
+ assert(Math.abs(boxes.a.width-boxes.b.width)<1,'goal width must equal composer width');
+ assert(Math.abs(boxes.a.left-boxes.b.left)<1&&Math.abs(boxes.a.right-boxes.b.right)<1,'goal edges must align with composer');
  }} finally {await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});
 '''
     result = subprocess.run(['node', '-e', script, str(root)], capture_output=True, text=True,

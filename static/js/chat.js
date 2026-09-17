@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260916longrun1';
-import chatRenderer from './chatRenderer.js?v=20260916longrun1';
+import sessionModule from './sessions.js?v=20260917sync1';
+import chatRenderer from './chatRenderer.js?v=20260917sync1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -1260,12 +1260,17 @@ import { bindUiText, t } from './i18n.js';
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-user msg-user-queued';
     wrap.dataset.queueId = item.id;
-    wrap.title = 'Queued - click to send now and stop the current response';
+    const goalActive = window.chatWork?.getSnapshot?.()?.goal?.status === 'active';
+    wrap.title = goalActive
+      ? 'Queued as additional guidance for the active goal'
+      : 'Queued - click to send now and stop the current response';
     wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
-    wrap.addEventListener('click', (ev) => {
-      if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
-      _promoteQueuedRequest(item.id);
-    });
+    if (!goalActive) {
+      wrap.addEventListener('click', (ev) => {
+        if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
+        _promoteQueuedRequest(item.id);
+      });
+    }
     host.appendChild(wrap);
     uiModule.scrollHistory();
     return wrap;
@@ -1393,6 +1398,13 @@ import { bindUiText, t } from './i18n.js';
     // If currently streaming, keyboard Enter can queue a non-empty composer.
     // Clicking the stop icon should still stop normally, even if text exists.
     if (isStreaming) {
+      const activeGoal = window.chatWork?.getSnapshot?.()?.goal;
+      const goalGuidance = activeGoal?.status === 'active'
+        && String(uiModule.el('message')?.value || '').trim();
+      // A message sent while a Goal is running is guidance for that Goal. Queue
+      // it behind the exact detached attempt; never reinterpret it as Stop,
+      // which would pause the Goal and create a false context boundary.
+      if (goalGuidance && queueStreamingComposerRequest()) return;
       const queueRequestedAt = Number(window.__odysseusQueueStreamingSubmit || 0);
       const shouldQueueStreamingSubmit = queueRequestedAt && Date.now() - queueRequestedAt < 1200;
       window.__odysseusQueueStreamingSubmit = 0;
@@ -5237,9 +5249,52 @@ import { bindUiText, t } from './i18n.js';
     }, 1000);
     try {
 
+    let snapshotEvents = [];
+    let snapshotCursor = -1;
+    let snapshotRunId = '';
+    let snapshotStartedAt = 0;
+    try {
+      const snapshotResponse = await fetch(
+        `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}`,
+        { signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store' },
+      );
+      if (snapshotResponse.ok) {
+        const snapshot = await snapshotResponse.json();
+        snapshotRunId = String(snapshot.run_id || '');
+        snapshotStartedAt = Number(snapshot.started_at || 0);
+        let after = -1;
+        while (isCurrentView()) {
+          const pageResponse = await fetch(
+            `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}/events?after_seq=${after}&limit=200`,
+            { signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store' },
+          );
+          if (!pageResponse.ok) throw new Error(`Replay snapshot HTTP ${pageResponse.status}`);
+          const page = await pageResponse.json();
+          if (snapshotRunId && page.run_id && String(page.run_id) !== snapshotRunId) {
+            throw new Error('Active run changed during replay snapshot');
+          }
+          const events = Array.isArray(page.events) ? page.events : [];
+          snapshotEvents.push(...events);
+          const next = Number(page.next_cursor);
+          if (!Number.isInteger(next) || next <= after) break;
+          after = next;
+          snapshotCursor = next;
+          if (!page.has_more) break;
+        }
+      }
+    } catch (error) {
+      if (subscription.abortCtrl.signal.aborted) return false;
+      console.warn('[chat-replay] snapshot unavailable; falling back to SSE tail', error);
+      snapshotEvents = [];
+      snapshotCursor = -1;
+      snapshotRunId = '';
+      snapshotStartedAt = 0;
+    }
+
     let res;
     try {
-      res = await fetch(`${API_BASE}/api/chat/resume/${encodeURIComponent(sessionId)}`, {
+      const cursorQuery = snapshotRunId ? `?after_seq=${snapshotCursor}` : '';
+      res = await fetch(`${API_BASE}/api/chat/resume/${encodeURIComponent(sessionId)}${cursorQuery}`, {
         signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store',
       });
     } catch (e) {
@@ -5251,6 +5306,10 @@ import { bindUiText, t } from './i18n.js';
       return false;
     }
     const resumeRunId = res.headers.get('X-Odysseus-Run-Id') || '';
+    if (snapshotRunId && resumeRunId && snapshotRunId !== resumeRunId) {
+      try { await res.body.cancel(); } catch (_) {}
+      return false;
+    }
     if (resumeRunId) _streamRunIds.set(sessionId, resumeRunId);
 
     // A detached run belongs to the chat, not to the tab that started it.
@@ -5269,7 +5328,7 @@ import { bindUiText, t } from './i18n.js';
 
     const meta = sessionModule.getSessions().find(s => s.id === sessionId);
     const roleLabel = _shortModel(meta && meta.model);
-    const resumeStartedAt = Number(res.headers.get('X-Odysseus-Started-At') || 0) * 1000;
+    const resumeStartedAt = Number(res.headers.get('X-Odysseus-Started-At') || snapshotStartedAt || 0) * 1000;
     const roleTs = new Date(resumeStartedAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     let nextRoundTimestamp = 0;
     const replayHolders = [];
@@ -5321,7 +5380,22 @@ import { bindUiText, t } from './i18n.js';
     spinner.start();
     uiModule.scrollHistory();
 
-    const reader = res.body.getReader();
+    const liveReader = res.body.getReader();
+    let snapshotIndex = 0;
+    const reader = {
+      async read() {
+        if (snapshotIndex < snapshotEvents.length) {
+          const batch = snapshotEvents.slice(snapshotIndex, snapshotIndex + 100);
+          snapshotIndex += batch.length;
+          const frames = batch.map(item =>
+            `id: ${Number(item.seq)}\ndata: ${JSON.stringify(item.data || {})}\n\n`
+          ).join('');
+          return { done: false, value: new TextEncoder().encode(frames) };
+        }
+        return liveReader.read();
+      },
+      cancel(reason) { return liveReader.cancel(reason); },
+    };
     subscription.reader = reader;
     subscription.lastActivity = Date.now();
     const decoder = new TextDecoder();
@@ -5338,6 +5412,8 @@ import { bindUiText, t } from './i18n.js';
     let nextDeltaStartsRound = false;
     let replayThinking = '';
     let replayThinkingThrottle = null;
+    let replayThinkingStartedAt = 0;
+    let replayThinkingTimer = null;
     const replayEvents = new Set();
     // "Rich" responses (tool calls, sources, doc streaming, multi-round) need the
     // full canonical render, which is rebuilt from the saved DB record on reload.
@@ -5352,6 +5428,8 @@ import { bindUiText, t } from './i18n.js';
 
     const cleanup = () => {
       try { spinner.destroy(); } catch (_) {}
+      if (replayThinkingTimer !== null) clearInterval(replayThinkingTimer);
+      replayThinkingTimer = null;
     };
 
     const ensureReplayThinkingSection = () => {
@@ -5361,7 +5439,7 @@ import { bindUiText, t } from './i18n.js';
         const id = 'replay-think-' + Math.random().toString(36).slice(2);
         section = document.createElement('div');
         section.className = 'thinking-section';
-        section.innerHTML = `<div class="thinking-header" data-thinking-id="${id}"><div class="thinking-header-left"><span class="live-think-header-text">Thinking…</span></div><span class="thinking-toggle expanded" id="${id}-toggle"></span></div><div class="thinking-content expanded" id="${id}"><div class="thinking-content-inner"></div></div>`;
+        section.innerHTML = `<div class="thinking-header" data-thinking-id="${id}"><div class="thinking-header-left"><span class="live-think-header-text">Thinking…</span></div><span class="replay-think-stats" style="font-size:11px;opacity:.4;font-variant-numeric:tabular-nums;margin-left:auto;margin-right:5px;"></span><span class="thinking-toggle expanded" id="${id}-toggle"></span></div><div class="thinking-content expanded" id="${id}"><div class="thinking-content-inner"></div></div>`;
         bindUiText(section.querySelector('.live-think-header-text'), 'Thinking…');
         holder.querySelector('.body')?.insertBefore(section, contentDiv);
       }
@@ -5388,9 +5466,21 @@ import { bindUiText, t } from './i18n.js';
         });
       }
       replayThinkingThrottle.update(replayThinking);
+      const stats = ensureReplayThinkingSection()?.querySelector('.replay-think-stats');
+      if (!replayThinkingStartedAt) replayThinkingStartedAt = Date.now();
+      const updateStats = () => {
+        if (!stats?.isConnected) return;
+        const elapsed = Math.max(0, (Date.now() - replayThinkingStartedAt) / 1000);
+        const tokens = Math.max(1, Math.ceil(String(replayThinking || '').trim().length / 4));
+        stats.textContent = `${elapsed.toFixed(1)}s · ${tokens} tok`;
+      };
+      updateStats();
+      if (replayThinkingTimer === null) replayThinkingTimer = setInterval(updateStats, 250);
     };
 
     const finishReplayThinking = () => {
+      if (replayThinkingTimer !== null) clearInterval(replayThinkingTimer);
+      replayThinkingTimer = null;
       if (replayThinkingThrottle) {
         replayThinkingThrottle.update(replayThinking);
         replayThinkingThrottle.flush();
@@ -5536,6 +5626,10 @@ import { bindUiText, t } from './i18n.js';
                 replayThread = null;
                 nextDeltaStartsRound = false;
                 replayThinking = '';
+                replayThinkingStartedAt = 0;
+              }
+              if (!replayThinkingStartedAt) {
+                replayThinkingStartedAt = Number(json._replay?.created_at || 0) * 1000 || Date.now();
               }
               replayThinking += json.delta;
               rich = true;
@@ -5558,6 +5652,7 @@ import { bindUiText, t } from './i18n.js';
               replayThread = null;
               nextDeltaStartsRound = false;
               replayThinking = '';
+              replayThinkingStartedAt = 0;
             }
             roundText += json.delta;
             if (!docFenceOpened && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
@@ -5657,6 +5752,7 @@ import { bindUiText, t } from './i18n.js';
             nextDeltaStartsRound = Boolean(roundText.trim() || replayTool || gotDelta);
             docFenceOpened = false;
             replayThinking = '';
+            replayThinkingStartedAt = 0;
           } else if (json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress') {
             rich = true;
             try { spinner.destroy(); } catch (_) {}
@@ -5732,9 +5828,9 @@ import { bindUiText, t } from './i18n.js';
     // rounds while this reader replayed. Reconcile with canonical history once,
     // without selectSession (which clears a draft and resets composer tools).
     if (onThisSession && sessionModule.refreshSessionHistory) {
-      removeReplayHolders();
       if (_resumingStreams.get(sessionId) === subscription) _resumingStreams.delete(sessionId);
-      await sessionModule.refreshSessionHistory(sessionId);
+      const refreshed = await sessionModule.refreshSessionHistory(sessionId, { allowBusy: true });
+      if (!refreshed) removeReplayHolders();
       return true;
     }
 

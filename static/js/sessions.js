@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260916longrun1';
+import chatRenderer from './chatRenderer.js?v=20260917sync1';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js';
@@ -75,10 +75,11 @@ export async function refreshSessionMessageCount(sessionId) {
 
 // Refresh canonical messages without navigating: do not clear a draft, switch
 // tools/presets, focus the composer, or detach another local send.
-export async function refreshSessionHistory(sessionId) {
+export async function refreshSessionHistory(sessionId, { allowBusy = false } = {}) {
   const navToken = _sessionNavToken;
   const canRender = () => currentSessionId === sessionId && _sessionNavToken === navToken
-    && !window.__odysseusChatBusy && !window.chatModule?.hasActiveStream?.(sessionId)
+    && (allowBusy || !window.__odysseusChatBusy)
+    && !window.chatModule?.hasActiveStream?.(sessionId)
     && _loadingSessionToken !== navToken;
   if (!canRender()) return false;
   const res = await _readLiveSession(_historyUrl(sessionId, { limit: _historyPageLimit() }));
@@ -92,8 +93,13 @@ export async function refreshSessionHistory(sessionId) {
   const oldHeight = box.scrollHeight;
   _clearHistoryPager();
   chatRenderer.hideWelcomeScreen?.();
-  box.innerHTML = '';
+  // Keep the current live/replay DOM attached until the canonical replacement
+  // is completely rendered. Appending the canonical nodes synchronously and
+  // removing the old set afterwards avoids the visible blank/flicker and lost
+  // scroll anchor caused by clearing chat-history first.
+  const priorNodes = Array.from(box.children);
   for (const msg of data.history) _renderHistoryMessage(msg, data.model || null);
+  for (const node of priorNodes) node.remove();
   _installHistoryPager(sessionId, data, data.model || null);
   const meta = sessions.find(s => s.id === sessionId);
   if (meta && data.model && meta.model !== data.model) {

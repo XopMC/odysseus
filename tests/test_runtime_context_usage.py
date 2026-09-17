@@ -87,6 +87,25 @@ def test_context_ledger_rejects_lower_measurement_without_compaction(monkeypatch
     assert current["context_reason"] == "compaction"
 
 
+def test_model_checkpoint_is_durable_but_removed_from_public_replay(monkeypatch):
+    run = agent_runs._Run()
+    monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})
+    messages = [
+        {"role": "user", "content": "finish the goal"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "verified output"},
+    ]
+    agent_runs._publish(run, "data: " + json.dumps({
+        "type": "context_checkpoint", "messages": messages,
+        "ledger_hash": "a" * 64, "compactions": 2,
+    }) + "\n\n")
+    checkpoint = run.continuation["working_checkpoint"]
+    assert checkpoint["messages"] == messages
+    assert checkpoint["compactions"] == 2
+    assert "verified output" not in run.buffer[-1]
+    assert '"message_count":3' in run.buffer[-1]
+
+
 def test_terminal_context_snapshot_is_available_only_when_requested(monkeypatch):
     run = agent_runs._Run()
     monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})

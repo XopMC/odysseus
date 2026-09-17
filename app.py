@@ -1139,11 +1139,12 @@ async def _startup_event():
             if not goals:
                 return
             from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+            from src.constants import internal_api_base
             import httpx
             for goal in goals:
                 session_id = str(goal.get("session_id") or "")
-                owner = str(goal.get("owner") or "")
-                if not session_id or not owner or agent_runs.is_active(session_id):
+                owner = goal.get("owner")
+                if not session_id or agent_runs.is_active(session_id):
                     continue
                 lease = await asyncio.to_thread(chat_work_store.acquire_goal_lease, owner, session_id)
                 if not lease:
@@ -1159,17 +1160,18 @@ async def _startup_event():
                     "allow_bash": "true" if (prior.get("allow_bash") is True or checkpoint.get("allow_bash") is True) else "false",
                     "allow_web_search": "true" if (prior.get("allow_web_search") is True or checkpoint.get("allow_web_search") is True) else "false",
                 }
-                headers = {
-                    INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN,
-                    "X-Odysseus-Owner": owner,
-                    "Origin": "http://127.0.0.1:7000",
-                }
+                headers = {"Origin": internal_api_base()}
+                if owner:
+                    headers.update({
+                        INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN,
+                        "X-Odysseus-Owner": str(owner),
+                    })
                 dispatch_error = None
                 for attempt in range(3):
                     try:
                         async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, read=20.0)) as client:
                             async with client.stream(
-                                "POST", "http://127.0.0.1:7000/api/chat_stream",
+                                "POST", f"{internal_api_base()}/api/chat_stream",
                                 headers=headers, data=form,
                             ) as response:
                                 if response.status_code < 400:

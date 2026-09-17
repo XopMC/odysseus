@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from routes.session_routes import _verify_session_owner
 from src.auth_helpers import effective_user
 from src.chat_work_store import WorkConflict, WorkNotFound, store
+from src.owner_identity import auth_disabled
 
 
 class ChatWorkRoute(APIRoute):
@@ -32,7 +33,7 @@ class ChatWorkRoute(APIRoute):
 def _owner(request, session_id, mutation=False):
     _verify_session_owner(request, session_id)
     owner = effective_user(request)
-    if not owner:
+    if not owner and not auth_disabled():
         raise HTTPException(401, "Login required")
     return owner
 
@@ -150,6 +151,9 @@ def setup_chat_work_routes():
             goal = store.goal_action(owner, session_id, action, body["expected_revision"])
         except WorkConflict as exc:
             raise HTTPException(409, str(exc)) from None
+        if action == "resume":
+            from src.goal_controller import dispatch_goal_continuation
+            await dispatch_goal_continuation(owner, session_id, reason="goal_resumed")
         return goal
 
     @router.post("/{session_id}/goal-revise")
@@ -170,6 +174,8 @@ def setup_chat_work_routes():
             if not stopped:
                 raise HTTPException(409, "The current attempt is still stopping; retry shortly")
         goal = store.revise_goal(owner, session_id, body["objective"], body["expected_revision"])
+        from src.goal_controller import dispatch_goal_continuation
+        await dispatch_goal_continuation(owner, session_id, reason="goal_revised")
         return goal
 
     @router.post("/{session_id}/goal-lease")

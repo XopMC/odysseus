@@ -695,11 +695,11 @@ class ToolRunSecurityContext:
         )
 
         access_mode = normalize_access_mode(self.access_mode, default=None)
-        # Full access suppresses routine approval cards, but the external
-        # untrusted-context gate below remains deliberately independent.  This
-        # prevents pasted reports/web/MCP text from becoming authority merely
-        # because a UI preference was changed.
-        if access_mode == ACCESS_MODE_FULL and not self.external_untrusted_context_seen:
+        # Full access is an explicit owner preference: all otherwise available
+        # tools run without approval cards, including later rounds that have
+        # consumed tool/web output. Tool/account/workspace capability checks
+        # above still apply; this only suppresses the interactive gate.
+        if access_mode == ACCESS_MODE_FULL:
             return ToolGateDecision(True)
         # A task/chat-scope exact approval may cover the remaining important
         # actions.  "Ask every time" intentionally does not inherit that

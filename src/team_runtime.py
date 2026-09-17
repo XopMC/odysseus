@@ -214,7 +214,7 @@ class TeamRuntime:
         if not os.path.isabs(path):
             raise ValueError('Project path must be absolute')
         config = {'auto_dispatch': True, 'auto_continue': True, 'reviewer': True,
-                  'web': False, 'external': False, 'trusted_host': True, 'mcp': False,
+                  'web': False, 'external': False, 'trusted_host': bool(project), 'mcp': False,
                   **body.get('config', {})}
         from src.access_policy import normalize_access_mode
         access_mode = normalize_access_mode(body.get('access_mode'))
@@ -405,6 +405,33 @@ class TeamRuntime:
         if not resolved['valid']:
             raise PermissionError('Inherited context policy is invalid: ' + resolved['validation_error'])
         return ContextPolicy.from_dict(resolved['effective']), resolved['revisions']
+
+    async def _legacy_context_limit(self, owner, worker, tools, config):
+        """Derive a safe message budget from the actual Team model window."""
+        from src.agent_context import schema_token_estimate
+        from src.model_context import budget_context_for_model
+        try:
+            route = team_config.resolve(owner, worker['profile']['endpoint_id'], worker['profile']['model'])
+        except Exception:
+            route = {}
+        if route.get('url'):
+            backend = await asyncio.to_thread(
+                budget_context_for_model, route['url'], route.get('model') or worker['profile']['model'],
+                fallback=TEAM_CONTEXT_LIMIT,
+            )
+        else:
+            # Legacy/recovery fixtures and old local Team records may predate a
+            # resolvable endpoint row. Keep their conservative historical limit.
+            backend = TEAM_CONTEXT_LIMIT
+        window = int(backend or TEAM_CONTEXT_LIMIT)
+        configured = config.get('context_limit')
+        if type(configured) is int and configured > 0:
+            window = min(window, configured)
+        schema = schema_token_estimate(tools)
+        limit = int(window * .85) - TEAM_MAX_OUTPUT_TOKENS - schema
+        if limit <= 0:
+            raise PermissionError('Team tool schemas and output reserve leave no usable context')
+        return max(1, limit), window, schema
 
     async def _policy_request(self, owner, team_id, worker, token, route, messages, tools, *, summary=False):
         policy_state = self._context_policy_state(owner, team_id, worker)
@@ -740,7 +767,10 @@ class TeamRuntime:
                 saved['planner_messages'] = messages
                 self.store.save_checkpoint(owner, team_id, worker['id'], token, saved)
                 if self.context_policy(owner, team_id, worker) is None:
-                    messages, status = await compact_working_context(messages, TEAM_CONTEXT_LIMIT, summarize)
+                    context_limit, _window, _schema = await self._legacy_context_limit(
+                        owner, worker, tools, current['metadata'].get('config', {}),
+                    )
+                    messages, status = await compact_working_context(messages, context_limit, summarize)
                 else:
                     status = 'unchanged'  # full schemas + budget enforced at model_call
                 if status in {'failed', 'uncompactable'}:
@@ -895,10 +925,14 @@ class TeamRuntime:
                 tools = []
             async def summarize(prompt):
                 return (await self.model_call(owner, team_id, worker, token, prompt, []))['content']
-            context_limit = min(TEAM_CONTEXT_LIMIT, int(config.get('context_limit', TEAM_CONTEXT_LIMIT)))
             if self.context_policy(owner, team_id, worker) is None:
-                compacted, status = await compact_working_context(messages, max(2048, context_limit), summarize)
+                context_limit, context_window, context_schema = await self._legacy_context_limit(
+                    owner, worker, tools, config,
+                )
+                compacted, status = await compact_working_context(messages, context_limit, summarize)
             else:
+                context_limit = int(config.get('context_limit') or TEAM_CONTEXT_LIMIT)
+                context_window, context_schema = context_limit, 0
                 compacted, status = messages, 'unchanged'
             if status in {'failed', 'uncompactable'}:
                 raise RuntimeError('Context compaction did not preserve a usable checkpoint')
@@ -1028,7 +1062,11 @@ class TeamRuntime:
             messages.extend(saved.pop('pending_guidance', []))
             if saved.get('force_final'):
                 messages.append({'role': 'user', 'content': 'No new evidence after three identical reads. Stop tools. Review ONLY the assigned subtask, not files another worker has not integrated yet. Return the required JSON verdict using inspected evidence; if evidence is insufficient, verdict must be fail. Non-reviewers must state the concrete blocker, not claim completion.'})
-            self.event(owner, team_id, 'worker_context', {'worker_id': worker['id'], 'tokens': estimate_tokens(messages), 'limit': context_limit})
+            self.event(owner, team_id, 'worker_context', {
+                'worker_id': worker['id'], 'tokens': estimate_tokens(messages),
+                'limit': context_limit, 'window': context_window,
+                'schema_tokens': context_schema,
+            })
         saved['round'] = start_round + 200
         self.store.save_checkpoint(owner, team_id, worker['id'], token, saved)
         self.event(owner, team_id, 'worker_round_limit', {'worker_id': worker['id'],

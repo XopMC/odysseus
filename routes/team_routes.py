@@ -327,8 +327,7 @@ def setup_team_routes():
                 if running:
                     running.cancel()
                     await asyncio.gather(running, return_exceptions=True)
-                if action == 'cancel':
-                    await runtime.stop_host_jobs(owner, team_id, worker)
+                await runtime.stop_host_jobs(owner, team_id, worker)
             else:
                 runtime.store.update_worker(owner, team_id, worker_id, status='pending')
         elif action == 'reassign':
@@ -389,19 +388,30 @@ def setup_team_routes():
             raise HTTPException(404, 'Unknown team action')
         if action != 'cancel' and task['status'] in {'done', 'accepted', 'cancelled'}:
             raise HTTPException(409, 'Completed or cancelled tasks cannot be resumed; start a new task')
+        workers = runtime.store.list_workers(owner, team_id)
         if action == 'resume':
             runtime.store.update_task_metadata(owner, team_id, {'manual_resume': {
-                w['id']: w.get('attempt_id') for w in runtime.store.list_workers(owner, team_id)}})
-        runtime.store.set_task_status(owner, team_id, {'pause': 'paused', 'resume': 'running', 'cancel': 'cancelled'}[action])
+                w['id']: w.get('attempt_id') for w in workers}})
         if action in {'pause', 'cancel'}:
+            requested = 'paused' if action == 'pause' else 'cancelled'
+            for worker in workers:
+                if worker['status'] == 'running':
+                    runtime.store.stop_worker(owner, team_id, worker['id'], status=requested)
+            runtime.store.set_task_status(owner, team_id, requested)
             running = [t for (o, tid, _), t in runtime.active.items() if o == owner and tid == team_id]
             for execution in running:
                 execution.cancel()
             await asyncio.gather(*running, return_exceptions=True)
-            if action == 'cancel':
-                # Fence/cancel dispatch first, then stop accepted host jobs.
-                await runtime.stop_host_jobs(owner, team_id)
+            # Fence dispatch first, then stop managed jobs for both Pause and
+            # Cancel. A paused task must not keep modifying the host.
+            stop_jobs = getattr(runtime, 'stop_host_jobs', None)
+            if stop_jobs:
+                await stop_jobs(owner, team_id)
         else:
+            runtime.store.set_task_status(owner, team_id, 'running')
+            for worker in workers:
+                if worker['status'] == 'paused':
+                    runtime.store.update_worker(owner, team_id, worker['id'], status='pending')
             runtime.start()
         return runtime.snapshot(owner, team_id)
 

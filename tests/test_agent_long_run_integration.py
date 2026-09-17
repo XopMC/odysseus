@@ -56,7 +56,12 @@ def run(monkeypatch, *, failures=False, initial_messages=None):
 
 def test_midrun_compaction_continues_with_goal_and_final_metrics(monkeypatch):
     events, calls, requests, summaries = run(monkeypatch)
-    assert any(e.get("type") == "compacted" and e.get("working_context") for e in events), [(e.get("type"), str(e.get("delta"))[:200], e.get("reason"), e.get("message")) for e in events]
+    checkpoints = [event for event in events if event.get("type") == "context_checkpoint"]
+    assert checkpoints
+    assert any("Verified evidence" in str(item.get("content")) for item in checkpoints[-1]["messages"])
+    compacted = next(e for e in events if e.get("type") == "compacted" and e.get("working_context"))
+    assert compacted["checkpoint"]["summary"]
+    assert len(compacted["checkpoint"]["ledger_hash"]) == 64
     assert summaries
     assert len(calls) == 8
     assert len(requests) == 9

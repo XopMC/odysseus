@@ -15,7 +15,7 @@ class CreatePlanTool:
         try:
             data = json.loads((content or "{}").strip())
             owner, session_id = _scope(ctx)
-            if not owner or not session_id:
+            if not session_id:
                 raise ValueError("create_plan requires an active owned chat")
             from src.chat_work_store import store
             plan = store.save_plan(
@@ -111,7 +111,7 @@ class UpdatePlanTool:
         desc = f"update_plan: {done}/{total} done" if total else "update_plan"
         plan_update = {"plan": plan}
         owner, session_id = _scope(ctx)
-        if owner and session_id:
+        if session_id:
             try:
                 from src.chat_work_store import store
                 current = store.get(owner, session_id).get("plan")
@@ -140,7 +140,7 @@ class UpdatePlanStepTool:
         try:
             data = json.loads((content or "{}").strip())
             owner, session_id = _scope(ctx)
-            if not owner or not session_id:
+            if not session_id:
                 raise ValueError("update_plan_step requires an active owned chat")
             from src.chat_work_store import store
             plan = store.update_plan_step(
@@ -157,7 +157,7 @@ class GetGoalTool:
     async def execute(self, content, ctx):
         owner, session_id = _scope(ctx)
         try:
-            if not owner or not session_id:
+            if not session_id:
                 raise ValueError("get_goal requires an active owned chat")
             from src.chat_work_store import store
             goal = store.get(owner, session_id).get("goal")
@@ -173,7 +173,7 @@ class UpdateGoalProgressTool:
         try:
             data = json.loads((content or "{}").strip())
             owner, session_id = _scope(ctx)
-            if not owner or not session_id:
+            if not session_id:
                 raise ValueError("update_goal_progress requires an active owned chat")
             from src.chat_work_store import store
             goal = store.update_goal(
@@ -190,7 +190,7 @@ class CompleteGoalTool:
         try:
             data = json.loads((content or "{}").strip())
             owner, session_id = _scope(ctx)
-            if not owner or not session_id:
+            if not session_id:
                 raise ValueError("complete_goal requires an active owned chat")
             from src.chat_work_store import store
             goal = store.complete_goal(owner, session_id, data.get("summary") or "", data.get("evidence") or [])

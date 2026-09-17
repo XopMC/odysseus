@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Request, HTTPException, Depends
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, case, func, or_
 
 from core.models import ChatMessage
 from core.database import SessionLocal, ChatMessage as DbChatMessage, Session as DbSession
@@ -224,18 +224,25 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 if db_session is None:
                     raise HTTPException(404, f"Session '{session_id}' not found")
 
-                total = (
-                    db.query(DbChatMessage)
+                total, visible_total = (
+                    db.query(
+                        func.count(DbChatMessage.id),
+                        func.coalesce(func.sum(case((
+                            func.coalesce(
+                                func.json_extract(DbChatMessage.meta_data, "$.hidden"), 0,
+                            ) != 1,
+                            1,
+                        ), else_=0)), 0),
+                    )
                     .filter(DbChatMessage.session_id == session_id)
-                    .count()
+                    .one()
                 )
-                # The header count is server-authoritative. Do not derive it
-                # from each client's rendered DOM: live/replay bubbles differ
-                # transiently between devices. The raw DB total remains the
-                # compatibility count; hidden checkpoint rows are excluded
-                # from the page itself and therefore never enter the visible
-                # DOM count.
-                visible_total = total
+                total = int(total or 0)
+                visible_total = int(visible_total or 0)
+                # The header count is server-authoritative and counts exactly
+                # what history can render. Hidden compaction/checkpoint rows
+                # remain in raw ``total`` for legacy cursor compatibility but
+                # never inflate the cross-device visible message count.
                 # Explicit offsets remain available for older clients. New
                 # clients use a stable opaque cursor so inserts at the tail do
                 # not shift an in-progress upward pagination session.

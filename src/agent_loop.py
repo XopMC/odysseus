@@ -8,6 +8,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 
 import asyncio
 import collections
+import hashlib
 import json
 import re
 import time
@@ -2267,6 +2268,50 @@ def _restore_durable_tool_ledger(messages: List[Dict]) -> List[Dict]:
     return restored
 
 
+def _prior_context_compactions(messages: List[Dict]) -> int:
+    """Carry the durable compaction generation into a replacement run."""
+    generation = 0
+    for message in messages or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        snapshot = metadata.get("working_context") if isinstance(metadata, dict) else None
+        value = snapshot.get("compactions") if isinstance(snapshot, dict) else None
+        if type(value) is int and value >= 0:
+            generation = max(generation, value)
+    return generation
+
+
+def _durable_model_checkpoint(messages: List[Dict], max_chars: int = 1_500_000) -> List[Dict]:
+    """Copy the model-visible user/assistant/tool ledger without runtime policy.
+
+    System prompts, permission policy and route-injected schemas are rebuilt on
+    every request. The remaining role messages are exactly what a replacement
+    Goal attempt needs to retain completed calls and their results.
+    """
+    records = []
+    for message in _strip_agent_injected_messages(messages):
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant", "tool"}:
+            continue
+        record = {"role": message["role"], "content": message.get("content", "")}
+        for key in ("name", "tool_call_id", "tool_calls"):
+            if key in message:
+                record[key] = message[key]
+        records.append(record)
+    encoded = json.dumps(records, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(encoded) <= max_chars:
+        return records
+    # The active tail is authoritative when an exceptionally large provider
+    # output exceeds the artifact bound. Keep complete message boundaries.
+    kept = []
+    used = 2
+    for record in reversed(records):
+        size = len(json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str)) + 1
+        if kept and used + size > max_chars:
+            break
+        kept.append(record)
+        used += size
+    return list(reversed(kept))
+
+
 def _prepend_agent_directive(messages: List[Dict], directive: str) -> List[Dict]:
     """Attach a route-independent directive to the generated agent prompt."""
 
@@ -3509,10 +3554,9 @@ def build_active_plan_note(approved_plan: str) -> str:
         "You are executing a plan the user already approved. THE FULL PLAN IS "
         "BELOW — it is always provided here every turn. Do NOT say you lost it, "
         "and do NOT look for it in tasks, notes, memory, files, or the API; just "
-        "read it below. Work through it IN ORDER. After finishing each step, call "
-        "the `update_plan` tool with the full checklist and that step marked "
-        "`- [x]` so progress stays visible in the user's plan window. If the user "
-        "asks to change the plan, call `update_plan` with the revised checklist. "
+        "read it below. Work through it IN ORDER. After finishing and checking each step, call "
+        "`update_plan_step` with that exact step_id, status and verification summary. "
+        "Use legacy `update_plan` only when the user explicitly revises the full checklist. "
         "Do the next unchecked item until all are done. Do not skip, reorder, or "
         "invent steps; if a step is genuinely impossible, say so and stop.\n\n"
         "Current plan:\n"
@@ -4648,7 +4692,7 @@ async def stream_agent_loop(
     _last_route_request_messages = _initial_route_request_messages
     _last_route_endpoint_url = endpoint_url
     _last_route_context_length = _initial_route_context_length
-    _context_compactions = 0
+    _context_compactions = _prior_context_compactions(messages)
     _context_calibration = 1.0
     _working_context = None
     _working_limit = max(1, int(_last_route_context_length * .85))
@@ -5139,7 +5183,18 @@ async def stream_agent_loop(
             _context_compactions += 1
             _active_route_state["messages"] = messages
             _active_route_state.pop("request_messages", None)
-            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages)})}\n\n'
+            checkpoint_message = next(
+                (item for item in messages if item.get("_agent_working_summary")), None,
+            )
+            checkpoint_text = str((checkpoint_message or {}).get("content") or "")
+            checkpoint = {
+                "summary": checkpoint_text[:120000],
+                "compactions": _context_compactions,
+                "ledger_hash": hashlib.sha256(
+                    json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+                ).hexdigest(),
+            } if checkpoint_text else None
+            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "checkpoint": checkpoint})}\n\n'
         elif _compact_status in {"failed", "uncompactable"}:
             # Do not silently drop evidence and continue an audit as if the
             # summary succeeded. The user can retry after the provider recovers.
@@ -6870,6 +6925,15 @@ async def stream_agent_loop(
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning,
                              tool_result_records=tool_result_records)
+
+        # Persist the exact model-visible ledger after every completed tool
+        # round. agent_runs strips the bulky payload from public replay after
+        # storing it in the durable run checkpoint.
+        _checkpoint_messages = _durable_model_checkpoint(messages)
+        _checkpoint_encoded = json.dumps(
+            _checkpoint_messages, ensure_ascii=False, separators=(",", ":"), default=str,
+        )
+        yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _checkpoint_messages, "ledger_hash": hashlib.sha256(_checkpoint_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions}, ensure_ascii=False)}\n\n'
 
         # Emit agent_step event
         yield (

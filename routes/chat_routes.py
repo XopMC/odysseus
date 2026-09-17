@@ -1373,7 +1373,8 @@ def setup_chat_routes(
             durable_plan = work_state.get("plan")
             if not plan_mode and durable_plan and durable_plan.get("status") in {"approved", "executing"}:
                 approved_plan = "\n".join(
-                    f"- [{'x' if step.get('status') == 'done' else ' '}] {step.get('text', '')}"
+                    f"- [{'x' if step.get('status') == 'done' else ' '}] "
+                    f"{step.get('text', '')} (step_id: {step.get('id', '')})"
                     for step in durable_plan.get("steps", [])
                 )[:8192]
             if (
@@ -1532,6 +1533,29 @@ def setup_chat_routes(
                         route_messages.insert(min(len(ctx.preface), len(route_messages)), dict(_project_context))
             except Exception:
                 logger.exception("Unable to load project memory/skills for session %s", session)
+
+        # Goal replacement attempts inherit the last successful working summary.
+        # Runtime policies and tool schemas are rebuilt for this request; the
+        # summary remains untrusted context and cannot grant permissions.
+        if active_goal:
+            durable_checkpoint = agent_runs.context_checkpoint_for_session(session)
+            if durable_checkpoint:
+                ledger = durable_checkpoint.get("messages")
+                if isinstance(ledger, list) and ledger:
+                    latest_user = ctx.messages[-1] if ctx.messages and ctx.messages[-1].get("role") == "user" else None
+                    ctx.messages = [dict(item) for item in ledger if isinstance(item, dict)]
+                    if latest_user is not None:
+                        ctx.messages.append(latest_user)
+                else:
+                    checkpoint_message = untrusted_context_message(
+                        "durable agent working checkpoint",
+                        str(durable_checkpoint.get("summary") or ""),
+                    )
+                    checkpoint_message["_context_pinned"] = True
+                    insert_at = len(ctx.messages)
+                    if ctx.messages and ctx.messages[-1].get("role") == "user":
+                        insert_at -= 1
+                    ctx.messages.insert(insert_at, checkpoint_message)
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 
@@ -2881,10 +2905,11 @@ def setup_chat_routes(
                 dispatch_error = None
                 try:
                     import httpx
+                    from src.constants import internal_api_base
                     timeout = httpx.Timeout(20.0, read=20.0)
                     async with httpx.AsyncClient(timeout=timeout) as client:
                         async with client.stream(
-                            "POST", "http://127.0.0.1:7000/api/chat_stream",
+                            "POST", f"{internal_api_base()}/api/chat_stream",
                             headers=_controller_headers, data=form,
                         ) as response:
                             if response.status_code >= 400:

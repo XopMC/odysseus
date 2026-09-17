@@ -156,6 +156,8 @@ def test_cursor_pages_fifty_visible_messages_and_survives_tail_insert(monkeypatc
 
     first = client.get("/api/history/session-1?limit=50").json()
     assert len(first["history"]) == 50
+    assert first["total"] == 65
+    assert first["visible_total"] == 55
     assert first["history"][0]["content"] == "content-5"
     assert first["history"][-1]["content"] == "content-54"
     assert first["next_cursor"]

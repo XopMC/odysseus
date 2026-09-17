@@ -326,10 +326,40 @@ def _publish(run: _Run, ev: str) -> None:
                 # after an explicit successful compaction and may legitimately
                 # be lower than the prior run's high-water mark.
                 run.compaction_pending = True
+                checkpoint = payload.get("checkpoint")
+                if isinstance(checkpoint, dict) and checkpoint.get("summary"):
+                    run.continuation["working_checkpoint"] = {
+                        "summary": str(checkpoint["summary"])[:120000],
+                        "compactions": int(checkpoint.get("compactions") or 0),
+                        "ledger_hash": str(checkpoint.get("ledger_hash") or "")[:128],
+                    }
+            elif event_type == "context_checkpoint" and isinstance(payload.get("messages"), list):
+                messages = payload["messages"]
+                run.continuation["working_checkpoint"] = {
+                    "messages": messages,
+                    "compactions": int(payload.get("compactions") or 0),
+                    "ledger_hash": str(payload.get("ledger_hash") or "")[:128],
+                }
+                # The ledger belongs in the protected run-state artifact, not
+                # every browser replay page. Keep only audit metadata in SSE.
+                payload = {
+                    "type": "context_checkpoint",
+                    "message_count": len(messages),
+                    "ledger_hash": run.continuation["working_checkpoint"]["ledger_hash"],
+                    "compactions": run.continuation["working_checkpoint"]["compactions"],
+                    "_replay": payload.get("_replay", {}),
+                }
+                lines = ev.splitlines()
+                try:
+                    data_idx = next(i for i, line in enumerate(lines) if line.startswith("data:"))
+                    lines[data_idx] = "data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    ev = "\n".join(lines) + "\n\n"
+                except StopIteration:
+                    pass
     except (TypeError, ValueError):
         pass  # Other SSE events, comments and [DONE] are not measurements.
     run.buffer.append(ev)
-    if event_type in {"context_usage", "tool_output", "agent_step", "ask_user", "goal_update", "plan_update"}:
+    if event_type in {"context_usage", "context_checkpoint", "compacted", "tool_output", "agent_step", "ask_user", "goal_update", "plan_update"}:
         _persist_run_state(run)
     for q in list(run.subscribers):
         try:
@@ -366,7 +396,11 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
         encoded_bytes = 0
         truncated = False
         saved_message_id = None
-        for index in range(min(len(run.buffer), 5000)):
+        # Metadata is bounded, but current work is more important than the
+        # oldest deltas. Build from the tail so Stop/error never preserves round
+        # one while dropping the tool and reasoning that were active at Stop.
+        selected_events = []
+        for index in range(len(run.buffer) - 1, max(-1, len(run.buffer) - 5001), -1):
             frame = run.buffer[index]
             raw = "\n".join(
                 line[5:].lstrip() for line in frame.splitlines()
@@ -388,7 +422,8 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
                 truncated = True
                 break
             encoded_bytes += size
-            events.append(item)
+            selected_events.append(item)
+        events = list(reversed(selected_events))
         if len(run.buffer) > 5000:
             truncated = True
         if not events:
@@ -899,6 +934,34 @@ def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Opt
     return dict(run.context_usage) if run and run.context_usage is not None else None
 
 
+def continuation_for_session(session_id: str) -> dict:
+    """Return non-secret execution toggles for a replacement Goal attempt."""
+    run = _RUNS.get(session_id)
+    if run is not None and run.continuation:
+        return dict(run.continuation)
+    try:
+        from core.database import ChatRunState, SessionLocal
+        with SessionLocal() as db:
+            row = db.query(ChatRunState).filter(
+                ChatRunState.session_id == session_id,
+            ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).first()
+            return dict(row.continuation or {}) if row is not None else {}
+    except Exception:
+        logger.debug("[agent-run] continuation lookup failed", exc_info=True)
+        return {}
+
+
+def context_checkpoint_for_session(session_id: str) -> Optional[dict]:
+    value = continuation_for_session(session_id).get("working_checkpoint")
+    if not isinstance(value, dict):
+        return None
+    has_summary = bool(str(value.get("summary") or "").strip())
+    has_messages = isinstance(value.get("messages"), list) and bool(value["messages"])
+    if not has_summary and not has_messages:
+        return None
+    return dict(value)
+
+
 async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
                  prev_task: Optional[asyncio.Task] = None) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning
@@ -1013,7 +1076,12 @@ def start(
     run.on_terminal = on_terminal
     run.session_id = str(session_id)
     run.owner = str(owner or "").strip() or None
-    run.continuation = dict(continuation or {})
+    prior_continuation = continuation_for_session(session_id)
+    run.continuation = {
+        **({"working_checkpoint": prior_continuation["working_checkpoint"]}
+           if isinstance(prior_continuation.get("working_checkpoint"), dict) else {}),
+        **dict(continuation or {}),
+    }
     _seed_context_ledger(run)
     if os.getenv('ODYSSEUS_DURABLE_CHAT_REPLAY') == '1':
         from src.chat_replay_log import ReplayLog

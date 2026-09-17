@@ -166,7 +166,6 @@ async function mutate(kind, action) {
       const input = el('message');
       if (input) { input.value = t('Execute the approved plan and update each step after verification.'); input.dispatchEvent(new Event('input', { bubbles: true })); el('chat-form')?.requestSubmit?.(); }
     }
-    if (kind === 'goal' && action === 'resume') void continueGoal();
   } catch (error) { toast(error.message, true); await refresh(sessionId); }
 }
 
@@ -200,7 +199,8 @@ async function onRunEnded(id) {
   // number of transient DOM bubbles (which can differ on two devices during
   // replay). This keeps desktop/mobile badges identical after completion.
   await window.sessionModule?.refreshSessionMessageCount?.(id);
-  if (id === sessionId && snapshot.goal?.status === 'active') setTimeout(continueGoal, 300);
+  // The durable server controller owns automatic continuation. A browser may
+  // disappear at this boundary, so UI completion must never be the scheduler.
 }
 
 async function pauseActiveGoal() {
@@ -261,7 +261,6 @@ async function reviseGoal() {
       run_id: window.chatModule?.getActiveRunId?.(sessionId) || '',
     });
     render();
-    setTimeout(continueGoal, 350);
   } catch (error) { toast(error.message, true); await refresh(sessionId); }
 }
 

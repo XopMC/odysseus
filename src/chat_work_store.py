@@ -22,6 +22,12 @@ from core.database import (
 PLAN_STATES = {"pending", "in_progress", "done", "blocked"}
 PLAN_STATUS = {"draft", "approved", "executing", "done", "cancelled"}
 GOAL_STATUS = {"active", "paused", "waiting_user", "completed", "cancelled"}
+_SINGLE_USER_OWNER_KEY = "__odysseus_single_user__"
+
+
+def _storage_owner(owner):
+    """Map the auth-disabled owner to a durable non-null scope key."""
+    return str(owner or _SINGLE_USER_OWNER_KEY)
 
 
 class WorkConflict(RuntimeError):
@@ -65,6 +71,7 @@ def _public_goal(row):
         return None
     return {
         "id": row.id, "session_id": row.session_id, "objective": row.objective,
+        "owner": None if row.owner == _SINGLE_USER_OWNER_KEY else row.owner,
         "status": row.status, "attempt": row.attempt, "progress": row.progress,
         "checkpoint": dict(row.checkpoint or {}), "last_error": row.last_error,
         "failure_count": row.failure_count, "revision": row.revision,
@@ -90,9 +97,6 @@ def checklist_steps(markdown):
         })
     if not steps:
         raise ValueError("Plan needs at least one step")
-    first = next((step for step in steps if step["status"] != "done"), None)
-    if first:
-        first["status"] = "in_progress"
     return steps
 
 
@@ -109,16 +113,17 @@ def _stable_step_id(text, ordinal=1):
 class ChatWorkStore:
     def _event(self, db, owner, session_id, kind, entity_id, revision, payload):
         db.add(ChatWorkEvent(
-            session_id=session_id, owner=owner, kind=kind,
+            session_id=session_id, owner=_storage_owner(owner), kind=kind,
             entity_id=entity_id, revision=revision, payload=payload or {},
         ))
 
     def get(self, owner, session_id):
         with SessionLocal() as db:
             _session(db, owner, session_id)
-            plan = db.query(ChatPlan).filter_by(owner=owner, session_id=session_id).first()
-            goal = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
-            cursor = db.query(ChatWorkEvent.id).filter_by(owner=owner, session_id=session_id).order_by(ChatWorkEvent.id.desc()).limit(1).scalar()
+            stored_owner = _storage_owner(owner)
+            plan = db.query(ChatPlan).filter_by(owner=stored_owner, session_id=session_id).first()
+            goal = db.query(ChatGoal).filter_by(owner=stored_owner, session_id=session_id).first()
+            cursor = db.query(ChatWorkEvent.id).filter_by(owner=stored_owner, session_id=session_id).order_by(ChatWorkEvent.id.desc()).limit(1).scalar()
             return {"plan": _public_plan(plan), "goal": _public_goal(goal), "cursor": cursor or 0}
 
     def list_active_goals(self):
@@ -132,8 +137,9 @@ class ChatWorkStore:
             raise ValueError("Invalid event cursor")
         with SessionLocal() as db:
             _session(db, owner, session_id)
+            stored_owner = _storage_owner(owner)
             rows = db.query(ChatWorkEvent).filter(
-                ChatWorkEvent.owner == owner, ChatWorkEvent.session_id == session_id,
+                ChatWorkEvent.owner == stored_owner, ChatWorkEvent.session_id == session_id,
                 ChatWorkEvent.id > after,
             ).order_by(ChatWorkEvent.id).limit(limit).all()
             return [{
@@ -162,11 +168,12 @@ class ChatWorkStore:
             })
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatPlan).filter_by(owner=owner, session_id=session_id).first()
+            stored_owner = _storage_owner(owner)
+            row = db.query(ChatPlan).filter_by(owner=stored_owner, session_id=session_id).first()
             if row is None:
                 if expected_revision not in (None, 0):
                     raise WorkConflict("Plan changed; reload")
-                row = ChatPlan(id=uuid.uuid4().hex, owner=owner, session_id=session_id)
+                row = ChatPlan(id=uuid.uuid4().hex, owner=stored_owner, session_id=session_id)
                 db.add(row)
                 db.flush()
             else:
@@ -179,12 +186,23 @@ class ChatWorkStore:
             # must not silently turn the plan back into a draft.  Reconcile
             # omitted IDs by matching old text so old clients keep stable IDs.
             if row is not None and row.steps:
-                old_by_text = {str(step.get("text", "")).strip().casefold(): step.get("id") for step in row.steps if step.get("id")}
+                old_by_text = {}
+                for old_step in row.steps:
+                    old_id = old_step.get("id")
+                    if old_id:
+                        old_by_text.setdefault(
+                            str(old_step.get("text", "")).strip().casefold(), []
+                        ).append(old_id)
                 for step in normalized:
                     # Text is the only identity available to legacy clients;
                     # preserve a previously authored opaque ID whenever it
                     # matches, including old positional IDs such as step-1.
-                    step["id"] = old_by_text.get(step["text"].strip().casefold(), step["id"])
+                    matches = old_by_text.get(step["text"].strip().casefold()) or []
+                    if matches:
+                        step["id"] = matches.pop(0)
+            step_ids = [step["id"] for step in normalized]
+            if len(step_ids) != len(set(step_ids)):
+                raise ValueError("Plan step IDs must be unique")
             prior_status = row.status if row is not None else "draft"
             status = prior_status if prior_status in {"executing", "done"} else "draft"
             row.title, row.steps, row.status = title, normalized, status
@@ -198,7 +216,7 @@ class ChatWorkStore:
             raise ValueError("Invalid plan action")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatPlan).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatPlan).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None:
                 raise WorkNotFound("Plan not found")
             if row.revision != expected_revision:
@@ -223,7 +241,7 @@ class ChatWorkStore:
         objective = _clean_text(objective, "goal", 12000)
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled"}:
                 raise WorkNotFound("Active goal not found")
             if row.status != "active":
@@ -247,7 +265,7 @@ class ChatWorkStore:
             raise ValueError("Invalid plan step status")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatPlan).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatPlan).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None:
                 raise WorkNotFound("Plan not found")
             if row.status in {"cancelled", "done"}:
@@ -276,12 +294,13 @@ class ChatWorkStore:
         objective = _clean_text(objective, "goal", 12000)
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            stored_owner = _storage_owner(owner)
+            row = db.query(ChatGoal).filter_by(owner=stored_owner, session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled"}:
                 if row is not None:
                     db.delete(row)
                     db.flush()
-                row = ChatGoal(id=uuid.uuid4().hex, owner=owner, session_id=session_id, objective=objective)
+                row = ChatGoal(id=uuid.uuid4().hex, owner=stored_owner, session_id=session_id, objective=objective)
                 db.add(row)
                 db.flush()
                 self._event(db, owner, session_id, "goal_created", row.id, row.revision, _public_goal(row))
@@ -293,7 +312,7 @@ class ChatWorkStore:
             raise ValueError("Invalid goal action")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None:
                 raise WorkNotFound("Goal not found")
             if row.revision != expected_revision:
@@ -313,7 +332,7 @@ class ChatWorkStore:
             raise ValueError("Goal checkpoint must be an object")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:
                 raise WorkNotFound("Active goal not found")
             row.progress = progress
@@ -338,7 +357,7 @@ class ChatWorkStore:
             raise ValueError("Goal checkpoint must be an object")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:
                 raise WorkNotFound("Active goal not found")
             row.failure_count = int(row.failure_count or 0) + 1 if row.last_error == error else 1
@@ -370,7 +389,7 @@ class ChatWorkStore:
             raise ValueError("complete_goal requires verification evidence")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled"}:
                 raise WorkNotFound("Active goal not found")
             row.progress = summary
@@ -393,7 +412,7 @@ class ChatWorkStore:
             # workers recovering the same Goal cannot both observe an empty
             # lease and then dispatch duplicate autonomous attempts.
             changed = db.query(ChatGoal).filter(
-                ChatGoal.owner == owner,
+                ChatGoal.owner == _storage_owner(owner),
                 ChatGoal.session_id == session_id,
                 ChatGoal.status == "active",
                 or_(ChatGoal.lease_token.is_(None), ChatGoal.lease_expires_at.is_(None), ChatGoal.lease_expires_at <= now),
@@ -405,7 +424,7 @@ class ChatWorkStore:
         now = utcnow_naive()
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
-            row = db.query(ChatGoal).filter_by(owner=owner, session_id=session_id).first()
+            row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None or row.status != "active":
                 raise WorkConflict("Goal is not ready to continue")
             if row.lease_token != token or not row.lease_expires_at or row.lease_expires_at <= now:

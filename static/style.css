@@ -2472,6 +2472,7 @@ body.bg-pattern-sparkles {
 	      border-radius: 16px;
 	      padding: 10px 12px;
       display: flex;
+      box-sizing: border-box;
       flex-direction: column;
       gap: 8px;
       max-width: 800px;
@@ -2553,13 +2554,13 @@ body.bg-pattern-sparkles {
 	    body.plan-mode-active .chat-input-top > .model-picker-wrap { opacity: 1; pointer-events: auto; transform: none; }
 	    .goal-mode-status { right: 112px; }
     .chat-work-status-row {
-      width: 100%; max-width: none; margin: 0 auto 6px;
+      width: 100%; max-width: 800px; box-sizing: border-box; margin: 0 auto 6px;
 	      display: flex; align-items: flex-end; flex-direction: column; gap: 5px;
 	    }
 	    .chat-work-status-row:empty { display: none; }
 	    .chat-work-card {
 	      position: relative; right: auto; bottom: auto; height: 36px; display: block;
-	      width: min(100%, 560px); box-sizing: border-box; padding: 0;
+	      width: 100%; box-sizing: border-box; padding: 0;
 	      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 48%, transparent);
 	      border-radius: 15px;
 	      background: color-mix(in srgb, var(--accent, var(--red)) 9%, var(--input-bg, var(--panel)));
@@ -2587,7 +2588,7 @@ body.bg-pattern-sparkles {
 	      font-size: 8px; line-height: 1; font-weight: 800; overflow: hidden; max-width: 38px;
 	    }
 	    .plan-work-card.expanded { width: min(calc(100% - 16px), 480px); align-self: flex-end; }
-	    .goal-work-card { width: 100%; }
+	    .goal-work-card { width: 100%; max-width: 100%; }
 	    .goal-work-card-head { padding: 0 6px 0 10px; cursor: default; }
 	    .goal-work-card-main {
 	      min-width: 0; flex: 1; height: 34px; padding: 0; border: 0;
@@ -2618,7 +2619,7 @@ body.bg-pattern-sparkles {
 	    }
 	    .chat-work-actions button:disabled { opacity: .45; cursor: default; }
 	    @media (max-width: 768px) {
-	      .chat-work-status-row { padding: 0 8px; margin-bottom: 6px; }
+	      .chat-work-status-row { padding: 0; margin-bottom: 6px; }
 	      .chat-work-card { width:100%; border-radius: 13px; }
 	      .plan-work-card { top: 58px; right: 10px; }
 	      .plan-work-card:not(.expanded) { width:36px; }

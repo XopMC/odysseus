@@ -4,6 +4,7 @@ import { bindUiText, uiTextSource, t } from './i18n.js';
 const encode = encodeURIComponent;
 const TABS = ['Tasks', 'Team', 'Terminals', 'Files & Changes', 'Resources'];
 const TERMINAL_TEXT_LIMIT = 200000;
+const TIMELINE_EVENT_LIMIT = 2000;
 
 export function terminalPlainText(value) {
   return String(value ?? '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
@@ -291,11 +292,16 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
   }
   function recordTimeline(events) {
     for (const event of events || []) if (Number.isSafeInteger(event?.seq)) timelineEvents.set(event.seq, event);
+    while (timelineEvents.size > TIMELINE_EVENT_LIMIT) {
+      timelineEvents.delete(timelineEvents.keys().next().value);
+    }
     if (!timelineRenderTimer) timelineRenderTimer = setTimeout(renderTimeline, 20);
   }
   async function loadTimeline(id, token) {
     if (!id) return;
-    const requestSeq = ++timelineRequestSeq; let after = 0;
+    const requestSeq = ++timelineRequestSeq;
+    const latest = Number(snapshot?.last_seq || 0);
+    let after = Math.max(0, latest - TIMELINE_EVENT_LIMIT);
     timelineEvents = new Map();
     while (true) {
       const data = await request(`/api/team/${encode(id)}/timeline?after_seq=${after}&limit=200`);

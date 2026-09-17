@@ -20,6 +20,20 @@ def test_server_authoritative_replay_is_not_blocked_by_stale_global_busy_flag():
     assert "window.chatModule?.resumeStream" in check
 
 
+def test_second_device_pages_active_run_before_opening_live_sse():
+    source = (Path(__file__).resolve().parents[1] / "static/js/chat.js").read_text(
+        encoding="utf-8"
+    )
+    resume = source.split("export async function resumeStream", 1)[1].split(
+        "// This only disconnects", 1
+    )[0]
+    assert "/api/chat/run/${encodeURIComponent(sessionId)}`" in resume
+    assert "/events?after_seq=${after}&limit=200" in resume
+    assert "snapshotEvents.push(...events)" in resume
+    assert "?after_seq=${snapshotCursor}" in resume
+    assert resume.index("snapshotEvents.push(...events)") < resume.index("/api/chat/resume/")
+
+
 @pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):

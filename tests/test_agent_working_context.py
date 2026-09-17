@@ -118,6 +118,30 @@ def test_snapshot_uses_one_round_not_accumulated_billing():
     assert snapshot["prompt_tokens"] == 8000
 
 
+def test_replacement_run_inherits_compaction_generation_from_saved_context():
+    from src.agent_loop import _prior_context_compactions
+    messages = [
+        {"role": "assistant", "content": "older", "metadata": {
+            "working_context": {"compactions": 2},
+        }},
+        {"role": "user", "content": "additional guidance"},
+    ]
+    assert _prior_context_compactions(messages) == 2
+
+
+def test_durable_model_checkpoint_excludes_runtime_system_policy():
+    from src.agent_loop import _durable_model_checkpoint
+    checkpoint = _durable_model_checkpoint([
+        {"role": "system", "content": "secret runtime policy"},
+        {"role": "user", "content": "finish the goal"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "verified output"},
+    ])
+    assert [item["role"] for item in checkpoint] == ["user", "assistant", "tool"]
+    assert "secret runtime policy" not in json.dumps(checkpoint)
+    assert checkpoint[-1]["content"] == "verified output"
+
+
 def test_untrusted_tool_ledger_is_not_a_new_user_turn():
     from src.agent_loop import (
         _extract_last_user_message,

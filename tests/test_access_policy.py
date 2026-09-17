@@ -19,13 +19,13 @@ def test_access_mode_normalization_and_effect_classification():
     ) is False
 
 
-def test_full_access_suppresses_routine_prompt_but_not_external_taint_gate():
+def test_full_access_suppresses_all_interactive_approval_prompts():
     context = ToolRunSecurityContext(access_mode="full_access")
     assert context.decision_for("bash", "echo ok").allowed is True
     tainted = ToolRunSecurityContext(
         access_mode="full_access", external_untrusted_context_seen=True
     )
-    assert tainted.decision_for("bash", "echo ok").allowed is False
+    assert tainted.decision_for("bash", "echo ok").allowed is True
 
 
 def test_ask_every_time_does_not_inherit_task_bypass():
@@ -35,4 +35,3 @@ def test_ask_every_time_does_not_inherit_task_bypass():
     decision = context.decision_for("bash", "echo ok")
     assert decision.allowed is False
     assert "approval" in (decision.reason or "").lower()
-

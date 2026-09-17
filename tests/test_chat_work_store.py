@@ -58,6 +58,34 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
         store.get("bob", owned_chat)
 
 
+def test_single_user_goal_and_model_tools_accept_null_request_owner(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    session_id = "single-work-" + uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(Session(
+            id=session_id, name="Single user work",
+            endpoint_url="http://model.test/v1", model="test-model", owner=None,
+        ))
+    try:
+        store = ChatWorkStore()
+        goal = store.ensure_goal(None, session_id, "Finish the local goal")
+        assert goal["owner"] is None
+        _desc, result = asyncio.run(execute_tool_block(
+            ToolBlock("update_goal_progress", json.dumps({
+                "progress": "Stage one verified", "checkpoint": {"stage": 1},
+            })),
+            owner=None, session_id=session_id,
+            security_context=NO_TOOL_SECURITY_CONTEXT,
+        ))
+        assert result["exit_code"] == 0
+        assert store.get(None, session_id)["goal"]["checkpoint"]["stage"] == 1
+    finally:
+        with SessionLocal.begin() as db:
+            row = db.query(Session).filter_by(id=session_id).first()
+            if row is not None:
+                db.delete(row)
+
+
 def test_legacy_plan_steps_have_stable_ids_and_cancel_fence(owned_chat):
     first = checklist_steps("- [ ] Inspect source\n- [ ] Run tests")
     reordered = checklist_steps("- [ ] Run tests\n- [ ] Inspect source")
@@ -68,6 +96,19 @@ def test_legacy_plan_steps_have_stable_ids_and_cancel_fence(owned_chat):
     plan = work.plan_action("alice", owned_chat, "cancel", plan["revision"])
     with pytest.raises(WorkConflict):
         work.update_plan_step("alice", owned_chat, plan["steps"][0]["id"], "done", expected_revision=plan["revision"])
+
+
+def test_draft_plan_stays_pending_and_duplicate_text_keeps_distinct_ids(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Release", "- [ ] Verify\n- [ ] Verify")
+    assert [step["status"] for step in plan["steps"]] == ["pending", "pending"]
+    original_ids = [step["id"] for step in plan["steps"]]
+    assert len(set(original_ids)) == 2
+    updated = work.save_plan(
+        "alice", owned_chat, "Release", "- [x] Verify\n- [ ] Verify",
+        expected_revision=plan["revision"],
+    )
+    assert [step["id"] for step in updated["steps"]] == original_ids
 
 
 def test_goal_revision_preserves_audit_and_advances_attempt(owned_chat):
@@ -179,6 +220,29 @@ def test_stopped_run_persists_rich_partial_after_latest_user(monkeypatch, owned_
         assert metadata["tool_events"][0]["exit_code"] == 130
         assert "collected 3 tests" in metadata["tool_events"][0]["output"]
         assert metadata["timeline_v2"]["run_id"] == run.run_id
+
+
+def test_stopped_long_run_keeps_timeline_tail_not_only_oldest_events(monkeypatch, owned_chat):
+    import core.database as database
+    monkeypatch.setattr(database, "SessionLocal", SessionLocal)
+    message_id = uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(ChatMessage(
+            id=message_id, session_id=owned_chat, role="assistant", content="partial",
+            meta_data="{}", timestamp=datetime.utcnow(),
+        ))
+    run = agent_runs._Run()
+    run.buffer = [f'data: {json.dumps({"delta": f"old-{index}"})}\n\n' for index in range(5105)]
+    run.buffer.append('data: ' + json.dumps({"delta": "LATEST-TAIL-MARKER"}) + '\n\n')
+    run.buffer.append('data: ' + json.dumps({"type": "message_saved", "id": message_id}) + '\n\n')
+    run.status = "stopped"
+    agent_runs._persist_timeline_v2(owned_chat, run)
+    with SessionLocal() as db:
+        row = db.query(ChatMessage).filter_by(id=message_id).first()
+        timeline = json.loads(row.meta_data)["timeline_v2"]
+    assert timeline["truncated"] is True
+    assert timeline["events"][0]["seq"] > 0
+    assert any(item["data"].get("delta") == "LATEST-TAIL-MARKER" for item in timeline["events"])
 
 
 def test_goal_prose_does_not_stop_detached_server_run(monkeypatch, owned_chat):
