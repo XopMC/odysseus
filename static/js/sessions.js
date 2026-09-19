@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260920parallelsubagents1';
+import chatRenderer from './chatRenderer.js?v=20260920parallelsubagents2';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js';
@@ -2589,6 +2589,9 @@ export async function materializePendingSession() {
     }
     _pendingChat = null;
     currentSessionId = payload.id;
+    // A deferred New Chat bypasses selectSession(), so session-scoped floating
+    // controllers must attach here as soon as the first prompt materializes it.
+    window.chatSubagents?.refresh?.(payload.id);
     if (!isIncognito) {
       Storage.set('lastSessionId', payload.id);
       history.replaceState(null, '', '#' + payload.id);

@@ -400,7 +400,7 @@ function initPersistentChat() {
 
     try {
       // Get current model info from session module
-      const sessionModule = (await import('./sessions.js?v=20260920parallelsubagents1'));
+      const sessionModule = (await import('./sessions.js?v=20260920parallelsubagents2'));
       const sessions = sessionModule.getSessions();
       const current = sessions.find(s => s.id === sessionModule.getCurrentSessionId());
 
