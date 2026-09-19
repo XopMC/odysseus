@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260920agentteam1';
+import chatRenderer from './chatRenderer.js?v=20260920contextcount2';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js';
@@ -62,8 +62,10 @@ export async function refreshSessionMessageCount(sessionId) {
   try {
     const res = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
     if (!res.ok || !res.data) return null;
-    const raw = Number.isFinite(Number(res.data.visible_total))
-      ? Number(res.data.visible_total) : Number(res.data.total);
+    const raw = Number.isFinite(Number(res.data.rendered_total))
+      ? Number(res.data.rendered_total)
+      : Number.isFinite(Number(res.data.visible_total))
+        ? Number(res.data.visible_total) : Number(res.data.total);
     if (Number.isFinite(raw) && raw >= 0) {
       const count = Math.floor(raw);
       window.__odysseusSetServerMessageCount?.(sessionId, count);
@@ -135,7 +137,8 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
   _syncedHistory.set(sessionId, _historyStamp(data));
   window.__odysseusSetServerMessageCount?.(
     sessionId,
-    Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
+    Number.isFinite(Number(data.rendered_total)) ? Number(data.rendered_total)
+      : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
   );
   if (nearBottom) uiModule.scrollHistoryInstant();
   else box.scrollTop = Math.max(0, oldTop + box.scrollHeight - oldHeight);
@@ -2196,13 +2199,15 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
         limit: data.limit,
         total: data.total,
         visible_total: data.visible_total,
+        rendered_total: data.rendered_total,
         cursor: data.cursor,
         next_cursor: data.next_cursor,
         has_more_before: !!data.has_more_before,
       };
       window.__odysseusSetServerMessageCount?.(
         id,
-        Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
+        Number.isFinite(Number(data.rendered_total)) ? Number(data.rendered_total)
+          : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
       );
       // The model returned by /api/history is the authoritative one the
       // backend will use for this session. Write it back into the cached

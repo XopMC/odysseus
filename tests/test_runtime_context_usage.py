@@ -268,11 +268,14 @@ def test_terminal_context_snapshot_survives_in_memory_run_eviction(monkeypatch):
     assert current["compactions"] == 3
 
 
-def _client(monkeypatch, history, run=None, owner_error=False):
+def _client(monkeypatch, history, run=None, owner_error=False, checkpoint=None):
     # Load collaborators before installing this route's fixed token estimator;
     # lazy imports must not capture the fixture function for later Agent tests.
     from src import context_policy_runtime  # noqa: F401
-    session = SimpleNamespace(model="mac-qwen", endpoint_url="http://mac.test/v1", history=history)
+    session = SimpleNamespace(
+        model="mac-qwen", endpoint_url="http://mac.test/v1", history=history,
+        context_checkpoint=checkpoint,
+    )
     session.get_context_messages = lambda: [m.to_dict() for m in history]
     manager = SimpleNamespace(get_session=lambda _sid: session)
     def check_owner(*_args):
@@ -317,6 +320,30 @@ def test_completed_snapshot_is_explicitly_last_request(monkeypatch):
     assert data["context_status"] == "last_request"
     assert data["source"] == "backend"
     assert data["can_compact"] is True
+
+
+def test_newer_manual_checkpoint_replaces_stale_terminal_measurement(monkeypatch):
+    run = agent_runs._Run()
+    _publish(run, _snapshot(used_tokens=262143, context_revision=44, compactions=7))
+    run.status = "done"
+    checkpoint = ChatMessage("system", "[Conversation summary]\ncompact", {
+        "timestamp": "2099-01-01T00:00:00+00:00",
+        "context_reason": "manual_compaction",
+        "compaction_revision": 2,
+        "ledger_hash": "a" * 64,
+    })
+
+    data = _client(monkeypatch, _history(), run, checkpoint=checkpoint).get(
+        "/api/session/chat/context"
+    ).json()
+
+    assert data["context_status"] == "working_checkpoint"
+    assert data["used_tokens"] == 1627
+    assert data["context_percent"] == 0.6
+    assert data["source"] == "estimated"
+    assert data["backend_measurement"]["used_tokens"] == 262143
+    assert data["working_checkpoint"]["compaction_revision"] == 2
+    assert data["context_revision"] == data["backend_measurement"]["context_revision"] + 1
 
 
 @pytest.mark.parametrize('live', [False, True])

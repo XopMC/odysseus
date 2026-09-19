@@ -1,13 +1,13 @@
 // static/sw.js — Odysseus PWA Service Worker
 // Strategy:
-//   - HTML (navigation): stale-while-revalidate. Instant open from cache,
-//     background refresh so the next open has latest HTML.
+//   - HTML (navigation): network-first, cache fallback. A normal reload must
+//     activate the current asset graph immediately, not one reload later.
 //   - JS/CSS (/static/*.js|.css): network-first, cache fallback for offline.
 //     (So code/style edits show up on a normal reload, no manual cache clear.)
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v389-agentteam1';
+const CACHE_NAME = 'odysseus-v391-safarireload1';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -39,22 +39,22 @@ const KATEX_FONTS = [
 // exact URL the browser requests, query string included.
 const PRECACHE = [
   '/',
-  '/static/style.css?v=20260920agentteam1',
-  '/static/css/team-workspace.css?v=20260920agentteam1',
+  '/static/style.css?v=20260920contextcount2',
+  '/static/css/team-workspace.css?v=20260920contextcount2',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
-  '/static/app.js?v=20260920agentteam1',
+  '/static/app.js?v=20260920contextcount2',
   '/static/js/storage.js',
   '/static/js/appConfig.js',
   '/static/js/ui.js',
   '/static/js/markdown.js',
   '/static/js/dragSort.js',
-  '/static/js/sessions.js?v=20260920agentteam1',
+  '/static/js/sessions.js?v=20260920contextcount2',
   '/static/js/memory.js?v=20260722memoryloading1',
   '/static/js/skills.js',
   '/static/js/tourHints.js',
   '/static/js/fileHandler.js',
   '/static/js/voiceRecorder.js',
-  '/static/js/models.js?v=20260920agentteam1',
+  '/static/js/models.js?v=20260920contextcount2',
   '/static/js/rag.js',
   '/static/js/presets.js',
   '/static/js/search.js',
@@ -62,13 +62,13 @@ const PRECACHE = [
   '/static/js/tts-ai.js',
   '/static/js/document.js?v=20260815approvalsave1',
   '/static/js/gallery.js?v=20260708match1',
-  '/static/js/chatRenderer.js?v=20260920agentteam1',
+  '/static/js/chatRenderer.js?v=20260920contextcount2',
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js?v=20260819approvalcontrol1',
-  '/static/js/chat.js?v=20260920agentteam1',
+  '/static/js/chat.js?v=20260920contextcount2',
   '/static/js/timelineReducer.js',
-  '/static/js/chat-work.js?v=20260920agentteam1',
-  '/static/js/accessMode.js?v=20260920agentteam1',
+  '/static/js/chat-work.js?v=20260920contextcount2',
+  '/static/js/accessMode.js?v=20260920contextcount2',
   '/static/js/projects.js?v=20260915projects1',
   '/static/js/cookbook.js',
   '/static/js/search-chat.js',
@@ -195,7 +195,7 @@ self.addEventListener('fetch', (e) => {
   // Never touch API calls or non-GET.
   if (url.pathname.startsWith('/api/') || e.request.method !== 'GET') return;
 
-  // HTML navigation: stale-while-revalidate the app shell — but ONLY for the
+  // HTML navigation: network-first app shell — but ONLY for the
   // SPA root. Other navigations (e.g. a deep-linked /static/*.html page) must
   // go to the network/static handlers below; otherwise every navigation was
   // served the app index, replacing the page the user actually asked for.
@@ -203,11 +203,10 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       caches.open(CACHE_NAME).then(async cache => {
         const cached = await cache.match('/');
-        const network = fetch(e.request).then(res => {
+        return fetch(e.request).then(res => {
           if (res && res.ok) cache.put('/', res.clone());
           return res;
         }).catch(() => cached);
-        return cached || network;
       })
     );
     return;

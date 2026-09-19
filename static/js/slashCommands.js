@@ -11,9 +11,9 @@ window.cancelActiveTour = function cancelActiveTour() {
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260920agentteam1';
-import modelsModule from './models.js?v=20260920agentteam1';
-import chatRenderer from './chatRenderer.js?v=20260920agentteam1';
+import sessionModule from './sessions.js?v=20260920contextcount2';
+import modelsModule from './models.js?v=20260920contextcount2';
+import chatRenderer from './chatRenderer.js?v=20260920contextcount2';
 import spinnerModule from './spinner.js';
 import themeModule from './theme.js';
 import documentModule from './document.js?v=20260815approvalsave1';

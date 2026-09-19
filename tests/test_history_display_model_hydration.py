@@ -178,6 +178,63 @@ def test_cursor_pages_fifty_visible_messages_and_survives_tail_insert(monkeypatc
     engine.dispose()
 
 
+def test_rendered_total_counts_persisted_agent_round_bubbles(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=3)
+    db = db_factory()
+    try:
+        assistant = db.query(DbChatMessage).filter(DbChatMessage.id == "message-1").one()
+        assistant.meta_data = json.dumps({
+            "round_texts": ["first", "second", "third"],
+            "rendered_message_count": 3,
+        })
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(object()))
+
+    payload = TestClient(app).get("/api/history/session-1?limit=1").json()
+
+    assert payload["canonical_visible_total"] == 3
+    assert payload["visible_total"] == 5
+    assert payload["rendered_total"] == 5
+    engine.dispose()
+
+
+def test_initial_history_page_is_bounded_by_rendered_bubbles(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=6)
+    db = db_factory()
+    try:
+        for message_id in ("message-1", "message-3", "message-5"):
+            row = db.query(DbChatMessage).filter(DbChatMessage.id == message_id).one()
+            row.meta_data = json.dumps({
+                "round_texts": [f"round-{index}" for index in range(30)],
+                "rendered_message_count": 30,
+            })
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(object()))
+
+    page = TestClient(app).get("/api/history/session-1?limit=50").json()
+
+    # Newest user + newest 30-round assistant fit. Adding the previous
+    # 30-round assistant would exceed the 50-bubble initial render budget.
+    assert [item["content"] for item in page["history"]] == ["content-4", "content-5"]
+    assert page["has_more_before"] is True
+    assert page["visible_total"] == 93
+    engine.dispose()
+
+
 def test_production_router_order_reaches_bounded_canonical_history(monkeypatch):
     """The assembled app must not shadow canonical history with session routes."""
     engine, db_factory = _database()

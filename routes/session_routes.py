@@ -1129,6 +1129,16 @@ def setup_session_routes(
         previous = getattr(session, "context_checkpoint", None)
         previous_meta = getattr(previous, "metadata", None) or {}
         compaction_revision = max(0, int(previous_meta.get("compaction_revision") or 0)) + 1
+        from src.agent_runs import get_context_usage
+        prior_measurement = get_context_usage(session_id, include_terminal=True) or {}
+        context_revision = max(
+            int(previous_meta.get("context_revision") or 0),
+            int(prior_measurement.get("context_revision") or 0),
+        ) + 1
+        context_generation = max(
+            int(previous_meta.get("context_generation") or 0),
+            int(prior_measurement.get("compactions") or 0),
+        ) + 1
         compacted_at = utcnow_naive().isoformat()
 
         summary_msg = ChatMessage(
@@ -1141,6 +1151,8 @@ def setup_session_routes(
                 "summarized_count": len(older),
                 "timestamp": compacted_at,
                 "compaction_revision": compaction_revision,
+                "context_revision": context_revision,
+                "context_generation": context_generation,
                 "context_reason": "manual_compaction",
                 "model": session.model,
                 "endpoint_url": session.endpoint_url,
@@ -1182,6 +1194,8 @@ def setup_session_routes(
             "before": before_percent,
             "after": after_percent,
             "compaction_revision": compaction_revision,
+            "context_revision": context_revision,
+            "context_generation": context_generation,
             "ledger_hash": ledger_hash,
             "model": model,
         }

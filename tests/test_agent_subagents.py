@@ -100,9 +100,12 @@ def test_subagent_settings_and_timeline_contract_are_wired():
     root = Path(__file__).resolve().parents[1]
     html = (root / "static/index.html").read_text(encoding="utf-8")
     settings = (root / "static/js/settings.js").read_text(encoding="utf-8")
+    app = (root / "static/app.js").read_text(encoding="utf-8")
     loop = (root / "src/agent_loop.py").read_text(encoding="utf-8")
     assert 'id="set-agentSubagentsMode"' in html
     assert 'id="set-agentSubagentModels"' in html
+    assert 'id="overflow-subagents-btn"' in html
+    assert "settingsModule.open('tools')" in app
     assert "agent_subagents_mode" in settings and "agent_subagent_models" in settings
     assert '"type": "tool_inventory"' in loop
     assert '"child_run_id": result["child_run_id"]' in loop

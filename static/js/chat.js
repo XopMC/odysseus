@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260920agentteam1';
-import chatRenderer from './chatRenderer.js?v=20260920agentteam1';
+import sessionModule from './sessions.js?v=20260920contextcount2';
+import chatRenderer from './chatRenderer.js?v=20260920contextcount2';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -209,7 +209,8 @@ import { bindUiText, t } from './i18n.js';
       ['Used', `${_fmtContextNumber(d.used_tokens)} / ${_fmtContextNumber(d.context_length)}`],
       ['Usage', `${pct}%`],
       ['Scope', d.context_status === 'active_request' ? 'Live request'
-        : d.context_status === 'last_request' ? 'Last request' : 'Stored chat'],
+        : d.context_status === 'last_request' ? 'Last request'
+          : d.context_status === 'working_checkpoint' ? 'Working checkpoint' : 'Stored chat'],
       ['Count source', d.source === 'backend' ? 'Backend tokens' : 'Estimate'],
       ['Window model', modelShort],
       ['Messages', `${Number(d.messages || 0).toLocaleString()}`],
@@ -223,6 +224,9 @@ import { bindUiText, t } from './i18n.js';
     }
     if (d.context_status !== 'stored_chat' && d.stored_chat_tokens != null) {
       rows.push(['Stored chat (est.)', _fmtContextNumber(d.stored_chat_tokens)]);
+    }
+    if (d.context_status === 'working_checkpoint' && d.backend_measurement?.context_percent != null) {
+      rows.push(['Last backend request', `${Number(d.backend_measurement.context_percent).toFixed(1)}%`]);
     }
     if (d.active_run) rows.push(['Manual compact', 'Run active']);
     if (d.saved_context_policy) {
@@ -239,7 +243,7 @@ import { bindUiText, t } from './i18n.js';
       const b = document.createElement('span');
       b.textContent = value;
       b.title = value;
-      if (['Scope', 'Count source', 'Manual compact', 'Threshold basis', 'Settings apply', 'Saved context policy'].includes(label)) {
+      if (['Scope', 'Count source', 'Manual compact', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request'].includes(label)) {
         bindUiText(b, value);
         bindUiText(b, value, 'title');
       }
@@ -3842,8 +3846,12 @@ import { bindUiText, t } from './i18n.js';
               } else if (json.type === 'message_saved') {
                 // Wire the persisted DB id onto the just-streamed bubble so it
                 // can be edited/deleted immediately, without reloading the chat.
+                if (!_isBg && holder && json.id) holder.dataset.dbId = json.id;
+                // The server count includes persisted multi-round bubble
+                // units. Refresh on the durable save boundary instead of
+                // waiting for a later focus/poll event.
+                void sessionModule.refreshSessionMessageCount?.(streamSessionId);
                 if (_isBg) continue;
-                if (holder && json.id) holder.dataset.dbId = json.id;
 
               } else if (json.type === 'tool_start') {
                 _closeOpenThinkingMarkup(_isBg);

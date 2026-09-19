@@ -217,6 +217,33 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             entry["metadata"] = meta
         return entry
 
+    def _history_rendered_units(entry: Dict[str, Any]) -> int:
+        """Top-level message bubbles produced by the browser renderer."""
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        if metadata.get("hidden"):
+            return 0
+        role = str(entry.get("role") or "")
+        content = str(entry.get("content") or "")
+        if role == "user" and (
+            content == "Continue where you left off"
+            or content.startswith("Your message was cut off.")
+            or content.startswith("Your previous response was interrupted.")
+            or "[Instruction: Rewrite" in content
+            or "[Instruction: Explain" in content
+        ):
+            return 0
+        if role == "assistant":
+            try:
+                persisted = int(metadata.get("rendered_message_count") or 0)
+            except (TypeError, ValueError):
+                persisted = 0
+            if persisted > 0:
+                return persisted
+            rounds = metadata.get("round_texts")
+            if isinstance(rounds, list) and len(rounds) > 1:
+                return len(rounds)
+        return 1
+
     @router.get("/api/history/{session_id}")
     async def get_session_history(
         request: Request,
@@ -234,21 +261,44 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 if db_session is None:
                     raise HTTPException(404, f"Session '{session_id}' not found")
 
-                total, visible_total = (
-                    db.query(
-                        func.count(DbChatMessage.id),
-                        func.coalesce(func.sum(case((
-                            func.coalesce(
-                                func.json_extract(DbChatMessage.meta_data, "$.hidden"), 0,
-                            ) != 1,
-                            1,
-                        ), else_=0)), 0),
-                    )
-                    .filter(DbChatMessage.session_id == session_id)
-                    .one()
+                hidden = func.coalesce(
+                    func.json_extract(DbChatMessage.meta_data, "$.hidden"), 0,
+                ) == 1
+                synthetic_user = and_(
+                    DbChatMessage.role == "user",
+                    or_(
+                        DbChatMessage.content == "Continue where you left off",
+                        DbChatMessage.content.like("Your message was cut off.%"),
+                        DbChatMessage.content.like("Your previous response was interrupted.%"),
+                        DbChatMessage.content.like("%[Instruction: Rewrite%"),
+                        DbChatMessage.content.like("%[Instruction: Explain%"),
+                    ),
                 )
+                persisted_units = func.coalesce(
+                    func.json_extract(DbChatMessage.meta_data, "$.rendered_message_count"), 0,
+                )
+                legacy_rounds = func.coalesce(func.json_array_length(func.json_extract(
+                    DbChatMessage.meta_data, "$.round_texts",
+                )), 0)
+                assistant_units = case(
+                    (persisted_units > 0, persisted_units),
+                    (legacy_rounds > 1, legacy_rounds),
+                    else_=1,
+                )
+                rendered_units = case(
+                    (hidden, 0),
+                    (synthetic_user, 0),
+                    (DbChatMessage.role == "assistant", assistant_units),
+                    else_=1,
+                )
+                total, canonical_visible_total, rendered_total = db.query(
+                    func.count(DbChatMessage.id),
+                    func.coalesce(func.sum(case((~hidden, 1), else_=0)), 0),
+                    func.coalesce(func.sum(rendered_units), 0),
+                ).filter(DbChatMessage.session_id == session_id).one()
                 total = int(total or 0)
-                visible_total = int(visible_total or 0)
+                canonical_visible_total = int(canonical_visible_total or 0)
+                rendered_total = int(rendered_total or 0)
                 # The header count is server-authoritative and counts exactly
                 # what history can render. Hidden compaction/checkpoint rows
                 # remain in raw ``total`` for legacy cursor compatibility but
@@ -292,6 +342,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     # Count *visible* messages, not raw rows: hidden compaction
                     # summaries never reduce the requested 50-message window.
                     visible_desc = []
+                    rendered_page_units = 0
                     scanned_oldest = None
                     batch_anchor = None
                     raw_consumed = 0
@@ -315,12 +366,22 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                         more_raw = len(fetched) > batch_size
                         reached_limit = False
                         for index, row in enumerate(batch):
+                            entry = _db_history_entry(row)
+                            units = _history_rendered_units(entry)
+                            # Never split one durable assistant row: its
+                            # timeline/reasoning metadata is one reconciliation
+                            # unit. Stop before an older row if adding it would
+                            # exceed the requested visible-bubble budget.
+                            if units > 0 and visible_desc and rendered_page_units + units > page_limit:
+                                has_more_before = True
+                                reached_limit = True
+                                break
                             scanned_oldest = row
                             raw_consumed += 1
-                            entry = _db_history_entry(row)
-                            if not (entry.get("metadata") or {}).get("hidden"):
+                            if units > 0:
                                 visible_desc.append(entry)
-                                if len(visible_desc) >= page_limit:
+                                rendered_page_units += units
+                                if rendered_page_units >= page_limit:
                                     has_more_before = index + 1 < len(batch) or more_raw
                                     reached_limit = True
                                     break
@@ -347,7 +408,12 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     "offset": page_offset,
                     "limit": page_limit,
                     "total": total,
-                    "visible_total": visible_total,
+                    # Visible total follows the renderer, not the number of
+                    # SQLite rows. Keep the canonical count additive for old
+                    # management/library consumers that still need it.
+                    "visible_total": rendered_total,
+                    "canonical_visible_total": canonical_visible_total,
+                    "rendered_total": rendered_total,
                     "cursor": next_cursor,
                     "next_cursor": next_cursor,
                     "has_more_before": has_more_before,
@@ -843,7 +909,15 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             from src.agent_context import context_endpoint_key
 
             messages = session.get_context_messages()
-            stored_used = int(estimate_tokens(messages))
+            working_used = int(estimate_tokens(messages))
+            # The canonical transcript estimate is deliberately separate from
+            # the compacted working ledger.  Calling the latter "stored chat"
+            # made a successful compaction appear to shrink saved history.
+            stored_messages = [
+                {"role": _message_role(message), "content": _message_text(message)}
+                for message in session.history
+            ]
+            stored_used = int(estimate_tokens(stored_messages))
             active = is_active(session_id)
             # Include the just-terminal detached run.  Its exact request
             # ledger is still authoritative during approval/Stop/error
@@ -859,9 +933,32 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     status = "last_request"
             checkpoint = getattr(session, "context_checkpoint", None)
             checkpoint_meta = getattr(checkpoint, "metadata", None) or {}
-            if snapshot is None and checkpoint is not None:
+            backend_snapshot = dict(snapshot) if snapshot else None
+
+            def parsed_time(value):
+                try:
+                    parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+                    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+                except (TypeError, ValueError):
+                    return None
+
+            checkpoint_at = parsed_time(checkpoint_meta.get("timestamp"))
+            snapshot_at = parsed_time((snapshot or {}).get("_recorded_at"))
+            checkpoint_revision = int(checkpoint_meta.get("context_revision") or 0)
+            snapshot_revision = int((snapshot or {}).get("context_revision") or 0)
+            checkpoint_is_newer = bool(
+                not active and checkpoint is not None and (
+                    snapshot is None
+                    or checkpoint_revision > snapshot_revision
+                    or (checkpoint_at is not None and snapshot_at is not None and checkpoint_at >= snapshot_at)
+                )
+            )
+            if checkpoint_is_newer:
+                snapshot = None
                 status = "working_checkpoint"
-            used = snapshot["used_tokens"] if snapshot else stored_used
+            elif snapshot is None and checkpoint is not None:
+                status = "working_checkpoint"
+            used = snapshot["used_tokens"] if snapshot else working_used
             ctx_len = snapshot["context_length"] if snapshot else int(get_context_length(session.endpoint_url, session.model) or 0)
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
             pct = max(0.0, min(100.0, pct))
@@ -929,11 +1026,35 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "stored_chat_tokens": stored_used,
                 "prompt_tokens": snapshot.get("prompt_tokens") if snapshot else None,
                 "round": snapshot.get("round") if snapshot else None,
-                "compactions": snapshot.get("compactions", 0) if snapshot else 0,
-                "context_revision": snapshot.get("context_revision") if snapshot else None,
+                "compactions": snapshot.get("compactions", 0) if snapshot else int(
+                    checkpoint_meta.get("context_generation")
+                    or (int((backend_snapshot or {}).get("compactions", 0) or 0) + (1 if checkpoint_is_newer else 0))
+                ),
+                "context_revision": snapshot.get("context_revision") if snapshot else (
+                    checkpoint_revision or (snapshot_revision + 1 if checkpoint_is_newer else None)
+                ),
                 "context_reason": snapshot.get("context_reason") if snapshot else checkpoint_meta.get("context_reason"),
                 "compaction_revision": checkpoint_meta.get("compaction_revision"),
                 "ledger_hash": snapshot.get("ledger_hash") if snapshot else checkpoint_meta.get("ledger_hash"),
+                "working_checkpoint": {
+                    "used_tokens": working_used,
+                    "context_length": ctx_len,
+                    "context_percent": round((working_used / ctx_len) * 100, 1) if ctx_len else 0.0,
+                    "compaction_revision": checkpoint_meta.get("compaction_revision"),
+                    "context_revision": checkpoint_revision or None,
+                    "ledger_hash": checkpoint_meta.get("ledger_hash"),
+                    "reason": checkpoint_meta.get("context_reason"),
+                    "created_at": checkpoint_meta.get("timestamp"),
+                } if checkpoint is not None else None,
+                "backend_measurement": {
+                    "used_tokens": backend_snapshot.get("used_tokens"),
+                    "context_length": backend_snapshot.get("context_length"),
+                    "context_percent": backend_snapshot.get("context_percent"),
+                    "source": backend_snapshot.get("source"),
+                    "context_revision": backend_snapshot.get("context_revision"),
+                    "reason": backend_snapshot.get("context_reason"),
+                    "recorded_at": backend_snapshot.get("_recorded_at"),
+                } if backend_snapshot else None,
                 "messages": visible_messages,
                 "context_messages": len(messages),
                 "compacted_messages": compacted_messages,

@@ -705,6 +705,13 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
             legacy_metadata["round_timestamps"] = [
                 round_timestamps.get(number) for number in range(1, max_round + 1)
             ]
+            # One persisted assistant turn can render as several top-level
+            # bubbles. Persist the exact unit count so every browser shows the
+            # same header counter without recounting a partial DOM or parsing
+            # megabytes of timeline metadata on every poll.
+            legacy_metadata["rendered_message_count"] = max(
+                1, sum(1 for value in round_texts if str(value or "").strip())
+            )
 
         synced_message_id = None
         synced_metadata = None
@@ -1106,6 +1113,10 @@ def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Opt
     if run is not None and run.status != "running" and not include_terminal:
         return None
     run_context = dict(run.context_usage) if run is not None and run.context_usage else None
+    if run_context is not None:
+        recorded = run.terminal_at or run.started_at
+        if recorded:
+            run_context["_recorded_at"] = datetime.utcfromtimestamp(recorded).isoformat() + "Z"
     # A pause/Stop followed by a reload can legitimately have no in-memory
     # _Run object (the process may have evicted it or restarted). Keep serving
     # the exact durable terminal measurement instead of replacing it with the
@@ -1119,7 +1130,15 @@ def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Opt
                 rows = db.query(ChatRunState).filter(
                     ChatRunState.session_id == session_id,
                 ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).all()
-                contexts = [dict(row.context_snapshot or {}) for row in rows if row.context_snapshot]
+                contexts = []
+                for row in rows:
+                    if not row.context_snapshot:
+                        continue
+                    value = dict(row.context_snapshot)
+                    recorded = getattr(row, "updated_at", None) or getattr(row, "terminal_at", None)
+                    if recorded is not None:
+                        value["_recorded_at"] = recorded.isoformat() + ("Z" if recorded.tzinfo is None else "")
+                    contexts.append(value)
                 if run_context:
                     contexts.append(run_context)
                 if contexts:

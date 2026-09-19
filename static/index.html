@@ -245,13 +245,13 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260920agentteam1">
-  <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260920agentteam1">
+  <link rel="stylesheet" href="/static/style.css?v=20260920contextcount2">
+  <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260920contextcount2">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260920agentteam1">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260920agentteam1">
+  <link rel="modulepreload" href="/static/app.js?v=20260920contextcount2">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260920contextcount2">
   <link rel="modulepreload" href="/static/js/ui.js">
-  <link rel="modulepreload" href="/static/js/sessions.js?v=20260920agentteam1">
+  <link rel="modulepreload" href="/static/js/sessions.js?v=20260920contextcount2">
   <link rel="modulepreload" href="/static/js/markdown.js">
 </head>
 <body>
@@ -1145,6 +1145,10 @@
               </button>
               <button type="button" class="overflow-menu-item" id="goal-toggle-btn" aria-pressed="false">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m16 8-4 4"/></svg><span>Goal: work until verified completion</span><span class="overflow-active-dot"></span>
+              </button>
+              <button type="button" class="overflow-menu-item" id="overflow-subagents-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="2.5"/><circle cx="19" cy="17" r="2.5"/><path d="M12 10v3M7.5 15.5 10 13m6.5 2.5L14 13"/></svg>
+                <span>Subagent settings</span>
               </button>
               <button type="button" class="overflow-menu-item" id="overflow-attach-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
@@ -2651,14 +2655,14 @@
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
 <script type="module" src="/static/js/dragSort.js"></script>
-<script type="module" src="/static/js/sessions.js?v=20260920agentteam1"></script>
+<script type="module" src="/static/js/sessions.js?v=20260920contextcount2"></script>
 <script type="module" src="/static/js/memory.js?v=20260722memoryloading1"></script>
 <script type="module" src="/static/js/skills.js"></script>
 <script type="module" src="/static/js/tourHints.js"></script>
 <script type="module" src="/static/js/tourAutoplay.js"></script>
 <script type="module" src="/static/js/fileHandler.js"></script>
 <script type="module" src="/static/js/voiceRecorder.js"></script>
-<script type="module" src="/static/js/models.js?v=20260920agentteam1"></script>  <!-- This must come BEFORE app.js -->
+<script type="module" src="/static/js/models.js?v=20260920contextcount2"></script>  <!-- This must come BEFORE app.js -->
 <script type="module" src="/static/js/rag.js"></script>
 <script type="module" src="/static/js/presets.js"></script>
 <script type="module" src="/static/js/search.js"></script>
@@ -2666,10 +2670,10 @@
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/document.js?v=20260815approvalsave1"></script>
 <script type="module" src="/static/js/gallery.js?v=20260708match1"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260920agentteam1"></script>
+<script type="module" src="/static/js/chatRenderer.js?v=20260920contextcount2"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260819approvalcontrol1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260920agentteam1"></script>
+  <script type="module" src="/static/js/chat.js?v=20260920contextcount2"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
@@ -2677,7 +2681,7 @@
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260815approvalsave1"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260920agentteam1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260920contextcount2"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

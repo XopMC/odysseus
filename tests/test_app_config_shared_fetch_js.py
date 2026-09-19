@@ -373,3 +373,13 @@ def test_appconfig_is_precached_by_the_service_worker():
     """PRECACHE is hand-maintained; a module missing from it breaks offline."""
     sw = (_REPO / "static" / "sw.js").read_text(encoding="utf-8")
     assert "'/static/js/appConfig.js'" in sw
+
+
+def test_root_navigation_is_network_first_with_offline_fallback():
+    sw = (_REPO / "static" / "sw.js").read_text(encoding="utf-8")
+    navigation = sw.split("if (e.request.mode === 'navigate'", 1)[1].split(
+        "// JS/CSS:", 1
+    )[0]
+    assert "return fetch(e.request)" in navigation
+    assert ".catch(() => cached)" in navigation
+    assert "return cached || network" not in navigation
