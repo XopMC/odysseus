@@ -27,11 +27,12 @@ def test_duplicate_models_select_and_restore_distinct_endpoints(tmp_path):
       <script type="module">import {initModelPicker,updateModelPicker} from '/static/js/modelPicker.js';
       window.catalog=${JSON.stringify(items)};window.current=JSON.parse(localStorage.getItem('qa-current')||'null')||{id:'chat',model:${JSON.stringify(shared)},endpoint_id:'jetson',endpoint_url:${JSON.stringify(items[0].url)}};
       window.modelsModule={getCachedItems:()=>catalog};
-      const realFetch=window.fetch;window.fetch=async(url,options)=>{if(options?.method==='PATCH'){window.captured=Object.fromEntries(options.body);localStorage.setItem('qa-current',JSON.stringify(current));return new Response('{}',{status:200});}return realFetch(url,options);};
+      const realFetch=window.fetch;window.fetch=async(url,options)=>{const path=String(url);if(options?.method==='PATCH'){window.captured=Object.fromEntries(options.body);localStorage.setItem('qa-current',JSON.stringify(current));return new Response('{}',{status:200});}if(path.includes('/api/prefs/model-favorites/snapshot'))return Response.json({favorites:[],revision:0});if(path.includes('/api/model-endpoints/probe-local'))return Response.json({items:[]});if(path.includes('/api/default-chat'))return Response.json({});return realFetch(url,options);};
       initModelPicker({getCurrentSessionId:()=>current.id,getSessions:()=>[current],getPendingChat:()=>null,setPendingChat:()=>{},createDirectChat:()=>{throw Error('Unexpected new chat');}});updateModelPicker();window.ready=true;</script></body></html>`;
       const stubs={'/static/js/providers.js':"export const providerLogo=()=>'';",'/static/js/ui.js':"export default {showToast(){},showError(message){throw Error(message);}};",'/static/js/settings.js':"export default {};",'/static/js/spinner.js':"export default {};"};
       const server=http.createServer((req,res)=>{const pathname=new URL(req.url,'http://localhost').pathname;
-        if(stubs[pathname]){res.setHeader('Content-Type','text/javascript');res.end(stubs[pathname]);}
+        if(pathname.startsWith('/api/')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(pathname.includes('model-favorites')?{favorites:[],revision:0}:pathname.includes('probe-local')?{items:[]} : {}));}
+        else if(stubs[pathname]){res.setHeader('Content-Type','text/javascript');res.end(stubs[pathname]);}
         else if(pathname.startsWith('/static/')){res.setHeader('Content-Type',pathname.endsWith('.css')?'text/css':'text/javascript');res.end(fs.readFileSync(root+pathname));}
         else{res.setHeader('Content-Type','text/html');res.end(html);}});
       await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));

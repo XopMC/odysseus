@@ -19,7 +19,6 @@ _WORD = struct.Struct('!Q')
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 MAX_RUN_BYTES = 256 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
-RETENTION_SECONDS = 7 * 24 * 3600
 logger = logging.getLogger(__name__)
 
 
@@ -70,23 +69,10 @@ class ReplayLog:
             output.write(data)
 
     def prune(self):
-        # Only expired artifacts with a terminal checkpoint can be removed.
-        # Never delete an active run to make space for another one.
-        for path in self.root.glob('*.json'):
-            if not re.fullmatch(r'[0-9a-f]{32}', path.stem):
-                continue
-            try:
-                meta = json.loads(path.read_text())
-            except (OSError, TypeError, ValueError):
-                # A torn/corrupt sidecar must not prevent a new chat run from
-                # starting.  Keep it for operator inspection; only prune
-                # artifacts whose terminal metadata is valid.
-                logger.warning("Skipping corrupt replay metadata: %s", path)
-                continue
-            if (meta.get('status') in ('done', 'error', 'stopped') and
-                    time.time() - meta.get('updated_at', time.time()) > RETENTION_SECONDS):
-                for suffix in ('.events', '.index', '.json'):
-                    path.with_suffix(suffix).unlink(missing_ok=True)
+        # Timeline/reasoning is part of chat history, not an expiring cache.
+        # It is removed only by the owner-scoped chat deletion path. The global
+        # quota below fails closed instead of silently hollowing old bubbles.
+        return
 
     def __len__(self):
         return self.path('.index').stat().st_size // _WORD.size

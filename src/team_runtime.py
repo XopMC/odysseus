@@ -194,7 +194,14 @@ class TeamRuntime:
         route = team_config.resolve(owner, selection['endpoint_id'], selection['model'])
         group = route['resource_group']
         self.store.configure_resource_group(group, 1 if route['local'] else 4)
-        return dict(selection, **extra), group
+        from src.model_context import budget_context_for_model
+        context_window = (
+            budget_context_for_model(
+                route['url'], route.get('model') or selection['model'], fallback=TEAM_CONTEXT_LIMIT,
+            )
+            if route.get('url') else TEAM_CONTEXT_LIMIT
+        ) or TEAM_CONTEXT_LIMIT
+        return dict(selection, context_window=int(context_window), **extra), group
 
     async def create(self, owner, session_id, body):
         if body.get('execution_host_id'):
@@ -301,6 +308,25 @@ class TeamRuntime:
     def snapshot(self, owner, team_id):
         task = self.store.get_task(owner, team_id)
         workers = self.store.list_workers(owner, team_id)
+        try:
+            from src.context_policy_store import ContextPolicyStore
+            policies = ContextPolicyStore(self.store)
+            enriched = []
+            for worker in workers:
+                item = dict(worker)
+                observation = policies.last_completed_request(
+                    owner, task_id=team_id, worker_id=worker['id'],
+                )
+                item['context'] = observation.get('context_policy') if observation else {
+                    'endpoint_id': worker.get('profile', {}).get('endpoint_id'),
+                    'model': worker.get('profile', {}).get('model'),
+                    'window': worker.get('profile', {}).get('context_window'),
+                    'source': 'model_inventory',
+                }
+                enriched.append(item)
+            workers = enriched
+        except Exception:
+            logger.warning('Team context observation unavailable for snapshot', exc_info=False)
         return {'team_id': team_id, 'status': task['status'], 'title': task['title'],
                 'config': task['metadata'].get('config', {}), 'metadata': task['metadata'],
                 'tasks': workers, 'workers': workers, 'resources': self.store.budget_status(owner, team_id),

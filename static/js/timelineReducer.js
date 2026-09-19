@@ -22,13 +22,15 @@ export function createTimelineReducer() {
     const runId = String(replay.run_id || event.run_id || state.runId || '');
     const seq = Number.isInteger(replay.seq) ? replay.seq
       : Number.isInteger(seqOverride) ? seqOverride : null;
-    const identity = runId && seq != null ? `${runId}:${seq}` : '';
+    const segmentId = String(replay.segment_id || event.segment_id || '');
+    const identity = runId && seq != null
+      ? [runId, seq, segmentId || replay.segment_id || '', event.tool_call_id || replay.tool_call_id || ''].join(':')
+      : '';
     if (identity && state.seen.has(identity)) return { accepted: false, state };
     if (identity) state.seen.add(identity);
     if (runId) state.runId = runId;
     if (seq != null) state.lastSeq = Math.max(state.lastSeq, seq);
     const type = String(event.type || (event.delta ? 'text' : 'unknown'));
-    const segmentId = String(replay.segment_id || event.segment_id || '');
     if (segmentId) state.segmentId = segmentId;
     if (Number.isInteger(event.round)) state.round = Math.max(state.round, event.round);
     if (type === 'agent_step') {

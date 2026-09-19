@@ -61,6 +61,71 @@ def delete_replays_for_session(session_id: str) -> int:
         return 0
 
 
+def reasoning_artifact(session_id: str, run_id: str, round_number: int) -> Optional[dict]:
+    """Reconstruct one reasoning round from the durable canonical event log."""
+    if not re.fullmatch(r"[0-9a-f]{32}", str(run_id)) or type(round_number) is not int or round_number < 1:
+        raise ValueError("Invalid reasoning artifact identity")
+    buffer = None
+    run = _RUNS.get(session_id)
+    if run is not None and run.run_id == run_id:
+        buffer = run.buffer
+    elif os.getenv("ODYSSEUS_DURABLE_CHAT_REPLAY") == "1":
+        from src.chat_replay_log import ReplayLog
+        buffer = ReplayLog(replay_root(), run_id, session_id)
+    if buffer is None:
+        return None
+
+    parts = []
+    first_at = None
+    last_at = None
+    truncated = False
+    max_chars = 2 * 1024 * 1024
+    for seq in range(len(buffer)):
+        frame = buffer[seq]
+        raw = "\n".join(
+            line[5:].lstrip() for line in frame.splitlines() if line.startswith("data:")
+        )
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("delta") is None:
+            continue
+        replay = payload.get("_replay") if isinstance(payload.get("_replay"), dict) else {}
+        try:
+            event_round = int(payload.get("round") or replay.get("round") or 1)
+        except (TypeError, ValueError):
+            event_round = 1
+        if event_round != round_number or not (
+            payload.get("thinking") is True or payload.get("channel") in {"thinking", "thought"}
+        ):
+            continue
+        value = str(payload.get("delta") or "")
+        if sum(len(part) for part in parts) + len(value) > max_chars:
+            remaining = max_chars - sum(len(part) for part in parts)
+            if remaining > 0:
+                parts.append(value[:remaining])
+            truncated = True
+            break
+        parts.append(value)
+        created_at = replay.get("created_at")
+        if isinstance(created_at, (int, float)):
+            first_at = created_at if first_at is None else min(first_at, created_at)
+            last_at = created_at if last_at is None else max(last_at, created_at)
+    text = "".join(parts)
+    if not text:
+        return None
+    return {
+        "run_id": run_id,
+        "round": round_number,
+        "thinking": text,
+        "token_count": max(1, len(text.strip()) // 4),
+        "duration": max(0.0, (last_at or first_at or 0) - (first_at or last_at or 0)),
+        "created_at": first_at,
+        "truncated": truncated,
+    }
+
+
 class _Run:
     __slots__ = (
         "buffer", "subscribers", "status", "task", "evict_task", "run_id",
@@ -995,6 +1060,22 @@ def normalize_context_usage(data) -> Optional[dict]:
         if not isinstance(endpoint_key, str) or len(endpoint_key) != 64 or any(c not in '0123456789abcdef' for c in endpoint_key):
             return None
         result['endpoint_key'] = endpoint_key
+    for key in ('route_revision', 'tool_inventory_revision', 'ledger_hash'):
+        value = data.get(key)
+        if value is not None:
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                return None
+            result[key] = value
+    if isinstance(data.get('context_policy'), dict):
+        policy = data['context_policy']
+        result['context_policy'] = {
+            key: policy[key]
+            for key in (
+                'status', 'window', 'input_budget', 'trigger_messages',
+                'target_messages', 'output_reserve', 'safety_tokens', 'revisions',
+            )
+            if key in policy
+        }
     for key in ("prompt_tokens", "round", "compactions"):
         value = data.get(key)
         if type(value) is int and value >= 0:

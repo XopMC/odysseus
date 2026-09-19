@@ -25,10 +25,13 @@ def context_endpoint_key(endpoint_url):
 
 
 def context_snapshot(*, model, context_length, prompt_tokens, output_tokens=0,
-                     source, round_num, limit, compactions, auto_compact_enabled=None, endpoint_url=None):
+                     source, round_num, limit, compactions, auto_compact_enabled=None,
+                     endpoint_url=None, route_revision=None, tool_inventory_revision=None):
     used = max(0, int(prompt_tokens)) + max(0, int(output_tokens))
     return {**({'auto_compact_enabled': auto_compact_enabled} if type(auto_compact_enabled) is bool else {}),
             **({'endpoint_key': context_endpoint_key(endpoint_url)} if endpoint_url else {}),
+            **({'route_revision': route_revision} if route_revision else {}),
+            **({'tool_inventory_revision': tool_inventory_revision} if tool_inventory_revision else {}),
             "model": model, "used_tokens": used, "prompt_tokens": int(prompt_tokens),
             "context_length": context_length, "source": source, "round": round_num,
             "context_percent": min(100, round(100 * used / context_length, 1)) if context_length else 0,

@@ -803,6 +803,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 except (TypeError, ValueError):
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
+            if key == "agent_subagents_mode" and val not in {"off", "same_model", "selected_models"}:
+                raise HTTPException(400, "Invalid agent subagents mode")
+            if key == "agent_subagent_models":
+                if not isinstance(val, str) or len(val) > 12000 or "\0" in val:
+                    raise HTTPException(400, "Invalid agent subagent model list")
             current[key] = val
         _save_settings(current)
         return without_retired_settings(current)

@@ -92,8 +92,12 @@ def setup_team_routes():
                 'durable_events': True, 'external_requires_consent': True}
 
     @router.get('/models')
-    async def models(request: Request):
-        return {'models': team_config.models(owner_for(request))}
+    async def models(request: Request, refresh: bool = False):
+        owner = owner_for(request)
+        refreshed = None
+        if refresh:
+            refreshed = await asyncio.to_thread(team_config.refresh_models, owner)
+        return {'models': team_config.models(owner), 'refresh': refreshed}
 
     @router.get('/presets')
     async def presets(request: Request):

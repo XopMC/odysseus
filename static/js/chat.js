@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260917sync4';
-import chatRenderer from './chatRenderer.js?v=20260917sync4';
+import sessionModule from './sessions.js?v=20260920agentteam1';
+import chatRenderer from './chatRenderer.js?v=20260920agentteam1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -102,7 +102,8 @@ import { bindUiText, t } from './i18n.js';
 
   function _contextSourceLabel(data) {
     const scope = data.context_status === 'active_request' ? 'Live request'
-      : data.context_status === 'last_request' ? 'Last request' : 'Stored chat';
+      : data.context_status === 'last_request' ? 'Last request'
+      : data.context_status === 'working_checkpoint' ? 'Working checkpoint' : 'Stored chat';
     return `${scope} · ${data.source === 'backend' ? 'backend tokens' : 'estimate'}`;
   }
 
@@ -212,15 +213,20 @@ import { bindUiText, t } from './i18n.js';
       ['Count source', d.source === 'backend' ? 'Backend tokens' : 'Estimate'],
       ['Window model', modelShort],
       ['Messages', `${Number(d.messages || 0).toLocaleString()}`],
-      ['Auto compact', d.auto_compact_enabled === false ? 'Disabled' : `${Number(d.auto_compact_threshold || 85)}%`],
+      ['Auto compact', d.auto_compact_enabled === false ? 'Disabled'
+        : `${Number(d.configured_auto_compact_threshold || d.auto_compact_threshold || 75)}%`],
     ];
+    if (d.auto_compact_enabled !== false
+        && d.effective_auto_compact_threshold != null
+        && Number(d.effective_auto_compact_threshold) !== Number(d.configured_auto_compact_threshold)) {
+      rows.push(['Effective trigger', `${Number(d.effective_auto_compact_threshold)}% of model window`]);
+    }
     if (d.context_status !== 'stored_chat' && d.stored_chat_tokens != null) {
       rows.push(['Stored chat (est.)', _fmtContextNumber(d.stored_chat_tokens)]);
     }
     if (d.active_run) rows.push(['Manual compact', 'Run active']);
     if (d.saved_context_policy) {
-      rows.push(['Saved auto compact', d.saved_context_policy.auto_compact ? `${d.saved_context_policy.trigger_percent}%` : 'Disabled']);
-      rows.push(['Saved threshold basis', 'Input budget']);
+      rows.push(['Threshold basis', d.threshold_basis === 'usable_input' ? 'Usable input budget' : 'Model window']);
       rows.push(['Settings apply', 'Next request']);
     }
     if (d.context_policy_error) rows.push(['Saved context policy', 'Needs correction']);
@@ -233,7 +239,7 @@ import { bindUiText, t } from './i18n.js';
       const b = document.createElement('span');
       b.textContent = value;
       b.title = value;
-      if (['Scope', 'Count source', 'Manual compact', 'Saved auto compact', 'Saved threshold basis', 'Settings apply', 'Saved context policy'].includes(label)) {
+      if (['Scope', 'Count source', 'Manual compact', 'Threshold basis', 'Settings apply', 'Saved context policy'].includes(label)) {
         bindUiText(b, value);
         bindUiText(b, value, 'title');
       }
@@ -322,8 +328,15 @@ import { bindUiText, t } from './i18n.js';
     }
     try {
       const res = await fetch(`/api/session/${encodeURIComponent(sid)}/compact`, { method: 'POST' });
-      if (!res.ok) throw new Error(await res.text());
-      uiModule.showToast('Context compacted');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+      if (data.status !== 'compacted' || !Number.isInteger(Number(data.compaction_revision))) {
+        uiModule.showToast(data.message || 'Nothing old enough to compact');
+        _closeContextHeaderPopup();
+        refreshChatContextHeader('compact-unchanged');
+        return false;
+      }
+      uiModule.showToast(`Context compacted: ${data.before}% → ${data.after}%`);
       _closeContextHeaderPopup();
       if (sm && sm.selectSession) await sm.selectSession(sid, { keepSidebar: true, showLoading: false });
       refreshChatContextHeader('compact');

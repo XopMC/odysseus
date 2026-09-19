@@ -5,6 +5,30 @@ from pathlib import Path
 
 
 class TeamBasicSetupTest(unittest.TestCase):
+    def test_team_resolves_fetch_after_csrf_wrapper_install(self):
+        module = (Path(__file__).resolve().parents[1] / 'static/js/team-workspace.js').as_uri()
+        script = r'''
+import assert from 'node:assert/strict';
+globalThis.document={getElementById(){return null;}};
+globalThis.sessionStorage={};
+const {createTeamWorkspace}=await import(process.argv[1]);
+const original=globalThis.fetch;
+globalThis.fetch=async()=>{throw new Error('captured too early');};
+const controller=createTeamWorkspace({getSessionId:()=>null,root:null,modeButton:null});
+let calls=0;
+globalThis.fetch=async()=>{calls++;return {ok:true,status:200,json:async()=>({})};};
+assert.equal(await controller.init(),false);
+assert.equal(calls,0,'null UI exits before any request');
+// Source contract: the default fetch must be resolved inside request(), not
+// captured in createTeamWorkspace's default parameter.
+assert.equal(createTeamWorkspace.toString().includes('fetchImpl = null'),true);
+assert.equal(createTeamWorkspace.toString().includes('fetchImpl || globalThis.fetch.bind(globalThis)'),true);
+assert.equal(createTeamWorkspace.toString().includes("headers.set('X-Odysseus-CSRF'"),true);
+globalThis.fetch=original;
+'''
+        result = subprocess.run(['node', '--input-type=module', '-e', script, module], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_basic_controls_in_browser(self):
         probe = subprocess.run(['node', '-e', "require.resolve('playwright')"], capture_output=True)
         if probe.returncode:

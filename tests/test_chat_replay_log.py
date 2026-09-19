@@ -73,6 +73,18 @@ class ReplayTests(unittest.TestCase):
             file.write(b'partial')
         self.assertEqual(self.log.page()['events'], [{'seq': 0, 'event': 'complete'}])
 
+    def test_reasoning_artifact_survives_terminal_reopen(self):
+        event = {'delta': 'private reasoning', 'thinking': True,
+                 '_replay': {'run_id': 'a' * 32, 'round': 3, 'created_at': 10.0}}
+        self.log.append('data: ' + json.dumps(event) + '\n\n')
+        self.log.checkpoint('done')
+        with patch.dict('os.environ', {'ODYSSEUS_DURABLE_CHAT_REPLAY': '1'}), \
+             patch.object(agent_runs, 'replay_root', return_value=self.temp.name):
+            artifact = agent_runs.reasoning_artifact('alice-chat', 'a' * 32, 3)
+        self.assertEqual(artifact['thinking'], 'private reasoning')
+        self.assertEqual(artifact['round'], 3)
+        self.assertEqual(artifact['created_at'], 10.0)
+
 
 class DetachedReplayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

@@ -12,12 +12,49 @@ import { bindMenuDismiss } from './escMenuStack.js';
 import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
 import { getTools } from './appConfig.js';
-import { bindUiText } from './i18n.js';
+import { bindUiText, t } from './i18n.js';
 
 function bindThinkingLabels(root) {
   root?.querySelectorAll?.('.thinking-header-left span').forEach(
     node => bindUiText(node, 'View thinking process')
   );
+}
+
+function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
+  if (hasReasoning) return;
+  const runId = String(metadata?.timeline_v2?.run_id || '');
+  if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return;
+  let section = root?.querySelector?.('.thinking-section');
+  if (!section) {
+    const shell = document.createElement('div');
+    shell.innerHTML = markdownModule.processWithThinking(`<think>${t('Thinking saved — open to load')}</think>`);
+    section = shell.querySelector('.thinking-section');
+    if (section) root.prepend(section);
+  }
+  const header = section?.querySelector?.('.thinking-header');
+  const inner = section?.querySelector?.('.thinking-content-inner');
+  if (!header || !inner) return;
+  inner.textContent = '';
+  section.dataset.lazyThinking = 'true';
+  header.addEventListener('click', async () => {
+    if (section.dataset.loaded === 'true' || section.dataset.loading === 'true') return;
+    section.dataset.loading = 'true';
+    try {
+      const sid = window.sessionModule?.getCurrentSessionId?.();
+      if (!sid) throw new Error('chat unavailable');
+      const response = await fetch(`/api/chat/run/${encodeURIComponent(sid)}/reasoning/${encodeURIComponent(runId)}/${roundNumber}`, {
+        credentials: 'same-origin', cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      inner.innerHTML = markdownModule.mdToHtml(String(data.thinking || ''));
+      const stats = section.querySelector('.thinking-stats');
+      if (stats) stats.textContent = `${Number(data.duration || 0).toFixed(1)}s · ${Number(data.token_count || 0)} tok`;
+      section.dataset.loaded = 'true';
+    } catch (_) {
+      inner.textContent = t('Preserved thinking is unavailable.');
+    } finally { delete section.dataset.loading; }
+  }, { once: false });
 }
 
 // Older saved assistant rows kept one combined `thinking` field and the
@@ -1459,7 +1496,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260917sync4').then(mod => {
+    import('./sessions.js?v=20260920agentteam1').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -2811,6 +2848,7 @@ export function addMessage(role, content, modelName, metadata) {
           }
           body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(renderSource)) + agentFindingsSuffix;
           bindThinkingLabels(body);
+          bindLazyHistoryThinking(body, metadata, roundNum, Boolean(reasoning || embeddedThinking));
           wrap.appendChild(body);
           wrap.dataset.raw = renderSource || txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;

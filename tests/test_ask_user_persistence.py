@@ -79,12 +79,13 @@ def test_ask_user_is_emitted_last_and_persisted(monkeypatch):
     assert tool_output_index < ask_user_index
 
     tool_output = events[tool_output_index]
-    assert tool_output["ask_user"] == payload
+    assert {key: tool_output["ask_user"][key] for key in payload} == payload
+    assert len(tool_output["ask_user"]["question_id"]) == 32
     assert "¿Qué proyecto prefieres?" in tool_output["command"]
     assert "\\u00" not in tool_output["command"]
 
     metrics = next(event["data"] for event in events if event.get("type") == "metrics")
-    assert metrics["tool_events"][0]["ask_user"] == payload
+    assert metrics["tool_events"][0]["ask_user"] == tool_output["ask_user"]
 
 
 def test_frontend_uses_one_renderer_for_live_and_restored_cards():

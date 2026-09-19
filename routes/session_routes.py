@@ -1049,8 +1049,9 @@ def setup_session_routes(
             raise HTTPException(404, f"Session {session_id} not found")
 
     @router.post("/session/{session_id}/compact")
+    @router.post("/session/{session_id}/context/compact")
     async def compact_session(request: Request, session_id: str):
-        """Summarize older messages into one compacted history entry."""
+        """Create a durable working-context checkpoint without editing history."""
         _verify_session_owner(request, session_id)
         try:
             session = session_manager.get_session(session_id)
@@ -1060,7 +1061,12 @@ def setup_session_routes(
 
         history = list(session.history or [])
         if len(history) < 6:
-            raise HTTPException(400, "Not enough messages to compact")
+            return {
+                "ok": False,
+                "status": "unchanged",
+                "reason": "not_enough_messages",
+                "message": "Not enough messages to compact",
+            }
 
         # Keep a small recent tail verbatim. The prior half-chat/20-message
         # tail made manual compaction look like it did nothing on normal chats.
@@ -1070,14 +1076,23 @@ def setup_session_routes(
         if not older:
             raise HTTPException(400, "Nothing old enough to compact")
 
-        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT
+        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
+        from src.model_context import estimate_tokens, get_context_length
+        import hashlib
 
         owner = getattr(session, "owner", None) or effective_user(request)
-        url, model, headers = resolve_endpoint("utility", owner=owner)
-        if not url or not model:
-            url, model, headers = session.endpoint_url, session.model, session.headers
+        # An explicitly configured Utility model wins. If none is configured,
+        # resolve_endpoint must retain the session's currently selected route,
+        # not jump to a stale global default model.
+        url, model, headers = resolve_endpoint(
+            "utility",
+            fallback_url=session.endpoint_url,
+            fallback_model=session.model,
+            fallback_headers=session.headers,
+            owner=owner,
+        )
         if not url or not model:
             raise HTTPException(400, "No model configured for compaction")
 
@@ -1094,6 +1109,8 @@ def setup_session_routes(
             f"{_message_role(m).upper()}: {_message_text(m)[:2000]}"
             for m in older
         )
+        context_length = int(get_context_length(session.endpoint_url, session.model) or 0)
+        before_tokens = int(estimate_tokens(session.get_context_messages()))
         try:
             summary = await llm_call_async(
                 url,
@@ -1107,6 +1124,12 @@ def setup_session_routes(
         except Exception as e:
             logger.error("Manual compaction failed: %s", e)
             raise HTTPException(500, "Compaction failed")
+        summary = normalize_compaction_summary(summary)
+
+        previous = getattr(session, "context_checkpoint", None)
+        previous_meta = getattr(previous, "metadata", None) or {}
+        compaction_revision = max(0, int(previous_meta.get("compaction_revision") or 0)) + 1
+        compacted_at = utcnow_naive().isoformat()
 
         summary_msg = ChatMessage(
             role="system",
@@ -1116,7 +1139,11 @@ def setup_session_routes(
                 "hidden": True,
                 "context_checkpoint": True,
                 "summarized_count": len(older),
-                "timestamp": utcnow_naive().isoformat(),
+                "timestamp": compacted_at,
+                "compaction_revision": compaction_revision,
+                "context_reason": "manual_compaction",
+                "model": session.model,
+                "endpoint_url": session.endpoint_url,
             },
         )
         # Compaction is a working-context operation, never a transcript edit.
@@ -1125,16 +1152,38 @@ def setup_session_routes(
         # transcript is re-compacted when needed; nothing is lost.
         session.context_checkpoint = summary_msg
         session.context_checkpoint_count = len(older)
+        after_messages = session.get_context_messages()
+        after_tokens = int(estimate_tokens(after_messages))
+        ledger_hash = hashlib.sha256(
+            json.dumps(after_messages, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        summary_msg.metadata["ledger_hash"] = ledger_hash
         persist_checkpoint = getattr(session_manager, "persist_context_checkpoint", None)
-        if persist_checkpoint:
-            persist_checkpoint(session.id)
+        if persist_checkpoint and not persist_checkpoint(session.id):
+            # Restore the previous in-memory checkpoint when the durable write
+            # fails. A summarizer success without a persisted checkpoint must
+            # never be reported as a completed compaction.
+            session.context_checkpoint = previous
+            raise HTTPException(503, "Context checkpoint could not be persisted")
+        session_manager.save_sessions()
+
+        before_percent = round(before_tokens / context_length * 100, 1) if context_length else 0.0
+        after_percent = round(after_tokens / context_length * 100, 1) if context_length else 0.0
 
         return {
             "ok": True,
+            "status": "compacted",
             "summarized": len(older),
             "kept": len(recent),
             "message_count": len(history),
             "transcript_preserved": True,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "before": before_percent,
+            "after": after_percent,
+            "compaction_revision": compaction_revision,
+            "ledger_hash": ledger_hash,
+            "model": model,
         }
 
     @router.post("/sessions/auto-sort")

@@ -910,6 +910,11 @@ async def _document_tool_dispatch(
     document_id: Optional[str] = None,
     document_version: Optional[int] = None,
     document_digest: Optional[str] = None,
+    current_endpoint_url: Optional[str] = None,
+    current_model: Optional[str] = None,
+    current_headers: Optional[Dict] = None,
+    parent_run_id: Optional[str] = None,
+    subagent_state: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
@@ -919,6 +924,11 @@ async def _document_tool_dispatch(
         "doc_id": document_id,
         "expected_document_version": document_version,
         "expected_document_digest": document_digest,
+        "current_endpoint_url": current_endpoint_url,
+        "current_model": current_model,
+        "current_headers": current_headers or {},
+        "parent_run_id": parent_run_id,
+        "subagent_state": subagent_state,
     }
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
@@ -943,6 +953,10 @@ async def execute_tool_block(
         | _MissingToolSecurityContext
     ) = _MISSING_TOOL_SECURITY_CONTEXT,
     exact_approval: Optional[ExactToolApproval] = None,
+    current_endpoint_url: Optional[str] = None,
+    current_model: Optional[str] = None,
+    current_headers: Optional[Dict] = None,
+    subagent_state: Optional[Dict] = None,
     registry: Optional[ToolRegistry] = None,
     registry_access_provider: Optional[Callable[[], ToolAccess]] = None,
 ) -> Tuple[str, Dict]:
@@ -1094,6 +1108,11 @@ async def execute_tool_block(
                 if approval_claimed
                 else None
             ),
+            current_endpoint_url=current_endpoint_url,
+            current_model=current_model,
+            current_headers=current_headers,
+            parent_run_id=getattr(security_context, "run_id", None),
+            subagent_state=subagent_state,
         )
         if isinstance(security_context, ToolRunSecurityContext):
             security_context.observe_tool_result(
@@ -1116,6 +1135,11 @@ async def _execute_tool_block_impl(
     approved_document_id: Optional[str] = None,
     approved_document_version: Optional[int] = None,
     approved_document_digest: Optional[str] = None,
+    current_endpoint_url: Optional[str] = None,
+    current_model: Optional[str] = None,
+    current_headers: Optional[Dict] = None,
+    parent_run_id: Optional[str] = None,
+    subagent_state: Optional[Dict] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1305,14 +1329,21 @@ async def _execute_tool_block_impl(
         query = content.split("\n")[0].strip()
         desc = f"search_chats: {query[:80]}"
         result = await do_search_chats(query, owner=owner)
-    elif tool in ("chat_with_model", "ask_teacher", "list_models"):
+    elif tool in ("chat_with_model", "delegate_subagent", "ask_teacher", "list_models"):
         # Migrated to the agent_tools registry (#3629): dispatched through
         # TOOL_HANDLERS with the owner/session ctx these tools need, instead
         # of the legacy dispatch_ai_tool elif. The impls live in
         # src/agent_tools/model_interaction_tools.py.
         first_line = content.split(chr(10))[0].strip()[:60]
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(
+            tool, content, session_id, owner,
+            current_endpoint_url=current_endpoint_url,
+            current_model=current_model,
+            current_headers=current_headers,
+            parent_run_id=parent_run_id,
+            subagent_state=subagent_state,
+        ) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):
         # Migrated to the agent_tools registry (#3629): dispatched through

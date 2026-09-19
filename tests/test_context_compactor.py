@@ -31,7 +31,7 @@ from src.context_compactor import (
 
 class TestCompactThreshold:
     def test_value(self):
-        assert COMPACT_THRESHOLD == 0.85
+        assert COMPACT_THRESHOLD == 0.75
 
     def test_summary_max_tokens(self):
         assert SUMMARY_MAX_TOKENS == 1024
@@ -160,7 +160,7 @@ class TestMaybeCompactFourthMessage:
 
         cc.get_context_length = lambda url, model: context_length
         cc.llm_call_async = _fake_summary
-        cc.resolve_endpoint = lambda which, owner=None: (None, None, None)
+        cc.resolve_endpoint = lambda which, owner=None, **kwargs: (None, None, None)
         cc._update_session_history = lambda *a, **k: None
         try:
             return asyncio.run(

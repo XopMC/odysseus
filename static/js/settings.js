@@ -1523,6 +1523,9 @@ async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');
+  var subagentMode = el('set-agentSubagentsMode');
+  var subagentModels = el('set-agentSubagentModels');
+  var subagentModelsRow = el('set-agentSubagentModelsRow');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
 
@@ -1532,6 +1535,9 @@ async function initAgentSettings() {
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
+    if (subagentMode) subagentMode.value = settings.agent_subagents_mode || 'off';
+    if (subagentModels) subagentModels.value = settings.agent_subagent_models || '';
+    if (subagentModelsRow) subagentModelsRow.hidden = subagentMode?.value !== 'selected_models';
   } catch (e) {}
 
   // Clamp + coerce a raw input to an int in [lo, hi]; falls back to `dflt`
@@ -1550,6 +1556,8 @@ async function initAgentSettings() {
     var payload = { agent_max_tool_calls: tools };
     if (rounds != null) payload.agent_max_rounds = rounds;
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
+    if (subagentMode) payload.agent_subagents_mode = subagentMode.value;
+    if (subagentModels) payload.agent_subagent_models = subagentModels.value.trim();
     try {
       await _postSettings(payload);
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
@@ -1562,6 +1570,11 @@ async function initAgentSettings() {
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
+  if (subagentMode) subagentMode.addEventListener('change', function() {
+    if (subagentModelsRow) subagentModelsRow.hidden = subagentMode.value !== 'selected_models';
+    save();
+  });
+  if (subagentModels) subagentModels.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +

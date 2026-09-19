@@ -199,7 +199,7 @@ function checkbox(label, checked = false) {
 }
 const list = text => String(text || '').split(',').map(s => s.trim()).filter(Boolean);
 
-export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch.bind(globalThis),
+export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   EventSourceImpl = globalThis.EventSource, storage = globalThis.sessionStorage,
   NotificationImpl = globalThis.Notification,
   confirmImpl = message => globalThis.confirm(message), root = document.getElementById('team-workspace'),
@@ -240,7 +240,26 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
     } catch (_) { notice(t('Notifications are unavailable in this browser or connection.'), true); }
   }
   async function request(path, options = {}) {
-    const res = await fetchImpl(path, { credentials: 'same-origin', cache: 'no-store', ...options });
+    // Resolve the application fetch wrapper at request time. app.js installs
+    // its CSRF-aware wrapper after constructing Team; capturing fetch in the
+    // default argument made every Team mutation bypass that wrapper.
+    const activeFetch = fetchImpl || globalThis.fetch.bind(globalThis);
+    const requestOptions = { credentials: 'same-origin', cache: 'no-store', ...options };
+    const method = String(requestOptions.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      const cookieName = globalThis.location?.protocol === 'https:'
+        ? 'odysseus_csrf_https' : 'odysseus_csrf_http';
+      const cookie = String(globalThis.document?.cookie || '').split('; ')
+        .find(value => value.startsWith(`${cookieName}=`));
+      if (cookie) {
+        const headers = new Headers(requestOptions.headers || {});
+        if (!headers.has('X-Odysseus-CSRF')) {
+          headers.set('X-Odysseus-CSRF', decodeURIComponent(cookie.slice(cookieName.length + 1)));
+        }
+        requestOptions.headers = headers;
+      }
+    }
+    const res = await activeFetch(path, requestOptions);
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.ok === false) {
       const error = new Error(typeof data?.detail === 'string' ? data.detail : data?.error || `Request failed (${res.status})`);
@@ -347,7 +366,14 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
     root.replaceChildren(); bindUiText(root, 'Team workspace', 'aria-label');
     const heading = element('div', '', 'team-heading'); heading.append(uiElement('h3', 'Team workspace'));
     ui.status = element('span', '', 'team-status'); ui.status.append(teamStatus('span', 'No task')); heading.append(ui.status,
-      button('Refresh', () => act(() => loadSnapshot())), button('Back to chat', () => setActive(false)));
+      button('Refresh', () => act(() => loadSnapshot())),
+      button('Refresh models', event => act(async () => {
+        const data = await request('/api/team/models?refresh=true');
+        models = data.models || [];
+        if (teamId) renderWorkers();
+        else build();
+      }, event.currentTarget)),
+      button('Back to chat', () => setActive(false)));
     root.append(heading);
     root.append(uiElement('p', 'Team tasks retain checkpoints. Review results before applying changes; uncertain command outcomes require inspection before resuming.', 'team-notice'));
     ui.notifications = button('Enable browser notifications', toggleNotifications); updateNotificationControl(); root.append(ui.notifications);
@@ -691,6 +717,14 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = globalThis.fetch
         document.createTextNode(' · '), TEAM_ROLES.has(role) ? uiElement('span', role) : element('span', role));
       const state = element('p'); state.append(teamStatus('span', worker.status || 'planned'), document.createTextNode(' · '), element('span', worker.model || ''));
       card.append(heading, element('p', worker.objective || worker.title || ''), state);
+      if (worker.context?.window) {
+        const context = element('p', '', 'team-context-summary');
+        context.append(uiElement('span', 'Context:'), document.createTextNode(
+          ` ${Number(worker.context.message_tokens || 0).toLocaleString()} / ${Number(worker.context.window).toLocaleString()}`
+          + (worker.context.input_budget ? ` · ${t('Input budget')} ${Number(worker.context.input_budget).toLocaleString()}` : '')
+        ));
+        card.append(context);
+      }
       if (worker.acceptance) { const acceptance = element('p'); acceptance.append(uiElement('span', 'Acceptance:'), document.createTextNode(' ' + worker.acceptance)); card.append(acceptance); }
       if (worker.error || worker.result || worker.blocked_reason) card.append(element('pre', terminalPlainText(worker.error || worker.blocked_reason || (typeof worker.result === 'string' ? worker.result : JSON.stringify(worker.result))), 'team-output'));
       if (worker.status === 'waiting_approval') {

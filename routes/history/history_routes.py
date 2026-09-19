@@ -155,6 +155,13 @@ def _last_request_context(session):
             return None
 
     measured_at = timestamp(metadata)
+    checkpoint = getattr(session, "context_checkpoint", None)
+    checkpoint_meta = getattr(checkpoint, "metadata", None) or {}
+    checkpoint_at = timestamp(checkpoint_meta)
+    if checkpoint_at is not None and (measured_at is None or checkpoint_at >= measured_at):
+        # Manual/automatic compaction created a newer working ledger. Do not
+        # keep showing the pre-compaction request measurement at 100%.
+        return None
     for message in history[:-1]:
         meta = getattr(message, "metadata", None) or {}
         if meta.get("compacted"):
@@ -850,6 +857,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 snapshot = _last_request_context(session)
                 if snapshot:
                     status = "last_request"
+            checkpoint = getattr(session, "context_checkpoint", None)
+            checkpoint_meta = getattr(checkpoint, "metadata", None) or {}
+            if snapshot is None and checkpoint is not None:
+                status = "working_checkpoint"
             used = snapshot["used_tokens"] if snapshot else stored_used
             ctx_len = snapshot["context_length"] if snapshot else int(get_context_length(session.endpoint_url, session.model) or 0)
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
@@ -901,7 +912,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 display_threshold = effective_policy.get("trigger_percent") if effective_policy else observed_threshold
                 display_enabled = effective_policy.get("auto_compact") if effective_policy else observed_enabled
             if display_threshold is None:
-                display_threshold = 85
+                display_threshold = ContextPolicy().trigger_percent
             if display_enabled is None:
                 display_enabled = True
             return {
@@ -920,7 +931,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "round": snapshot.get("round") if snapshot else None,
                 "compactions": snapshot.get("compactions", 0) if snapshot else 0,
                 "context_revision": snapshot.get("context_revision") if snapshot else None,
-                "context_reason": snapshot.get("context_reason") if snapshot else None,
+                "context_reason": snapshot.get("context_reason") if snapshot else checkpoint_meta.get("context_reason"),
+                "compaction_revision": checkpoint_meta.get("compaction_revision"),
+                "ledger_hash": snapshot.get("ledger_hash") if snapshot else checkpoint_meta.get("ledger_hash"),
                 "messages": visible_messages,
                 "context_messages": len(messages),
                 "compacted_messages": compacted_messages,
@@ -930,6 +943,13 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 # request. Preserve the last observed request separately so a
                 # settings edit never rewrites historical telemetry.
                 "auto_compact_threshold": display_threshold,
+                "configured_auto_compact_threshold": (
+                    effective_policy.get("trigger_percent") if effective_policy else display_threshold
+                ),
+                "effective_auto_compact_threshold": (
+                    observed_threshold if observed_threshold is not None else display_threshold
+                ),
+                "threshold_basis": "usable_input" if effective_policy else "model_window",
                 "auto_compact_enabled": display_enabled,
                 "observed_auto_compact_threshold": observed_threshold,
                 "observed_auto_compact_enabled": observed_enabled,
@@ -940,106 +960,5 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             logger.error(f"Context usage error {session_id}: {e}")
             raise HTTPException(500, "Context usage unavailable")
-
-    @router.post("/api/session/{session_id}/compact")
-    async def compact_session(request: Request, session_id: str):
-        """Manually trigger context compaction for a session."""
-        _verify_session_owner(request, session_id)
-        from src.auth_helpers import effective_user
-        owner = effective_user(request)
-        try:
-            session = session_manager.get_session(session_id)
-        except KeyError:
-            raise HTTPException(404, "Session not found")
-        _reject_compact_during_active_run(session_id)
-
-        try:
-            from src.model_context import estimate_tokens, get_context_length
-            from src.llm_core import llm_call_async
-            from src.endpoint_resolver import resolve_endpoint
-
-            if len(session.history) < 6:
-                return {"status": "ok", "message": "Not enough messages to compact"}
-
-            ctx_len = get_context_length(session.endpoint_url, session.model)
-            messages_before = session.get_context_messages()
-            used_before = estimate_tokens(messages_before)
-            pct_before = round((used_before / ctx_len) * 100, 1) if ctx_len else 0
-            msg_count_before = len(session.history)
-
-            # Keep only last 4 messages, summarize the rest
-            keep_count = 4
-            older = session.history[:-keep_count]
-            recent = session.history[-keep_count:]
-
-            # Build text to summarize
-            convo_text = "\n".join(
-                f"{_message_role(m).upper()}: "
-                f"{_message_text(m)[:2000]}"
-                for m in older
-            )
-
-            # Use utility model if available
-            util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner or None)
-            compact_url = util_url or session.endpoint_url
-            compact_model = util_model or session.model
-            compact_headers = util_headers if util_url else session.headers
-
-            from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary
-            compaction_count = sum(1 for m in session.history if isinstance(m, ChatMessage) and "[Conversation summary" in (m.content or ""))
-            sys_prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace("{count}", str(len(older))).replace("{n}", str(compaction_count + 1))
-            summary = await llm_call_async(
-                compact_url, compact_model,
-                [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": convo_text},
-                ],
-                temperature=0.2, max_tokens=1024,
-                headers=compact_headers, timeout=30,
-            )
-            summary = normalize_compaction_summary(summary)
-
-            # Install a model-context checkpoint while preserving the complete
-            # canonical transcript used by history, export and live replay.
-            compacted_at = datetime.now(timezone.utc).isoformat()
-            system_summary = ChatMessage(
-                role="system",
-                content=f"[Conversation summary — {len(older)} earlier messages were compacted]\n\n{summary}",
-                metadata={
-                    "compacted": True,
-                    "hidden": True,
-                    "context_checkpoint": True,
-                    "summarized_count": len(older),
-                    "timestamp": compacted_at,
-                },
-            )
-            session.context_checkpoint = system_summary
-            session.context_checkpoint_count = len(older)
-            persist_checkpoint = getattr(session_manager, "persist_context_checkpoint", None)
-            if persist_checkpoint:
-                persist_checkpoint(session.id)
-            logger.info(
-                "Compact: installed context checkpoint for %s messages; "
-                "preserved all %s transcript messages",
-                len(older), msg_count_before,
-            )
-
-            session_manager.save_sessions()
-
-            used_after = estimate_tokens(session.get_context_messages())
-            pct_after = round((used_after / ctx_len) * 100, 1) if ctx_len else 0
-
-            return {
-                "status": "ok",
-                "message": f"Context compacted; all {msg_count_before} transcript messages preserved ({pct_before}% → {pct_after}%)",
-                "before": pct_before,
-                "after": pct_after,
-                "message_count": msg_count_before,
-                "transcript_preserved": True,
-            }
-
-        except Exception as e:
-            logger.error(f"Manual compact error {session_id}: {e}")
-            raise HTTPException(500, "Context compaction failed")
 
     return router

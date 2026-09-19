@@ -2,6 +2,7 @@
 import ipaddress
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, wait
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -80,6 +81,73 @@ def models(owner):
                                'local': local_endpoint(endpoint.base_url, endpoint.endpoint_kind),
                                'resource_group': resource_group(endpoint.base_url)})
         return result
+
+
+def refresh_models(owner, *, timeout=15, probe=None, key_resolver=None):
+    """Synchronously refresh the owner-visible Team model inventory.
+
+    The ordinary Team listing stays cached and instant.  This explicit path is
+    called only from the user's Refresh models action and preserves a previous
+    non-empty cache when an endpoint is temporarily offline.
+    """
+    from core.database import ModelEndpoint, SessionLocal
+    if probe is None or key_resolver is None:
+        from routes.model_routes import _probe_endpoint, _resolve_probe_key
+        probe = probe or _probe_endpoint
+        key_resolver = key_resolver or _resolve_probe_key
+
+    refreshed = 0
+    failed = []
+    with SessionLocal() as db:
+        records = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+        visible = [endpoint for endpoint in records
+                   if endpoint.owner in (None, owner)
+                   and endpoint.model_type in (None, 'llm')]
+
+        # An owner can have many configured endpoints. Probing them serially
+        # makes the explicit refresh exceed the app-wide 45 second request
+        # deadline as soon as a few offline endpoints each consume their
+        # timeout. Resolve credentials on the request thread, then perform
+        # bounded independent probes in parallel. Database objects are only
+        # mutated back on this thread.
+        jobs = []
+        for endpoint in visible:
+            try:
+                jobs.append((endpoint, endpoint.base_url, key_resolver(endpoint)))
+            except Exception:
+                failed.append(endpoint.id)
+
+        pool = ThreadPoolExecutor(max_workers=max(1, min(8, len(jobs))))
+        futures = {
+            pool.submit(probe, base_url, key, timeout=timeout): endpoint
+            for endpoint, base_url, key in jobs
+        }
+        done, pending = wait(futures, timeout=max(1, timeout + 2))
+        discovered_by_id = {}
+        for future in done:
+            endpoint = futures[future]
+            try:
+                discovered_by_id[endpoint.id] = future.result() or []
+            except Exception:
+                discovered_by_id[endpoint.id] = []
+        for future in pending:
+            endpoint = futures[future]
+            failed.append(endpoint.id)
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+        for endpoint in visible:
+            if endpoint.id in failed:
+                continue
+            discovered = discovered_by_id.get(endpoint.id, [])
+            if discovered:
+                endpoint.cached_models = json.dumps(discovered)
+                refreshed += 1
+            else:
+                failed.append(endpoint.id)
+        if refreshed:
+            db.commit()
+    return {'refreshed_endpoints': refreshed, 'failed_endpoint_ids': failed}
 
 
 def resolve(owner, endpoint_id, model):

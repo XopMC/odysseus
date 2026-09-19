@@ -46,7 +46,9 @@ def _content_as_text(content: Any) -> str:
     return ""
 
 
-COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
+# Compatibility export for older callers. Runtime decisions use ContextPolicy
+# and its usable-input budget below, never a separate hard-coded 85% gate.
+COMPACT_THRESHOLD = 0.75
 SUMMARY_MAX_TOKENS = 1024
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
 
@@ -370,12 +372,24 @@ async def maybe_compact(
     context_length = get_context_length(endpoint_url, model)
     used = estimate_tokens(messages)
     pct = (used / context_length) * 100 if context_length else 0
+    from src.context_policy import ContextPolicy
+    policy = ContextPolicy(
+        output_reserve=min(4096, max(256, context_length // 8)),
+        safety_tokens=min(1024, max(0, context_length // 20)),
+    )
+    try:
+        trigger_messages = policy.budget(context_length).trigger_messages
+    except ValueError:
+        # Synthetic/tiny backends cannot satisfy the production reserve
+        # minimums. Keep compatibility without reintroducing the old 85% path.
+        trigger_messages = max(1, int(context_length * COMPACT_THRESHOLD))
 
-    if pct < COMPACT_THRESHOLD * 100:
+    if used < trigger_messages:
         return messages, context_length, False
 
     logger.info(
-        f"Context at {pct:.1f}% ({used}/{context_length} tokens) — compacting"
+        f"Context at {pct:.1f}% ({used}/{context_length} tokens; "
+        f"trigger={trigger_messages}) — compacting"
     )
 
     # Split into system preface and conversation
@@ -408,7 +422,13 @@ async def maybe_compact(
     )
 
     # Use utility model if configured, otherwise fall back to session model
-    util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner)
+    util_url, util_model, util_headers = resolve_endpoint(
+        "utility",
+        fallback_url=endpoint_url,
+        fallback_model=model,
+        fallback_headers=headers,
+        owner=owner,
+    )
     compact_url = util_url or endpoint_url
     compact_model = util_model or model
     compact_headers = util_headers if util_url else headers

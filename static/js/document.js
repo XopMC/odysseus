@@ -7,7 +7,7 @@
 
 
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260917sync4';
+import sessionModule from './sessions.js?v=20260920agentteam1';
 import emojiPicker from './emojiPicker.js';
 import markdownModule from './markdown.js';
 import codeRunnerModule from './codeRunner.js';

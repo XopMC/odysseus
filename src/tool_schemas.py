@@ -349,6 +349,23 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "delegate_subagent",
+            "description": "Delegate one bounded reasoning subtask to an Agent subagent. The child has no tools or extra permissions and returns evidence to this parent run. Available only when enabled in Agent settings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "description": "Concrete bounded subtask and expected result"},
+                    "context": {"type": "string", "description": "Only the context excerpt the child needs"},
+                    "model": {"type": "string", "description": "'same' or an exact configured model/model@endpoint allowlist entry"},
+                    "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 600}
+                },
+                "required": ["objective"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_session",
             "description": "Create a new chat for ongoing conversations with a specific model. (The UI calls these 'chats'; 'session' is the internal term.)",
             "parameters": {
@@ -1549,6 +1566,13 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         content = args.get("query", "")
     elif tool_type == "chat_with_model":
         content = args.get("model", "") + "\n" + args.get("message", "")
+    elif tool_type == "delegate_subagent":
+        content = json.dumps({
+            "objective": args.get("objective", ""),
+            "context": args.get("context", ""),
+            "model": args.get("model", "same"),
+            "timeout_seconds": args.get("timeout_seconds", 0),
+        }, ensure_ascii=False)
     elif tool_type == "create_session":
         content = args.get("name", "Untitled") + "\n" + args.get("model", "")
     elif tool_type == "list_sessions":

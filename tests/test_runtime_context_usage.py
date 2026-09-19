@@ -408,6 +408,17 @@ def test_enabled_policy_runtime_uses_validated_defaults_not_legacy_85(monkeypatc
     assert data['saved_context_policy'] is None
 
 
+def test_idle_legacy_context_uses_current_default_trigger_not_old_85(monkeypatch):
+    from src import context_policy_runtime
+    monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: None)
+    monkeypatch.setattr(context_policy_runtime, 'enabled', lambda: False)
+
+    data = _client(monkeypatch, _history(snapshot=False)).get('/api/session/chat/context').json()
+
+    assert data['auto_compact_threshold'] == 75
+    assert data['configured_auto_compact_threshold'] == 75
+
+
 def test_invalid_saved_policy_keeps_observed_usage_available(monkeypatch):
     from src import context_policy_runtime
     def invalid(*args, **kwargs):

@@ -182,7 +182,7 @@ def test_engineering_foundation_real_browser(tmp_path):
         assert.equal(await page.evaluate(()=>selectedProjects.at(-1).id),'p1');
         assert.equal(await page.title(),'Odysseus Engineering QA');assert.equal(new URL(page.url()).origin,base);
         assert.equal(await by('host').inputValue(),'');assert.equal(await by('consent').isChecked(),false);assert.equal(await by('apply-policy').isDisabled(),true);
-        assert.equal(await by('isolated-option').isDisabled(),true);assert.match(await by('workspace').textContent(),/full engineering workflow.*not available/i);
+        assert.equal(await by('isolated-option').isDisabled(),true);assert.match(await by('workspace').textContent(),/isolated execution is limited to approved checks/i);
         await page.getByLabel('Project name',{exact:true}).fill('<img src=x onerror=alert(1)>');
         await page.getByLabel('Absolute project folder').fill('/work/browser-qa');await page.getByLabel('Host',{exact:true}).selectOption('legacy-jetson');
         await by('create').click();await page.getByText('Project folder is not accessible',{exact:true}).waitFor();

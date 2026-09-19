@@ -15,7 +15,7 @@ def test_context_policy_scoped_edit_validation_conflict_and_locale(tmp_path):
       const {chromium}=require('playwright'),fs=require('node:fs'),http=require('node:http'),assert=require('node:assert/strict');
       const repo=process.argv[1],out=process.argv[2],api='/api/team/engineering',calls=[],errors=[],events=[];
       const foundationCopy=[
-        ['Foundation: register projects, review host access policy and inspect the tool catalog. Isolated execution and the full engineering workflow are not available here yet.','Базовый этап: регистрация проектов, просмотр политики доступа к хосту и каталога инструментов. Изолированное выполнение и полный рабочий процесс разработки здесь пока недоступны.'],
+        ['Engineering workspace: register projects, choose a host policy, inspect tools and language servers, configure verified checks and context policy. Isolated execution is limited to approved checks in a verification copy.','Среда разработки: регистрируйте проекты, выбирайте политику хоста, просматривайте инструменты и языковые серверы, настраивайте проверенные проверки и политику контекста. Изолированное выполнение ограничено подтверждёнными проверками в верификационной копии.'],
         ['The selected Engineering project applies to NEW Team runs only. Existing and legacy tasks keep their current settings. Choose Legacy / no Engineering project to start without this binding.','Выбранный проект разработки применяется только к НОВЫМ командным задачам. Существующие задачи сохраняют свои настройки. Чтобы начать без этой привязки, выберите «Прежний режим / без проекта разработки».'],
         ['Choose an existing folder on a configured host. Registration does not create a folder or grant execution access.','Выберите существующую папку на настроенном хосте. Регистрация не создаёт папку и не разрешает выполнение команд.'],
         ['Trusted-host access permits tools to act on the real host under its configured permissions. It is not a sandbox. Review the selected host and folder before confirming.','Доступ к доверенному хосту позволяет инструментам работать на реальном хосте в пределах настроенных разрешений. Это не изолированная среда. Перед подтверждением проверьте выбранный хост и папку.'],
@@ -122,7 +122,7 @@ def test_context_policy_scoped_edit_validation_conflict_and_locale(tmp_path):
         assert.equal(await by('binding-notice').textContent(),foundationCopy[1][1]);
         assert.equal(await by('notice').textContent(),'Проверьте политику выбранного проекта.');
         assert((await by('project-details').textContent()).includes('Хост: jetson'));assert((await by('project-details').textContent()).includes('Папка: /work/Save'));
-        assert((await by('project-details').textContent()).includes('Политика: Только чтение — доступ к доверенному хосту не подтверждён'));
+        assert((await by('project-details').textContent()).includes('Политика: Только чтение — доступ к хосту не подтверждён'));
         assert((await by('project-details').textContent()).includes('Project <b>Save</b>'),'project names stay unchanged');
         await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:out+'/engineering-foundation-ru-desktop.png',animations:'disabled'});
         assert.equal(await by('context-scope').locator('option[value="owner"]').textContent(),'Настройки пользователя');assert.equal(await page.locator('main b').count(),0);

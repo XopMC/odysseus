@@ -99,7 +99,12 @@ def _compact_prompt_for(monkeypatch, history):
         captured["messages"] = messages
         return "Summary text"
 
-    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(
+        session_routes,
+        "router",
+        APIRouter(prefix="/api", tags=["sessions"]),
+    )
+    monkeypatch.setattr(session_routes, "_verify_session_owner", lambda request, session_id: None)
     monkeypatch.setattr(history_routes, "SessionLocal", lambda: _FakeDb())
 
     import src.agent_runs as agent_runs
@@ -108,9 +113,9 @@ def _compact_prompt_for(monkeypatch, history):
     import src.model_context as model_context
 
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: False)
-    def fake_resolve_endpoint(kind, owner=None):
+    def fake_resolve_endpoint(kind, owner=None, **kwargs):
         captured.setdefault("resolve_calls", []).append((kind, owner))
-        return None, None, {}
+        return kwargs.get("fallback_url"), kwargs.get("fallback_model"), kwargs.get("fallback_headers") or {}
 
     monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", fake_resolve_endpoint)
     monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call_async)
@@ -120,12 +125,12 @@ def _compact_prompt_for(monkeypatch, history):
     session = _FakeSession(history)
     manager = _FakeSessionManager(session)
     app = FastAPI()
-    app.include_router(history_routes.setup_history_routes(manager))
+    app.include_router(session_routes.setup_session_routes(manager, {}))
 
     response = TestClient(app).post("/api/session/session-1/compact")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json()["status"] == "compacted"
     assert manager.saved is True
     return captured["messages"][1]["content"]
 
@@ -151,9 +156,9 @@ def _registered_compact_response(monkeypatch, history, active_run=False):
     import src.llm_core as llm_core
 
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: active_run)
-    def fake_resolve_endpoint(kind, owner=None):
+    def fake_resolve_endpoint(kind, owner=None, **kwargs):
         captured.setdefault("resolve_calls", []).append((kind, owner))
-        return None, None, {}
+        return kwargs.get("fallback_url"), kwargs.get("fallback_model"), kwargs.get("fallback_headers") or {}
 
     monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", fake_resolve_endpoint)
     monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call_async)

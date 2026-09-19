@@ -24,3 +24,10 @@ def test_replay_flush_recovers_thinking_from_shared_timeline_reducer():
     assert "timelineReducer.snapshot?.().segments" in finish
     assert "!String(inner.textContent || '').trim()" in finish
     assert "markdownModule.mdToHtml(thinkingText)" in finish
+
+
+def test_empty_history_thinking_is_lazy_loaded_from_durable_run():
+    source = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    assert "function bindLazyHistoryThinking" in source
+    assert "/reasoning/${encodeURIComponent(runId)}/${roundNumber}" in source
+    assert "bindLazyHistoryThinking(body, metadata, roundNum" in source

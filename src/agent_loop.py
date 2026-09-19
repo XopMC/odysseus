@@ -14,6 +14,7 @@ import re
 import time
 import logging
 import os
+import uuid
 from typing import Any, AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
@@ -709,6 +710,7 @@ Suggest changes with explanations (for review/feedback requests).""",
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
+    "delegate_subagent": "- ```delegate_subagent``` — Delegate one bounded reasoning subtask to an enabled child agent. Args JSON: {\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}. The child has no tools or extra permissions; verify its result before using it.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
@@ -4056,6 +4058,9 @@ async def stream_agent_loop(
     # RAG-based tool selection: retrieve relevant tools for this query.
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
     _relevant_tools = relevant_tools
+    _subagent_mode = str(get_setting("agent_subagents_mode", "off") or "off")
+    _subagent_models = str(get_setting("agent_subagent_models", "") or "")
+    _subagent_state = {"started": 0, "max_children": 4}
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
@@ -4270,6 +4275,24 @@ async def stream_agent_loop(
         if _host_enabled(owner):
             _relevant_tools.update(_host_tools)
 
+    # A Goal is a durable execution contract. Tool RAG may optimize ordinary
+    # one-shot turns, but it must not silently make bash/file tools disappear
+    # on a later continuation or after a route fallback. Runtime policy still
+    # filters every disabled/unauthorized tool downstream.
+    if active_goal and not guide_only:
+        if _relevant_tools is None:
+            from src.tool_index import ALWAYS_AVAILABLE
+            _relevant_tools = set(ALWAYS_AVAILABLE)
+        _relevant_tools.update(_DOMAIN_TOOL_MAP["files"])
+        _relevant_tools.update({
+            "ask_user", "get_goal", "update_goal_progress", "complete_goal",
+        })
+    if _subagent_mode in {"same_model", "selected_models"} and not guide_only:
+        if _relevant_tools is None:
+            from src.tool_index import ALWAYS_AVAILABLE
+            _relevant_tools = set(ALWAYS_AVAILABLE)
+        _relevant_tools.add("delegate_subagent")
+
     _intent_domains = set(_intent.get("domains") or set())
     _base_relevant_tools = None if _relevant_tools is None else set(_relevant_tools)
     _runtime_skill_tools: Set[str] = set()
@@ -4278,6 +4301,7 @@ async def stream_agent_loop(
         is_ody = _is_odysseus_qwen_model(candidate_model)
         doc_mode = (
             is_ody
+            and not active_goal
             and not _runtime_skill_tools
             and (
                 "documents" in _intent_domains
@@ -4289,6 +4313,7 @@ async def stream_agent_loop(
         )
         notes_mode = (
             is_ody
+            and not active_goal
             and not _runtime_skill_tools
             and not doc_mode
             and (
@@ -4308,6 +4333,7 @@ async def stream_agent_loop(
             and not doc_mode
             and not notes_mode
             and not guide_only
+            and not active_goal
         )
         return (
             is_ody,
@@ -4376,6 +4402,7 @@ async def stream_agent_loop(
         and "files" not in _intent_domains
         and not uploaded_files
         and not workspace
+        and not active_goal
     ):
         _doc_irrelevant_file_tools = {
             "append_file",
@@ -4585,6 +4612,7 @@ async def stream_agent_loop(
         elif (
             registry_catalog is None and is_ody
             and not _runtime_skill_tools
+            and not active_goal
             and not plan_mode
             and not approved_plan
             and not guide_only
@@ -4597,6 +4625,19 @@ async def stream_agent_loop(
             _prepend_agent_directive(route_messages, build_active_plan_note(approved_plan))
         if active_goal and not guide_only:
             _prepend_agent_directive(route_messages, build_active_goal_note(active_goal))
+        if _subagent_mode in {"same_model", "selected_models"} and not guide_only:
+            _subagent_scope = (
+                "Use only the current model (model='same')."
+                if _subagent_mode == "same_model"
+                else "Allowed child models: " + (_subagent_models or "none configured")
+            )
+            _prepend_agent_directive(route_messages, (
+                "## SUBAGENTS\n"
+                "delegate_subagent is available for independent bounded reasoning tasks. "
+                "Give each child only the context excerpt it needs, never secrets or the full transcript. "
+                "Children have no tools or extra permissions; verify their claims before acting. "
+                + _subagent_scope
+            ))
         if guide_only:
             _prepend_agent_directive(route_messages, GUIDE_ONLY_DIRECTIVE)
         return {
@@ -4704,6 +4745,8 @@ async def stream_agent_loop(
     _context_calibration = 1.0
     _working_context = None
     _working_limit = max(1, int(_last_route_context_length * .85))
+    _last_tool_inventory_revision = ""
+    _last_route_revision = ""
     _failed_reads = FailedReadGuard()
     _failed_read_nudges = 0
 
@@ -4866,6 +4909,10 @@ async def stream_agent_loop(
                     workspace=workspace,
                     security_context=run_security,
                     exact_approval=exact_approval,
+                    current_endpoint_url=_last_route_endpoint_url,
+                    current_model=model,
+                    current_headers=headers,
+                    subagent_state=_subagent_state,
                     **_registry_dispatch_kwargs(approved=True),
                 )
             finally:
@@ -5105,22 +5152,57 @@ async def stream_agent_loop(
             except Exception:
                 logger.exception("Failed to refresh active Goal guidance")
 
-        _active_route_state = {
-            "messages": messages,
-            "mcp_schemas": mcp_schemas,
-            "relevant_tools": _relevant_tools,
-            "is_api_model": _is_api_model,
-            "is_ollama_native": _is_ollama_native,
-            "ollama_openai_compat": _ollama_openai_compat,
-            "ody_qwen_finetune_model": _ody_qwen_finetune_model,
-            "ody_doc_finetune_mode": _ody_doc_finetune_mode,
-            "ody_notes_finetune_mode": _ody_notes_finetune_mode,
-            "ody_doc_stream_create_mode": _ody_doc_stream_create_mode,
-            "compaction_state": (
-                _route_state.get("compaction_state", {}) if round_num == 1 else {}
-            ),
-        }
-        if _engineering_registry is not None:
+        _selected_route_changed = False
+        if history_session is not None:
+            next_url = str(getattr(history_session, "endpoint_url", "") or "")
+            next_model = str(getattr(history_session, "model", "") or "")
+            if next_url and next_model and (next_url != endpoint_url or next_model != model):
+                endpoint_url = next_url
+                model = next_model
+                headers = getattr(history_session, "headers", None) or headers
+                requested_model = model
+                actual_model = model
+                _pinned_fallback_candidate = None
+                _pinned_fallback_route = None
+                from src.model_context import budget_context_for_model
+                _last_route_context_length = budget_context_for_model(
+                    endpoint_url, model, fallback=context_length,
+                ) or context_length or 8192
+                _route_context_lengths[(endpoint_url, model)] = _last_route_context_length
+                _last_route_endpoint_url = endpoint_url
+                _selected_route_changed = True
+
+        if _selected_route_changed:
+            _active_route_state = await _build_route_request_state(
+                endpoint_url, model, headers, messages, suppress_tools=_force_answer,
+            )
+            messages = _active_route_state["messages"]
+            mcp_schemas = _active_route_state["mcp_schemas"]
+            _relevant_tools = _active_route_state["relevant_tools"]
+            _is_api_model = _active_route_state["is_api_model"]
+            _is_ollama_native = _active_route_state["is_ollama_native"]
+            _ollama_openai_compat = _active_route_state["ollama_openai_compat"]
+            _ody_qwen_finetune_model = _active_route_state["ody_qwen_finetune_model"]
+            _ody_doc_finetune_mode = _active_route_state["ody_doc_finetune_mode"]
+            _ody_notes_finetune_mode = _active_route_state["ody_notes_finetune_mode"]
+            _ody_doc_stream_create_mode = _active_route_state["ody_doc_stream_create_mode"]
+        else:
+            _active_route_state = {
+                "messages": messages,
+                "mcp_schemas": mcp_schemas,
+                "relevant_tools": _relevant_tools,
+                "is_api_model": _is_api_model,
+                "is_ollama_native": _is_ollama_native,
+                "ollama_openai_compat": _ollama_openai_compat,
+                "ody_qwen_finetune_model": _ody_qwen_finetune_model,
+                "ody_doc_finetune_mode": _ody_doc_finetune_mode,
+                "ody_notes_finetune_mode": _ody_notes_finetune_mode,
+                "ody_doc_stream_create_mode": _ody_doc_stream_create_mode,
+                "compaction_state": (
+                    _route_state.get("compaction_state", {}) if round_num == 1 else {}
+                ),
+            }
+        if _engineering_registry is not None and not _selected_route_changed:
             _active_route_state = await _build_route_request_state(
                 endpoint_url, model, headers, messages, suppress_tools=_force_answer)
             messages = _active_route_state['messages']
@@ -5128,6 +5210,28 @@ async def stream_agent_loop(
         if round_num == 1 and not _approved_result_injected:
             _active_route_state["request_messages"] = messages
         all_tool_schemas = _tool_schemas_for_route(_active_route_state)
+        _schema_tool_names = {
+            str(schema.get("function", {}).get("name") or schema.get("name") or "")
+            for schema in all_tool_schemas
+            if isinstance(schema, dict)
+        }
+        _selected_tool_names = _schema_tool_names or set(_active_route_state.get("relevant_tools") or ())
+        _selected_tool_names.difference_update(disabled_tools)
+        _tool_inventory_revision = hashlib.sha256(
+            json.dumps(sorted(name for name in _selected_tool_names if name), separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        _route_revision = hashlib.sha256(
+            json.dumps([
+                _last_route_endpoint_url,
+                model,
+                _last_route_context_length,
+            ], separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        if (_tool_inventory_revision != _last_tool_inventory_revision
+                or _route_revision != _last_route_revision):
+            yield f'data: {json.dumps({"type": "tool_inventory", "data": {"revision": _tool_inventory_revision, "route_revision": _route_revision, "tools": sorted(name for name in _selected_tool_names if name), "reason": "initial" if not _last_tool_inventory_revision else "route_or_policy_changed"}})}\n\n'
+            _last_tool_inventory_revision = _tool_inventory_revision
+            _last_route_revision = _route_revision
         from src.context_policy_runtime import owner_policy as _resolve_context_policy, shape_request
         def owner_policy(policy_owner):
             return _resolve_context_policy(policy_owner, session_id=session_id)
@@ -5268,6 +5372,8 @@ async def stream_agent_loop(
             prompt_tokens=_estimated_prompt, source="estimated", round_num=round_num,
             limit=_working_limit, compactions=_context_compactions,
             auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+            route_revision=_route_revision,
+            tool_inventory_revision=_tool_inventory_revision,
         )
         if _configured_telemetry:
             _working_context['context_policy'] = _configured_telemetry
@@ -5644,6 +5750,8 @@ async def stream_agent_loop(
                             source="backend", round_num=round_num,
                             limit=_working_limit, compactions=_context_compactions,
                             auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+                            route_revision=_route_revision,
+                            tool_inventory_revision=_tool_inventory_revision,
                         )
                         yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
                         # Backend-reported TRUE generation speed (llama.cpp
@@ -5698,6 +5806,8 @@ async def stream_agent_loop(
                                 source="estimated", round_num=round_num,
                                 limit=_working_limit, compactions=_context_compactions,
                                 auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+                                route_revision=_route_revision,
+                                tool_inventory_revision=_tool_inventory_revision,
                             )
                             yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
                             mcp_schemas = answering_state["mcp_schemas"]
@@ -6447,6 +6557,10 @@ async def stream_agent_loop(
                             progress_cb=_push_progress,
                             workspace=workspace,
                             security_context=run_security,
+                            current_endpoint_url=_last_route_endpoint_url,
+                            current_model=model,
+                            current_headers=headers,
+                            subagent_state=_subagent_state,
                             **_registry_dispatch_kwargs(),
                         )
                     finally:
@@ -6594,7 +6708,11 @@ async def stream_agent_loop(
                 # loop and re-ask after the user answers. Stream it as assistant
                 # text (once) so it persists and is replayed. The card shows the
                 # options only, so this is the single visible copy of the question.
-                _auq = result["ask_user"]
+                _auq = dict(result["ask_user"])
+                _auq.setdefault("question_id", uuid.uuid4().hex)
+                if active_goal and active_goal.get("id"):
+                    _auq.setdefault("goal_id", active_goal["id"])
+                result["ask_user"] = _auq
                 _auq_q = (_auq.get("question") or "").strip()
                 if _auq_q and _auq_q not in full_response:
                     _auq_delta = ("\n\n" if full_response.strip() else "") + _auq_q
@@ -6608,7 +6726,10 @@ async def stream_agent_loop(
                         active_goal = _chat_work_store.update_goal(
                             owner, session_id,
                             "Waiting for the user's decision: " + _auq_q,
-                            {"question": _auq_q}, waiting_user=True,
+                            {
+                                "question": _auq_q,
+                                "question_id": _auq["question_id"],
+                            }, waiting_user=True,
                         )
                         yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                     except Exception:
@@ -6671,6 +6792,12 @@ async def stream_agent_loop(
 
             # Emit tool_output (include ui_event data if present)
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}
+            if result.get("child_run_id"):
+                tool_output_data.update({
+                    "child_run_id": result["child_run_id"],
+                    "child_model": result.get("model"),
+                    "child_objective": result.get("objective", ""),
+                })
             if is_doc_tool and "action" in result:
                 tool_output_data.update({
                     "doc_id": result.get("doc_id"),
@@ -6879,6 +7006,12 @@ async def stream_agent_loop(
             if result.get("doc_id"):
                 tool_event["doc_id"] = result["doc_id"]
                 tool_event["doc_title"] = result.get("title", "")
+            if result.get("child_run_id"):
+                tool_event.update({
+                    "child_run_id": result["child_run_id"],
+                    "child_model": result.get("model"),
+                    "child_objective": result.get("objective", ""),
+                })
             # Persist the file-write/edit diff so it re-renders on reload — without
             # this the diff shows live but vanishes from saved history.
             if result.get("diff"):

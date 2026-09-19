@@ -33,10 +33,11 @@ def test_task_parse_resolves_with_owner_scope():
     assert 'resolve_endpoint("default", owner=user or None)' in body
 
 
-def test_history_compact_resolves_with_owner_scope():
-    body = _function_source("routes/history/history_routes.py", "compact_session")
-    assert "owner = effective_user(request)" in body
-    assert 'resolve_endpoint("utility", owner=owner or None)' in body
+def test_canonical_compact_resolves_with_owner_scope():
+    body = _function_source("routes/session_routes.py", "compact_session")
+    assert "owner = getattr(session, \"owner\", None) or effective_user(request)" in body
+    assert '"utility",' in body
+    assert "owner=owner," in body
 
 
 def test_note_reminder_synthesis_resolves_with_owner_scope():

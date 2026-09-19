@@ -1365,6 +1365,30 @@ def setup_chat_routes(
                 work_state["goal"] = active_goal
             else:
                 active_goal = work_state.get("goal")
+            # A normal reply to ask_user is guidance for the existing Goal,
+            # not an implicit Pause/Cancel. Resume the durable state before
+            # building this request so the same user message becomes the next
+            # model-visible instruction and the server controller can keep
+            # owning later attempts if this browser disappears.
+            if (
+                active_goal
+                and active_goal.get("status") == "waiting_user"
+                and not tool_approval_continuation
+                and not goal_continuation
+                and isinstance(message, str)
+                and message.strip()
+            ):
+                try:
+                    active_goal = chat_work_store.goal_action(
+                        owner, session, "resume", active_goal["revision"],
+                    )
+                    work_state["goal"] = active_goal
+                    chat_mode = "agent"
+                except WorkConflict:
+                    # A concurrent explicit Pause/Cancel wins. Reload below
+                    # will expose the authoritative state without resurrecting
+                    # the Goal from this stale request.
+                    active_goal = chat_work_store.get(owner, session).get("goal")
             # A paused/cancelled/completed Goal must not silently re-enter the
             # agent prompt just because the user sends an unrelated chat turn.
             # Explicit Resume (or an approval decision) is the only transition
@@ -3086,6 +3110,22 @@ def setup_chat_routes(
             "output": value[-2 * 1024 * 1024:],
             "truncated": len(value) > 2 * 1024 * 1024,
         }
+
+    @router.get("/api/chat/run/{session_id}/reasoning/{run_id}/{round_number}")
+    async def chat_run_reasoning_artifact(
+        request: Request, session_id: str, run_id: str, round_number: int,
+    ):
+        """Load a historical reasoning round without embedding it in history."""
+        _verify_session_owner(request, session_id)
+        try:
+            artifact = agent_runs.reasoning_artifact(session_id, run_id, round_number)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except (FileNotFoundError, OSError):
+            artifact = None
+        if artifact is None:
+            raise HTTPException(404, "Reasoning artifact not found")
+        return artifact
 
     # ------------------------------------------------------------------ #
     # POST /api/chat/stop — cancel a detached run (Stop button). Closing the SSE
