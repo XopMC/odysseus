@@ -110,14 +110,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         if is_https:
             # Dual-scheme deployments intentionally keep HTTP available.  Do
-            # not opt a fresh install into browser-wide HSTS unless an
-            # operator explicitly enables it; ``HSTS_ENABLED=false`` still
-            # emits max-age=0 to clear a policy cached earlier.
-            if os.getenv("HSTS_ENABLED", "false").strip().lower() == "false":
-                # A TLS response is the only standards-compliant way to clear
-                # HSTS previously cached by a browser.
-                response.headers["Strict-Transport-Security"] = "max-age=0"
-            else:
+            # not opt Odysseus into hostname-wide HSTS unless an operator
+            # explicitly enables it.  In particular, never emit max-age=0:
+            # HSTS ignores ports, so an Odysseus response must not clear the
+            # policy established by another service on the same host.
+            if os.getenv("HSTS_ENABLED", "false").strip().lower() != "false":
                 response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         if is_report:

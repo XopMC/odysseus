@@ -164,7 +164,8 @@ Chat и Team/Command: «Спрашивать каждый раз», «Спраш
 делегированных токенов, внешнего недоверенного контекста и неизвестных
 побочных эффектов.
 
-HTTP и HTTPS работают одновременно без редиректа и без HSTS. Они используют
+HTTP и HTTPS работают одновременно без редиректа; Odysseus не отправляет HSTS
+и не сбрасывает HSTS-политику других сервисов на том же hostname. Они используют
 раздельные cookies; HTTPS-cookie всегда `Secure`, а HTTP-сессия считается
 небезопасной для публичной сети.
 
@@ -199,7 +200,9 @@ Full access suppresses routine approval cards for enabled tools; it does not
 remove owner/project/host checks, delegated-token restrictions, external
 untrusted-context gates, or unknown-side-effect protection.
 
-HTTP and HTTPS intentionally remain available without an HSTS policy or redirect.
+HTTP and HTTPS intentionally remain available without an Odysseus HSTS policy or
+redirect. Odysseus also does not clear an HSTS policy owned by another service on
+the same hostname.
 They use separate session cookies; the HTTPS cookie is always Secure, while the
 HTTP session is suitable only for trusted/private networks.
 

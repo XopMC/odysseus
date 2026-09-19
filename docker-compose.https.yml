@@ -8,7 +8,8 @@ services:
       # Dual HTTP/HTTPS mode intentionally keeps both schemes available. The
       # app issues separate scheme-specific cookies; HSTS remains disabled.
       SECURE_COOKIES: "false"
-      # Clear a previously cached HSTS policy so explicit HTTP stays HTTP.
+      # Odysseus omits HSTS without clearing a policy owned by another service
+      # on the same hostname. Use a dedicated hostname if that policy is active.
       HSTS_ENABLED: "false"
 
   odysseus-https:

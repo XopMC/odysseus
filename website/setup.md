@@ -682,6 +682,8 @@ Three things bite when moving an existing install behind TLS:
   with each MCP authorization server up front — so set it to the external
   origin if you use remote MCP servers over OAuth.
 - HSTS is disabled by default so the explicit HTTP entrypoint remains usable.
+  Odysseus omits the header; it never emits `max-age=0`, because that would
+  clear a hostname-wide policy established by another service.
   If an operator enables `HSTS_ENABLED=true`, remember that HSTS applies to the
   whole hostname and ignores the port; any other plain-HTTP service on that
   hostname can become unreachable in browsers that visited Odysseus. Give
