@@ -327,6 +327,55 @@ class ChatRunState(TimestampMixin, Base):
     __table_args__ = (Index("ix_chat_run_states_owner_session", "owner", "session_id", "updated_at"),)
 
 
+class ChatSubagentRun(TimestampMixin, Base):
+    """Durable child-Agent identity owned by one ordinary chat."""
+    __tablename__ = "chat_subagent_runs"
+    id = Column(String, primary_key=True)
+    parent_session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    parent_run_id = Column(String, nullable=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    ordinal = Column(Integer, nullable=False, default=1)
+    name = Column(String, nullable=False, default="Subagent")
+    objective = Column(Text, nullable=False)
+    assigned_context = Column(Text, nullable=False, default="")
+    model = Column(String, nullable=False)
+    endpoint_id = Column(String, nullable=True, index=True)
+    slot = Column(Integer, nullable=True)
+    policy_snapshot = Column(JSON, nullable=False, default=dict)
+    worker_id = Column(String, nullable=True, index=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    status = Column(String, nullable=False, default="queued", index=True)
+    result = Column(Text, nullable=False, default="")
+    error = Column(Text, nullable=False, default="")
+    guidance = Column(JSON, nullable=False, default=list)
+    metrics = Column(JSON, nullable=False, default=dict)
+    revision = Column(Integer, nullable=False, default=1)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    removed = Column(Boolean, nullable=False, default=False, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    __table_args__ = (
+        Index("ix_chat_subagent_scope", "owner", "parent_session_id", "created_at"),
+        Index("ix_chat_subagent_model_slots", "owner", "model", "status"),
+        Index("uq_chat_subagent_active_slot", "owner", "model", "endpoint_id", "slot", unique=True),
+    )
+
+
+class ChatSubagentEvent(Base):
+    """Append-only child timeline used by reload, inspector and second devices."""
+    __tablename__ = "chat_subagent_events"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    child_id = Column(String, ForeignKey("chat_subagent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    parent_session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("ix_chat_subagent_events_cursor", "owner", "parent_session_id", "id"),
+    )
+
+
 class ChatMessage(Base):
     """
     SQLAlchemy model for ChatMessage table.

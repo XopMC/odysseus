@@ -2587,7 +2587,33 @@ body.bg-pattern-sparkles {
 	      border: 1px solid var(--panel); background: var(--accent, var(--red)); color: var(--panel);
 	      font-size: 8px; line-height: 1; font-weight: 800; overflow: hidden; max-width: 38px;
 	    }
-	    .plan-work-card.expanded { width: min(calc(100% - 16px), 480px); align-self: flex-end; }
+    .plan-work-card.expanded { width: min(calc(100% - 16px), 480px); align-self: flex-end; }
+    .subagents-work-card { position: fixed; top: 116px; right: 18px; z-index: 339; }
+    .subagents-work-card:not(.expanded) { width:36px; height:36px; border-radius:11px; overflow:visible; }
+    .subagents-work-card:not(.expanded) .chat-work-card-head { padding:0; justify-content:center; overflow:visible; }
+    .subagents-work-card:not(.expanded) .subagents-label { font-size:0; }
+    .subagents-work-card:not(.expanded) .subagents-label::before { content:'\2699'; font-size:18px; line-height:1; }
+    .subagents-work-card:not(.expanded) #subagents-badge {
+      position:absolute; top:-7px; right:-7px; min-width:17px; height:17px; padding:0 4px;
+      border-radius:999px; display:inline-flex; align-items:center; justify-content:center;
+      border:1px solid var(--panel); background:var(--accent,var(--red)); color:var(--panel);
+      font-size:8px; line-height:1; font-weight:800;
+    }
+    .subagents-work-card.expanded { width:min(calc(100% - 16px),520px); height:auto; }
+    .subagents-popover { max-height:min(62vh,560px); }
+    .subagents-title { display:flex; justify-content:space-between; gap:12px; margin-bottom:7px; }
+    .subagents-list { display:grid; gap:6px; }
+    .subagent-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:5px 8px; padding:7px; border:1px solid color-mix(in srgb,var(--accent) 24%,transparent); border-radius:9px; }
+    .subagent-main { min-width:0; }
+    .subagent-name,.subagent-model,.subagent-objective { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .subagent-model,.subagent-objective { opacity:.72; font-size:10px; }
+    .subagent-status.running,.subagent-status.queued { color:var(--accent,var(--red)); }
+    .subagent-actions { display:flex; gap:4px; align-items:center; }
+    .subagent-actions button,.subagent-message-row button { border:1px solid color-mix(in srgb,var(--accent) 38%,transparent); border-radius:8px; color:inherit; background:transparent; cursor:pointer; padding:4px 7px; }
+    .subagent-detail { margin-top:8px; border-top:1px solid color-mix(in srgb,var(--accent) 25%,transparent); padding-top:8px; }
+    .subagent-output { max-height:210px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:color-mix(in srgb,var(--panel) 78%,#000); padding:7px; border-radius:8px; }
+    .subagent-message-row { display:flex; gap:6px; }
+    .subagent-message-row textarea { flex:1; min-width:0; resize:vertical; color:inherit; background:var(--panel); border:1px solid color-mix(in srgb,var(--accent) 30%,transparent); border-radius:8px; padding:6px; }
 	    .goal-work-card { width: 100%; max-width: 100%; }
 	    .goal-work-card-head { padding: 0 6px 0 10px; cursor: default; }
 	    .goal-work-card-main {
@@ -2622,6 +2648,7 @@ body.bg-pattern-sparkles {
 	      .chat-work-status-row { padding: 0; margin-bottom: 6px; }
 	      .chat-work-card { width:100%; border-radius: 13px; }
 	      .plan-work-card { top: 58px; right: 10px; }
+	      .subagents-work-card { top:100px; right:10px; }
 	      .plan-work-card:not(.expanded) { width:36px; }
 	      .chat-work-actions { overflow-x: auto; flex-wrap: nowrap; }
 	      .chat-work-actions button { white-space: nowrap; }

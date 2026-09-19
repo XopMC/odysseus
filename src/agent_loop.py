@@ -9,6 +9,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 import asyncio
 import collections
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -710,7 +711,8 @@ Suggest changes with explanations (for review/feedback requests).""",
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
-    "delegate_subagent": "- ```delegate_subagent``` — Create one bounded child agent for one subtask. For N requested subagents, call it N times with different objectives; never use create_session for subagents. Args JSON: {\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}. The child has no tools or extra permissions; verify its result before using it.",
+    "delegate_subagent": "- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}. Maximum 8 active children per exact model.",
+    "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or wait for several child_ids after all of them have been started.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
@@ -3635,6 +3637,7 @@ async def stream_agent_loop(
     _is_teacher_run: bool = False,
     history_session=None,
     defer_context_shaping: bool = False,
+    guidance_provider=None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -4060,7 +4063,7 @@ async def stream_agent_loop(
     _relevant_tools = relevant_tools
     _subagent_mode = str(get_setting("agent_subagents_mode", "off") or "off")
     _subagent_models = str(get_setting("agent_subagent_models", "") or "")
-    _subagent_state = {"started": 0, "max_children": 4}
+    _subagent_state = {"started": 0, "max_children_per_model": 8}
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
@@ -4292,6 +4295,7 @@ async def stream_agent_loop(
             from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.add("delegate_subagent")
+        _relevant_tools.add("manage_subagents")
 
     _intent_domains = set(_intent.get("domains") or set())
     _base_relevant_tools = None if _relevant_tools is None else set(_relevant_tools)
@@ -4633,11 +4637,13 @@ async def stream_agent_loop(
             )
             _prepend_agent_directive(route_messages, (
                 "## SUBAGENTS\n"
-                "delegate_subagent is the only tool for child agents. If the user asks to create, spawn, "
-                "launch, or assign N subagents, call delegate_subagent exactly N times with distinct objectives. "
+                "delegate_subagent starts a child asynchronously and returns its child_id immediately. If the user "
+                "asks for N subagents, call delegate_subagent exactly N times with distinct objectives BEFORE waiting, "
+                "so every child works in parallel. Then call manage_subagents action='wait' once with all child_ids. "
                 "Never use create_session for subagents; create_session only creates a separate user-visible chat. "
                 "Give each child only the context excerpt it needs, never secrets or the full transcript. "
-                "Children have no tools or extra permissions; verify their claims before acting. "
+                "Children receive ordinary Agent tools within the current user policy; verify their claims before acting. "
+                "At most 8 children may be active on one exact model; configured models are otherwise unlimited. "
                 + _subagent_scope
             ))
         if guide_only:
@@ -4915,6 +4921,7 @@ async def stream_agent_loop(
                     current_model=model,
                     current_headers=headers,
                     subagent_state=_subagent_state,
+                    allowed_tools=(None if _relevant_tools is None else set(_relevant_tools)),
                     **_registry_dispatch_kwargs(approved=True),
                 )
             finally:
@@ -5153,6 +5160,24 @@ async def stream_agent_loop(
                     })
             except Exception:
                 logger.exception("Failed to refresh active Goal guidance")
+
+        # Child-agent guidance is injected only at model-round boundaries.  It
+        # never mutates the parent's history/checkpoint and cannot interrupt an
+        # effectful tool while that tool is in flight.
+        if guidance_provider is not None:
+            try:
+                pending_guidance = guidance_provider()
+                if inspect.isawaitable(pending_guidance):
+                    pending_guidance = await pending_guidance
+                for item in pending_guidance or []:
+                    text = str(item.get("text") if isinstance(item, dict) else item).strip()
+                    if text:
+                        messages.append({
+                            "role": "user",
+                            "content": "Additional user guidance for this subagent:\n" + text,
+                        })
+            except Exception:
+                logger.exception("Failed to refresh subagent guidance")
 
         _selected_route_changed = False
         if history_session is not None:
@@ -6563,6 +6588,7 @@ async def stream_agent_loop(
                             current_model=model,
                             current_headers=headers,
                             subagent_state=_subagent_state,
+                            allowed_tools=(None if _relevant_tools is None else set(_relevant_tools)),
                             **_registry_dispatch_kwargs(),
                         )
                     finally:

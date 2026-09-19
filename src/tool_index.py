@@ -87,6 +87,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "generate_image": "Generate an AI image from a text prompt. Specify model, size, and quality. Art, illustrations, photos.",
     "chat_with_model": "Send a message to a different AI model. Compare responses, get specialized help, delegate tasks.",
     "delegate_subagent": "Delegate a bounded reasoning subtask to an enabled Agent subagent and return its evidence to the parent run.",
+    "manage_subagents": "List, inspect, message, stop, remove, or wait for parallel Agent subagents.",
     "ask_teacher": "Ask a more capable model for help with a difficult problem. Escalate complex tasks.",
     "pipeline": "Run a multi-step AI pipeline with multiple models. Chain tasks together in sequence.",
     "list_models": "List all available AI models and their endpoints.",

@@ -350,7 +350,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_subagent",
-            "description": "Create one bounded child agent for a subtask. If the user asks to create/spawn N subagents, call this tool N times with distinct objectives. Use this instead of create_session for subagents. The child has no tools or extra permissions and returns evidence to this parent run. Available only when enabled in Agent settings.",
+            "description": "Start one independent child agent and return immediately. For N children, call this N times first so they run in parallel, then join them with manage_subagents action=wait. Children use ordinary permitted Agent tools. Maximum 8 active children per exact model; any number of configured models may be selected.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -360,6 +360,25 @@ FUNCTION_TOOL_SCHEMAS = [
                     "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 600}
                 },
                 "required": ["objective"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_subagents",
+            "description": "List, inspect, message, stop, remove, or wait for independently running child agents. To preserve parallelism, spawn all requested children before calling wait.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "message", "stop", "remove", "wait"]},
+                    "child_id": {"type": "string"},
+                    "child_ids": {"type": "array", "items": {"type": "string"}},
+                    "message": {"type": "string"},
+                    "wait_for": {"type": "string", "enum": ["all", "any"]},
+                    "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 600}
+                },
+                "required": ["action"]
             }
         }
     },
@@ -1572,6 +1591,15 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             "context": args.get("context", ""),
             "model": args.get("model", "same"),
             "timeout_seconds": args.get("timeout_seconds", 0),
+        }, ensure_ascii=False)
+    elif tool_type == "manage_subagents":
+        content = json.dumps({
+            "action": args.get("action", "list"),
+            "child_id": args.get("child_id", ""),
+            "child_ids": args.get("child_ids", []),
+            "message": args.get("message", ""),
+            "wait_for": args.get("wait_for", "all"),
+            "timeout_seconds": args.get("timeout_seconds", 600),
         }, ensure_ascii=False)
     elif tool_type == "create_session":
         content = args.get("name", "Untitled") + "\n" + args.get("model", "")

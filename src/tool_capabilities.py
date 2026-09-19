@@ -194,7 +194,7 @@ _register(
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
-    {"chat_with_model", "delegate_subagent", "ask_teacher"},
+    {"chat_with_model", "delegate_subagent", "manage_subagents", "ask_teacher"},
     ToolEffect.NETWORK_EGRESS,
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )

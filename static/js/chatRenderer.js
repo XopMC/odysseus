@@ -21,7 +21,6 @@ function bindThinkingLabels(root) {
 }
 
 function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
-  if (hasReasoning) return;
   const runId = String(metadata?.timeline_v2?.run_id || '');
   if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return;
   let section = root?.querySelector?.('.thinking-section');
@@ -34,7 +33,7 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
   const header = section?.querySelector?.('.thinking-header');
   const inner = section?.querySelector?.('.thinking-content-inner');
   if (!header || !inner) return;
-  inner.textContent = '';
+  if (!hasReasoning) inner.textContent = '';
   section.dataset.lazyThinking = 'true';
   header.addEventListener('click', async () => {
     if (section.dataset.loaded === 'true' || section.dataset.loading === 'true') return;
@@ -52,7 +51,7 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
       if (stats) stats.textContent = `${Number(data.duration || 0).toFixed(1)}s · ${Number(data.token_count || 0)} tok`;
       section.dataset.loaded = 'true';
     } catch (_) {
-      inner.textContent = t('Preserved thinking is unavailable.');
+      if (!hasReasoning) inner.textContent = t('Preserved thinking is unavailable.');
     } finally { delete section.dataset.loading; }
   }, { once: false });
 }
@@ -66,6 +65,10 @@ export function historyRoundReasonings(metadata, roundCount = 0) {
     ? metadata.round_reasonings.map(value => String(value || ''))
     : [];
   while (values.length < roundCount) values.push('');
+  const timelineFillRounds = new Set();
+  values.forEach((value, index) => {
+    if (!String(value || '').trim()) timelineFillRounds.add(index + 1);
+  });
   const timeline = metadata?.timeline_v2?.events;
   if (Array.isArray(timeline)) {
     for (const item of timeline) {
@@ -76,10 +79,12 @@ export function historyRoundReasonings(metadata, roundCount = 0) {
       if (!payload || typeof payload !== 'object' || !payload.delta) continue;
       if (payload.thinking !== true && !['thinking', 'thought'].includes(payload.channel)) continue;
       const round = Math.max(1, Number(payload.round || payload._replay?.round || 1));
+      while (values.length < round) values.push('');
+      if (!String(values[round - 1] || '').trim()) timelineFillRounds.add(round);
       // Older metadata sometimes contains reasoning for only the newest
       // rounds. Fill each missing round from timeline_v2 without duplicating
       // values that were already persisted in round_reasonings.
-      if (!String(values[round - 1] || '').trim()) {
+      if (timelineFillRounds.has(round)) {
         values[round - 1] = `${values[round - 1] || ''}${String(payload.delta)}`;
       }
     }
@@ -1496,7 +1501,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260920subagentsperf3').then(mod => {
+    import('./sessions.js?v=20260920parallelsubagents1').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {

@@ -6,11 +6,11 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js?v=20260920subagentsperf3';
+import modelsModule from './js/models.js?v=20260920parallelsubagents1';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260920subagentsperf3';
+import chatModule from './js/chat.js?v=20260920parallelsubagents1';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
@@ -22,12 +22,13 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260920subagentsperf3';
-import sessionModule from './js/sessions.js?v=20260920subagentsperf3';
-import chatWork from './js/chat-work.js?v=20260920subagentsperf3';
-import accessModeModule from './js/accessMode.js?v=20260920subagentsperf3';
+import chatRenderer from './js/chatRenderer.js?v=20260920parallelsubagents1';
+import sessionModule from './js/sessions.js?v=20260920parallelsubagents1';
+import chatWork from './js/chat-work.js?v=20260920parallelsubagents1';
+import chatSubagents from './js/chat-subagents.js?v=20260920parallelsubagents1';
+import accessModeModule from './js/accessMode.js?v=20260920parallelsubagents1';
 import projectsModule from './js/projects.js?v=20260915projects1';
-import { createTeamWorkspace } from './js/team-workspace.js?v=20260920subagentsperf3';
+import { createTeamWorkspace } from './js/team-workspace.js?v=20260920parallelsubagents1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -37,7 +38,7 @@ import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
-import settingsModule from './js/settings.js?v=20260920subagentsperf3';
+import settingsModule from './js/settings.js?v=20260920parallelsubagents1';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -64,6 +65,7 @@ window.teamWorkspace = teamWorkspace;
 window.themeModule = themeModule;
 window.sessionModule = sessionModule;
 window.chatWork = chatWork;
+window.chatSubagents = chatSubagents;
 window.accessModeModule = accessModeModule;
 window.projectsModule = projectsModule;
 window.uiModule = uiModule;
@@ -3793,6 +3795,7 @@ function startOdysseusApp() {
   // Initialize all event listeners
   try { initializeEventListeners(); } catch(e) { console.error('Event init error:', e); }
   try { chatWork.bind(); chatWork.refresh(); } catch(e) { console.error('Chat work init error:', e); }
+  try { chatSubagents.bind(); chatSubagents.refresh(); } catch(e) { console.error('Chat subagents init error:', e); }
   try { accessModeModule.init(API_BASE); } catch(e) { console.error('Access mode init error:', e); }
   try { projectsModule.bind(); } catch(e) { console.error('Projects init error:', e); }
 

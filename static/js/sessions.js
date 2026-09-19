@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260920subagentsperf3';
+import chatRenderer from './chatRenderer.js?v=20260920parallelsubagents1';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js';
@@ -2352,6 +2352,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     // Check server for active stream (survives page refresh)
     _checkServerStream(id);
     window.chatWork?.refresh?.(id);
+    window.chatSubagents?.refresh?.(id);
     // Document panel: keep open if next session also wants it, otherwise close
     if (window.documentModule) {
       const docBtn = document.getElementById('overflow-doc-btn');
@@ -2475,6 +2476,7 @@ export function createDirectChat(url, modelId, endpointId, opts = {}) {
   // chat's Goal/Plan card immediately so its objective and controls cannot
   // leak into the new composer while the session is materialized lazily.
   window.chatWork?.refresh?.(null);
+  window.chatSubagents?.refresh?.(null);
   try { window.__odysseusLastSelectedSessionId = ''; } catch (_) {}
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);

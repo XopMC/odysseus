@@ -937,9 +937,11 @@ from routes.engineering_routes import setup_engineering_routes
 app.include_router(setup_engineering_routes())
 from routes.chat_replay_routes import setup_chat_replay_routes
 from routes.chat_work_routes import setup_chat_work_routes
+from routes.subagent_routes import setup_subagent_routes
 from routes.project_routes import setup_project_routes
 app.include_router(setup_chat_replay_routes())
 app.include_router(setup_chat_work_routes())
+app.include_router(setup_subagent_routes())
 app.include_router(setup_project_routes())
 app.include_router(setup_team_routes())
 

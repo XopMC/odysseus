@@ -915,6 +915,13 @@ async def _document_tool_dispatch(
     current_headers: Optional[Dict] = None,
     parent_run_id: Optional[str] = None,
     subagent_state: Optional[Dict] = None,
+    workspace: Optional[str] = None,
+    access_mode: str = "",
+    parent_disabled_tools: Optional[set] = None,
+    parent_tool_policy: Optional[Any] = None,
+    parent_allowed_tools: Optional[set] = None,
+    external_untrusted_context_seen: bool = False,
+    delegated_credential: bool = False,
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
@@ -929,6 +936,13 @@ async def _document_tool_dispatch(
         "current_headers": current_headers or {},
         "parent_run_id": parent_run_id,
         "subagent_state": subagent_state,
+        "workspace": workspace,
+        "access_mode": access_mode,
+        "parent_disabled_tools": set(parent_disabled_tools or []),
+        "parent_tool_policy": parent_tool_policy,
+        "parent_allowed_tools": None if parent_allowed_tools is None else set(parent_allowed_tools),
+        "external_untrusted_context_seen": bool(external_untrusted_context_seen),
+        "delegated_credential": bool(delegated_credential),
     }
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
@@ -959,6 +973,7 @@ async def execute_tool_block(
     subagent_state: Optional[Dict] = None,
     registry: Optional[ToolRegistry] = None,
     registry_access_provider: Optional[Callable[[], ToolAccess]] = None,
+    allowed_tools: Optional[set] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1113,6 +1128,19 @@ async def execute_tool_block(
             current_headers=current_headers,
             parent_run_id=getattr(security_context, "run_id", None),
             subagent_state=subagent_state,
+            workspace=workspace,
+            access_mode=(security_context.access_mode if isinstance(security_context, ToolRunSecurityContext) else ""),
+            parent_disabled_tools=disabled_tools,
+            parent_tool_policy=tool_policy,
+            parent_allowed_tools=allowed_tools,
+            external_untrusted_context_seen=(
+                security_context.external_untrusted_context_seen
+                if isinstance(security_context, ToolRunSecurityContext) else False
+            ),
+            delegated_credential=(
+                security_context.delegated_credential
+                if isinstance(security_context, ToolRunSecurityContext) else False
+            ),
         )
         if isinstance(security_context, ToolRunSecurityContext):
             security_context.observe_tool_result(
@@ -1140,6 +1168,13 @@ async def _execute_tool_block_impl(
     current_headers: Optional[Dict] = None,
     parent_run_id: Optional[str] = None,
     subagent_state: Optional[Dict] = None,
+    workspace: Optional[str] = None,
+    access_mode: str = "",
+    parent_disabled_tools: Optional[set] = None,
+    parent_tool_policy: Optional[Any] = None,
+    parent_allowed_tools: Optional[set] = None,
+    external_untrusted_context_seen: bool = False,
+    delegated_credential: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1329,7 +1364,7 @@ async def _execute_tool_block_impl(
         query = content.split("\n")[0].strip()
         desc = f"search_chats: {query[:80]}"
         result = await do_search_chats(query, owner=owner)
-    elif tool in ("chat_with_model", "delegate_subagent", "ask_teacher", "list_models"):
+    elif tool in ("chat_with_model", "delegate_subagent", "manage_subagents", "ask_teacher", "list_models"):
         # Migrated to the agent_tools registry (#3629): dispatched through
         # TOOL_HANDLERS with the owner/session ctx these tools need, instead
         # of the legacy dispatch_ai_tool elif. The impls live in
@@ -1343,6 +1378,13 @@ async def _execute_tool_block_impl(
             current_headers=current_headers,
             parent_run_id=parent_run_id,
             subagent_state=subagent_state,
+            workspace=workspace,
+            access_mode=access_mode,
+            parent_disabled_tools=parent_disabled_tools,
+            parent_tool_policy=parent_tool_policy,
+            parent_allowed_tools=parent_allowed_tools,
+            external_untrusted_context_seen=external_untrusted_context_seen,
+            delegated_credential=delegated_credential,
         ) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):

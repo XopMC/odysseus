@@ -1,5 +1,7 @@
 """Regression guards for non-empty thinking blocks after reload/reconnect."""
 from pathlib import Path
+import json
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,8 @@ def test_replay_flush_recovers_thinking_from_shared_timeline_reducer():
     )[0]
     assert "timelineReducer.snapshot?.().segments" in finish
     assert "!String(inner.textContent || '').trim()" in finish
+    assert "String(inner?.textContent || '').trim()" in finish
+    assert "replayThinkingFinalized" in finish
     assert "markdownModule.mdToHtml(thinkingText)" in finish
 
 
@@ -31,3 +35,16 @@ def test_empty_history_thinking_is_lazy_loaded_from_durable_run():
     assert "function bindLazyHistoryThinking" in source
     assert "/reasoning/${encodeURIComponent(runId)}/${roundNumber}" in source
     assert "bindLazyHistoryThinking(body, metadata, roundNum" in source
+
+
+def test_history_reducer_appends_every_timeline_delta_for_missing_round():
+    source = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    body = source.split("export function historyRoundReasonings", 1)[1].split("const SEARCH_ICON", 1)[0]
+    function_source = "function historyRoundReasonings" + body
+    metadata = {"timeline_v2": {"events": [
+        {"data": {"delta": "first ", "thinking": True, "round": 1}},
+        {"data": {"delta": "second", "thinking": True, "round": 1}},
+    ]}}
+    script = function_source + "\nconsole.log(JSON.stringify(historyRoundReasonings(" + json.dumps(metadata) + ",1)));"
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == ["first second"]

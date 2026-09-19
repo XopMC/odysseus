@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260920subagentsperf3';
-import chatRenderer from './chatRenderer.js?v=20260920subagentsperf3';
+import sessionModule from './sessions.js?v=20260920parallelsubagents1';
+import chatRenderer from './chatRenderer.js?v=20260920parallelsubagents1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -5540,6 +5540,13 @@ import { bindUiText, t } from './i18n.js';
       if (!section) return;
       const inner = section.querySelector('.thinking-content-inner');
       let thinkingText = replayThinking;
+      // A tool boundary and the following agent_step may both finalize the
+      // same card.  The second call has an empty accumulator; never erase the
+      // thinking already committed by the first call.
+      if (!String(thinkingText || '').trim() && String(inner?.textContent || '').trim()) {
+        section.dataset.replayThinkingFinalized = 'true';
+        return;
+      }
       // The shared reducer is the source of truth for replayed deltas. A
       // throttled render can be interrupted by the next tool/round boundary
       // before its local accumulator commits; recover that segment here so a
@@ -5552,6 +5559,7 @@ import { bindUiText, t } from './i18n.js';
         inner.style.whiteSpace = '';
         inner.innerHTML = markdownModule.mdToHtml(thinkingText);
       }
+      if (String(thinkingText || '').trim()) section.dataset.replayThinkingFinalized = 'true';
       section.querySelector('.thinking-content')?.classList.remove('expanded');
       section.querySelector('.thinking-toggle')?.classList.remove('expanded');
       const label = section.querySelector('.live-think-header-text');

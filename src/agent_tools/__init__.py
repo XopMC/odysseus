@@ -28,7 +28,7 @@ from .interaction_tools import (
     AskUserTool, CompleteGoalTool, CreatePlanTool, GetGoalTool,
     UpdateGoalProgressTool, UpdatePlanStepTool, UpdatePlanTool,
 )
-from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, DelegateSubagentTool, ListModelsTool
+from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, DelegateSubagentTool, ManageSubagentsTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
@@ -65,6 +65,7 @@ TOOL_HANDLERS = {
     "complete_goal": CompleteGoalTool().execute,
     "chat_with_model": ChatWithModelTool().execute,
     "delegate_subagent": DelegateSubagentTool().execute,
+    "manage_subagents": ManageSubagentsTool().execute,
     "ask_teacher": AskTeacherTool().execute,
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
@@ -90,7 +91,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",
-             "chat_with_model", "delegate_subagent", "create_session", "list_sessions",
+             "chat_with_model", "delegate_subagent", "manage_subagents", "create_session", "list_sessions",
              "send_to_session",
              "pipeline",
              "manage_session", "manage_memory", "list_models",

@@ -297,18 +297,23 @@ function bind() {
   el('goal-work-quick-resume')?.addEventListener('click', () => mutate('goal', 'resume'));
   el('goal-work-quick-cancel')?.addEventListener('click', () => mutate('goal', 'cancel'));
   el('goal-work-save')?.addEventListener('click', reviseGoal);
-  document.querySelectorAll('.chat-work-card').forEach(node => {
+  document.querySelectorAll('#plan-mode-status, #goal-mode-status').forEach(node => {
     const toggle = node.querySelector('.chat-work-card-toggle');
     toggle?.addEventListener('click', () => {
       const open = node.classList.toggle('expanded');
       toggle.setAttribute('aria-expanded', String(open));
-      if (open) armCollapse(node);
+      if (open) {
+        const subagents = document.getElementById('subagents-status');
+        subagents?.classList.remove('expanded');
+        subagents?.querySelector('#subagents-toggle')?.setAttribute('aria-expanded', 'false');
+        armCollapse(node);
+      }
     });
     ['pointermove', 'focusin', 'input'].forEach(type => node.addEventListener(type, () => {
       if (node.classList.contains('expanded')) armCollapse(node);
     }));
   });
-  document.querySelectorAll('.chat-work-card strong, .chat-work-card summary, .chat-work-card button').forEach(node => {
+  document.querySelectorAll('#plan-mode-status strong, #plan-mode-status summary, #plan-mode-status button, #goal-mode-status strong, #goal-mode-status summary, #goal-mode-status button').forEach(node => {
     const source = node.textContent.trim();
     if (source) bindUiText(node, source);
   });
