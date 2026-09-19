@@ -10,6 +10,7 @@ from routes.session_routes import _verify_session_owner
 from src.auth_helpers import effective_user
 from src.owner_identity import auth_disabled
 from src.subagent_runtime import runtime
+from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 
 
 def _owner(request: Request, session_id: str):
@@ -43,7 +44,7 @@ def setup_subagent_routes():
         return {
             "subagents": rows,
             "active": sum(row["status"] in {"queued", "running", "waiting_user", "stopping"} for row in rows),
-            "max_active_per_model": 8,
+            "max_active_per_model": MAX_ACTIVE_PER_MODEL,
             "latest_cursor": runtime.latest_cursor(owner, session_id),
         }
 

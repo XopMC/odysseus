@@ -141,7 +141,7 @@ def test_subagent_settings_and_timeline_contract_are_wired():
     assert ".subagent-message-row[hidden] { display:none !important; }" in style
 
 
-def test_parallel_runtime_returns_immediately_and_caps_each_model_at_eight(monkeypatch):
+def test_parallel_runtime_returns_immediately_and_caps_each_model_at_four(monkeypatch):
     owner = "parallel-" + uuid.uuid4().hex
     session_id = uuid.uuid4().hex
     db = SessionLocal()
@@ -149,28 +149,37 @@ def test_parallel_runtime_returns_immediately_and_caps_each_model_at_eight(monke
     db.commit(); db.close()
     entered = []
     release = asyncio.Event()
+    four_entered = asyncio.Event()
 
-    async def held_child(**kwargs):
-        entered.append(kwargs["child_id"])
+    async def held_model_loop(endpoint_url, model, messages, **kwargs):
+        entered.append((model, asyncio.get_running_loop().time()))
+        if len(entered) >= 4:
+            four_entered.set()
         await release.wait()
+        yield 'data: {"delta":"ok","round":1}\n\n'
+        yield 'data: [DONE]\n\n'
 
-    monkeypatch.setattr(runtime, "_run_child", held_child)
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", held_model_loop)
 
     async def scenario():
         common = dict(owner=owner, session_id=session_id, parent_run_id="parent",
                       objective="work", assigned_context="", endpoint_url="http://local",
                       headers={}, endpoint_id="ep", timeout_seconds=60,
                       workspace=None, access_mode="ask_important")
-        children = [await runtime.spawn(model="worker-a", **common) for _ in range(8)]
-        await asyncio.sleep(0)
-        assert len(entered) == 8
+        children = [await runtime.spawn(model="worker-a", **common) for _ in range(4)]
+        await asyncio.wait_for(four_entered.wait(), timeout=2)
+        assert len(entered) == 4
+        assert max(t for _, t in entered) - min(t for _, t in entered) < 0.5
         assert all(row["exit_code"] == 0 for row in children)
-        ninth = await runtime.spawn(model="worker-a", **common)
-        assert ninth["policy"] == "model_capacity_exhausted"
+        fifth = await runtime.spawn(model="worker-a", **common)
+        assert fifth["policy"] == "model_capacity_exhausted"
         other = await runtime.spawn(model="worker-b", **common)
         assert other["exit_code"] == 0
-        await asyncio.sleep(0)
-        assert len(entered) == 9
+        for _ in range(20):
+            if len(entered) == 5:
+                break
+            await asyncio.sleep(0.01)
+        assert len(entered) == 5
         release.set()
         await asyncio.gather(*(task for cid, task in list(runtime._tasks.items())
                                if cid in {row.get("child_id") for row in children + [other]}))
@@ -222,6 +231,7 @@ def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
         assert captured["external_untrusted_context_seen"] is True
         assert captured["delegated_credential"] is True
         assert captured["relevant_tools"] == {"read_file", "delegate_subagent"}
+        assert captured["workload"] == "subagent"
         assert "bash" in captured["disabled_tools"]
         assert "delegate_subagent" in captured["disabled_tools"]
         events = runtime.events(owner, session_id, child_id=result["child_id"], limit=100)
@@ -237,6 +247,47 @@ def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
             db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
         db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
         db.commit(); db.close()
+
+
+def test_local_transport_allows_four_subagent_prompts_in_flight(monkeypatch):
+    import src.llm_core as llm_core
+
+    monkeypatch.setenv("ODYSSEUS_LOCAL_MODEL_GATE", "true")
+    monkeypatch.setattr(llm_core, "is_local_endpoint", lambda _url: True)
+    monkeypatch.setattr(llm_core, "_SUBAGENT_MODEL_SLOTS", {})
+
+    async def scenario():
+        active = 0
+        maximum = 0
+        entered = 0
+        four_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def request():
+            nonlocal active, maximum, entered
+            async with llm_core._local_model_slot(
+                "http://192.168.50.4:1234/v1/chat/completions",
+                "worker-model", workload="subagent",
+            ):
+                active += 1
+                entered += 1
+                maximum = max(maximum, active)
+                if entered == 4:
+                    four_entered.set()
+                await release.wait()
+                active -= 1
+
+        tasks = [asyncio.create_task(request()) for _ in range(5)]
+        await asyncio.wait_for(four_entered.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+        assert active == 4
+        assert entered == 4
+        release.set()
+        await asyncio.gather(*tasks)
+        assert entered == 5
+        assert maximum == 4
+
+    asyncio.run(scenario())
 
 
 def test_long_history_post_processing_is_scoped_to_new_nodes():

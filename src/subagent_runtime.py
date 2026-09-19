@@ -17,15 +17,13 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional
 
 from src.database import ChatSubagentEvent, ChatSubagentRun, SessionLocal
+from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = {"queued", "running", "waiting_user", "stopping"}
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
-MAX_ACTIVE_PER_MODEL = 8
-
-
 def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -331,7 +329,7 @@ class SubagentRuntime:
                     session_id=session_id, owner=owner, workspace=workspace,
                     access_mode=access_mode or "", history_session=history,
                     disabled_tools=disabled, max_rounds=200, max_tool_calls=0,
-                    workload="background", _is_teacher_run=True,
+                    workload="subagent", _is_teacher_run=True,
                     guidance_provider=guidance_provider,
                     relevant_tools=allowed,
                     tool_policy=config.get("tool_policy"),

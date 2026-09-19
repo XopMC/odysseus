@@ -28,6 +28,7 @@ from src.llm_core import (
     _normalize_usage_counts,
 )
 from src.model_context import estimate_tokens
+from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 from src.agent_context import (
     FailedReadGuard, call_signature, compact_working_context,
     context_snapshot, input_limit, schema_token_estimate,
@@ -711,7 +712,7 @@ Suggest changes with explanations (for review/feedback requests).""",
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
-    "delegate_subagent": "- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}. Maximum 8 active children per exact model.",
+    "delegate_subagent": f"- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {{\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}}. Maximum {MAX_ACTIVE_PER_MODEL} active children per exact model.",
     "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or wait for several child_ids after all of them have been started.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
@@ -4063,7 +4064,7 @@ async def stream_agent_loop(
     _relevant_tools = relevant_tools
     _subagent_mode = str(get_setting("agent_subagents_mode", "off") or "off")
     _subagent_models = str(get_setting("agent_subagent_models", "") or "")
-    _subagent_state = {"started": 0, "max_children_per_model": 8}
+    _subagent_state = {"started": 0, "max_children_per_model": MAX_ACTIVE_PER_MODEL}
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
@@ -4643,7 +4644,7 @@ async def stream_agent_loop(
                 "Never use create_session for subagents; create_session only creates a separate user-visible chat. "
                 "Give each child only the context excerpt it needs, never secrets or the full transcript. "
                 "Children receive ordinary Agent tools within the current user policy; verify their claims before acting. "
-                "At most 8 children may be active on one exact model; configured models are otherwise unlimited. "
+                f"At most {MAX_ACTIVE_PER_MODEL} children may be active on one exact model; configured models are otherwise unlimited. "
                 + _subagent_scope
             ))
         if guide_only:

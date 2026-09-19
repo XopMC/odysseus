@@ -350,7 +350,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_subagent",
-            "description": "Start one independent child agent and return immediately. For N children, call this N times first so they run in parallel, then join them with manage_subagents action=wait. Children use ordinary permitted Agent tools. Maximum 8 active children per exact model; any number of configured models may be selected.",
+            "description": "Start one independent child agent and return immediately. For N children, call this N times first so they run in parallel, then join them with manage_subagents action=wait. Children use ordinary permitted Agent tools. Maximum 4 active children per exact model; any number of configured models may be selected.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
+from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 _LOCAL_MODEL_LOCK = asyncio.Lock()
 _LOCAL_MODEL_WAITING_FOREGROUND = 0
 _LOCAL_MODEL_CURRENT: Dict[str, object] = {}
+_SUBAGENT_MODEL_SLOTS: Dict[tuple, asyncio.Semaphore] = {}
 
 
 def _normalize_usage_counts(input_value=0, output_value=0):
@@ -75,7 +77,10 @@ def _local_model_gate_enabled() -> bool:
 
 
 def _gate_workload(workload: Optional[str]) -> str:
-    return "background" if str(workload or "").lower() == "background" else "foreground"
+    value = str(workload or "").lower()
+    if value == "subagent":
+        return "subagent"
+    return "background" if value == "background" else "foreground"
 
 
 @asynccontextmanager
@@ -95,6 +100,20 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
     # Normal chat must use that same slot or it could evict a worker's model.
     # Independent Jetson/Mac backends no longer serialize each other here.
     from src.team_config import enabled as teams_enabled, resource_group
+    kind = _gate_workload(workload)
+    if kind == "subagent":
+        # LM Studio and compatible local servers can batch concurrent streams.
+        # Ordinary background work remains serialized below, but child Agents
+        # get a bounded per-route/model semaphore so their prompts are truly in
+        # flight together instead of merely appearing as parallel DB rows.
+        loop = asyncio.get_running_loop()
+        key = (loop, resource_group(target_url), str(model))
+        semaphore = _SUBAGENT_MODEL_SLOTS.setdefault(
+            key, asyncio.Semaphore(MAX_ACTIVE_PER_MODEL)
+        )
+        async with semaphore:
+            yield
+        return
     if teams_enabled():
         from src.team_model import resource_slot
         async with resource_slot(resource_group(target_url)):
@@ -102,7 +121,6 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
         return
 
     global _LOCAL_MODEL_WAITING_FOREGROUND
-    kind = _gate_workload(workload)
     current_task = asyncio.current_task()
     if kind == "foreground":
         _LOCAL_MODEL_WAITING_FOREGROUND += 1
