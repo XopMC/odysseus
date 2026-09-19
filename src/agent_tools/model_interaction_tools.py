@@ -158,9 +158,10 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         allowed = []
 
     if mode == "same_model":
-        if requested_model.lower() not in {"", "same"}:
-            return {"error": "This run permits only the current model for subagents", "exit_code": 1,
-                    "policy": "disabled_by_policy"}
+        # The account setting is authoritative.  Small/local models sometimes
+        # hallucinate a provider alias (for example "sonnet") even after being
+        # told to pass model="same".  In same-model mode that argument must not
+        # be able to override or break the selected parent route.
         url = ctx.get("current_endpoint_url")
         model = ctx.get("current_model")
         headers = ctx.get("current_headers") or {}

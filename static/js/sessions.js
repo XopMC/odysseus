@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260920contextcount2';
+import chatRenderer from './chatRenderer.js?v=20260920subagentsperf3';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js';
@@ -60,7 +60,10 @@ async function _readLiveSession(url) {
 export async function refreshSessionMessageCount(sessionId) {
   if (!sessionId) return null;
   try {
-    const res = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
+    // Count polling must never hydrate the latest assistant row. Long Agent
+    // turns can attach megabytes of reasoning/tool metadata to that row; the
+    // old history?limit=1 probe reparsed and transferred it every three seconds.
+    const res = await _readLiveSession(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}/message-count`);
     if (!res.ok || !res.data) return null;
     const raw = Number.isFinite(Number(res.data.rendered_total))
       ? Number(res.data.rendered_total)

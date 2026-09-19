@@ -1526,8 +1526,147 @@ async function initAgentSettings() {
   var subagentMode = el('set-agentSubagentsMode');
   var subagentModels = el('set-agentSubagentModels');
   var subagentModelsRow = el('set-agentSubagentModelsRow');
+  var subagentModelSearch = el('set-agentSubagentModelSearch');
+  var subagentModelsRefresh = el('set-agentSubagentModelsRefresh');
+  var subagentModelsList = el('set-agentSubagentModelsList');
+  var subagentModelsStatus = el('set-agentSubagentModelsStatus');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
+
+  var selectedSubagentModels = new Set();
+  var subagentInventory = [];
+
+  function setSelectedModels(raw) {
+    selectedSubagentModels = new Set(String(raw || '').split(',').map(function(item) {
+      return item.trim();
+    }).filter(Boolean));
+    if (subagentModels) subagentModels.value = Array.from(selectedSubagentModels).join(',');
+  }
+
+  function updateSelectedModelCount() {
+    if (subagentModelsStatus) {
+      subagentModelsStatus.textContent = selectedSubagentModels.size + ' ' + t('models selected');
+    }
+  }
+
+  function inventoryFromModelsPayload(data) {
+    var rows = [];
+    (data && data.items || []).forEach(function(endpoint) {
+      if (endpoint.model_type && endpoint.model_type !== 'llm') return;
+      var ids = (endpoint.models || []).concat(endpoint.models_extra || []);
+      ids.forEach(function(model) {
+        var endpointKey = endpoint.endpoint_id || endpoint.endpoint_name;
+        if (!model || !endpointKey) return;
+        rows.push({
+          spec: String(model) + '@' + String(endpointKey),
+          model: String(model),
+          endpointId: String(endpointKey),
+          endpointName: String(endpoint.endpoint_name || endpointKey),
+        });
+      });
+    });
+    return rows;
+  }
+
+  function inventoryFromTeamPayload(data) {
+    return (data && data.models || []).filter(function(row) {
+      return row && row.model && row.endpoint_id;
+    }).map(function(row) {
+      return {
+        spec: String(row.model) + '@' + String(row.endpoint_id),
+        model: String(row.model),
+        endpointId: String(row.endpoint_id),
+        endpointName: String(row.label || row.endpoint_id).split(' · ')[0],
+      };
+    });
+  }
+
+  function renderSubagentModels() {
+    if (!subagentModelsList) return;
+    var query = String(subagentModelSearch && subagentModelSearch.value || '').trim().toLowerCase();
+    var bySpec = new Map();
+    subagentInventory.forEach(function(row) { bySpec.set(row.spec, row); });
+    selectedSubagentModels.forEach(function(spec) {
+      if (!bySpec.has(spec)) {
+        var split = spec.lastIndexOf('@');
+        bySpec.set(spec, {
+          spec: spec,
+          model: split > 0 ? spec.slice(0, split) : spec,
+          endpointId: split > 0 ? spec.slice(split + 1) : '',
+          endpointName: t('Unavailable endpoint'),
+          unavailable: true,
+        });
+      }
+    });
+    var rows = Array.from(bySpec.values()).filter(function(row) {
+      return !query || (row.model + ' ' + row.endpointName + ' ' + row.endpointId).toLowerCase().includes(query);
+    }).sort(function(a, b) {
+      return a.endpointName.localeCompare(b.endpointName) || a.model.localeCompare(b.model);
+    });
+    subagentModelsList.innerHTML = '';
+    if (!rows.length) {
+      var empty = document.createElement('div');
+      empty.className = 'subagent-model-empty';
+      empty.textContent = query ? t('No matching models') : t('No models available');
+      subagentModelsList.appendChild(empty);
+    }
+    rows.forEach(function(row) {
+      var label = document.createElement('label');
+      label.className = 'subagent-model-option';
+      if (row.unavailable) label.classList.add('is-unavailable');
+      var checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = row.spec;
+      checkbox.checked = selectedSubagentModels.has(row.spec);
+      checkbox.setAttribute('aria-label', row.model + ' · ' + row.endpointName);
+      var text = document.createElement('span');
+      var name = document.createElement('span');
+      name.className = 'subagent-model-option-name';
+      name.textContent = row.model;
+      name.title = row.model;
+      var endpoint = document.createElement('span');
+      endpoint.className = 'subagent-model-option-endpoint';
+      endpoint.textContent = row.endpointName + ' · ' + row.endpointId;
+      text.append(name, endpoint);
+      label.append(checkbox, text);
+      checkbox.addEventListener('change', function() {
+        if (checkbox.checked) selectedSubagentModels.add(row.spec);
+        else selectedSubagentModels.delete(row.spec);
+        if (subagentModels) subagentModels.value = Array.from(selectedSubagentModels).join(',');
+        updateSelectedModelCount();
+        save();
+      });
+      subagentModelsList.appendChild(label);
+    });
+    updateSelectedModelCount();
+  }
+
+  async function loadSubagentModels(force) {
+    if (!subagentModelsList) return;
+    if (subagentModelsStatus) subagentModelsStatus.textContent = t('Loading models…');
+    try {
+      var rows = [];
+      if (force) {
+        try {
+          var teamRes = await fetch('/api/team/models?refresh=true', { credentials: 'same-origin' });
+          if (teamRes.ok) rows = inventoryFromTeamPayload(await teamRes.json());
+        } catch (_) {}
+      }
+      if (!rows.length) {
+        var modelsUrl = '/api/models?' + (force ? 'refresh=true' : 'background=false');
+        var modelsRes = await fetch(modelsUrl, { credentials: 'same-origin' });
+        if (!modelsRes.ok) throw new Error('HTTP ' + modelsRes.status);
+        rows = inventoryFromModelsPayload(await modelsRes.json());
+      }
+      var unique = new Map();
+      rows.forEach(function(row) { unique.set(row.spec, row); });
+      subagentInventory = Array.from(unique.values());
+      renderSubagentModels();
+    } catch (error) {
+      if (subagentModelsStatus) subagentModelsStatus.textContent = t('Failed to load models');
+      renderSubagentModels();
+    }
+  }
 
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
@@ -1536,7 +1675,7 @@ async function initAgentSettings() {
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
     if (subagentMode) subagentMode.value = settings.agent_subagents_mode || 'off';
-    if (subagentModels) subagentModels.value = settings.agent_subagent_models || '';
+    setSelectedModels(settings.agent_subagent_models || '');
     if (subagentModelsRow) subagentModelsRow.hidden = subagentMode?.value !== 'selected_models';
   } catch (e) {}
 
@@ -1557,7 +1696,7 @@ async function initAgentSettings() {
     if (rounds != null) payload.agent_max_rounds = rounds;
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     if (subagentMode) payload.agent_subagents_mode = subagentMode.value;
-    if (subagentModels) payload.agent_subagent_models = subagentModels.value.trim();
+    if (subagentModels) payload.agent_subagent_models = Array.from(selectedSubagentModels).join(',');
     try {
       await _postSettings(payload);
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
@@ -1572,9 +1711,14 @@ async function initAgentSettings() {
   if (supInput) supInput.addEventListener('change', save);
   if (subagentMode) subagentMode.addEventListener('change', function() {
     if (subagentModelsRow) subagentModelsRow.hidden = subagentMode.value !== 'selected_models';
+    if (subagentMode.value === 'selected_models' && !subagentInventory.length) loadSubagentModels(false);
     save();
   });
-  if (subagentModels) subagentModels.addEventListener('change', save);
+  if (subagentModelSearch) subagentModelSearch.addEventListener('input', renderSubagentModels);
+  if (subagentModelsRefresh) subagentModelsRefresh.addEventListener('click', function() {
+    loadSubagentModels(true);
+  });
+  if (subagentMode && subagentMode.value === 'selected_models') loadSubagentModels(false);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +

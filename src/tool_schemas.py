@@ -350,7 +350,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_subagent",
-            "description": "Delegate one bounded reasoning subtask to an Agent subagent. The child has no tools or extra permissions and returns evidence to this parent run. Available only when enabled in Agent settings.",
+            "description": "Create one bounded child agent for a subtask. If the user asks to create/spawn N subagents, call this tool N times with distinct objectives. Use this instead of create_session for subagents. The child has no tools or extra permissions and returns evidence to this parent run. Available only when enabled in Agent settings.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -367,7 +367,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_session",
-            "description": "Create a new chat for ongoing conversations with a specific model. (The UI calls these 'chats'; 'session' is the internal term.)",
+            "description": "Create a separate user-visible chat for an ongoing conversation. Never use this to create, spawn, or delegate to subagents; use delegate_subagent for child agents. (The UI calls these 'chats'; 'session' is the internal term.)",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -25212,6 +25212,56 @@ input.settings-select::placeholder { color: color-mix(in srgb, var(--fg) 35%, tr
   border-color: var(--red);
 }
 
+.subagent-models-row { align-items: flex-start; }
+.subagent-model-picker {
+  flex: 1;
+  min-width: 0;
+  max-width: 720px;
+}
+.subagent-model-picker-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.subagent-model-picker-toolbar .settings-select { width: 100%; }
+.subagent-model-list {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+}
+.subagent-model-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  cursor: pointer;
+}
+.subagent-model-option:last-child { border-bottom: 0; }
+.subagent-model-option:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.subagent-model-option input { margin: 2px 0 0; accent-color: var(--accent); }
+.subagent-model-option-name,
+.subagent-model-option-endpoint {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-model-option-name { font-size: 12px; color: var(--fg); }
+.subagent-model-option-endpoint { margin-top: 2px; font-size: 10px; opacity: .55; }
+.subagent-model-status { min-height: 16px; margin-top: 5px; font-size: 10px; opacity: .65; }
+.subagent-model-empty { padding: 12px; font-size: 11px; opacity: .6; }
+
+@media (max-width: 768px) {
+  .subagent-models-row { flex-direction: column; }
+  .subagent-models-row > .settings-label { min-width: 0; }
+  .subagent-model-picker { width: 100%; max-width: none; }
+  .subagent-model-list { max-height: 190px; }
+}
+
 @media (max-width: 768px) {
   /* Deep Research settings contain desktop-sized inline widths. On mobile,
      let each control claim the card width instead of escaping the admin block. */

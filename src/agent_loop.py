@@ -710,7 +710,7 @@ Suggest changes with explanations (for review/feedback requests).""",
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
-    "delegate_subagent": "- ```delegate_subagent``` — Delegate one bounded reasoning subtask to an enabled child agent. Args JSON: {\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}. The child has no tools or extra permissions; verify its result before using it.",
+    "delegate_subagent": "- ```delegate_subagent``` — Create one bounded child agent for one subtask. For N requested subagents, call it N times with different objectives; never use create_session for subagents. Args JSON: {\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}. The child has no tools or extra permissions; verify its result before using it.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
@@ -773,7 +773,7 @@ If `dtend` omitted, defaults to dtstart+1h (or +1d when `all_day: true`). \
 For a RECURRING event pass `rrule` as an iCalendar RRULE string, e.g. `"FREQ=WEEKLY;BYDAY=MO"` (every Monday), `"FREQ=DAILY;COUNT=10"`, or `"FREQ=MONTHLY;BYMONTHDAY=1"` — create ONE event with the rrule, do not loop creating many events. Do not pass `rrule` for "next Wednesday only", "just this once", or any single occurrence. \
 If the user asks for a reminder/alarm before the event, pass `reminder_minutes` as an integer; do not write reminder text into the event description and do NOT also call `manage_notes` for the same reminder because calendar reminders are routed through Notes automatically. \
 `calendar` accepts a name ("Main") or short-id prefix.""",
-    "create_session": "- ```create_session``` — Create a new chat. Line 1 = chat name, line 2 = model name. Use for background/parallel work.",
+    "create_session": "- ```create_session``` — Create a separate user-visible chat. Line 1 = chat name, line 2 = model name. Never use it for subagents; use delegate_subagent instead.",
     "list_sessions": "- ```list_sessions``` — List chats sorted MOST-RECENT FIRST (the UI calls them 'chats') with clickable chat-title links. Output includes a relative \"last active\" timestamp per row, so the first row is the user's most recent chat. Content = optional filter keyword (matches chat name). When answering, preserve the `[title](#session-id)` links exactly; do not convert them into plain text.",
     "send_to_session": "- ```send_to_session``` — Send a message to another session. Line 1 = session_id, rest = message. Use for orchestrating work across sessions.",
     "search_chats": "- ```search_chats``` — Search past session transcripts for direct conversation evidence. Use when user asks 'did we discuss X?', 'find the conversation about Y', or when prior chat context is more appropriate than persistent memory.",
@@ -4633,7 +4633,9 @@ async def stream_agent_loop(
             )
             _prepend_agent_directive(route_messages, (
                 "## SUBAGENTS\n"
-                "delegate_subagent is available for independent bounded reasoning tasks. "
+                "delegate_subagent is the only tool for child agents. If the user asks to create, spawn, "
+                "launch, or assign N subagents, call delegate_subagent exactly N times with distinct objectives. "
+                "Never use create_session for subagents; create_session only creates a separate user-visible chat. "
                 "Give each child only the context excerpt it needs, never secrets or the full transcript. "
                 "Children have no tools or extra permissions; verify their claims before acting. "
                 + _subagent_scope

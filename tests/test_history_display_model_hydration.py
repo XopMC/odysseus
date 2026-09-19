@@ -205,6 +205,37 @@ def test_rendered_total_counts_persisted_agent_round_bubbles(monkeypatch):
     engine.dispose()
 
 
+def test_message_count_endpoint_does_not_hydrate_latest_timeline(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=3)
+    db = db_factory()
+    try:
+        assistant = db.query(DbChatMessage).filter(DbChatMessage.id == "message-1").one()
+        assistant.meta_data = json.dumps({
+            "round_texts": ["large reasoning " * 2000] * 3,
+            "rendered_message_count": 3,
+        })
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(object()))
+
+    response = TestClient(app).get("/api/session/session-1/message-count")
+    assert response.status_code == 200
+    assert response.json() == {
+        "total": 3,
+        "canonical_visible_total": 3,
+        "rendered_total": 5,
+        "visible_total": 5,
+    }
+    assert "large reasoning" not in response.text
+    engine.dispose()
+
+
 def test_initial_history_page_is_bounded_by_rendered_bubbles(monkeypatch):
     engine, db_factory = _database()
     _seed_session(db_factory, message_count=6)

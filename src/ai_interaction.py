@@ -88,6 +88,7 @@ def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[
     from src.database import SessionLocal, ModelEndpoint
     from src.llm_core import _detect_provider, ANTHROPIC_MODELS
     from src.auth_helpers import owner_filter
+    from sqlalchemy import or_
 
     spec = spec.strip()
     target_endpoint_name = None
@@ -123,7 +124,14 @@ def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[
         if model_type:
             query = query.filter(ModelEndpoint.model_type == model_type)
         if target_endpoint_name:
-            query = query.filter(ModelEndpoint.name.ilike(f"%{target_endpoint_name}%"))
+            # Interactive model pickers persist an immutable endpoint id.  Keep
+            # accepting legacy display names, but prefer the exact id so a
+            # renamed endpoint or two similarly named endpoints cannot route a
+            # child to the wrong backend.
+            query = query.filter(or_(
+                ModelEndpoint.id == target_endpoint_name,
+                ModelEndpoint.name.ilike(f"%{target_endpoint_name}%"),
+            ))
         if owner:
             query = owner_filter(query, ModelEndpoint, owner)
         endpoints = query.all()

@@ -21,3 +21,12 @@ def test_older_history_is_requested_only_from_top_scroll_pager():
     assert "if (box.scrollTop > 90) return;" in source
     assert "_historyPager.offset - _historyPager.limit" in source
     assert "box.addEventListener('scroll', _historyPager.handler" in source
+
+
+def test_message_count_poll_does_not_fetch_latest_history_payload():
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+    assert "/api/session/${encodeURIComponent(sessionId)}/message-count" in source
+    count_fn = source.split("export async function refreshSessionMessageCount", 1)[1].split(
+        "export async function refreshSessionHistory", 1,
+    )[0]
+    assert "_historyUrl(" not in count_fn

@@ -1496,7 +1496,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260920contextcount2').then(mod => {
+    import('./sessions.js?v=20260920subagentsperf3').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -2725,6 +2725,11 @@ export function addMessage(role, content, modelName, metadata) {
     hideWelcomeScreen();
     const box = document.getElementById('chat-history');
     if (!box) { console.error('Chat history element not found'); return; }
+    // History pages can contain thousands of already-mounted nodes.  Keep all
+    // post-processing scoped to the children created by this call; querying
+    // the whole transcript after every restored DB row becomes O(n^2) and was
+    // the main Safari pause in long Agent chats.
+    const renderStartNode = box.lastElementChild;
 
     // Loading a later user message means any earlier ask_user card was
     // answered.  This also removes the live card as soon as a manual reply is
@@ -2934,10 +2939,14 @@ export function addMessage(role, content, modelName, metadata) {
         if (metadata) displayMetrics(firstWrap, metadata);
       }
 
+      const newRoots = [];
+      for (let node = renderStartNode ? renderStartNode.nextElementSibling : box.firstElementChild;
+           node; node = node.nextElementSibling) newRoots.push(node);
       if (window.hljs) {
-        box.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
+        newRoots.forEach(root => root.querySelectorAll('pre code:not(.hljs)')
+          .forEach(b => window.hljs.highlightElement(b)));
       }
-      if (markdownModule.renderMermaid) markdownModule.renderMermaid(box);
+      if (markdownModule.renderMermaid) newRoots.forEach(root => markdownModule.renderMermaid(root));
       if (pendingAskUser) {
         // Session history is rendered oldest-to-newest.  A later user message
         // removes this card; if there is none, the pending choice survives a

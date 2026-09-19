@@ -244,6 +244,68 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 return len(rounds)
         return 1
 
+    def _rendered_message_totals(db, session_id: str) -> tuple[int, int, int]:
+        """Count canonical/rendered rows without hydrating message metadata.
+
+        The sidebar/header poll used to call ``/api/history?...limit=1`` every
+        three seconds.  A long Agent turn stores megabytes of timeline metadata
+        on its final row, so even that one-row response repeatedly parsed and
+        serialized the entire payload.  Keep the count path aggregate-only.
+        """
+        hidden = func.coalesce(
+            func.json_extract(DbChatMessage.meta_data, "$.hidden"), 0,
+        ) == 1
+        synthetic_user = and_(
+            DbChatMessage.role == "user",
+            or_(
+                DbChatMessage.content == "Continue where you left off",
+                DbChatMessage.content.like("Your message was cut off.%"),
+                DbChatMessage.content.like("Your previous response was interrupted.%"),
+                DbChatMessage.content.like("%[Instruction: Rewrite%"),
+                DbChatMessage.content.like("%[Instruction: Explain%"),
+            ),
+        )
+        persisted_units = func.coalesce(
+            func.json_extract(DbChatMessage.meta_data, "$.rendered_message_count"), 0,
+        )
+        legacy_rounds = func.coalesce(func.json_array_length(func.json_extract(
+            DbChatMessage.meta_data, "$.round_texts",
+        )), 0)
+        assistant_units = case(
+            (persisted_units > 0, persisted_units),
+            (legacy_rounds > 1, legacy_rounds),
+            else_=1,
+        )
+        rendered_units = case(
+            (hidden, 0),
+            (synthetic_user, 0),
+            (DbChatMessage.role == "assistant", assistant_units),
+            else_=1,
+        )
+        total, canonical_visible, rendered = db.query(
+            func.count(DbChatMessage.id),
+            func.coalesce(func.sum(case((~hidden, 1), else_=0)), 0),
+            func.coalesce(func.sum(rendered_units), 0),
+        ).filter(DbChatMessage.session_id == session_id).one()
+        return int(total or 0), int(canonical_visible or 0), int(rendered or 0)
+
+    @router.get("/api/session/{session_id}/message-count")
+    async def get_session_message_count(request: Request, session_id: str) -> Dict[str, int]:
+        _verify_session_owner(request, session_id)
+        db = SessionLocal()
+        try:
+            if db.query(DbSession.id).filter(DbSession.id == session_id).first() is None:
+                raise HTTPException(404, f"Session '{session_id}' not found")
+            total, canonical_visible, rendered = _rendered_message_totals(db, session_id)
+            return {
+                "total": total,
+                "canonical_visible_total": canonical_visible,
+                "rendered_total": rendered,
+                "visible_total": rendered,
+            }
+        finally:
+            db.close()
+
     @router.get("/api/history/{session_id}")
     async def get_session_history(
         request: Request,
@@ -261,44 +323,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 if db_session is None:
                     raise HTTPException(404, f"Session '{session_id}' not found")
 
-                hidden = func.coalesce(
-                    func.json_extract(DbChatMessage.meta_data, "$.hidden"), 0,
-                ) == 1
-                synthetic_user = and_(
-                    DbChatMessage.role == "user",
-                    or_(
-                        DbChatMessage.content == "Continue where you left off",
-                        DbChatMessage.content.like("Your message was cut off.%"),
-                        DbChatMessage.content.like("Your previous response was interrupted.%"),
-                        DbChatMessage.content.like("%[Instruction: Rewrite%"),
-                        DbChatMessage.content.like("%[Instruction: Explain%"),
-                    ),
-                )
-                persisted_units = func.coalesce(
-                    func.json_extract(DbChatMessage.meta_data, "$.rendered_message_count"), 0,
-                )
-                legacy_rounds = func.coalesce(func.json_array_length(func.json_extract(
-                    DbChatMessage.meta_data, "$.round_texts",
-                )), 0)
-                assistant_units = case(
-                    (persisted_units > 0, persisted_units),
-                    (legacy_rounds > 1, legacy_rounds),
-                    else_=1,
-                )
-                rendered_units = case(
-                    (hidden, 0),
-                    (synthetic_user, 0),
-                    (DbChatMessage.role == "assistant", assistant_units),
-                    else_=1,
-                )
-                total, canonical_visible_total, rendered_total = db.query(
-                    func.count(DbChatMessage.id),
-                    func.coalesce(func.sum(case((~hidden, 1), else_=0)), 0),
-                    func.coalesce(func.sum(rendered_units), 0),
-                ).filter(DbChatMessage.session_id == session_id).one()
-                total = int(total or 0)
-                canonical_visible_total = int(canonical_visible_total or 0)
-                rendered_total = int(rendered_total or 0)
+                total, canonical_visible_total, rendered_total = _rendered_message_totals(db, session_id)
                 # The header count is server-authoritative and counts exactly
                 # what history can render. Hidden compaction/checkpoint rows
                 # remain in raw ``total`` for legacy cursor compatibility but

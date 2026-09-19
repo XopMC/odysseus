@@ -6,10 +6,10 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260920contextcount2';
+import sessionModule from './sessions.js?v=20260920subagentsperf3';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
-import { modelColor } from './chatRenderer.js?v=20260920contextcount2';
+import { modelColor } from './chatRenderer.js?v=20260920subagentsperf3';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
 import { modelRouteKey, isRouteFavorite, toggleRouteFavorite } from './model/routeIdentity.js';

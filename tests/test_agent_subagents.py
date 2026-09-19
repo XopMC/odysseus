@@ -41,6 +41,25 @@ def test_same_model_subagent_is_bounded_and_has_stable_child_identity(monkeypatc
     assert "Only parser.py" in captured["messages"][1]["content"]
 
 
+def test_same_model_setting_overrides_a_hallucinated_child_model(monkeypatch):
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: "same_model" if key == "agent_subagents_mode" else default)
+    captured = {}
+
+    async def complete(url, model, messages, **kwargs):
+        captured.update(url=url, model=model)
+        return "child ok"
+
+    monkeypatch.setattr("src.llm_core.llm_call_async", complete)
+    result = asyncio.run(tools.delegate_subagent(json.dumps({
+        "objective": "Check one part", "model": "sonnet",
+    }), {
+        "current_endpoint_url": "http://192.168.50.4:1234/v1/chat/completions",
+        "current_model": "qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved",
+    }))
+    assert result["exit_code"] == 0
+    assert captured["model"] == "qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved"
+
+
 def test_selected_subagent_model_is_an_exact_allowlist(monkeypatch):
     values = {
         "agent_subagents_mode": "selected_models",
@@ -104,8 +123,23 @@ def test_subagent_settings_and_timeline_contract_are_wired():
     loop = (root / "src/agent_loop.py").read_text(encoding="utf-8")
     assert 'id="set-agentSubagentsMode"' in html
     assert 'id="set-agentSubagentModels"' in html
+    assert 'id="set-agentSubagentModelsList"' in html
+    assert 'id="set-agentSubagentModelsRefresh"' in html
     assert 'id="overflow-subagents-btn"' in html
     assert "settingsModule.open('tools')" in app
     assert "agent_subagents_mode" in settings and "agent_subagent_models" in settings
+    assert "/api/team/models?refresh=true" in settings
+    assert "model) + '@' + String(endpointKey)" in settings
+    assert "Never use create_session for subagents" in loop
     assert '"type": "tool_inventory"' in loop
     assert '"child_run_id": result["child_run_id"]' in loop
+
+
+def test_long_history_post_processing_is_scoped_to_new_nodes():
+    root = Path(__file__).resolve().parents[1]
+    renderer = (root / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    style = (root / "static/style.css").read_text(encoding="utf-8")
+    assert "const renderStartNode = box.lastElementChild" in renderer
+    assert "newRoots.forEach(root => root.querySelectorAll('pre code:not(.hljs)')" in renderer
+    assert "box.querySelectorAll('pre code:not(.hljs)')" not in renderer
+    assert "content-visibility: auto" in style

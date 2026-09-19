@@ -312,6 +312,34 @@ def test_repeated_checkpoint_advances_over_new_messages_without_rewriting_histor
     assert "new checkpoint" in session.context_checkpoint.content
 
 
+def test_large_saved_transcript_does_not_reenter_working_context_after_checkpoint():
+    """UI history length and model-visible context are independent."""
+    from core.models import ChatMessage, Session
+
+    old_history = [ChatMessage("assistant", f"saved UI turn {index}") for index in range(6000)]
+    checkpoint = ChatMessage(
+        "system",
+        "[Conversation summary]\nDurable summary of the earlier work.",
+        {"compacted": True, "hidden": True, "context_checkpoint": True},
+    )
+    session = Session(
+        id="long-chat", name="long", endpoint_url="http://local/v1", model="worker",
+        history=old_history,
+        context_checkpoint=checkpoint,
+        context_checkpoint_count=len(old_history),
+    )
+    session.history.extend([
+        ChatMessage("user", "new guidance"),
+        ChatMessage("assistant", "new result"),
+    ])
+
+    model_messages = session.get_context_messages()
+    assert len(session.history) == 6002
+    assert [message["content"] for message in model_messages] == [
+        checkpoint.content, "new guidance", "new result",
+    ]
+
+
 class TestResearchPrimerPreserved:
     """A research-spinoff primer (metadata research_spinoff_from) must never be
     trimmed away — it is the Discuss chat's sole knowledge base (drift fix)."""
