@@ -26,7 +26,7 @@ def test_long_run_timers_and_offscreen_timeline_are_bounded():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260920parallelsubagents2"
+    expected = "20260920parallelsubagents3"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"

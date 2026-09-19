@@ -121,6 +121,7 @@ def test_subagent_settings_and_timeline_contract_are_wired():
     root = Path(__file__).resolve().parents[1]
     html = (root / "static/index.html").read_text(encoding="utf-8")
     settings = (root / "static/js/settings.js").read_text(encoding="utf-8")
+    style = (root / "static/style.css").read_text(encoding="utf-8")
     app = (root / "static/app.js").read_text(encoding="utf-8")
     loop = (root / "src/agent_loop.py").read_text(encoding="utf-8")
     assert 'id="set-agentSubagentsMode"' in html
@@ -137,6 +138,7 @@ def test_subagent_settings_and_timeline_contract_are_wired():
     assert '"type": "tool_inventory"' in loop
     assert "manage_subagents" in loop
     assert "BEFORE waiting" in loop
+    assert ".subagent-message-row[hidden] { display:none !important; }" in style
 
 
 def test_parallel_runtime_returns_immediately_and_caps_each_model_at_eight(monkeypatch):
