@@ -443,25 +443,26 @@ function _getEffectSize() {
 // Canvas themes used to repaint at the display refresh rate even while a long
 // Agent run was reconciling Markdown and tool cards. Safari then spent a
 // steady CPU core on decoration. Keep animation fluid when idle, but let chat
-// work win the frame budget during streaming.
+// work win the frame budget during streaming.  A throttled canvas must also
+// avoid registering a requestAnimationFrame callback on every display frame:
+// WebKit still wakes and accounts those callbacks even when they skip drawing.
 function _nextBgFrame(draw) {
-  requestAnimationFrame((timestamp) => {
-    const countText = document.getElementById('current-meta-count')?.textContent || '';
-    const visibleMessages = Number((countText.match(/\d[\d\s]*/) || ['0'])[0].replace(/\s/g, '')) || 0;
-    // A second browser reconnecting to an active run does not own the local
-    // send-state flag, so size is the cross-device signal. Beyond 500 rendered
-    // units, prioritize chat layout/streaming even when this tab is read-only.
-    const interval = (window.__odysseusChatBusy || visibleMessages >= 500)
-      ? 100
-      : 1000 / 30;
-    const last = Number(draw._odysseusLastFrame || 0);
-    if (!last || timestamp - last >= interval) {
+  const countText = document.getElementById('current-meta-count')?.textContent || '';
+  const visibleMessages = Number((countText.match(/\d[\d\s]*/) || ['0'])[0].replace(/\s/g, '')) || 0;
+  // A second browser reconnecting to an active run does not own the local
+  // send-state flag, so size is the cross-device signal. Large/streaming chats
+  // get a calm 4fps background; the timeout keeps WebKit asleep between draws.
+  const interval = (window.__odysseusChatBusy || visibleMessages >= 500)
+    ? 250
+    : 1000 / 30;
+  const elapsed = performance.now() - Number(draw._odysseusLastFrame || 0);
+  const wait = Math.max(0, interval - elapsed);
+  window.setTimeout(() => {
+    requestAnimationFrame((timestamp) => {
       draw._odysseusLastFrame = timestamp;
       draw();
-    } else {
-      _nextBgFrame(draw);
-    }
-  });
+    });
+  }, wait);
 }
 
 // Patterns where the intensity/size sliders have no visible effect.
