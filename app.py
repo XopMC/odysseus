@@ -1197,6 +1197,17 @@ async def _startup_event():
             logger.warning("[startup] detached chat recovery failed", exc_info=True)
 
     _startup_tasks.append(asyncio.create_task(_recover_detached_chat_work()))
+    async def _recover_auto_research_work():
+        try:
+            await asyncio.sleep(1.0)
+            from src.agent_tools.efficiency_tools import recover_research_drivers
+            count = await recover_research_drivers()
+            if count:
+                logger.info("[startup] resumed %d Auto-Research workflow(s)", count)
+        except Exception:
+            logger.warning("[startup] Auto-Research recovery failed", exc_info=True)
+
+    _startup_tasks.append(asyncio.create_task(_recover_auto_research_work()))
     if upload_cleanup_func:
         upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
     # Always-on monitor that auto-continues the agent when a background bash

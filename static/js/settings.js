@@ -1526,6 +1526,10 @@ async function initAgentSettings() {
   var subagentMode = el('set-agentSubagentsMode');
   var efficiencyProfile = el('set-agentEfficiencyProfile');
   var autoResearchLab = el('set-autoResearchLabEnabled');
+  var autoResearchMaxParallel = el('set-autoResearchMaxParallel');
+  var autoResearchMaxCandidates = el('set-autoResearchMaxCandidates');
+  var compactKeepRecent = el('set-agentCompactKeepRecent');
+  var compactMemoTokens = el('set-agentCompactMemoTokens');
   var subagentModels = el('set-agentSubagentModels');
   var subagentModelsRow = el('set-agentSubagentModelsRow');
   var subagentModelSearch = el('set-agentSubagentModelSearch');
@@ -1679,6 +1683,10 @@ async function initAgentSettings() {
     if (subagentMode) subagentMode.value = settings.agent_subagents_mode || 'off';
     if (efficiencyProfile) efficiencyProfile.value = settings.agent_efficiency_profile || 'performance';
     if (autoResearchLab) autoResearchLab.checked = !!settings.auto_research_lab_enabled;
+    if (autoResearchMaxParallel) autoResearchMaxParallel.value = settings.auto_research_max_parallel ?? 2;
+    if (autoResearchMaxCandidates) autoResearchMaxCandidates.value = settings.auto_research_max_candidates ?? 24;
+    if (compactKeepRecent) compactKeepRecent.value = settings.agent_online_compact_keep_recent_tokens ?? 20000;
+    if (compactMemoTokens) compactMemoTokens.value = settings.agent_online_compact_memo_tokens ?? 1000;
     var cacheRatio = document.getElementById('set-agentCacheRatio');
     var reducerEndpoint = document.getElementById('set-evidenceReducerEndpoint');
     var reducerModel = document.getElementById('set-evidenceReducerModel');
@@ -1708,6 +1716,10 @@ async function initAgentSettings() {
     if (subagentMode) payload.agent_subagents_mode = subagentMode.value;
     if (efficiencyProfile) payload.agent_efficiency_profile = efficiencyProfile.value;
     if (autoResearchLab) payload.auto_research_lab_enabled = !!autoResearchLab.checked;
+    if (autoResearchMaxParallel) payload.auto_research_max_parallel = clampInt(autoResearchMaxParallel.value, 1, 16, 2);
+    if (autoResearchMaxCandidates) payload.auto_research_max_candidates = clampInt(autoResearchMaxCandidates.value, 1, 256, 24);
+    if (compactKeepRecent) payload.agent_online_compact_keep_recent_tokens = clampInt(compactKeepRecent.value, 1000, 1000000, 20000);
+    if (compactMemoTokens) payload.agent_online_compact_memo_tokens = clampInt(compactMemoTokens.value, 128, 100000, 1000);
     var cacheRatio = document.getElementById('set-agentCacheRatio');
     var reducerEndpoint = document.getElementById('set-evidenceReducerEndpoint');
     var reducerModel = document.getElementById('set-evidenceReducerModel');
@@ -1734,6 +1746,9 @@ async function initAgentSettings() {
   });
   if (efficiencyProfile) efficiencyProfile.addEventListener('change', save);
   if (autoResearchLab) autoResearchLab.addEventListener('change', save);
+  [autoResearchMaxParallel, autoResearchMaxCandidates, compactKeepRecent, compactMemoTokens].forEach(function(input) {
+    if (input) input.addEventListener('change', save);
+  });
   ['set-agentCacheRatio', 'set-evidenceReducerEndpoint', 'set-evidenceReducerModel'].forEach(function(id) {
     var el = document.getElementById(id); if (el) el.addEventListener('change', save);
   });

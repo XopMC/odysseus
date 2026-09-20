@@ -121,11 +121,15 @@ explicitly.
   reproductions and rejected hypotheses. Candidate snapshots are immutable and
   require a verdict from a different child before acceptance.
 - **Auto-Research Lab** — disabled by default. When explicitly enabled it keeps
-  a frozen baseline, a bounded candidate lineage, fixed gates, train metrics,
-  Pareto selection and sealed held-out measurements. The A/B harness records
+  a frozen baseline, immutable train/held-out environments, bounded independent
+  trajectories, map/reduce synthesis, separate proposer/implementer/reviewer
+  roles, revision loops, atomic worker leases, train metrics, Pareto selection
+  and sealed held-out measurements whose metric values are never returned to
+  research workers. The A/B harness records
   tokens, requests, TTFT, duration, completion and quality against a frozen task
-  set (`benchmarks/agent_harness_long_tasks.json`). The lab records candidate
-  evidence only and never authorizes or performs deployment.
+  set (`benchmarks/agent_harness_long_tasks.json`). Its append-only audit ledger
+  binds every stage and output hash. The lab records candidate evidence only and
+  never authorizes or performs deployment.
 
 ### Важно
 

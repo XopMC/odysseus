@@ -793,6 +793,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             "observation_pack_object_max_bytes": (1024, 268_435_456),
             "auto_research_max_candidates": (1, 256),
             "auto_research_max_parallel": (1, 16),
+            "agent_online_compact_keep_recent_tokens": (1_000, 1_000_000),
+            "agent_online_compact_memo_tokens": (128, 100_000),
         }
         for key in DEFAULT_SETTINGS:
             if key in RETIRED_SETTING_KEYS:

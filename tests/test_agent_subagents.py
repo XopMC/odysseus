@@ -24,7 +24,7 @@ def test_child_runtime_has_stable_file_and_verification_tool_core():
     assert CHILD_CORE_TOOLS == {
         "get_workspace", "ls", "glob", "grep", "read_file", "write_file",
         "edit_file", "apply_patch", "bash", "python", "read_tool_artifact",
-        "publish_subagent_evidence", "todowrite",
+        "publish_subagent_evidence", "manage_auto_research_lab", "todowrite",
     }
 
 

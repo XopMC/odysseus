@@ -3,8 +3,118 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import time
 
 from src.observation_pack import recall
+
+
+_research_drivers: dict[str, asyncio.Task] = {}
+
+
+async def _drive_research(owner, experiment_id: str, ctx: dict) -> None:
+    """Durable queue driver; workers are independent real subagents."""
+    from src import auto_research_lab as lab
+    from src.agent_tools.model_interaction_tools import delegate_subagent
+    started = time.monotonic()
+    failures = 0
+    while time.monotonic() - started < 7200:
+        lab.recover_expired_work(owner, experiment_id)
+        snapshot = lab.workflow_snapshot(owner, experiment_id)
+        if snapshot.get("error") or snapshot.get("status") != "open":
+            return
+        stages = snapshot.get("stages") or []
+        queued = [item for item in stages if item.get("status") == "queued"]
+        running = [item for item in stages if item.get("status") == "running"]
+        if not queued and not running:
+            trained = any(item.get("stage") == "train" and item.get("status") == "completed"
+                          for item in stages)
+            heldout_started = any(item.get("stage") == "heldout" for item in stages)
+            if trained and not heldout_started:
+                selection = lab.select_pareto(owner, experiment_id)
+                if selection.get("selected"):
+                    continue
+            return
+        if not queued:
+            await asyncio.sleep(1.5); continue
+        claimed = lab.claim_work(owner, experiment_id, worker_id="research-driver",
+                                 event_id=queued[0]["event_id"], lease_seconds=900)
+        work = claimed.get("work")
+        if not work:
+            await asyncio.sleep(.5); continue
+        role = work["actor_role"]
+        assignment = dict(work.get("input") or {})
+        if work.get("sealed_assignment"):
+            assignment["sealed_environment"] = work["sealed_assignment"]
+        objective = (
+            f"You are the independent {role} worker for blind Auto-Research experiment {experiment_id}. "
+            f"Execute only stage {work['stage']} iteration {work['iteration']}. Input: "
+            f"{json.dumps(assignment, ensure_ascii=False)}. Use the project tools and verifier evidence. "
+            "Do not inspect other workflow stages, train results, or held-out results. "
+            "When finished, call manage_auto_research_lab exactly once with action=submit_work, "
+            f"experiment_id={experiment_id}, event_id={work['event_id']}, "
+            f"lease_token={claimed['lease_token']}, outcome=completed, and a structured output object. "
+            "A proposal needs parent_sha and hypothesis; candidate_sha is optional until implementation. "
+            "An implementation must commit its work and return candidate_sha. Reviewer verdict must be "
+            "accept, revise, or reject. Validation outputs must contain numeric metrics."
+        )
+        spawn = await delegate_subagent(json.dumps({
+            "objective": objective, "context": "Blind role-scoped assignment. Never request hidden held-out feedback.",
+            "model": "auto", "timeout_seconds": 850,
+        }), ctx)
+        if spawn.get("error"):
+            lab.release_work(owner, experiment_id, event_id=work["event_id"],
+                             lease_token=claimed["lease_token"], reason=spawn["error"])
+            failures += 1
+            if failures >= 3:
+                return
+            await asyncio.sleep(2)
+        else:
+            failures = 0
+            await asyncio.sleep(.25)
+
+
+async def recover_research_drivers() -> int:
+    """Resume durable open workflows after a web-process restart."""
+    from src.settings import get_setting
+    if not bool(get_setting("auto_research_lab_enabled", False)):
+        return 0
+    from core.database import AutoResearchExperiment, AutoResearchStageEvent, Session, SessionLocal
+    from routes.prefs_routes import get_access_mode_for_user
+    db = SessionLocal()
+    try:
+        experiments = db.query(AutoResearchExperiment).filter(
+            AutoResearchExperiment.status == "open",
+        ).all()
+        resumable = []
+        for exp in experiments:
+            unfinished = db.query(AutoResearchStageEvent).filter(
+                AutoResearchStageEvent.experiment_id == exp.id,
+                AutoResearchStageEvent.status.in_(["queued", "running"]),
+            ).count()
+            session = db.query(Session).filter(Session.id == exp.session_id).first() if exp.session_id else None
+            if unfinished and session:
+                resumable.append((exp.id, exp.owner, exp.candidate_worktree, session.id,
+                                  session.endpoint_url, session.model, dict(session.headers or {})))
+    finally:
+        db.close()
+    started = 0
+    for experiment_id, owner, workspace, session_id, endpoint_url, model, headers in resumable:
+        prior = _research_drivers.get(experiment_id)
+        if prior and not prior.done():
+            continue
+        ctx = {
+            "owner": owner or None, "session_id": session_id, "workspace": workspace,
+            "current_endpoint_url": endpoint_url, "current_model": model,
+            "current_headers": headers, "access_mode": get_access_mode_for_user(owner or None),
+            "subagent_state": {"started": 0},
+        }
+        _research_drivers[experiment_id] = asyncio.create_task(
+            _drive_research(owner or None, experiment_id, ctx),
+            name=f"auto-research-recover-{experiment_id[:8]}",
+        )
+        started += 1
+    return started
 
 
 class ReadToolArtifactTool:
@@ -51,6 +161,11 @@ class ManageAutoResearchLabTool:
             action = str(args.get("action") or "list")
         except (TypeError, ValueError, AttributeError):
             return {"error": "Auto-Research arguments must be an object", "exit_code": 1}
+        subagent = isinstance(ctx.get("subagent_state"), dict) and bool(
+            (ctx.get("subagent_state") or {}).get("child_run_id")
+        )
+        if subagent and action != "submit_work":
+            return {"error": "Role workers cannot inspect or control the global research workflow", "exit_code": 1}
         if action == "list":
             return lab.list_experiments(ctx.get("owner"))
         if action == "create":
@@ -59,6 +174,12 @@ class ManageAutoResearchLabTool:
                 baseline_sha=args.get("baseline_sha"),
                 candidate_worktree=args.get("candidate_worktree"),
                 gates=args.get("gates") or [], objectives=args.get("objectives") or [],
+            )
+        if action == "configure_environment":
+            return lab.configure_environment(
+                ctx.get("owner"), str(args.get("experiment_id") or ""),
+                split=str(args.get("split") or ""), root=str(args.get("root") or ""),
+                manifest=args.get("manifest") or {},
             )
         if action == "record":
             return lab.record(
@@ -79,6 +200,51 @@ class ManageAutoResearchLabTool:
         if action == "claim":
             return lab.claim(ctx.get("owner"), str(args.get("experiment_id") or ""),
                              str(args.get("candidate_id") or ""), str(args.get("split") or ""))
+        if action == "start_lineage":
+            result = lab.start_lineage(
+                ctx.get("owner"), str(args.get("experiment_id") or ""),
+                hypothesis=args.get("hypothesis") or "",
+                trajectory_count=args.get("trajectory_count") or 3,
+            )
+            if result.get("exit_code") == 0 and args.get("auto_run", True):
+                experiment_id = str(args.get("experiment_id") or "")
+                prior = _research_drivers.get(experiment_id)
+                if not prior or prior.done():
+                    _research_drivers[experiment_id] = asyncio.create_task(
+                        _drive_research(ctx.get("owner"), experiment_id, dict(ctx)),
+                        name=f"auto-research-{experiment_id[:8]}",
+                    )
+                result["driver_status"] = "running"
+            return result
+        if action == "claim_work":
+            return lab.claim_work(
+                ctx.get("owner"), str(args.get("experiment_id") or ""),
+                worker_id=str(args.get("worker_id") or (ctx.get("child_run_id") or "parent")),
+                actor_role=str(args.get("actor_role") or ""),
+                lease_seconds=args.get("lease_seconds") or 900,
+                event_id=str(args.get("event_id") or ""),
+            )
+        if action == "submit_work":
+            return lab.submit_work(
+                ctx.get("owner"), str(args.get("experiment_id") or ""),
+                event_id=str(args.get("event_id") or ""),
+                lease_token=str(args.get("lease_token") or ""),
+                output=args.get("output") or {}, outcome=str(args.get("outcome") or "completed"),
+            )
+        if action == "workflow":
+            return lab.workflow_snapshot(
+                ctx.get("owner"), str(args.get("experiment_id") or ""),
+                cursor=args.get("cursor") or 0,
+            )
+        if action == "run_workflow":
+            experiment_id = str(args.get("experiment_id") or "")
+            prior = _research_drivers.get(experiment_id)
+            if not prior or prior.done():
+                _research_drivers[experiment_id] = asyncio.create_task(
+                    _drive_research(ctx.get("owner"), experiment_id, dict(ctx)),
+                    name=f"auto-research-{experiment_id[:8]}",
+                )
+            return {"experiment_id": experiment_id, "driver_status": "running", "exit_code": 0}
         if action in {"pause", "resume", "close"}:
             return lab.set_status(ctx.get("owner"), str(args.get("experiment_id") or ""),
                                   {"pause": "paused", "resume": "open", "close": "closed"}[action])

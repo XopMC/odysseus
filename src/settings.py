@@ -129,6 +129,8 @@ DEFAULT_SETTINGS = {
     # Relative cost of one cache write compared with one cache read. Captured
     # once per run so a settings edit cannot move the economic boundary mid-run.
     "agent_cache_write_read_ratio": 12.5,
+    "agent_online_compact_keep_recent_tokens": 20_000,
+    "agent_online_compact_memo_tokens": 1_000,
     "auto_research_max_candidates": 24,
     "auto_research_max_parallel": 2,
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the

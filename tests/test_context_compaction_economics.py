@@ -7,11 +7,11 @@ def test_waits_for_boundary_below_emergency():
     assert not d.compact and d.reason == "awaiting_plan_boundary"
 
 
-def test_compacts_when_boundary_savings_pay_for_rewrite():
+def test_default_cache_price_defers_when_horizon_does_not_pay_for_rewrite():
     d = decide(at_boundary=True, used_tokens=70_000, input_budget=100_000,
                completed_boundaries=4, tokens_since_boundary=20_000)
-    assert d.compact and d.reason == "economic_plan_boundary"
-    assert d.estimated_savings > d.rewrite_cost
+    assert not d.compact and d.reason == "deferred_economic"
+    assert d.breakeven_requests > d.expected_remaining_requests
 
 
 def test_window_protection_does_not_wait_for_boundary():

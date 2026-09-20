@@ -348,6 +348,19 @@ class ChatContextCompaction(Base):
     )
 
 
+class ChatContextEfficiencyState(TimestampMixin, Base):
+    """Versioned Online Context Compact economics state for one chat."""
+    __tablename__ = "chat_context_efficiency_states"
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    state = Column(JSON, nullable=False, default=dict)
+    revision = Column(Integer, nullable=False, default=1)
+    __table_args__ = (
+        Index("uq_context_efficiency_owner_session", "owner", "session_id", unique=True),
+    )
+
+
 class ChatSubagentRun(TimestampMixin, Base):
     """Durable child-Agent identity owned by one ordinary chat."""
     __tablename__ = "chat_subagent_runs"
@@ -501,6 +514,83 @@ class AutoResearchCandidate(Base):
     __table_args__ = (
         Index("uq_auto_research_candidate_sha", "experiment_id", "candidate_sha", unique=True),
         Index("uq_auto_research_candidate_ordinal", "experiment_id", "ordinal", unique=True),
+    )
+
+
+class AutoResearchStageEvent(Base):
+    """Append-only workflow stage with role-scoped public and sealed output."""
+    __tablename__ = "auto_research_stage_events"
+    id = Column(String, primary_key=True)
+    experiment_id = Column(String, ForeignKey("auto_research_experiments.id", ondelete="CASCADE"), nullable=False, index=True)
+    candidate_id = Column(String, ForeignKey("auto_research_candidates.id", ondelete="CASCADE"), nullable=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    lineage_id = Column(String, nullable=False, index=True)
+    stage = Column(String, nullable=False, index=True)
+    iteration = Column(Integer, nullable=False, default=1)
+    actor_role = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued", index=True)
+    public_payload = Column(JSON, nullable=False, default=dict)
+    sealed_payload = Column(EncryptedText, nullable=True)
+    input_hash = Column(String, nullable=False)
+    output_hash = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    __table_args__ = (
+        Index("ix_auto_research_stage_queue", "experiment_id", "status", "stage", "created_at"),
+    )
+
+
+class AutoResearchLease(Base):
+    """Single atomic worker lease for one stage event."""
+    __tablename__ = "auto_research_leases"
+    id = Column(String, primary_key=True)
+    event_id = Column(String, ForeignKey("auto_research_stage_events.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    experiment_id = Column(String, ForeignKey("auto_research_experiments.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    worker_id = Column(String, nullable=False, index=True)
+    actor_role = Column(String, nullable=False)
+    slot = Column(Integer, nullable=False)
+    token_hash = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="active", index=True)
+    revision = Column(Integer, nullable=False, default=1)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    released_at = Column(DateTime, nullable=True)
+    __table_args__ = (
+        Index("uq_auto_research_lease_slot", "experiment_id", "slot", unique=True),
+    )
+
+
+class AutoResearchAuditEvent(Base):
+    """Immutable replay journal for workflow scheduling and results."""
+    __tablename__ = "auto_research_audit_events"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    experiment_id = Column(String, ForeignKey("auto_research_experiments.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    lineage_id = Column(String, nullable=False, index=True)
+    event_id = Column(String, nullable=True, index=True)
+    kind = Column(String, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    content_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("ix_auto_research_audit_cursor", "owner", "experiment_id", "id"),
+    )
+
+
+class AutoResearchEnvironment(Base):
+    """Frozen train/held-out environment; held-out manifest is role-sealed."""
+    __tablename__ = "auto_research_environments"
+    id = Column(String, primary_key=True)
+    experiment_id = Column(String, ForeignKey("auto_research_experiments.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    split = Column(String, nullable=False)
+    root = Column(Text, nullable=False)
+    manifest_hash = Column(String, nullable=False)
+    sealed_manifest = Column(EncryptedText, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("uq_auto_research_environment_split", "experiment_id", "split", unique=True),
     )
 
 

@@ -2602,6 +2602,10 @@ def setup_chat_routes(
                         exact_approval=exact_tool_approval,
                         access_mode=access_mode,
                         initial_context_compactions=_initial_context_compactions,
+                        context_correction=(
+                            not goal_continuation
+                            and not tool_approval_continuation
+                        ),
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:

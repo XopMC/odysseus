@@ -86,3 +86,20 @@ def test_owner_quota_and_session_cleanup(monkeypatch, tmp_path):
     assert pack.delete_session("alice", "s1") is True
     assert pack.owner_usage("alice") == 0
     assert pack.owner_usage("bob") == 12_000
+
+
+def test_append_only_ledger_records_full_placeholder_and_recall(monkeypatch, tmp_path):
+    monkeypatch.setattr(pack, "DATA_DIR", str(tmp_path))
+    body = "line\n" * 3000
+    tool = {"role": "tool", "content": body,
+            "_observation_source": {"tool_name": "bash", "tool_call_id": "call-ledger"}}
+    pack.project_messages([tool], owner="alice", session_id="s1")
+    projected, _ = pack.project_messages([
+        tool, {"role": "assistant", "content": "one"}, {"role": "assistant", "content": "two"},
+    ], owner="alice", session_id="s1")
+    oid = next(line.split(": ", 1)[1] for line in projected[0]["content"].splitlines() if line.startswith("id: "))
+    pack.recall("alice", "s1", oid, 0)
+    ledger = (pack._scope("alice", "s1") / "ledger.jsonl").read_text()
+    assert '"event": "full"' in ledger
+    assert '"event": "placeholder"' in ledger
+    assert '"event": "recall"' in ledger

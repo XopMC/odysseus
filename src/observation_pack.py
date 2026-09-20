@@ -8,12 +8,14 @@ full result twice.  Storage/recall failures are deliberately fail-open.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import fcntl
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from src.constants import DATA_DIR
@@ -92,6 +94,19 @@ def delete_session(owner: Optional[str], session_id: Optional[str]) -> bool:
 def observation_id(tool_name: str, tool_call_id: str, text: str) -> str:
     content_hash = _hash(text)
     return "obs_" + _hash(f"{tool_name}\0{tool_call_id}\0{content_hash}")[:24]
+
+
+def _journal(owner: Optional[str], session_id: Optional[str], event: str, **payload) -> None:
+    path = _scope(owner, session_id) / "ledger.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        record = {"timestamp": datetime.now(timezone.utc).isoformat(), "event": event, **payload}
+        os.write(fd, (json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN); os.close(fd)
 
 
 def archive(owner: Optional[str], session_id: Optional[str], *, tool_name: str,
@@ -198,7 +213,19 @@ def project_messages(messages: list[dict], *, owner: Optional[str],
                 replacement = placeholder(meta, content)
                 message["content"] = replacement
                 packed += 1
-                removed += max(0, len(content.encode("utf-8")) - len(replacement.encode("utf-8")))
+                saved = max(0, len(content.encode("utf-8")) - len(replacement.encode("utf-8")))
+                removed += saved
+                _journal(owner, session_id, "placeholder", id=meta["id"],
+                         request=count + 1, send_number=assistant_after[index] + 1,
+                         tool=meta["tool"], original_bytes=meta["bytes"],
+                         original_lines=meta["lines"], content_hash=meta["sha256"],
+                         placeholder_bytes=len(replacement.encode()), removed_bytes=saved,
+                         removed_tokens=(saved + 3) // 4)
+            elif meta:
+                _journal(owner, session_id, "full", id=meta["id"], request=count + 1,
+                         send_number=assistant_after[index] + 1, tool=meta["tool"],
+                         original_bytes=meta["bytes"], original_lines=meta["lines"],
+                         original_tokens=(meta["bytes"] + 3) // 4, content_hash=meta["sha256"])
         except (OSError, ValueError):
             # Fail open: the exact original remains in the provider request.
             pass
@@ -233,7 +260,7 @@ def recall(owner: Optional[str], session_id: Optional[str], observation_id_value
         end -= 1
     chunk = data[:end]
     next_offset = offset + len(chunk)
-    return {
+    result = {
         "id": observation_id_value,
         "offset": offset,
         "next_offset": next_offset,
@@ -241,3 +268,9 @@ def recall(owner: Optional[str], session_id: Optional[str], observation_id_value
         "bytes": len(chunk),
         "text": chunk.decode("utf-8"),
     }
+    try:
+        _journal(owner, session_id, "recall", id=observation_id_value,
+                 offset=offset, next_offset=next_offset, eof=result["eof"], bytes=len(chunk))
+    except OSError:
+        pass
+    return result

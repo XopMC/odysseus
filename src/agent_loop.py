@@ -3648,6 +3648,7 @@ async def stream_agent_loop(
     defer_context_shaping: bool = False,
     guidance_provider=None,
     child_run_id: Optional[str] = None,
+    context_correction: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -4789,6 +4790,28 @@ async def stream_agent_loop(
         ))
     except (TypeError, ValueError):
         _economic_cache_ratio = 12.5
+    try:
+        from src.context_efficiency_state import restore as _restore_efficiency_state
+        _economic_state = _restore_efficiency_state(owner, session_id, _economic_cache_ratio)
+        # Like SoL-Pi, one session keeps the ratio it started with even if the
+        # setting changes or the selected model changes later.
+        _economic_cache_ratio = float(_economic_state["cache_write_read_ratio"])
+    except Exception:
+        logger.exception("Failed to restore Online Context Compact state")
+        _economic_state = {
+            "completed_boundary_request_counts": [], "plan": [],
+            "positive_context_delta_total": 0.0, "positive_context_delta_count": 0,
+            "native_compaction_count": 0, "cache_debt_tokens": 0.0,
+            "cache_debt_repayment_tokens": 0.0,
+        }
+    if context_correction and _efficiency_enabled("online_context_compact"):
+        try:
+            from src.context_efficiency_state import record_correction as _record_economic_correction
+            _economic_state = _record_economic_correction(
+                owner, session_id, _economic_cache_ratio,
+            )
+        except Exception:
+            logger.exception("Failed to persist Online Context Compact correction")
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
     # stuck firing the same tool call over and over with no text — burns
@@ -5175,6 +5198,7 @@ async def stream_agent_loop(
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
 
+        _round_had_correction = False
         if active_goal and session_id:
             try:
                 from src.chat_work_store import store as _chat_work_store
@@ -5190,6 +5214,7 @@ async def stream_agent_loop(
                         "role": "user",
                         "content": "Additional user guidance for the active Goal:\n" + str(item.get("text") or ""),
                     })
+                    _round_had_correction = True
             except Exception:
                 logger.exception("Failed to refresh active Goal guidance")
 
@@ -5208,8 +5233,19 @@ async def stream_agent_loop(
                             "role": "user",
                             "content": "Additional user guidance for this subagent:\n" + text,
                         })
+                        _round_had_correction = True
             except Exception:
                 logger.exception("Failed to refresh subagent guidance")
+
+        if _round_had_correction and _efficiency_enabled("online_context_compact"):
+            try:
+                from src.context_efficiency_state import record_correction as _record_economic_correction
+                _economic_state = _record_economic_correction(
+                    owner, session_id, _economic_cache_ratio,
+                )
+                _economic_boundary_pending = False
+            except Exception:
+                logger.exception("Failed to reset Online Context Compact after guidance")
 
         _selected_route_changed = False
         if history_session is not None:
@@ -5358,12 +5394,37 @@ async def stream_agent_loop(
         _configured_telemetry = None
         if _efficiency_enabled("online_context_compact"):
             from src.context_compaction_economics import decide as _economic_compaction_decide
+            try:
+                _keep_recent = max(1000, int(get_setting("agent_online_compact_keep_recent_tokens", 20_000) or 20_000))
+                _memo_tokens = max(128, int(get_setting("agent_online_compact_memo_tokens", 1_000) or 1_000))
+            except (TypeError, ValueError):
+                _keep_recent, _memo_tokens = 20_000, 1_000
+            _measured_tokens = int(_before_context * _context_calibration)
+            _archive_tokens = max(0, _measured_tokens - _keep_recent)
+            _growth_count = int(_economic_state.get("positive_context_delta_count") or 0)
+            _average_growth = (
+                float(_economic_state.get("positive_context_delta_total") or 0) / _growth_count
+                if _growth_count else None
+            )
+            _remaining_boundaries = sum(
+                1 for step in (_economic_state.get("plan") or [])
+                if isinstance(step, dict) and step.get("status") not in {"done", "completed"}
+            )
             _economic_decision = _economic_compaction_decide(
                 at_boundary=_economic_boundary_pending,
-                used_tokens=int(_before_context * _context_calibration),
-                input_budget=max(1, _working_limit),
-                completed_boundaries=_economic_completed_boundaries,
-                tokens_since_boundary=max(0, _before_context - _economic_last_boundary_tokens),
+                write_tokens=_measured_tokens, archive_tokens=_archive_tokens,
+                memo_tokens=_memo_tokens, context_tokens=_measured_tokens,
+                completed_boundary_request_counts=list(
+                    _economic_state.get("completed_boundary_request_counts") or []
+                ) if _economic_boundary_pending else None,
+                remaining_boundaries=_remaining_boundaries,
+                average_context_token_increment=_average_growth,
+                context_window_tokens=_last_route_context_length or context_length or None,
+                prior_compaction_count=int(_economic_state.get("native_compaction_count") or 0),
+                carried_debt_tokens=float(_economic_state.get("cache_debt_tokens") or 0),
+                cache_debt_repayment_tokens=float(
+                    _economic_state.get("cache_debt_repayment_tokens") or 0
+                ),
                 cache_write_read_ratio=_economic_cache_ratio,
             )
             if _economic_decision.compact:
@@ -5396,6 +5457,19 @@ async def stream_agent_loop(
             _context_compactions += 1
             _economic_boundary_pending = False
             _economic_last_boundary_tokens = estimate_tokens(messages)
+            if _economic_decision and _efficiency_enabled("online_context_compact"):
+                try:
+                    from src.context_efficiency_state import record_compaction as _record_economic_compaction
+                    _economic_state = _record_economic_compaction(
+                        owner, session_id, _economic_cache_ratio,
+                        debt_tokens=_economic_decision.write_tokens
+                        * (_economic_decision.incremental_cache_cost_ratio or 0),
+                        repayment_tokens=max(
+                            0, _economic_decision.archive_tokens - _economic_decision.memo_tokens
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to persist Online Context Compact state")
             _active_route_state["messages"] = messages
             _active_route_state.pop("request_messages", None)
             checkpoint_message = next(
@@ -5706,6 +5780,15 @@ async def stream_agent_loop(
             bool(all_tool_schemas),
             agent_stream_timeout,
         )
+        if _efficiency_enabled("online_context_compact"):
+            try:
+                from src.context_efficiency_state import record_provider_request as _record_provider_request
+                _economic_state = _record_provider_request(
+                    owner, session_id, _economic_cache_ratio,
+                    estimate_tokens(messages) + _schema_tokens,
+                )
+            except Exception:
+                logger.exception("Failed to record Online Context Compact request")
         async for chunk in stream_llm_with_fallback(
             _candidates,
             messages,
@@ -7157,6 +7240,21 @@ async def stream_agent_loop(
                 if isinstance(_plan_update, dict) and _plan_update.get("status") == "done":
                     _economic_boundary_pending = True
                     _economic_completed_boundaries += 1
+                    if _efficiency_enabled("online_context_compact"):
+                        try:
+                            from src.context_efficiency_state import record_boundary as _record_economic_boundary
+                            from src.chat_work_store import store as _chat_work_store
+                            _work_snapshot = _chat_work_store.get(owner, session_id) if session_id else {}
+                            _plan_snapshot = ((_work_snapshot or {}).get("plan") or {}).get("steps") or []
+                            _economic_state = _record_economic_boundary(
+                                owner, session_id, _economic_cache_ratio, list(_plan_snapshot), {
+                                    "step_id": str(_plan_update.get("step_id") or ""),
+                                    "verification": str(_plan_update.get("verification") or ""),
+                                    "round": round_num,
+                                },
+                            )
+                        except Exception:
+                            logger.exception("Failed to persist Online Context Compact boundary")
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
@@ -7164,16 +7262,17 @@ async def stream_agent_loop(
             # Efficiency profile: large diagnostic logs may be replaced in the
             # next model request by a cryptographically bound evidence receipt.
             # The UI/timeline above always retains the original tool output.
-            if _efficiency_enabled("evidence_reducer") and block.tool_type == "bash":
+            if _efficiency_enabled("evidence_reducer"):
                 try:
-                    from src.evidence_reducer import reduce as _reduce_evidence
+                    from src.evidence_reducer import (
+                        candidate_from_result as _evidence_candidate,
+                        reduce as _reduce_evidence,
+                    )
                     from src.endpoint_resolver import resolve_endpoint as _resolve_reducer_endpoint
                     from src.llm_core import llm_call_async as _reducer_llm_call
-                    _raw_parts = []
-                    for _key in ("stdout", "stderr", "output"):
-                        if result.get(_key):
-                            _raw_parts.append(str(result[_key]))
-                    _raw_diagnostic = "\n".join(_raw_parts)
+                    _candidate = _evidence_candidate(block.tool_type, block.content, result)
+                    if not _candidate:
+                        raise LookupError("not a reducible diagnostic result")
                     _util_url, _util_model, _util_headers = _resolve_reducer_endpoint(
                         "evidence_reducer", fallback_url=_last_route_endpoint_url or endpoint_url,
                         fallback_model=model, fallback_headers=headers, owner=owner,
@@ -7192,8 +7291,10 @@ async def stream_agent_loop(
                     )
                     _reduced = await _reduce_evidence(
                         owner=owner, session_id=session_id, tool_call_id=str(_native_id),
-                        tool="bash", command=block.content, text=_raw_diagnostic,
-                        exit_code=int(result.get("exit_code") or 0), llm_call=_call_reducer,
+                        tool=block.tool_type, command=_candidate["command"], text=_candidate["text"],
+                        exit_code=_candidate["exit_code"], llm_call=_call_reducer,
+                        route={"endpoint_id": str(get_setting("evidence_reducer_endpoint_id", "") or ""),
+                               "model": _util_model or model},
                     )
                     if _reduced:
                         formatted = _reduced["text"]
@@ -7203,6 +7304,8 @@ async def stream_agent_loop(
                             "endpoint_url": _util_url or endpoint_url,
                             "model": _util_model or model,
                         }
+                except LookupError:
+                    pass
                 except Exception:
                     logger.exception("Evidence reducer failed open")
             tool_results.append(formatted)
