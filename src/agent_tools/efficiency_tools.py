@@ -43,6 +43,24 @@ async def _drive_research(owner, experiment_id: str, ctx: dict) -> None:
         if not work:
             await asyncio.sleep(.5); continue
         role = work["actor_role"]
+        if work.get("stage") == "heldout":
+            try:
+                from src.auto_research_isolation import run_heldout
+                output = await run_heldout(owner, experiment_id, event_id=work["event_id"],
+                                           lease_token=claimed["lease_token"])
+                result = lab.submit_work(owner, experiment_id, event_id=work["event_id"],
+                                         lease_token=claimed["lease_token"], output=output)
+                if result.get("exit_code") != 0:
+                    raise RuntimeError(result.get("error") or "Held-out result was rejected")
+                failures = 0
+            except Exception as exc:
+                lab.release_work(owner, experiment_id, event_id=work["event_id"],
+                                 lease_token=claimed["lease_token"], reason=str(exc)[:1000])
+                failures += 1
+                if failures >= 3:
+                    return
+                await asyncio.sleep(2)
+            continue
         assignment = dict(work.get("input") or {})
         if work.get("sealed_assignment"):
             assignment["sealed_environment"] = work["sealed_assignment"]
@@ -169,17 +187,44 @@ class ManageAutoResearchLabTool:
         if action == "list":
             return lab.list_experiments(ctx.get("owner"))
         if action == "create":
+            from src.auto_research_isolation import validate_git
+            runner_host_id = str(args.get("runner_host_id") or "")
+            baseline_sha = str(args.get("baseline_sha") or "").lower()
+            candidate_worktree = str(args.get("candidate_worktree") or "")
+            try:
+                await validate_git(ctx.get("owner"), runner_host_id, candidate_worktree,
+                                   baseline_sha, scope="auto-research-create")
+            except Exception:
+                return {"error": "Execution host could not verify a clean exact baseline", "exit_code": 1}
             return lab.create(
                 ctx.get("owner"), ctx.get("session_id"),
-                baseline_sha=args.get("baseline_sha"),
-                candidate_worktree=args.get("candidate_worktree"),
+                baseline_sha=baseline_sha, candidate_worktree=candidate_worktree,
                 gates=args.get("gates") or [], objectives=args.get("objectives") or [],
+                runner_host_id=runner_host_id, validated_baseline_sha=baseline_sha,
             )
         if action == "configure_environment":
+            from src.auto_research_isolation import experiment_host, validate_environment
+            experiment_id = str(args.get("experiment_id") or "")
+            split = str(args.get("split") or "")
+            root = str(args.get("root") or "")
+            manifest = args.get("manifest") or {}
+            runner_host_id = str(manifest.get("runner_host_id") or args.get("runner_host_id") or "")
+            if not runner_host_id:
+                try:
+                    runner_host_id = experiment_host(ctx.get("owner"), experiment_id)
+                except Exception:
+                    return {"error": "Experiment execution host is unavailable", "exit_code": 1}
+            try:
+                content_hash = await validate_environment(
+                    ctx.get("owner"), runner_host_id, root,
+                    scope=f"auto-research:{experiment_id}",
+                )
+            except Exception:
+                return {"error": "Execution host could not freeze the environment", "exit_code": 1}
             return lab.configure_environment(
-                ctx.get("owner"), str(args.get("experiment_id") or ""),
-                split=str(args.get("split") or ""), root=str(args.get("root") or ""),
-                manifest=args.get("manifest") or {},
+                ctx.get("owner"), experiment_id, split=split, root=root,
+                manifest=manifest, validated_root=True,
+                environment_content_hash=content_hash,
             )
         if action == "record":
             return lab.record(
@@ -225,11 +270,31 @@ class ManageAutoResearchLabTool:
                 event_id=str(args.get("event_id") or ""),
             )
         if action == "submit_work":
+            output = dict(args.get("output") or {})
+            from src.auto_research_isolation import leased_stage
+            try:
+                stage = leased_stage(
+                    ctx.get("owner"), str(args.get("experiment_id") or ""),
+                    str(args.get("event_id") or ""), str(args.get("lease_token") or ""),
+                )
+            except Exception:
+                return {"error": "Active stage lease not found", "exit_code": 1}
+            if stage == "implementation":
+                from src.auto_research_isolation import validate_implementation
+                try:
+                    output["_validated_candidate_sha"] = await validate_implementation(
+                        ctx.get("owner"), str(args.get("experiment_id") or ""),
+                        event_id=str(args.get("event_id") or ""),
+                        lease_token=str(args.get("lease_token") or ""),
+                        candidate_sha=str(output.get("candidate_sha") or ""),
+                    )
+                except Exception:
+                    return {"error": "Execution host rejected the implementation commit", "exit_code": 1}
             return lab.submit_work(
                 ctx.get("owner"), str(args.get("experiment_id") or ""),
                 event_id=str(args.get("event_id") or ""),
                 lease_token=str(args.get("lease_token") or ""),
-                output=args.get("output") or {}, outcome=str(args.get("outcome") or "completed"),
+                output=output, outcome=str(args.get("outcome") or "completed"),
             )
         if action == "workflow":
             return lab.workflow_snapshot(

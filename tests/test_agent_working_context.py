@@ -109,6 +109,16 @@ def test_compaction_folds_previous_summary_and_keeps_multicall_batch():
     assert [m.get("tool_call_id") for m in out[-2:]] == ["11", "second"]
 
 
+def test_native_feasibility_requires_two_complete_cut_groups():
+    from src.agent_context import working_context_compactable
+    pinned = {"role": "system", "content": "pinned " * 400}
+    one = [pinned, {"role": "user", "content": "only group " * 900}]
+    assert working_context_compactable(one, 100) is False
+    two = [{"role": "assistant", "content": "first group " * 900},
+           {"role": "assistant", "content": "second group " * 900}, *one]
+    assert working_context_compactable(two, 100) is True
+
+
 def test_snapshot_uses_one_round_not_accumulated_billing():
     snapshot = ac.context_snapshot(model="m", context_length=10000, prompt_tokens=8000,
                                    output_tokens=500, source="backend", round_num=7,

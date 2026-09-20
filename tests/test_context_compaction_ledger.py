@@ -21,4 +21,6 @@ def test_compaction_marker_is_durable_and_settled(monkeypatch):
     assert ledger.settle("alice", "s", 1) is True
     db = store(); row = db.query(ChatContextCompaction).one()
     assert row.status == "settled" and row.rebuild_marker["kind"] == "rebuild_plan_after_compaction"
+    assert row.rebuild_marker["mandatory"] is True
+    assert "create_plan" in row.rebuild_marker["required_tools"]
     db.close()

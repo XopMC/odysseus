@@ -4784,6 +4784,8 @@ async def stream_agent_loop(
     _economic_last_boundary_tokens = estimate_tokens(messages)
     _economic_decision = None
     _pending_compaction_settlement = None
+    _compaction_plan_required = False
+    _compaction_plan_nudges = 0
     try:
         _economic_cache_ratio = min(1000.0, max(
             0.0, float(get_setting("agent_cache_write_read_ratio", 12.5) or 0.0)
@@ -5428,6 +5430,14 @@ async def stream_agent_loop(
                 cache_write_read_ratio=_economic_cache_ratio,
             )
             if _economic_decision.compact:
+                from dataclasses import replace as _replace_dataclass
+                from src.agent_context import working_context_compactable
+                _target = max(1, int(_economic_decision.target_tokens / max(_context_calibration, .01)))
+                if not working_context_compactable(messages, _target):
+                    _economic_decision = _replace_dataclass(
+                        _economic_decision, compact=False, reason="native_not_compactable",
+                    )
+            if _economic_decision.compact:
                 _compacted_messages, _compact_status = await compact_working_context(
                     messages,
                     max(1, int(_economic_decision.target_tokens / max(_context_calibration, .01))),
@@ -5498,6 +5508,10 @@ async def stream_agent_loop(
                         "_agent_compaction_rebuild": True,
                     })
                     _active_route_state["messages"] = messages
+                    _compaction_plan_required = True
+                    _compaction_plan_nudges = 0
+                    if _base_relevant_tools is not None:
+                        _base_relevant_tools.update({"create_plan", "update_plan", "update_plan_step", "get_goal"})
                 except Exception:
                     logger.exception("Failed to persist compaction settlement marker")
                     _pending_compaction_settlement = None
@@ -6105,16 +6119,6 @@ async def stream_agent_loop(
             _round_first_token_logged,
         )
         _finalize_round_usage()
-        if _pending_compaction_settlement and session_id and (
-            round_response.strip() or round_reasoning.strip() or native_tool_calls
-        ):
-            try:
-                from src.context_compaction_ledger import settle as _settle_compaction
-                if _settle_compaction(owner, session_id, _context_compactions):
-                    yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _context_compactions, "settlement_id": _pending_compaction_settlement.get("id")})}\n\n'
-                _pending_compaction_settlement = None
-            except Exception:
-                logger.exception("Failed to settle durable compaction marker")
         _normalized_doc_round = (
             _normalize_stream_document_fences(
                 round_response,
@@ -6140,6 +6144,34 @@ async def stream_agent_loop(
             allow_fenced_for_api=_ody_doc_finetune_mode,
             canonical_tools=_engineering_registry is not None,
         )
+        _fresh_plan_call = False
+        if _compaction_plan_required:
+            _plan_calls = [block for block in tool_blocks if block.tool_type in {
+                "create_plan", "update_plan", "update_plan_step",
+            }]
+            if not _plan_calls:
+                _compaction_plan_nudges += 1
+                if _compaction_plan_nudges > 3:
+                    yield f'data: {json.dumps({"type": "context_compaction_failed", "reason": "fresh_plan_missing", "message": "Compaction succeeded, but the agent did not rebuild the required fresh plan."})}\n\n'
+                    return
+                tool_blocks = []
+                converted_calls = []
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Mandatory post-compaction step still missing. Call create_plan, update_plan, "
+                        "or update_plan_step now. No other tool or prose is accepted first."
+                    ),
+                    "_agent_compaction_rebuild": True,
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "fresh_plan_required"})}\n\n'
+                continue
+            # Enforce ordering even when a model batches unrelated calls.
+            _plan_index = tool_blocks.index(_plan_calls[0])
+            tool_blocks = [_plan_calls[0]]
+            if used_native:
+                converted_calls = converted_calls[_plan_index:_plan_index + 1]
+            _fresh_plan_call = True
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
                 (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
@@ -6804,6 +6836,18 @@ async def stream_agent_loop(
             _failed_reads.observe(block.tool_type, block.content, result)
             if tool_result_is_successful(result):
                 _failed_read_nudges = 0
+                if _fresh_plan_call and block.tool_type in {
+                    "create_plan", "update_plan", "update_plan_step",
+                }:
+                    _compaction_plan_required = False
+                    if _pending_compaction_settlement and session_id:
+                        try:
+                            from src.context_compaction_ledger import settle as _settle_compaction
+                            if _settle_compaction(owner, session_id, _context_compactions):
+                                yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _context_compactions, "settlement_id": _pending_compaction_settlement.get("id")})}\n\n'
+                            _pending_compaction_settlement = None
+                        except Exception:
+                            logger.exception("Failed to settle durable compaction marker")
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its
@@ -7246,10 +7290,18 @@ async def stream_agent_loop(
                             from src.chat_work_store import store as _chat_work_store
                             _work_snapshot = _chat_work_store.get(owner, session_id) if session_id else {}
                             _plan_snapshot = ((_work_snapshot or {}).get("plan") or {}).get("steps") or []
+                            _completed = next((step for step in _plan_snapshot
+                                               if str(step.get("id") or "") == str(_plan_update.get("step_id") or "")), {})
+                            _progress = dict(_completed.get("progress") or {})
                             _economic_state = _record_economic_boundary(
                                 owner, session_id, _economic_cache_ratio, list(_plan_snapshot), {
                                     "step_id": str(_plan_update.get("step_id") or ""),
-                                    "verification": str(_plan_update.get("verification") or ""),
+                                    "goal": str(_completed.get("text") or ""),
+                                    "files_changed": list(_progress.get("files_changed") or []),
+                                    "verification": list(_progress.get("verification") or []),
+                                    "decisions": list(_progress.get("decisions") or []),
+                                    "next_work": [str(step.get("text") or "") for step in _plan_snapshot
+                                                  if step.get("status") not in {"done", "completed"}],
                                     "round": round_num,
                                 },
                             )
@@ -7269,7 +7321,7 @@ async def stream_agent_loop(
                         reduce as _reduce_evidence,
                     )
                     from src.endpoint_resolver import resolve_endpoint as _resolve_reducer_endpoint
-                    from src.llm_core import llm_call_async as _reducer_llm_call
+                    from src.llm_core import stream_llm as _reducer_stream_llm
                     _candidate = _evidence_candidate(block.tool_type, block.content, result)
                     if not _candidate:
                         raise LookupError("not a reducible diagnostic result")
@@ -7278,12 +7330,31 @@ async def stream_agent_loop(
                         fallback_model=model, fallback_headers=headers, owner=owner,
                     )
                     async def _call_reducer(_prompt):
-                        return await _reducer_llm_call(
+                        _answer_parts, _reasoning_parts, _usage = [], [], None
+                        async for _frame in _reducer_stream_llm(
                             _util_url or endpoint_url, _util_model or model, _prompt,
                             headers=_util_headers or headers, temperature=0.0,
-                            max_tokens=1600, timeout=90, max_retries=1,
-                            session_id=session_id, require_answer_content=True,
-                        )
+                            max_tokens=1600, timeout=90, session_id=session_id,
+                            workload="background",
+                        ):
+                            for _line in str(_frame).splitlines():
+                                if not _line.startswith("data: "):
+                                    continue
+                                _raw = _line[6:]
+                                if not _raw or _raw == "[DONE]":
+                                    continue
+                                try:
+                                    _event = json.loads(_raw)
+                                except (TypeError, ValueError):
+                                    continue
+                                if _event.get("type") == "usage" and isinstance(_event.get("data"), dict):
+                                    _usage = dict(_event["data"])
+                                elif isinstance(_event.get("delta"), str):
+                                    (_reasoning_parts if _event.get("thinking") else _answer_parts).append(_event["delta"])
+                        return {
+                            "text": "".join(_answer_parts).strip() or "".join(_reasoning_parts).strip(),
+                            "usage": _usage or {},
+                        }
                     _native_id = (
                         converted_calls[i].get("id")
                         if used_native and i < len(converted_calls)
@@ -7300,6 +7371,7 @@ async def stream_agent_loop(
                         formatted = _reduced["text"]
                         tool_event["evidence_receipt"] = _reduced["receipt"]
                         tool_event["artifact_id"] = _reduced["artifact"]["id"]
+                        tool_event["evidence_reducer_usage"] = dict(_reduced.get("usage") or {})
                         tool_event["evidence_reducer_route"] = {
                             "endpoint_url": _util_url or endpoint_url,
                             "model": _util_model or model,

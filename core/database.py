@@ -472,6 +472,7 @@ class AutoResearchExperiment(Base):
     session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=True, index=True)
     baseline_sha = Column(String, nullable=False)
     candidate_worktree = Column(String, nullable=False)
+    runner_host_id = Column(String, nullable=True)
     gates = Column(JSON, nullable=False, default=list)
     objectives = Column(JSON, nullable=False, default=list)
     status = Column(String, nullable=False, default="open", index=True)
@@ -2492,6 +2493,7 @@ def init_db():
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()
     _migrate_add_context_checkpoint_columns()
+    _migrate_add_auto_research_runner_host()
     _migrate_add_assistant_columns()
     _migrate_add_email_smtp_security()
     _migrate_email_account_default_invariant()
@@ -2520,6 +2522,17 @@ def _migrate_add_context_checkpoint_columns():
                 conn.execute(text("ALTER TABLE sessions ADD COLUMN context_checkpoint_count INTEGER NOT NULL DEFAULT 0"))
     except Exception as exc:
         logging.getLogger(__name__).warning("context checkpoint migration failed: %s", exc)
+
+
+def _migrate_add_auto_research_runner_host():
+    """Bind new Auto-Research experiments to one verified execution host."""
+    try:
+        with engine.begin() as conn:
+            cols = {column["name"] for column in inspect(conn).get_columns("auto_research_experiments")}
+            if cols and "runner_host_id" not in cols:
+                conn.execute(text("ALTER TABLE auto_research_experiments ADD COLUMN runner_host_id VARCHAR"))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("auto research runner-host migration failed: %s", exc)
 
 
 def _migrate_backfill_task_folders():

@@ -196,7 +196,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_auto_research_lab",
-            "description": "Run an opt-in blind auto-research workflow: independent trajectories, map-reduce analysis, proposal, implementer/reviewer revisions, train validation, Pareto selection and sealed held-out verdicts. Use parallel subagents as role workers. Never deploys a candidate.",
+            "description": "Run an opt-in blind auto-research workflow: Oracle Analysis, independent trajectories, map-reduce analysis, proposal, implementer/reviewer revisions, train-validation feedback loops, Pareto selection and hard-isolated sealed held-out verdicts. Use parallel subagents as non-held-out role workers. Never exposes held-out inputs to a model and never deploys a candidate.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -211,7 +211,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "trajectory_count": {"type": "integer", "minimum": 2, "maximum": 32},
                     "auto_run": {"type": "boolean"},
                     "worker_id": {"type": "string"},
-                    "actor_role": {"type": "string", "enum": ["explorer", "analyzer", "reducer", "proposer", "implementer", "reviewer", "validator", "heldout_validator"]},
+                    "actor_role": {"type": "string", "enum": ["oracle_analyst", "explorer", "analyzer", "reducer", "proposer", "implementer", "reviewer", "validator", "heldout_validator"]},
                     "lease_seconds": {"type": "integer", "minimum": 30, "maximum": 7200},
                     "event_id": {"type": "string"},
                     "lease_token": {"type": "string"},
@@ -221,6 +221,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "root": {"type": "string"},
                     "manifest": {"type": "object"},
                     "candidate_worktree": {"type": "string"},
+                    "runner_host_id": {"type": "string"},
                     "split": {"type": "string", "enum": ["train", "heldout"]},
                     "gates": {"type": "array", "items": {"type": "object"}},
                     "objectives": {"type": "array", "items": {"type": "string"}},
@@ -698,6 +699,9 @@ FUNCTION_TOOL_SCHEMAS = [
                 "step_id": {"type": "string"},
                 "status": {"type": "string", "enum": ["pending", "in_progress", "done", "blocked"]},
                 "summary": {"type": "string"},
+                "files_changed": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
+                "verification": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
+                "decisions": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
                 "expected_revision": {"type": "integer"}
             }, "required": ["step_id", "status"]}
         }

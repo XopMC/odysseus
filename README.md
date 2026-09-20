@@ -121,21 +121,24 @@ explicitly.
   reproductions and rejected hypotheses. Candidate snapshots are immutable and
   require a verdict from a different child before acceptance.
 - **Auto-Research Lab** — disabled by default. When explicitly enabled it keeps
-  a frozen baseline, immutable train/held-out environments, bounded independent
+  a clean exact-HEAD baseline, an Oracle Analysis gate, bounded independent
   trajectories, map/reduce synthesis, separate proposer/implementer/reviewer
-  roles, revision loops, atomic worker leases, train metrics, Pareto selection
-  and sealed held-out measurements whose metric values are never returned to
-  research workers. The A/B harness records
+  roles, and train-validation feedback into revision or new rollout cycles.
+  Pareto-selected candidates enter a fixed, no-network, read-only-root container
+  with a hash-pinned candidate copy and a separately hash-pinned read-only
+  held-out mount; neither the held-out manifest nor raw output is sent to a
+  model. The A/B harness records
   tokens, requests, TTFT, duration, completion and quality against a frozen task
   set (`benchmarks/agent_harness_long_tasks.json`). Its append-only audit ledger
-  binds every stage and output hash. The lab records candidate evidence only and
-  never authorizes or performs deployment.
+  binds every stage and output hash. The lab records candidate evidence and a
+  sealed pass/fail verdict only, and never authorizes or performs deployment.
 
 ### Важно
 
 Это расширение предназначено для доверенных машин, которыми владеет оператор.
-Доступ к shell, файлам и сети не равен песочнице: включайте его только после
-явного выбора проекта и хоста. Изоляция контейнеров, полнофункциональные
+Доступ к обычным shell, файлам и сети не равен песочнице: включайте его только после
+явного выбора проекта и хоста. Жёсткий контейнерный контур применяется только к
+held-out проверкам Auto-Research. Полнофункциональные
 межмашинные worktree, DAP, эксперименты между моделями и полная сквозная
 приёмка остаются отдельными этапами разработки. LSP-мост работает только для
 языковых серверов, фактически установленных и проверенных на выбранном хосте;

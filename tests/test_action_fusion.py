@@ -104,6 +104,24 @@ async def test_same_path_fusions_are_serialized(tmp_path, monkeypatch):
     assert (tmp_path / "sample.txt").read_text() == "second"
 
 
+@pytest.mark.asyncio
+async def test_ordinary_write_cannot_interleave_before_fused_verification(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.harness_efficiency.get_setting", lambda *a: "performance")
+    monkeypatch.setattr("src.tool_execution._owner_is_admin", lambda owner: True)
+    path = tmp_path / "sample.txt"
+    fused = _write(path, "first", "sleep 0.05; grep -qx first sample.txt")
+    ordinary = SimpleNamespace(tool_type="write_file", content=json.dumps({
+        "path": str(path), "content": "second",
+    }))
+    first, second = await asyncio.gather(
+        execute_tool_block(fused, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
+        execute_tool_block(ordinary, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
+    )
+    assert first[1]["exit_code"] == 0
+    assert second[1]["exit_code"] == 0
+    assert path.read_text() == "second"
+
+
 def test_remote_fence_rejects_changed_file(tmp_path):
     path = tmp_path / "remote.txt"
     path.write_text("first")

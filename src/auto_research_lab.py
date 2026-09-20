@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 _SHA = re.compile(r"^[0-9a-f]{7,64}$")
 _OPS = {"gte", "lte"}
 _STAGE_ROLES = {
-    "trajectory": "explorer", "map": "analyzer", "reduce": "reducer",
+    "oracle": "oracle_analyst", "trajectory": "explorer", "map": "analyzer", "reduce": "reducer",
     "proposal": "proposer", "implementation": "implementer", "review": "reviewer",
     "train": "validator", "heldout": "heldout_validator",
 }
@@ -93,20 +93,35 @@ def _freeze_worktree(path: str, baseline_sha: str) -> tuple[str, str]:
     ).stdout.strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40,64}", frozen):
         raise ValueError("Baseline does not resolve to a commit")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], **common).stdout.strip().lower()
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"], **common,
+    ).stdout
+    if head != frozen or status.strip():
+        raise ValueError("Candidate worktree must be clean and checked out at the frozen commit")
     return resolved, frozen
 
 
 def create(owner: Optional[str], session_id: Optional[str], *, baseline_sha: str,
-           candidate_worktree: str, gates: list, objectives: list) -> dict:
+           candidate_worktree: str, gates: list, objectives: list,
+           runner_host_id: str = "", validated_baseline_sha: str = "") -> dict:
     if not _enabled():
         return {"error": "Auto-Research Lab is disabled in settings", "exit_code": 1}
     baseline_sha = str(baseline_sha or "").lower()
     if not _SHA.fullmatch(baseline_sha) or not os.path.isabs(str(candidate_worktree or "")):
         return {"error": "A frozen git SHA and absolute candidate worktree are required", "exit_code": 1}
-    try:
-        worktree, baseline_sha = _freeze_worktree(candidate_worktree, baseline_sha)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return {"error": "Candidate worktree must be a Git root containing the frozen baseline", "exit_code": 1}
+    host_id = str(runner_host_id or "").strip()
+    if host_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id):
+        return {"error": "Invalid execution host id", "exit_code": 1}
+    if validated_baseline_sha:
+        if str(validated_baseline_sha).lower() != baseline_sha:
+            return {"error": "Runner baseline does not match the requested SHA", "exit_code": 1}
+        worktree = os.path.normpath(str(candidate_worktree))
+    else:
+        try:
+            worktree, baseline_sha = _freeze_worktree(candidate_worktree, baseline_sha)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {"error": "Candidate worktree must be a Git root containing the frozen baseline", "exit_code": 1}
     if not isinstance(gates, list) or not gates or not isinstance(objectives, list):
         return {"error": "At least one fixed gate and objective are required", "exit_code": 1}
     normalized = []
@@ -121,26 +136,42 @@ def create(owner: Optional[str], session_id: Optional[str], *, baseline_sha: str
         row = AutoResearchExperiment(
             id=uuid.uuid4().hex, owner=owner or "", session_id=session_id,
             baseline_sha=baseline_sha, candidate_worktree=worktree,
+            runner_host_id=host_id or None,
             gates=normalized, objectives=[str(x) for x in objectives if str(x)], status="open",
         )
         db.add(row); db.commit()
         return {"experiment_id": row.id, "baseline_sha": baseline_sha,
+                "runner_host_id": row.runner_host_id,
                 "gates_hash": _digest(normalized), "status": "open", "exit_code": 0}
     finally:
         db.close()
 
 
 def configure_environment(owner: Optional[str], experiment_id: str, *, split: str,
-                          root: str, manifest: dict) -> dict:
+                          root: str, manifest: dict, validated_root: bool = False,
+                          environment_content_hash: str = "") -> dict:
     split = str(split or "").lower()
     raw_root = os.path.abspath(str(root or ""))
     resolved = os.path.realpath(raw_root)
+    local_valid = os.path.isdir(raw_root) and not os.path.islink(raw_root)
     if (split not in {"train", "heldout"} or not os.path.isabs(str(root or ""))
-            or not os.path.isdir(raw_root) or os.path.islink(raw_root) or not isinstance(manifest, dict)):
+            or (not validated_root and not local_valid) or not isinstance(manifest, dict)):
         return {"error": "split, absolute root and manifest object are required", "exit_code": 1}
+    if validated_root:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(environment_content_hash or "")):
+            return {"error": "Verified environment content hash is required", "exit_code": 1}
+        manifest = {**manifest, "_content_sha256": str(environment_content_hash)}
     encoded = json.dumps(manifest, sort_keys=True, ensure_ascii=False)
     if len(encoded.encode()) > _MAX_STAGE_PAYLOAD:
         return {"error": "Environment manifest exceeds 128 KiB", "exit_code": 1}
+    if split == "heldout":
+        host_id = manifest.get("runner_host_id")
+        command = manifest.get("command")
+        timeout = manifest.get("timeout_seconds", 900)
+        if (not isinstance(host_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id)
+                or not isinstance(command, str) or not command.strip() or len(command.encode()) > 100_000
+                or type(timeout) is not int or not 1 <= timeout <= 7200):
+            return {"error": "Held-out manifest requires runner_host_id, command and bounded timeout_seconds", "exit_code": 1}
     db = SessionLocal()
     try:
         exp = db.query(AutoResearchExperiment).filter(
@@ -150,6 +181,8 @@ def configure_environment(owner: Optional[str], experiment_id: str, *, split: st
         ).first()
         if not exp:
             return {"error": "Open experiment not found", "exit_code": 1}
+        if split == "heldout" and exp.runner_host_id and manifest.get("runner_host_id") != exp.runner_host_id:
+            return {"error": "Held-out environment must use the experiment execution host", "exit_code": 1}
         if db.query(AutoResearchEnvironment).filter(
             AutoResearchEnvironment.experiment_id == experiment_id,
             AutoResearchEnvironment.split == split,
@@ -170,7 +203,7 @@ def configure_environment(owner: Optional[str], experiment_id: str, *, split: st
             "split": split, "environment_id": row.id, "manifest_hash": row.manifest_hash,
         }); db.commit()
         return {"environment_id": row.id, "split": split, "manifest_hash": row.manifest_hash,
-                "sealed": split == "heldout", "exit_code": 0}
+                "sealed": split == "heldout", "hard_isolation": split == "heldout", "exit_code": 0}
     finally:
         db.close()
 
@@ -300,6 +333,7 @@ def list_experiments(owner: Optional[str]) -> dict:
         ).order_by(AutoResearchExperiment.created_at.desc()).limit(100).all()
         return {"experiments": [{"experiment_id": row.id, "baseline_sha": row.baseline_sha,
                                  "candidate_worktree": row.candidate_worktree,
+                                 "runner_host_id": row.runner_host_id,
                                  "gates": row.gates, "objectives": row.objectives,
                                  "status": row.status} for row in rows], "exit_code": 0}
     finally:
@@ -537,17 +571,18 @@ def start_lineage(owner: Optional[str], experiment_id: str, *, hypothesis: str,
         if not exp:
             return {"error": "Open experiment not found", "exit_code": 1}
         lineage_id = uuid.uuid4().hex
-        events = [_queue(db, exp, lineage_id, "trajectory", iteration=index + 1,
-                         payload={"hypothesis": text[:12000], "trajectory_index": index + 1,
-                                  "trajectory_count": count, "baseline_sha": exp.baseline_sha})
-                  for index in range(count)]
+        events = [_queue(db, exp, lineage_id, "oracle", payload={
+            "hypothesis": text[:12000], "trajectory_count": count,
+            "baseline_sha": exp.baseline_sha, "research_cycle": 1,
+            "objective_families": list(exp.objectives or []),
+        })]
         _audit(db, exp, lineage_id, None, "lineage_started", {
             "hypothesis": text[:12000], "trajectory_count": count,
             "gates_hash": _digest(exp.gates or []), "objectives": list(exp.objectives or []),
         })
         db.commit()
         return {"lineage_id": lineage_id, "status": "running",
-                "queued": [_public_event(row) for row in events], "next_action": "claim_work",
+                "queued": [_public_event(row) for row in events], "next_action": "oracle_analysis",
                 "exit_code": 0}
     finally:
         db.close()
@@ -655,7 +690,7 @@ def claim_work(owner: Optional[str], experiment_id: str, *, worker_id: str,
                     })
                     db.commit()
                     work = _public_event(row)
-                    if row.stage in {"train", "heldout"}:
+                    if row.stage == "train":
                         environment = db.query(AutoResearchEnvironment).filter(
                             AutoResearchEnvironment.experiment_id == exp.id,
                             AutoResearchEnvironment.split == row.stage,
@@ -666,6 +701,18 @@ def claim_work(owner: Optional[str], experiment_id: str, *, worker_id: str,
                                 "manifest_hash": environment.manifest_hash,
                                 "manifest": json.loads(environment.sealed_manifest),
                             }
+                    elif row.stage == "heldout":
+                        environment = db.query(AutoResearchEnvironment).filter(
+                            AutoResearchEnvironment.experiment_id == exp.id,
+                            AutoResearchEnvironment.split == "heldout",
+                        ).first()
+                        if not environment:
+                            db.rollback()
+                            return {"error": "Frozen held-out environment is missing", "exit_code": 1}
+                        work["isolation"] = {
+                            "required": True, "manifest_hash": environment.manifest_hash,
+                            "feedback_policy": "verdict_only",
+                        }
                     return {"work": work, "lease_token": token,
                             "lease_seconds": ttl, "slot": slot, "exit_code": 0}
                 except IntegrityError:
@@ -781,7 +828,31 @@ def submit_work(owner: Optional[str], experiment_id: str, *, event_id: str,
         })
         db.delete(lease)
         if outcome == "completed":
-            if row.stage == "trajectory":
+            if row.stage == "oracle":
+                verdict = str(output.get("verdict") or "").lower()
+                if verdict not in {"proceed", "reject"}:
+                    db.rollback(); return {"error": "Oracle result requires verdict=proceed|reject", "exit_code": 1}
+                if verdict == "proceed":
+                    source = dict(row.public_payload or {})
+                    try:
+                        count = max(2, min(32, int(output.get("trajectory_count") or source.get("trajectory_count") or 3)))
+                    except (TypeError, ValueError):
+                        db.rollback(); return {"error": "Oracle trajectory_count must be an integer", "exit_code": 1}
+                    hypothesis = str(output.get("hypothesis") or source.get("hypothesis") or "").strip()[:12000]
+                    for index in range(count):
+                        _queue(db, exp, row.lineage_id, "trajectory", iteration=index + 1,
+                               payload={"hypothesis": hypothesis, "trajectory_index": index + 1,
+                                        "trajectory_count": count, "baseline_sha": exp.baseline_sha,
+                                        "research_cycle": int(source.get("research_cycle") or 1),
+                                        "oracle_event_id": row.id, "oracle_hash": row.output_hash})
+                    _audit(db, exp, row.lineage_id, row.id, "oracle_selected", {
+                        "trajectory_count": count, "output_hash": row.output_hash,
+                    })
+                else:
+                    _audit(db, exp, row.lineage_id, row.id, "oracle_rejected", {
+                        "output_hash": row.output_hash,
+                    })
+            elif row.stage == "trajectory":
                 _queue(db, exp, row.lineage_id, "map", iteration=row.iteration,
                        payload={"trajectory_event_id": row.id, "trajectory_hash": row.output_hash,
                                 "trajectory": output})
@@ -834,10 +905,15 @@ def submit_work(owner: Optional[str], experiment_id: str, *, event_id: str,
                 implemented_sha = str(output.get("candidate_sha") or "").lower()
                 if not candidate or not _SHA.fullmatch(implemented_sha):
                     db.rollback(); return {"error": "Implementation must return its committed candidate_sha", "exit_code": 1}
-                try:
-                    _root, implemented_sha = _freeze_worktree(exp.candidate_worktree, implemented_sha)
-                except (OSError, subprocess.SubprocessError, ValueError):
-                    db.rollback(); return {"error": "Implemented candidate_sha is not a commit in the frozen worktree", "exit_code": 1}
+                validated = str(output.get("_validated_candidate_sha") or "").lower()
+                if validated == implemented_sha:
+                    output = {key: value for key, value in output.items() if key != "_validated_candidate_sha"}
+                    row.public_payload = {**dict(row.public_payload or {}), "result": output}
+                else:
+                    try:
+                        _root, implemented_sha = _freeze_worktree(exp.candidate_worktree, implemented_sha)
+                    except (OSError, subprocess.SubprocessError, ValueError):
+                        db.rollback(); return {"error": "Implemented candidate_sha is not a clean checked-out commit", "exit_code": 1}
                 candidate.candidate_sha = implemented_sha
                 candidate.patch_ref = str(output.get("patch_ref") or candidate.patch_ref or "")[:4096]
                 _queue(db, exp, row.lineage_id, "review", iteration=row.iteration,
@@ -847,7 +923,8 @@ def submit_work(owner: Optional[str], experiment_id: str, *, event_id: str,
             elif row.stage == "review":
                 verdict = str(output.get("verdict") or "").lower()
                 if verdict == "accept":
-                    _queue(db, exp, row.lineage_id, "train", candidate_id=row.candidate_id,
+                    _queue(db, exp, row.lineage_id, "train", iteration=row.iteration,
+                           candidate_id=row.candidate_id,
                            payload={"review_event_id": row.id, "review_hash": row.output_hash,
                                     "review": output, "candidate_worktree": exp.candidate_worktree})
                 elif verdict == "revise" and row.iteration < 5:
@@ -863,10 +940,57 @@ def submit_work(owner: Optional[str], experiment_id: str, *, event_id: str,
                 if not isinstance(metrics, dict) or not all(isinstance(v, (int, float)) for v in metrics.values()):
                     db.rollback(); return {"error": "Train result requires numeric metrics", "exit_code": 1}
                 candidate = db.query(AutoResearchCandidate).filter(AutoResearchCandidate.id == row.candidate_id).first()
-                candidate.train_metrics = {str(k): float(v) for k, v in metrics.items()}; candidate.status = "trained"
+                candidate.train_metrics = {str(k): float(v) for k, v in metrics.items()}
                 db.add(AutoResearchRun(id=uuid.uuid4().hex, experiment_id=exp.id, owner=exp.owner,
                     candidate_sha=candidate.candidate_sha, split="train", metrics=candidate.train_metrics,
                     evidence=[str(x) for x in output.get("evidence") or []], content_hash=row.output_hash))
+                failures = [gate["metric"] for gate in exp.gates or [] if not (
+                    isinstance(candidate.train_metrics.get(gate["metric"]), (int, float)) and
+                    (candidate.train_metrics[gate["metric"]] >= gate["threshold"] if gate["op"] == "gte"
+                     else candidate.train_metrics[gate["metric"]] <= gate["threshold"])
+                )]
+                requested = str(output.get("next_action") or ("revise" if failures else "accept")).lower()
+                if failures or requested in {"revise", "reroll", "reject"}:
+                    if requested not in {"revise", "reroll", "reject"}:
+                        requested = "revise"
+                    feedback = {
+                        "failed_metrics": failures,
+                        "validation_summary": str(output.get("summary") or "")[:4000],
+                        "train_event_id": row.id, "train_hash": row.output_hash,
+                    }
+                    if requested == "revise" and row.iteration < 5:
+                        candidate.status = "proposed"
+                        _queue(db, exp, row.lineage_id, "implementation", iteration=row.iteration + 1,
+                               candidate_id=candidate.id, payload={
+                                   "candidate_worktree": exp.candidate_worktree,
+                                   "candidate_sha": candidate.candidate_sha,
+                                   "train_feedback": feedback,
+                               })
+                    elif requested == "reroll":
+                        candidate.status = "rejected"
+                        source = next((event for event in db.query(AutoResearchStageEvent).filter(
+                            AutoResearchStageEvent.experiment_id == exp.id,
+                            AutoResearchStageEvent.lineage_id == row.lineage_id,
+                            AutoResearchStageEvent.stage == "oracle",
+                        ).all()), None)
+                        cycle = int(dict(source.public_payload or {}).get("research_cycle") or 1) if source else 1
+                        if cycle < 3:
+                            new_lineage = uuid.uuid4().hex
+                            _queue(db, exp, new_lineage, "oracle", payload={
+                                "hypothesis": candidate.hypothesis,
+                                "trajectory_count": 3, "baseline_sha": exp.baseline_sha,
+                                "research_cycle": cycle + 1, "parent_lineage_id": row.lineage_id,
+                                "train_feedback": feedback,
+                                "objective_families": list(exp.objectives or []),
+                            })
+                    else:
+                        candidate.status = "rejected"
+                    _audit(db, exp, row.lineage_id, row.id, "train_feedback", {
+                        "candidate_id": candidate.id, "next_action": requested,
+                        "failed_metrics": failures, "feedback_released": True,
+                    })
+                else:
+                    candidate.status = "trained"
             elif row.stage == "heldout":
                 metrics = output.get("metrics")
                 if not isinstance(metrics, dict) or not all(isinstance(v, (int, float)) for v in metrics.values()):

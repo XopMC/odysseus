@@ -40,8 +40,15 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
         store.plan_action("alice", owned_chat, "execute", plan["revision"] + 1)
     plan = store.plan_action("alice", owned_chat, "execute", plan["revision"])
     assert plan["steps"][0]["status"] == "in_progress"
-    plan = store.update_plan_step("alice", owned_chat, "verify", "done", expected_revision=plan["revision"])
+    plan = store.update_plan_step("alice", owned_chat, "verify", "done", expected_revision=plan["revision"],
+                                  progress={"files_changed": ["src/a.py"],
+                                            "verification": ["pytest: passed"],
+                                            "decisions": ["kept API additive"]})
     assert plan["status"] == "done"
+    assert plan["steps"][0]["progress"] == {
+        "files_changed": ["src/a.py"], "verification": ["pytest: passed"],
+        "decisions": ["kept API additive"],
+    }
 
     goal = store.ensure_goal("alice", owned_chat, "Ship a verified release")
     store.update_goal("alice", owned_chat, "Tests are running", {"suite": "focused"})

@@ -146,6 +146,9 @@ class UpdatePlanStepTool:
             plan = store.update_plan_step(
                 owner, session_id, str(data.get("step_id") or ""),
                 str(data.get("status") or ""), summary=str(data.get("summary") or ""),
+                progress={key: data.get(key) or [] for key in (
+                    "files_changed", "verification", "decisions",
+                )} if any(key in data for key in ("files_changed", "verification", "decisions")) else None,
                 expected_revision=data.get("expected_revision"),
             )
             return "update_plan_step", {"plan_update": plan, "output": "Plan step updated.", "exit_code": 0}

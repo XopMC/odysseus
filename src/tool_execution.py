@@ -1175,6 +1175,7 @@ async def _execute_tool_block_impl(
     parent_allowed_tools: Optional[set] = None,
     external_untrusted_context_seen: bool = False,
     delegated_credential: bool = False,
+    _mutation_queue_held: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1282,6 +1283,41 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+    # Ordinary and fused mutations share one canonical per-path queue.  Without
+    # this outer slot an ordinary write can interleave after a fused mutation
+    # but before its verification command, making the command verify somebody
+    # else's bytes. Recursive calls carry the private flag. Detect the presence
+    # of a fusion
+    # request here so it acquires its slot exactly once below; a ContextVar
+    # re-entrant lock would be unsafe because child asyncio tasks inherit it.
+    _fusion_requested = False
+    if tool in {"write_file", "edit_file", "apply_patch"}:
+        try:
+            _mutation_args = json.loads(str(content or "{}"))
+            _fusion_requested = isinstance(_mutation_args, dict) and "verify" in _mutation_args
+        except (TypeError, ValueError):
+            pass
+    if (tool in {"write_file", "edit_file", "apply_patch"}
+            and not _mutation_queue_held and not _fusion_requested):
+        from src.action_fusion import hold, mutation_paths
+        paths = mutation_paths(tool, content)
+        async with hold(paths, workspace):
+            return await _execute_tool_block_impl(
+                block, session_id=session_id, disabled_tools=disabled_tools,
+                owner=owner, progress_cb=progress_cb, tool_policy=tool_policy,
+                approved_document_id=approved_document_id,
+                approved_document_version=approved_document_version,
+                approved_document_digest=approved_document_digest,
+                current_endpoint_url=current_endpoint_url, current_model=current_model,
+                current_headers=current_headers, parent_run_id=parent_run_id,
+                subagent_state=subagent_state, workspace=workspace, access_mode=access_mode,
+                parent_disabled_tools=parent_disabled_tools,
+                parent_tool_policy=parent_tool_policy,
+                parent_allowed_tools=parent_allowed_tools,
+                external_untrusted_context_seen=external_untrusted_context_seen,
+                delegated_credential=delegated_credential, _mutation_queue_held=True,
+            )
+
     # Action Fusion executes a workspace mutation and its verification as one
     # sealed action.  It lives after every policy gate, while the recursive
     # calls below still pass through the individual mutation/bash gates.
@@ -1332,6 +1368,7 @@ async def _execute_tool_block_impl(
                 parent_allowed_tools=parent_allowed_tools,
                 external_untrusted_context_seen=external_untrusted_context_seen,
                 delegated_credential=delegated_credential,
+                _mutation_queue_held=True,
             )
             from src import host_execution as _fusion_host
             host_mode = _fusion_host.enabled_for(owner)

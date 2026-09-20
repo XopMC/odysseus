@@ -48,6 +48,14 @@ def _clean_text(value, name, limit=8192):
     return value
 
 
+def _clean_string_list(value, name, *, count=100, item_limit=2000):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > count:
+        raise ValueError(f"{name} must be a bounded list")
+    return [_clean_text(item, name, item_limit) for item in value]
+
+
 def _session(db, owner, session_id):
     row = db.query(DbSession).filter(DbSession.id == session_id, DbSession.owner == owner).first()
     if row is None:
@@ -261,7 +269,8 @@ class ChatWorkStore:
             db.flush()
             return _public_goal(row)
 
-    def update_plan_step(self, owner, session_id, step_id, status, *, summary="", expected_revision=None):
+    def update_plan_step(self, owner, session_id, step_id, status, *, summary="", progress=None,
+                         expected_revision=None):
         if status not in PLAN_STATES:
             raise ValueError("Invalid plan step status")
         with SessionLocal.begin() as db:
@@ -282,12 +291,25 @@ class ChatWorkStore:
             target["status"] = status
             if summary:
                 target["summary"] = str(summary)[:2000]
+            if progress is not None:
+                if not isinstance(progress, dict) or set(progress) - {
+                    "files_changed", "verification", "decisions",
+                }:
+                    raise ValueError("Invalid plan progress snapshot")
+                target["progress"] = {
+                    "files_changed": _clean_string_list(progress.get("files_changed"), "files_changed"),
+                    "verification": _clean_string_list(progress.get("verification"), "verification"),
+                    "decisions": _clean_string_list(progress.get("decisions"), "decisions"),
+                }
             unfinished = [s for s in steps if s.get("required", True) and s.get("status") != "done"]
             row.steps = steps
             row.status = "done" if not unfinished else "executing"
             row.current_step_id = next((s["id"] for s in steps if s.get("status") == "in_progress"), None) or (unfinished[0]["id"] if unfinished else None)
             row.revision += 1
-            self._event(db, owner, session_id, "plan_step_updated", row.id, row.revision, {"step_id": step_id, "status": status, "summary": summary})
+            self._event(db, owner, session_id, "plan_step_updated", row.id, row.revision, {
+                "step_id": step_id, "status": status, "summary": summary,
+                "progress": dict(target.get("progress") or {}),
+            })
             db.flush()
             return _public_plan(row)
 

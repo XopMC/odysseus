@@ -70,6 +70,50 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('only fixed check arguments', rejected['error'])
         self.assertIn('sandbox.command.start', self.call('runner.capabilities')['result']['supported_ops'])
 
+    def test_isolated_command_requires_separate_hashed_heldout_mount(self):
+        project = self.root / 'project'
+        heldout = self.root / 'heldout'
+        project.mkdir(); heldout.mkdir()
+        (project / 'code.py').write_text('value = 1\n')
+        (heldout / 'cases.json').write_text('{}\n')
+        self.runner.platform_identity['os'] = 'linux'
+        digest = self.call('workspace.digest', {'cwd': str(project)})['result']['sha256']
+        copied = self.call('workspace.verification-copy', {
+            'source': str(project), 'expected_source_sha256': digest,
+            'idempotency_key': 'isolated-copy',
+        })['result']
+        with patch.object(self.module.shutil, 'which', return_value='/usr/bin/docker'):
+            rejected = self.call('sandbox.command.start', {
+                'cwd': copied['path'], 'command': 'true', 'idempotency_key': 'missing-heldout',
+                'expected_workspace_hash': digest, 'check_run_id': 'a' * 32,
+            })
+        self.assertFalse(rejected['ok'])
+        self.assertIn('sealed environment', rejected['error'])
+        heldout_digest = self.call('workspace.digest', {'cwd': str(heldout)})['result']['sha256']
+        (heldout / 'cases.json').write_text('{"changed":true}\n')
+        with patch.object(self.module.shutil, 'which', return_value='/usr/bin/docker'):
+            rejected = self.call('sandbox.command.start', {
+                'cwd': copied['path'], 'command': 'true', 'idempotency_key': 'stale-heldout',
+                'expected_workspace_hash': digest, 'check_run_id': 'b' * 32,
+                'sealed_environment': str(heldout),
+                'expected_environment_hash': heldout_digest,
+            })
+        self.assertFalse(rejected['ok'])
+        self.assertIn('changed before check dispatch', rejected['error'])
+
+    def test_workspace_git_state_is_fixed_clean_head(self):
+        project = self.root / 'git-project'
+        subprocess.run(['git', 'init', '-q', str(project)], check=True)
+        (project / 'file.txt').write_text('one\n')
+        subprocess.run(['git', '-C', str(project), 'add', 'file.txt'], check=True)
+        subprocess.run(['git', '-C', str(project), '-c', 'user.name=Test',
+                        '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'one'], check=True)
+        state = self.call('workspace.git-state', {'cwd': str(project)})['result']
+        self.assertTrue(state['clean'])
+        self.assertRegex(state['head'], r'^[0-9a-f]{40}$')
+        (project / 'file.txt').write_text('dirty\n')
+        self.assertFalse(self.call('workspace.git-state', {'cwd': str(project)})['result']['clean'])
+
     def test_pty_input_resize_interrupt_and_stop(self):
         terminal = self.call('terminal.create', {'cwd': str(self.root), 'idempotency_key': 'pty'})['result']
         identity = terminal['id']

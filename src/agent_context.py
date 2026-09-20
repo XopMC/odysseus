@@ -59,6 +59,28 @@ def _excerpt(message):
     return text
 
 
+def working_context_compactable(messages, limit: int) -> bool:
+    """Cheap native-compaction feasibility check with the same split rules.
+
+    This deliberately performs no summarizer call.  It prevents the economic
+    planner from selecting compaction when there are fewer than two complete,
+    non-pinned conversation groups to archive.
+    """
+    if type(limit) is not int or limit < 1 or estimate_tokens(messages) < limit:
+        return False
+    convo = [m for m in messages if m.get("role") != "system" and not m.get("_agent_working_summary")]
+    goal = next((m for m in reversed(convo) if m.get("role") == "user"
+                 and not m.get("_agent_injected")
+                 and (m.get("metadata") or {}).get("trusted") is not False), None)
+    pinned_ids = {id(goal)} if goal is not None else set()
+    groups = _groups(convo)
+    for group in groups:
+        if any(id(message) in pinned_ids for message in group):
+            pinned_ids.update(id(message) for message in group)
+    archive_groups = [group for group in groups if not any(id(message) in pinned_ids for message in group)]
+    return len(archive_groups) >= 2
+
+
 async def compact_working_context(messages, limit, summarize, *, policy=None, target_limit=None, manual=False):
     """Summarize between rounds before the transport's destructive soft trim.
 

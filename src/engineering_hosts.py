@@ -17,7 +17,7 @@ from src.host_execution import enabled_for
 LEGACY = 'legacy-jetson'
 MAX_BYTES = 8 * 1024 * 1024
 OPS = frozenset(('runner.capabilities', 'resource.snapshot', 'scope.cancel',
-    'workspace.digest', 'workspace.verification-copy',
+    'workspace.digest', 'workspace.git-state', 'workspace.verification-copy',
     'lsp.discover', 'lsp.start', 'lsp.request', 'lsp.diagnostics', 'lsp.stop',
     'terminal.create', 'terminal.poll', 'terminal.input', 'terminal.resize',
     'terminal.interrupt', 'terminal.stop', 'terminal.list', 'command.start',

@@ -154,7 +154,22 @@ def _validate(raw: str, source: str, *, source_sha256: str, exit_code: int) -> O
     return value
 
 
-def render_receipt(receipt: dict, artifact: dict, command: str, route: Optional[dict]) -> str:
+def _usage(value: object, prompt: list[dict], raw: str) -> dict:
+    candidate = value if isinstance(value, dict) else {}
+    try:
+        input_tokens = max(0, int(candidate.get("input_tokens", candidate.get("prompt_tokens", 0)) or 0))
+        output_tokens = max(0, int(candidate.get("output_tokens", candidate.get("completion_tokens", 0)) or 0))
+    except (TypeError, ValueError):
+        input_tokens = output_tokens = 0
+    source = "provider" if input_tokens or output_tokens else "estimated"
+    if source == "estimated":
+        input_tokens = max(1, len(json.dumps(prompt, ensure_ascii=False).encode()) // 4)
+        output_tokens = max(1, len(raw.encode()) // 4)
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens, "source": source}
+
+
+def render_receipt(receipt: dict, artifact: dict, command: str, route: Optional[dict], usage: dict) -> str:
     lines = [
         "odysseus_evidence_receipt_v1",
         f"status: {receipt['status']}",
@@ -166,6 +181,10 @@ def render_receipt(receipt: dict, artifact: dict, command: str, route: Optional[
         f"full_output_artifact: {artifact['id']}",
         f"reducer_endpoint: {str((route or {}).get('endpoint_id') or '')}",
         f"reducer_model: {str((route or {}).get('model') or '')}",
+        f"reducer_input_tokens: {usage['input_tokens']}",
+        f"reducer_output_tokens: {usage['output_tokens']}",
+        f"reducer_total_tokens: {usage['total_tokens']}",
+        f"reducer_usage_source: {usage['source']}",
         "verified_evidence:",
     ]
     for item in receipt["evidence"]:
@@ -210,20 +229,26 @@ async def reduce(
         }, ensure_ascii=False)},
     ]
     try:
-        raw = await llm_call(prompt)
+        response = await llm_call(prompt)
+        if isinstance(response, dict):
+            raw = str(response.get("text") or "")
+            usage = _usage(response.get("usage"), prompt, raw)
+        else:
+            raw = str(response or "")
+            usage = _usage(None, prompt, raw)
         receipt = _validate(str(raw or ""), text, source_sha256=source_sha256, exit_code=exit_code)
         if receipt is None:
             _journal(owner, session_id, "fallback", reason="invalid_receipt", source_sha256=source_sha256)
             return None
-        rendered = render_receipt(receipt, artifact, command, route)
+        rendered = render_receipt(receipt, artifact, command, route, usage)
         if len(rendered.encode("utf-8")) >= len(text.encode("utf-8")):
             _journal(owner, session_id, "fallback", reason="receipt_not_smaller", source_sha256=source_sha256)
             return None
         _journal(owner, session_id, "applied", source_sha256=source_sha256,
                  receipt_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
                  receipt_bytes=len(rendered.encode()), evidence_count=len(receipt["evidence"]),
-                 route=dict(route or {}))
-        return {"text": rendered, "receipt": receipt, "artifact": artifact}
+                 route=dict(route or {}), usage=usage)
+        return {"text": rendered, "receipt": receipt, "artifact": artifact, "usage": usage}
     except Exception as exc:
         try:
             _journal(owner, session_id, "fallback", reason=type(exc).__name__, source_sha256=source_sha256)

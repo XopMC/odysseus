@@ -18,7 +18,14 @@ def record(owner: Optional[str], session_id: str, generation: int, *, ledger_has
         ).order_by(ChatRunState.updated_at.desc()).first()
         marker = {
             "kind": "rebuild_plan_after_compaction", "generation": int(generation),
-            "instruction": "Re-read the active plan and goal checkpoint, rebuild current step state, then continue.",
+            "mandatory": True,
+            "required_tools": ["create_plan", "update_plan", "update_plan_step"],
+            "instruction": (
+                "Online context compaction finished and the parent task is still active. "
+                "Before any other work, re-read the active goal/checkpoint and rebuild a fresh "
+                "remaining-work plan by calling create_plan, update_plan, or update_plan_step. "
+                "Do not continue execution or merely describe a plan until that tool call succeeds."
+            ),
         }
         row = ChatContextCompaction(
             id=uuid.uuid4().hex, owner=owner or "", session_id=session_id,

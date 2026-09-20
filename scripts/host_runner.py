@@ -147,7 +147,8 @@ class Runner:
         # The last two fields are authenticated check-evidence bindings created
         # by the server.  They are metadata, never Docker options or host paths.
         if isolated and set(args) - {'cwd', 'command', 'timeout', 'idempotency_key',
-                                    'expected_workspace_hash', 'check_run_id'}:
+                                    'expected_workspace_hash', 'check_run_id',
+                                    'sealed_environment', 'expected_environment_hash'}:
             raise ValueError('isolated command accepts only fixed check arguments')
         cwd = self.safe_cwd(args.get('cwd'))
         lease = self.lease(cwd, owner, scope)
@@ -177,6 +178,17 @@ class Runner:
                 raise ValueError('isolated execution requires a ready verification copy, never a user workspace')
             if not shutil.which('docker'):
                 raise ValueError('isolated execution is unavailable: docker is not installed for this runner')
+            sealed_raw = args.get('sealed_environment')
+            sealed_hash = args.get('expected_environment_hash')
+            if (not isinstance(sealed_raw, str) or not sealed_raw.startswith('/')
+                    or not isinstance(sealed_hash, str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', sealed_hash)):
+                raise ValueError('isolated execution requires a sealed environment and its SHA-256')
+            sealed_environment = self.safe_cwd(sealed_raw)
+            if sealed_environment == cwd or Path(sealed_environment) in Path(cwd).parents or Path(cwd) in Path(sealed_environment).parents:
+                raise ValueError('sealed environment must be separate from the candidate workspace')
+            if self.workspace_digest(sealed_environment, owner, scope)['sha256'] != sealed_hash:
+                raise ValueError('sealed environment changed before check dispatch')
         timeout = min(86400, max(1, int(args.get('timeout', 86400 if terminal else 3600))))
         if lease and self.data['worktrees'][lease].get('kind') == 'verification-copy':
             verification = self.data['worktrees'][lease]
@@ -196,6 +208,8 @@ class Runner:
                               'command_hash': hashlib.sha256(command.encode()).hexdigest(),
                               'toolchain': toolchain,
                               'protocol': 1}
+            if isolated:
+                check_evidence['environment_hash'] = sealed_hash
             if 'check_run_id' in args:
                 if not isinstance(args['check_run_id'], str) or not re.fullmatch(r'[0-9a-f]{32}', args['check_run_id']):
                     raise ValueError('Invalid check run identity')
@@ -207,9 +221,12 @@ class Runner:
                   'status': 'running', 'exit_code': None, 'output_start': 0, 'output_end': 0,
                   'timeout': timeout}
         if isolated:
-            record['isolation'] = {'image': ISOLATED_IMAGE, 'network': 'none', 'host_mounts': [cwd],
+            record['isolation'] = {'image': ISOLATED_IMAGE, 'network': 'none',
+                                   'host_mounts': [{'target': '/workspace', 'mode': 'rw'},
+                                                   {'target': '/heldout', 'mode': 'ro'}],
                                    'read_only_root': True, 'capabilities_dropped': True,
                                    'no_new_privileges': True, 'pids_limit': 64, 'memory_limit': '512m'}
+            record['sealed_environment'] = sealed_environment
         if check_evidence is not None:
             record['check_evidence'] = check_evidence
         # Persist the claim before process creation: a daemon crash cannot replay
@@ -243,7 +260,8 @@ class Runner:
                             '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '64',
                             '--memory', '512m', '--user', f'{os.getuid()}:{os.getgid()}',
                             '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
-                            '--volume', f'{cwd}:/workspace:rw', '--workdir', '/workspace',
+                            '--volume', f'{cwd}:/workspace:rw',
+                            '--volume', f'{sealed_environment}:/heldout:ro', '--workdir', '/workspace',
                             ISOLATED_IMAGE, '/bin/sh', '-ceu', command]
                 proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -327,13 +345,17 @@ class Runner:
                     try:
                         record['check_evidence']['workspace_hash_after'] = self.workspace_digest(
                             record['cwd'], record['owner'], record['scope'])['sha256']
+                        if record.get('sealed_environment'):
+                            record['check_evidence']['environment_hash_after'] = self.workspace_digest(
+                                record['sealed_environment'], record['owner'], record['scope'])['sha256']
                     except (OSError, ValueError):
                         record['check_evidence']['digest_unavailable'] = True
                 self.save()
 
     @staticmethod
     def public_job(record):
-        return {key: value for key, value in record.items() if key not in {'key', 'signature', 'owner', 'scope'}}
+        return {key: value for key, value in record.items()
+                if key not in {'key', 'signature', 'owner', 'scope', 'sealed_environment'}}
 
     def workspace_digest(self, cwd, owner, scope, *, _copy_to=None):
         """Bounded source-tree digest; no Git hooks or project code executed.
@@ -407,6 +429,21 @@ class Runner:
             destination.chmod(mode)
         return {'sha256': hashed.hexdigest(), 'scheme': 'odysseus-source-v1',
                 'files_and_dirs': count, 'bytes': total, 'excluded_names': sorted(excluded)}
+
+    def workspace_git_state(self, cwd, owner, scope):
+        """Return a fixed, non-hook Git identity for one exact worktree root."""
+        root = self.safe_cwd(cwd)
+        self.lease(root, owner, scope)
+        if self.busy(root):
+            raise ValueError('workspace has an active runner job')
+        top = self._git(root, 'rev-parse', '--show-toplevel').decode().strip()
+        if os.path.realpath(top) != os.path.realpath(root):
+            raise ValueError('workspace must point to the Git root')
+        head = self._git(root, 'rev-parse', '--verify', 'HEAD^{commit}').decode().strip().lower()
+        status = self._git(root, 'status', '--porcelain=v1', '--untracked-files=all').decode()
+        if not re.fullmatch(r'[0-9a-f]{40,64}', head):
+            raise ValueError('workspace HEAD is invalid')
+        return {'root': root, 'head': head, 'clean': not bool(status.strip())}
 
     def verification_copy(self, args, owner, scope):
         """Private byte copy, not a sandbox. Retain failed/finished copies."""
@@ -1259,12 +1296,17 @@ class Runner:
                     result = self.resource_snapshot()
                 elif op == 'workspace.digest':
                     result = self.workspace_digest(args.get('cwd'), owner, scope)
+                elif op == 'workspace.git-state':
+                    if set(args) != {'cwd'}:
+                        raise ValueError('workspace.git-state accepts only cwd')
+                    result = self.workspace_git_state(args.get('cwd'), owner, scope)
                 elif op == 'workspace.verification-copy':
                     result = self.verification_copy(args, owner, scope)
                 elif op == 'runner.capabilities':
                     result = runner_platform.capabilities(self.platform_identity)
                     for supported in ('lsp.discover', 'lsp.start', 'lsp.request', 'lsp.diagnostics', 'lsp.stop',
-                                      'workspace.digest', 'workspace.verification-copy', 'sandbox.command.start'):
+                                      'workspace.digest', 'workspace.git-state', 'workspace.verification-copy',
+                                      'sandbox.command.start'):
                         if supported not in result['supported_ops']:
                             result['supported_ops'].append(supported)
                 elif op.startswith('lsp.'):

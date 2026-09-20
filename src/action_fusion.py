@@ -11,11 +11,43 @@ import re
 import base64
 import shlex
 from typing import AsyncIterator
+from urllib.parse import unquote, urlparse
 
 
 FUSIBLE_TOOLS = frozenset({"write_file", "edit_file", "apply_patch"})
 _locks: dict[str, asyncio.Lock] = {}
 _locks_guard = asyncio.Lock()
+
+
+def mutation_paths(tool: str, content: str) -> list[str]:
+    """Extract every file target from an ordinary or fused mutation."""
+    if tool not in FUSIBLE_TOOLS:
+        return []
+    try:
+        args = json.loads(str(content or "{}"))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(args, dict):
+        return []
+    if tool == "apply_patch":
+        patch = str(args.get("patch_text") or args.get("patchText") or args.get("patch") or "")
+        return [path.strip() for path in re.findall(
+            r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.MULTILINE,
+        ) if path.strip()]
+    path = str(args.get("path") or "").strip()
+    return [path] if path else []
+
+
+def _expand_tool_path(path: str, workspace: str | None) -> str:
+    value = path[1:] if path.startswith("@") else path
+    if value.startswith("file://"):
+        parsed = urlparse(value)
+        if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+            raise ValueError("Only local file URLs can be queued")
+        value = unquote(parsed.path)
+    value = os.path.expanduser(value)
+    root = workspace or os.getcwd()
+    return os.path.realpath(value if os.path.isabs(value) else os.path.join(root, value))
 
 
 def parse(tool: str, content: str) -> dict | None:
@@ -44,12 +76,7 @@ def parse(tool: str, content: str) -> dict | None:
         raise ValueError("verify.timeout_seconds must be between 1 and 3600")
     clean = dict(args)
     clean.pop("verify", None)
-    if tool == "apply_patch":
-        patch = str(clean.get("patch_text") or clean.get("patchText") or clean.get("patch") or "")
-        paths = re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.MULTILINE)
-    else:
-        paths = [str(clean.get("path") or "")]
-    paths = [path.strip() for path in paths if path.strip()]
+    paths = mutation_paths(tool, json.dumps(clean, ensure_ascii=False))
     return {
         "clean_content": json.dumps(clean, ensure_ascii=False),
         "command": command,
@@ -59,8 +86,7 @@ def parse(tool: str, content: str) -> dict | None:
 
 
 def lock_keys(paths: list[str], workspace: str | None) -> list[str]:
-    root = workspace or os.getcwd()
-    return sorted({os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path)) for path in paths})
+    return sorted({_expand_tool_path(path, workspace) for path in paths})
 
 
 def fingerprints(paths: list[str], workspace: str | None) -> dict[str, str]:
