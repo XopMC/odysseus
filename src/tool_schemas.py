@@ -350,14 +350,15 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_subagent",
-            "description": "Start one independent child agent and return immediately. For N children, call this N times first so they run in parallel, then join them with manage_subagents action=wait. Children use ordinary permitted Agent tools. Maximum 4 active children per exact model; any number of configured models may be selected.",
+            "description": "Start one independent child agent and return immediately. For N children, call this N times first so they run in parallel, then join them with manage_subagents action=wait. In selected-models mode the server assigns children breadth-first across every selected model before reusing one. Maximum 4 children per exact model, or 3 on the active chat model.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "objective": {"type": "string", "description": "Concrete bounded subtask and expected result"},
                     "context": {"type": "string", "description": "Only the context excerpt the child needs"},
-                    "model": {"type": "string", "description": "'same' or an exact configured model/model@endpoint allowlist entry"},
-                    "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 600}
+                    "model": {"type": "string", "description": "Use 'auto' (default) for balanced allocation, or an exact configured model/model@endpoint as a preference"},
+                    "pin_model": {"type": "boolean", "description": "Pin to the exact model only when the user explicitly requested that assignment"},
+                    "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 86400, "description": "Whole child-run deadline; defaults to 21600 seconds (6 hours)"}
                 },
                 "required": ["objective"]
             }
@@ -1590,6 +1591,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             "objective": args.get("objective", ""),
             "context": args.get("context", ""),
             "model": args.get("model", "same"),
+            "pin_model": args.get("pin_model", False),
             "timeout_seconds": args.get("timeout_seconds", 0),
         }, ensure_ascii=False)
     elif tool_type == "manage_subagents":

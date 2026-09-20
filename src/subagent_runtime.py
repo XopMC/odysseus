@@ -115,6 +115,47 @@ class SubagentRuntime:
         finally:
             db.close()
 
+    def _merge_metrics(self, child_id: str, owner: Optional[str], values: dict) -> Optional[dict]:
+        """Merge telemetry without letting a later heartbeat erase context data."""
+        db = SessionLocal()
+        try:
+            row = db.query(ChatSubagentRun).filter(
+                ChatSubagentRun.id == child_id,
+                ChatSubagentRun.owner == (owner or ""),
+            ).first()
+            if row is None:
+                return None
+            metrics = dict(row.metrics or {})
+            metrics.update(values or {})
+            row.metrics = metrics
+            row.revision = int(row.revision or 0) + 1
+            db.commit()
+            db.refresh(row)
+            return _public(row, include_result=True)
+        finally:
+            db.close()
+
+    @staticmethod
+    def _route_id(endpoint_url: str, endpoint_id: Optional[str]) -> str:
+        return endpoint_id or ("url-" + hashlib.sha256(endpoint_url.encode()).hexdigest()[:16])
+
+    def active_count(self, *, owner: Optional[str], endpoint_url: str,
+                     model: str, endpoint_id: Optional[str]) -> int:
+        """Return the durable active count for one exact model route."""
+        self._recover_stale()
+        route_id = self._route_id(endpoint_url, endpoint_id)
+        db = SessionLocal()
+        try:
+            return int(db.query(ChatSubagentRun).filter(
+                ChatSubagentRun.owner == (owner or ""),
+                ChatSubagentRun.model == model,
+                ChatSubagentRun.endpoint_id == route_id,
+                ChatSubagentRun.status.in_(ACTIVE_STATUSES),
+                ChatSubagentRun.removed.is_(False),
+            ).count())
+        finally:
+            db.close()
+
     async def spawn(self, *, owner: Optional[str], session_id: str,
                     parent_run_id: Optional[str], objective: str,
                     assigned_context: str, endpoint_url: str, model: str,
@@ -123,16 +164,18 @@ class SubagentRuntime:
                     disabled_tools: Optional[set] = None, tool_policy=None,
                     allowed_tools: Optional[set] = None,
                     external_untrusted_context_seen: bool = False,
-                    delegated_credential: bool = False) -> dict:
+                    delegated_credential: bool = False,
+                    max_active_for_model: int = MAX_ACTIVE_PER_MODEL) -> dict:
         self._recover_stale()
         owner_key = owner or ""
+        model_capacity = max(1, min(int(max_active_for_model), MAX_ACTIVE_PER_MODEL))
         async with self._lock:
-            route_id = endpoint_id or ("url-" + hashlib.sha256(endpoint_url.encode()).hexdigest()[:16])
+            route_id = self._route_id(endpoint_url, endpoint_id)
             child_id = uuid.uuid4().hex
             ordinal = 1
             slot = None
             active_count = 0
-            for _attempt in range(MAX_ACTIVE_PER_MODEL + 1):
+            for _attempt in range(model_capacity + 1):
                 db = SessionLocal()
                 try:
                     used = {int(value[0]) for value in db.query(ChatSubagentRun.slot).filter(
@@ -144,12 +187,13 @@ class SubagentRuntime:
                         ChatSubagentRun.slot.isnot(None),
                     ).all()}
                     active_count = len(used)
-                    slot = next((candidate for candidate in range(1, MAX_ACTIVE_PER_MODEL + 1)
+                    slot = next((candidate for candidate in range(1, model_capacity + 1)
                                  if candidate not in used), None)
                     if slot is None:
-                        return {"error": f"Active subagent limit reached for model {model} ({MAX_ACTIVE_PER_MODEL})",
+                        return {"error": f"Active subagent limit reached for model {model} ({model_capacity})",
                                 "exit_code": 1, "policy": "model_capacity_exhausted",
-                                "model": model, "active_for_model": len(used)}
+                                "model": model, "active_for_model": len(used),
+                                "max_active_per_model": model_capacity}
                     ordinal = db.query(ChatSubagentRun).filter(
                         ChatSubagentRun.owner == owner_key,
                         ChatSubagentRun.parent_session_id == session_id,
@@ -172,7 +216,7 @@ class SubagentRuntime:
                     db.add(row); db.commit(); break
                 except IntegrityError:
                     db.rollback()
-                    if _attempt >= MAX_ACTIVE_PER_MODEL:
+                    if _attempt >= model_capacity:
                         return {"error": "Subagent capacity changed concurrently; retry", "exit_code": 1,
                                 "policy": "model_capacity_exhausted"}
                     await asyncio.sleep(0)
@@ -216,7 +260,7 @@ class SubagentRuntime:
         return {
             "child_id": child_id, "child_run_id": child_id, "worker_id": f"child-{ordinal}",
             "parent_run_id": parent_run_id, "model": model, "status": "queued",
-            "active_for_model": active_count + 1, "max_active_per_model": MAX_ACTIVE_PER_MODEL,
+            "active_for_model": active_count + 1, "max_active_per_model": model_capacity,
             "exit_code": 0,
             "message": "Subagent started asynchronously. Spawn remaining children before waiting.",
         }
@@ -225,7 +269,6 @@ class SubagentRuntime:
                          endpoint_url: str, model: str, headers: dict,
                          timeout_seconds: int, workspace: Optional[str], access_mode: str) -> None:
         from src.agent_loop import stream_agent_loop
-        from src.tool_policy import known_tool_names
 
         db = SessionLocal()
         try:
@@ -263,9 +306,6 @@ class SubagentRuntime:
             "send_to_session", "manage_session", "complete_goal",
             "update_goal_progress", "get_goal",
         }
-        allowed = config.get("allowed_tools")
-        if allowed is not None:
-            disabled.update(set(known_tool_names()) - set(allowed))
         output_parts: list[str] = []
         reasoning_parts: list[str] = []
         pending_delta: list[str] = []
@@ -307,7 +347,8 @@ class SubagentRuntime:
                 pending_thinking.clear()
                 self._event(child_id, owner, session_id, "thinking", {"text": text})
             if output_parts or reasoning_parts:
-                self._update(child_id, owner, result="".join(output_parts)[-120000:], heartbeat_at=_utcnow(), metrics={
+                self._update(child_id, owner, result="".join(output_parts)[-120000:], heartbeat_at=_utcnow())
+                self._merge_metrics(child_id, owner, {
                     "thinking_chars": sum(map(len, reasoning_parts)),
                     "output_chars": sum(map(len, output_parts)),
                 })
@@ -331,7 +372,11 @@ class SubagentRuntime:
                     disabled_tools=disabled, max_rounds=200, max_tool_calls=0,
                     workload="subagent", _is_teacher_run=True,
                     guidance_provider=guidance_provider,
-                    relevant_tools=allowed,
+                    # The parent's selected tools are RAG hints for the parent
+                    # objective, not a permission boundary. Each child must run
+                    # tool retrieval against its own objective while retaining
+                    # the parent's real disabled/tool-policy restrictions.
+                    relevant_tools=None,
                     tool_policy=config.get("tool_policy"),
                     external_untrusted_context_seen=bool(config.get("external_untrusted_context_seen")),
                     delegated_credential=bool(config.get("delegated_credential")),
@@ -364,14 +409,14 @@ class SubagentRuntime:
                             if kind == "ask_user":
                                 waiting_payload = event.get("data") or event
                             if kind == "metrics":
-                                self._update(child_id, owner, metrics=event.get("data") or {})
+                                self._merge_metrics(child_id, owner, event.get("data") or {})
                             self._event(child_id, owner, session_id, kind, event)
             await asyncio.wait_for(consume(), timeout=timeout_seconds)
             await flush(force=True)
             final = "".join(output_parts).strip()
             if waiting_payload:
-                self._update(child_id, owner, status="waiting_user", result=final,
-                             metrics={"waiting_user": waiting_payload}, error="")
+                self._merge_metrics(child_id, owner, {"waiting_user": waiting_payload})
+                self._update(child_id, owner, status="waiting_user", result=final, error="")
                 self._event(child_id, owner, session_id, "status", {
                     "status": "waiting_user", "ask_user": waiting_payload,
                 })

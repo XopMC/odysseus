@@ -68,6 +68,7 @@ def test_midrun_compaction_continues_with_goal_and_final_metrics(monkeypatch):
     assert all(any("do not modify" in str(m.get("content", "")) for m in msgs) for msgs in requests), [(len(msgs), estimate_tokens(msgs), [str(m.get("content", ""))[:80] for m in msgs if m.get("role") == "user" and (m.get("metadata") or {}).get("trusted") is not False]) for msgs in requests]
     metrics = next(e["data"] for e in events if e.get("type") == "metrics")
     assert metrics["working_context"]["compactions"] >= 1
+    assert metrics["working_context"]["auto_compact_enabled"] is True
     assert metrics["working_context"]["prompt_tokens"] == estimate_tokens(requests[-1])
 
 

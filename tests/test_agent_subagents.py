@@ -41,6 +41,7 @@ def test_same_model_subagent_is_bounded_and_has_stable_child_identity(monkeypatc
     assert captured["endpoint_url"] == "http://local/v1/chat/completions"
     assert captured["headers"] == {"X-Test": "yes"}
     assert captured["assigned_context"] == "Only parser.py lines 1-20"
+    assert captured["timeout_seconds"] == 21600
 
 
 def test_same_model_setting_overrides_a_hallucinated_child_model(monkeypatch):
@@ -72,6 +73,99 @@ def test_selected_subagent_model_is_an_exact_allowlist(monkeypatch):
         "objective": "Check", "model": "other@endpoint",
     }), {"owner": "alice"}))
     assert denied["policy"] == "disabled_by_policy"
+
+
+def test_selected_models_are_allocated_breadth_first_before_reuse(monkeypatch):
+    allowed = [f"worker-{idx}@endpoint-{idx}" for idx in range(1, 6)]
+    values = {
+        "agent_subagents_mode": "selected_models",
+        "agent_subagent_models": ",".join(allowed),
+    }
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: values.get(key, default))
+
+    def resolve(spec, owner=None):
+        model, endpoint = spec.rsplit("@", 1)
+        return f"http://{endpoint}/v1/chat/completions", model, {}
+
+    counts = {}
+    spawned = []
+
+    def active_count(**kwargs):
+        return counts.get((kwargs["model"], kwargs["endpoint_id"]), 0)
+
+    async def spawn(**kwargs):
+        key = (kwargs["model"], kwargs["endpoint_id"])
+        counts[key] = counts.get(key, 0) + 1
+        spawned.append(kwargs)
+        return {"child_id": str(len(spawned)), "model": kwargs["model"],
+                "status": "queued", "exit_code": 0}
+
+    monkeypatch.setattr("src.ai_interaction._resolve_model", resolve)
+    monkeypatch.setattr("src.subagent_runtime.runtime.active_count", active_count)
+    monkeypatch.setattr("src.subagent_runtime.runtime.spawn", spawn)
+    ctx = {"owner": "alice", "session_id": "s1", "subagent_state": {},
+           "current_endpoint_url": "http://parent/v1/chat/completions",
+           "current_model": "parent"}
+
+    async def scenario():
+        for idx in range(6):
+            # Even if a model repeats the first allowed value, it is merely a
+            # preference unless the user explicitly requested pin_model.
+            result = await tools.delegate_subagent(json.dumps({
+                "objective": f"Task {idx}", "model": allowed[0],
+            }), ctx)
+            assert result["exit_code"] == 0
+
+    asyncio.run(scenario())
+    assert [row["model"] for row in spawned] == [
+        "worker-1", "worker-2", "worker-3", "worker-4", "worker-5", "worker-1",
+    ]
+    assert all(row["max_active_for_model"] == 4 for row in spawned)
+
+
+def test_parent_model_gets_three_child_slots_then_allocator_uses_other_models(monkeypatch):
+    values = {
+        "agent_subagents_mode": "selected_models",
+        "agent_subagent_models": "parent@endpoint-parent,worker@endpoint-worker",
+    }
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: values.get(key, default))
+
+    def resolve(spec, owner=None):
+        model, endpoint = spec.rsplit("@", 1)
+        return f"http://{endpoint}/v1/chat/completions", model, {}
+
+    counts = {}
+    spawned = []
+
+    def active_count(**kwargs):
+        return counts.get((kwargs["model"], kwargs["endpoint_id"]), 0)
+
+    async def spawn(**kwargs):
+        key = (kwargs["model"], kwargs["endpoint_id"])
+        counts[key] = counts.get(key, 0) + 1
+        spawned.append(kwargs)
+        return {"child_id": str(len(spawned)), "model": kwargs["model"],
+                "status": "queued", "exit_code": 0}
+
+    monkeypatch.setattr("src.ai_interaction._resolve_model", resolve)
+    monkeypatch.setattr("src.subagent_runtime.runtime.active_count", active_count)
+    monkeypatch.setattr("src.subagent_runtime.runtime.spawn", spawn)
+    ctx = {"owner": "alice", "session_id": "s1", "subagent_state": {},
+           "current_endpoint_url": "http://endpoint-parent/v1/chat/completions",
+           "current_model": "parent"}
+
+    async def scenario():
+        for idx in range(7):
+            result = await tools.delegate_subagent(json.dumps({
+                "objective": f"Task {idx}", "model": "auto",
+            }), ctx)
+            assert result["exit_code"] == 0
+
+    asyncio.run(scenario())
+    assert [row["model"] for row in spawned] == [
+        "parent", "worker", "parent", "worker", "parent", "worker", "worker",
+    ]
+    assert [row["max_active_for_model"] for row in spawned] == [3, 4, 3, 4, 3, 4, 4]
 
 
 def test_subagent_dispatch_preserves_current_route_parent_and_budget(monkeypatch):
@@ -138,6 +232,7 @@ def test_subagent_settings_and_timeline_contract_are_wired():
     assert '"type": "tool_inventory"' in loop
     assert "manage_subagents" in loop
     assert "BEFORE waiting" in loop
+    assert "distributes automatic children breadth-first" in loop
     assert ".subagent-message-row[hidden] { display:none !important; }" in style
 
 
@@ -196,6 +291,53 @@ def test_parallel_runtime_returns_immediately_and_caps_each_model_at_four(monkey
         db.commit(); db.close()
 
 
+def test_runtime_can_reserve_one_parent_slot_by_capping_children_at_three(monkeypatch):
+    owner = "parent-cap-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="parent cap test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    release = asyncio.Event()
+    three_entered = asyncio.Event()
+    entered = []
+
+    async def held_model_loop(endpoint_url, model, messages, **kwargs):
+        entered.append(model)
+        if len(entered) == 3:
+            three_entered.set()
+        await release.wait()
+        yield 'data: {"delta":"ok","round":1}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", held_model_loop)
+
+    async def scenario():
+        common = dict(owner=owner, session_id=session_id, parent_run_id="parent",
+                      objective="work", assigned_context="", endpoint_url="http://local",
+                      model="parent", headers={}, endpoint_id="ep", timeout_seconds=60,
+                      workspace=None, access_mode="ask_important", max_active_for_model=3)
+        children = [await runtime.spawn(**common) for _ in range(3)]
+        await asyncio.wait_for(three_entered.wait(), timeout=2)
+        fourth = await runtime.spawn(**common)
+        assert fourth["policy"] == "model_capacity_exhausted"
+        assert fourth["max_active_per_model"] == 3
+        assert all(child["max_active_per_model"] == 3 for child in children)
+        release.set()
+        await asyncio.gather(*(runtime._tasks[child["child_id"]] for child in children))
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
 def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
     owner = "policy-" + uuid.uuid4().hex
     session_id = uuid.uuid4().hex
@@ -206,10 +348,13 @@ def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
 
     async def fake_loop(*args, **kwargs):
         captured.update(kwargs)
+        yield 'data: {"type":"context_usage","data":{"model":"worker","context_percent":74,"auto_compact_enabled":true,"compactions":0}}\n\n'
         yield 'data: {"delta":"reason ","thinking":true,"round":1}\n\n'
         yield 'data: {"type":"tool_start","tool":"read_file","round":1}\n\n'
+        yield 'data: {"type":"compacted","working_context":true,"before_tokens":7500,"after_tokens":4200,"checkpoint":{"ledger_hash":"abc"}}\n\n'
+        yield 'data: {"type":"context_checkpoint","messages":[{"role":"user","content":"inspect"}],"ledger_hash":"abc","compactions":1}\n\n'
         yield 'data: {"delta":"done","round":1}\n\n'
-        yield 'data: {"type":"metrics","data":{"output_tokens":1}}\n\n'
+        yield 'data: {"type":"metrics","data":{"output_tokens":1,"working_context":{"compactions":1,"auto_compact_enabled":true}}}\n\n'
         yield 'data: [DONE]\n\n'
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
@@ -220,7 +365,7 @@ def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
             objective="inspect", assigned_context="", endpoint_url="http://local",
             model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
             workspace="/tmp", access_mode="ask_important",
-            disabled_tools={"bash"}, allowed_tools={"read_file", "delegate_subagent"},
+            disabled_tools={"write_file"}, allowed_tools={"delegate_subagent"},
             external_untrusted_context_seen=True, delegated_credential=True,
         )
         task = runtime._tasks[result["child_id"]]
@@ -230,15 +375,68 @@ def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
         assert row["result"] == "done"
         assert captured["external_untrusted_context_seen"] is True
         assert captured["delegated_credential"] is True
-        assert captured["relevant_tools"] == {"read_file", "delegate_subagent"}
+        assert captured["relevant_tools"] is None
         assert captured["workload"] == "subagent"
-        assert "bash" in captured["disabled_tools"]
+        assert "bash" not in captured["disabled_tools"]
+        assert "read_file" not in captured["disabled_tools"]
+        assert "write_file" in captured["disabled_tools"]
         assert "delegate_subagent" in captured["disabled_tools"]
         events = runtime.events(owner, session_id, child_id=result["child_id"], limit=100)
-        assert {event["kind"] for event in events} >= {"created", "thinking", "delta", "tool_start", "status"}
+        assert {event["kind"] for event in events} >= {
+            "created", "thinking", "delta", "tool_start", "status",
+            "context_usage", "compacted", "context_checkpoint",
+        }
+        assert row["metrics"]["working_context"]["compactions"] == 1
+        assert row["metrics"]["working_context"]["auto_compact_enabled"] is True
 
     try:
         asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
+def test_parallel_children_receive_independent_model_contexts(monkeypatch):
+    owner = "contexts-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="child contexts", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    captured = []
+
+    async def fake_loop(endpoint_url, model, messages, **kwargs):
+        captured.append({
+            "model": model,
+            "history_id": id(kwargs["history_session"]),
+            "messages": json.loads(json.dumps(messages)),
+        })
+        yield 'data: {"delta":"done","round":1}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        common = dict(owner=owner, session_id=session_id, parent_run_id="parent",
+                      assigned_context="", endpoint_url="http://local", headers={},
+                      endpoint_id="ep", timeout_seconds=30, workspace=None,
+                      access_mode="ask_important")
+        first = await runtime.spawn(objective="Inspect alpha only", model="worker-a", **common)
+        second = await runtime.spawn(objective="Inspect beta only", model="worker-b", **common)
+        await asyncio.gather(runtime._tasks[first["child_id"]], runtime._tasks[second["child_id"]])
+
+    try:
+        asyncio.run(scenario())
+        assert len(captured) == 2
+        assert len({item["history_id"] for item in captured}) == 2
+        prompts = {item["model"]: item["messages"][-1]["content"] for item in captured}
+        assert "alpha" in prompts["worker-a"] and "beta" not in prompts["worker-a"]
+        assert "beta" in prompts["worker-b"] and "alpha" not in prompts["worker-b"]
     finally:
         db = SessionLocal()
         ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]

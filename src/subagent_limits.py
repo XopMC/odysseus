@@ -1,3 +1,6 @@
 """Shared concurrency limits for ordinary Agent child runs."""
 
 MAX_ACTIVE_PER_MODEL = 4
+MAX_ACTIVE_ON_PARENT_MODEL = 3
+DEFAULT_SUBAGENT_TIMEOUT_SECONDS = 6 * 60 * 60
+MAX_SUBAGENT_TIMEOUT_SECONDS = 24 * 60 * 60

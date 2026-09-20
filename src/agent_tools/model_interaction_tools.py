@@ -124,8 +124,14 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
 async def delegate_subagent(content: str, ctx: dict) -> Dict:
     """Start one real child agent and return immediately to the parent."""
     from src.settings import get_setting
-    from src.ai_interaction import _resolve_model, AI_CHAT_TIMEOUT
+    from src.ai_interaction import _resolve_model
     from src.subagent_runtime import runtime
+    from src.subagent_limits import (
+        DEFAULT_SUBAGENT_TIMEOUT_SECONDS,
+        MAX_ACTIVE_PER_MODEL,
+        MAX_ACTIVE_ON_PARENT_MODEL,
+        MAX_SUBAGENT_TIMEOUT_SECONDS,
+    )
 
     try:
         payload = json.loads(content or "{}")
@@ -136,14 +142,16 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
     objective = str(payload.get("objective") or "").strip()
     assigned_context = str(payload.get("context") or "").strip()
     requested_model = str(payload.get("model") or "same").strip()
+    pin_model = payload.get("pin_model") is True
     if not objective or len(objective) > 20000 or len(assigned_context) > 100000:
         return {"error": "Subagent objective/context is missing or too large", "exit_code": 1}
     try:
-        timeout_seconds = int(payload.get("timeout_seconds") or AI_CHAT_TIMEOUT)
+        timeout_seconds = int(payload.get("timeout_seconds") or DEFAULT_SUBAGENT_TIMEOUT_SECONDS)
     except (TypeError, ValueError):
         return {"error": "Subagent timeout must be an integer", "exit_code": 1}
-    if not 5 <= timeout_seconds <= 600:
-        return {"error": "Subagent timeout must be between 5 and 600 seconds", "exit_code": 1}
+    if not 5 <= timeout_seconds <= MAX_SUBAGENT_TIMEOUT_SECONDS:
+        return {"error": f"Subagent timeout must be between 5 and {MAX_SUBAGENT_TIMEOUT_SECONDS} seconds",
+                "exit_code": 1}
 
     mode = str(get_setting("agent_subagents_mode", "off") or "off")
     if mode == "off":
@@ -157,6 +165,7 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
     else:
         allowed = []
 
+    max_active_for_model = MAX_ACTIVE_PER_MODEL
     if mode == "same_model":
         # The account setting is authoritative.  Small/local models sometimes
         # hallucinate a provider alias (for example "sonnet") even after being
@@ -169,19 +178,77 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
             return {"error": "Current model route is unavailable for a subagent", "exit_code": 1,
                     "policy": "unavailable_transport"}
         resolved_spec = requested_model
+        max_active_for_model = MAX_ACTIVE_ON_PARENT_MODEL
     else:
         if not allowed:
             return {"error": "No subagent models are configured", "exit_code": 1,
                     "policy": "disabled_by_policy"}
-        model_spec = allowed[0] if requested_model.lower() in {"", "same"} else requested_model
-        resolved_spec = model_spec
-        if model_spec not in allowed:
+        automatic = requested_model.lower() in {"", "same", "auto"}
+        if not automatic and requested_model not in allowed:
             return {"error": "Requested subagent model is outside the configured allowlist", "exit_code": 1,
                     "policy": "disabled_by_policy"}
-        try:
-            url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=ctx.get("owner"))
-        except ValueError as exc:
-            return {"error": str(exc), "exit_code": 1, "policy": "not_supported_by_route"}
+
+        state = ctx.get("subagent_state") if isinstance(ctx.get("subagent_state"), dict) else {}
+        cache_key = (
+            ctx.get("owner") or "", tuple(allowed),
+            str(ctx.get("current_model") or ""),
+            str(ctx.get("current_endpoint_url") or "").rstrip("/"),
+        )
+        cached = state.get("_resolved_model_pool")
+        if not isinstance(cached, dict) or cached.get("key") != cache_key:
+            resolved = await asyncio.gather(*(
+                asyncio.to_thread(_resolve_model, spec, owner=ctx.get("owner"))
+                for spec in allowed
+            ), return_exceptions=True)
+            pool = []
+            for spec, item in zip(allowed, resolved):
+                if isinstance(item, Exception):
+                    continue
+                candidate_url, candidate_model, candidate_headers = item
+                endpoint_id = spec.rsplit("@", 1)[1] if "@" in spec else None
+                is_parent = (
+                    str(candidate_model) == str(ctx.get("current_model") or "")
+                    and str(candidate_url).rstrip("/") == str(ctx.get("current_endpoint_url") or "").rstrip("/")
+                )
+                pool.append({
+                    "spec": spec, "url": candidate_url, "model": candidate_model,
+                    "headers": candidate_headers or {}, "endpoint_id": endpoint_id,
+                    "capacity": MAX_ACTIVE_ON_PARENT_MODEL if is_parent else MAX_ACTIVE_PER_MODEL,
+                })
+            cached = {"key": cache_key, "pool": pool}
+            state["_resolved_model_pool"] = cached
+        pool = list(cached.get("pool") or [])
+        if not pool:
+            return {"error": "No configured subagent model is currently available", "exit_code": 1,
+                    "policy": "unavailable_transport"}
+
+        if pin_model:
+            if automatic:
+                return {"error": "pin_model requires an exact configured model", "exit_code": 1,
+                        "policy": "disabled_by_policy"}
+            candidates = [candidate for candidate in pool if candidate["spec"] == requested_model]
+        else:
+            # A model supplied without pin_model is only a tie-break preference.
+            # Allocation remains breadth-first across every selected route.
+            candidates = pool
+            if not automatic:
+                candidates = sorted(candidates, key=lambda candidate: candidate["spec"] != requested_model)
+
+        ranked = []
+        for order, candidate in enumerate(candidates):
+            active = runtime.active_count(
+                owner=ctx.get("owner"), endpoint_url=candidate["url"],
+                model=candidate["model"], endpoint_id=candidate["endpoint_id"],
+            )
+            if active < int(candidate["capacity"]):
+                ranked.append((active, order, candidate))
+        if not ranked:
+            return {"error": "All selected subagent models are at capacity", "exit_code": 1,
+                    "policy": "model_capacity_exhausted"}
+        _active, _order, selected = min(ranked, key=lambda item: (item[0], item[1]))
+        resolved_spec = selected["spec"]
+        url, model, headers = selected["url"], selected["model"], selected["headers"]
+        max_active_for_model = int(selected["capacity"])
 
     return await runtime.spawn(
         owner=ctx.get("owner"), session_id=ctx.get("session_id"),
@@ -198,6 +265,7 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         allowed_tools=ctx.get("parent_allowed_tools"),
         external_untrusted_context_seen=bool(ctx.get("external_untrusted_context_seen")),
         delegated_credential=bool(ctx.get("delegated_credential")),
+        max_active_for_model=max_active_for_model,
     )
 
 

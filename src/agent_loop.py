@@ -712,7 +712,7 @@ Suggest changes with explanations (for review/feedback requests).""",
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
-    "delegate_subagent": f"- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {{\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"same|exact configured model\"}}. Maximum {MAX_ACTIVE_PER_MODEL} active children per exact model.",
+    "delegate_subagent": f"- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {{\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"auto|exact configured model\"}}. Selected models are filled breadth-first. Maximum {MAX_ACTIVE_PER_MODEL} children per exact model, or 3 on the active chat model.",
     "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or wait for several child_ids after all of them have been started.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
@@ -4634,7 +4634,12 @@ async def stream_agent_loop(
             _subagent_scope = (
                 "Use only the current model (model='same')."
                 if _subagent_mode == "same_model"
-                else "Allowed child models: " + (_subagent_models or "none configured")
+                else (
+                    "Allowed child models: " + (_subagent_models or "none configured") + ". "
+                    "Pass model='auto' unless the user explicitly assigns one child to one exact model. "
+                    "The server distributes automatic children breadth-first across all selected models. "
+                    "Set pin_model=true only for an explicit user-requested assignment."
+                )
             )
             _prepend_agent_directive(route_messages, (
                 "## SUBAGENTS\n"
@@ -4644,7 +4649,7 @@ async def stream_agent_loop(
                 "Never use create_session for subagents; create_session only creates a separate user-visible chat. "
                 "Give each child only the context excerpt it needs, never secrets or the full transcript. "
                 "Children receive ordinary Agent tools within the current user policy; verify their claims before acting. "
-                f"At most {MAX_ACTIVE_PER_MODEL} children may be active on one exact model; configured models are otherwise unlimited. "
+                f"At most {MAX_ACTIVE_PER_MODEL} children may be active on one exact model; the active chat model is limited to 3 children. "
                 + _subagent_scope
             ))
         if guide_only:
@@ -5399,7 +5404,7 @@ async def stream_agent_loop(
             model=model, context_length=_last_route_context_length, endpoint_url=endpoint_url,
             prompt_tokens=_estimated_prompt, source="estimated", round_num=round_num,
             limit=_working_limit, compactions=_context_compactions,
-            auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+            auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else True,
             route_revision=_route_revision,
             tool_inventory_revision=_tool_inventory_revision,
         )
@@ -5777,7 +5782,7 @@ async def stream_agent_loop(
                             prompt_tokens=round_input, output_tokens=round_output,
                             source="backend", round_num=round_num,
                             limit=_working_limit, compactions=_context_compactions,
-                            auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+                            auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else True,
                             route_revision=_route_revision,
                             tool_inventory_revision=_tool_inventory_revision,
                         )
@@ -5833,7 +5838,7 @@ async def stream_agent_loop(
                                 prompt_tokens=estimate_tokens(_last_route_request_messages) + _schema_tokens,
                                 source="estimated", round_num=round_num,
                                 limit=_working_limit, compactions=_context_compactions,
-                                auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else None,
+                                auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else True,
                                 route_revision=_route_revision,
                                 tool_inventory_revision=_tool_inventory_revision,
                             )
