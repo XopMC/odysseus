@@ -808,6 +808,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             if key == "agent_subagent_models":
                 if not isinstance(val, str) or len(val) > 12000 or "\0" in val:
                     raise HTTPException(400, "Invalid agent subagent model list")
+            if key == "agent_efficiency_profile" and val not in {"off", "performance", "efficiency"}:
+                raise HTTPException(400, "Invalid agent efficiency profile")
             current[key] = val
         _save_settings(current)
         return without_retired_settings(current)

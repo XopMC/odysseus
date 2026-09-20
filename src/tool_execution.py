@@ -1282,6 +1282,106 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+    # Action Fusion executes a workspace mutation and its verification as one
+    # sealed action.  It lives after every policy gate, while the recursive
+    # calls below still pass through the individual mutation/bash gates.
+    if tool in {"write_file", "edit_file", "apply_patch"}:
+        from src.action_fusion import fingerprints, hold, parse as parse_fusion
+        from src.harness_efficiency import enabled as efficiency_enabled
+
+        try:
+            fused = parse_fusion(tool, content)
+        except ValueError as exc:
+            return f"{tool}: BLOCKED", {"error": f"Invalid fused action: {exc}", "exit_code": 1}
+        if fused is not None:
+            if not efficiency_enabled("action_fusion"):
+                return f"{tool}: BLOCKED", {
+                    "error": "Action Fusion is disabled by the active efficiency profile.",
+                    "exit_code": 1,
+                }
+            bash_names = registry_policy_names("bash")
+            if disabled_tools and not bash_names.isdisjoint(disabled_tools):
+                return f"{tool}+verify: BLOCKED", {
+                    "error": "Verification command is disabled; the file mutation was not applied.",
+                    "exit_code": 1,
+                }
+            if tool_policy and any(tool_policy.blocks(name) for name in bash_names):
+                return f"{tool}+verify: BLOCKED", {
+                    "error": "Verification command is blocked by policy; the file mutation was not applied.",
+                    "exit_code": 1,
+                }
+
+            recursive_kwargs = dict(
+                session_id=session_id,
+                disabled_tools=disabled_tools,
+                owner=owner,
+                progress_cb=progress_cb,
+                tool_policy=tool_policy,
+                current_endpoint_url=current_endpoint_url,
+                current_model=current_model,
+                current_headers=current_headers,
+                parent_run_id=parent_run_id,
+                subagent_state=subagent_state,
+                workspace=workspace,
+                access_mode=access_mode,
+                parent_disabled_tools=parent_disabled_tools,
+                parent_tool_policy=parent_tool_policy,
+                parent_allowed_tools=parent_allowed_tools,
+                external_untrusted_context_seen=external_untrusted_context_seen,
+                delegated_credential=delegated_credential,
+            )
+            from src import host_execution as _fusion_host
+            host_mode = _fusion_host.enabled_for(owner)
+            async with hold(fused["paths"], workspace):
+                mutation_desc, mutation = await _execute_tool_block_impl(
+                    SimpleNamespace(tool_type=tool, content=fused["clean_content"]),
+                    **recursive_kwargs,
+                )
+                if mutation.get("exit_code", 0) != 0 or mutation.get("error"):
+                    return f"{tool}+verify: mutation failed", {
+                        "error": "Mutation failed; verification was not run.",
+                        "exit_code": mutation.get("exit_code", 1) or 1,
+                        "mutation": mutation,
+                        "verification_skipped": True,
+                    }
+                post_mutation = {} if host_mode else fingerprints(fused["paths"], workspace)
+                # Yield once so a non-cooperating external editor can be seen
+                # by the post-mutation fence before the command starts.
+                await asyncio.sleep(0)
+                if not host_mode and post_mutation != fingerprints(fused["paths"], workspace):
+                    return f"{tool}+verify: fenced", {
+                        "error": "A mutated file changed before verification; command was not run.",
+                        "exit_code": 1,
+                        "mutation": mutation,
+                        "verification_skipped": True,
+                    }
+                try:
+                    verify_desc, verification = await asyncio.wait_for(
+                        _execute_tool_block_impl(
+                            SimpleNamespace(tool_type="bash", content=fused["command"]),
+                            **recursive_kwargs,
+                        ),
+                        timeout=fused["timeout_seconds"],
+                    )
+                except asyncio.TimeoutError:
+                    verification = {
+                        "error": f"Verification timed out after {fused['timeout_seconds']} seconds.",
+                        "exit_code": 124,
+                    }
+                    verify_desc = "bash: timed out"
+                ok = verification.get("exit_code", 0) == 0 and not verification.get("error")
+                return f"{tool}+verify", {
+                    "output": "Mutation applied and verification passed." if ok else (
+                        "Mutation applied, but verification failed. The mutation was preserved."
+                    ),
+                    "exit_code": 0 if ok else (verification.get("exit_code", 1) or 1),
+                    "mutation": mutation,
+                    "mutation_description": mutation_desc,
+                    "verification": verification,
+                    "verification_description": verify_desc,
+                    "fused": True,
+                }
+
 
     # Host mode is an explicit owner opt-in, AFTER every normal policy gate.
     # Background jobs retain the existing local lifecycle/auto-followup monitor.
@@ -1364,7 +1464,7 @@ async def _execute_tool_block_impl(
         query = content.split("\n")[0].strip()
         desc = f"search_chats: {query[:80]}"
         result = await do_search_chats(query, owner=owner)
-    elif tool in ("chat_with_model", "delegate_subagent", "manage_subagents", "ask_teacher", "list_models"):
+    elif tool in ("chat_with_model", "delegate_subagent", "manage_subagents", "ask_teacher", "list_models", "publish_subagent_evidence"):
         # Migrated to the agent_tools registry (#3629): dispatched through
         # TOOL_HANDLERS with the owner/session ctx these tools need, instead
         # of the legacy dispatch_ai_tool elif. The impls live in

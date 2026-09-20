@@ -8,7 +8,7 @@ from src.agent_tools import model_interaction_tools as tools
 from src.tool_capabilities import ToolRunSecurityContext
 from src import tool_execution
 from src.database import ChatSubagentEvent, ChatSubagentRun, Session, SessionLocal
-from src.subagent_runtime import runtime
+from src.subagent_runtime import CHILD_CORE_TOOLS, runtime
 
 
 def test_subagent_disabled_fails_before_model_dispatch(monkeypatch):
@@ -18,6 +18,14 @@ def test_subagent_disabled_fails_before_model_dispatch(monkeypatch):
     }))
     assert result["policy"] == "disabled_by_policy"
     assert result["exit_code"] == 1
+
+
+def test_child_runtime_has_stable_file_and_verification_tool_core():
+    assert CHILD_CORE_TOOLS == {
+        "get_workspace", "ls", "glob", "grep", "read_file", "write_file",
+        "edit_file", "apply_patch", "bash", "python", "read_tool_artifact",
+        "publish_subagent_evidence", "todowrite",
+    }
 
 
 def test_same_model_subagent_is_bounded_and_has_stable_child_identity(monkeypatch):
@@ -34,6 +42,7 @@ def test_same_model_subagent_is_bounded_and_has_stable_child_identity(monkeypatc
     }), {
         "current_endpoint_url": "http://local/v1/chat/completions", "current_model": "model-a",
         "current_headers": {"X-Test": "yes"}, "owner": "alice", "session_id": "s1",
+        "access_mode": "full_access",
     }))
     assert result["exit_code"] == 0
     assert result["model"] == "model-a"
@@ -42,6 +51,7 @@ def test_same_model_subagent_is_bounded_and_has_stable_child_identity(monkeypatc
     assert captured["headers"] == {"X-Test": "yes"}
     assert captured["assigned_context"] == "Only parser.py lines 1-20"
     assert captured["timeout_seconds"] == 21600
+    assert captured["access_mode"] == "full_access"
 
 
 def test_same_model_setting_overrides_a_hallucinated_child_model(monkeypatch):
@@ -375,7 +385,9 @@ def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
         assert row["result"] == "done"
         assert captured["external_untrusted_context_seen"] is True
         assert captured["delegated_credential"] is True
+        assert captured["access_mode"] == "ask_important"
         assert captured["relevant_tools"] is None
+        assert captured["forced_tools"] == set(CHILD_CORE_TOOLS)
         assert captured["workload"] == "subagent"
         assert "bash" not in captured["disabled_tools"]
         assert "read_file" not in captured["disabled_tools"]

@@ -376,6 +376,91 @@ class ChatSubagentEvent(Base):
     )
 
 
+class ChatSubagentEvidence(Base):
+    """Append-only evidence published by a child agent."""
+    __tablename__ = "chat_subagent_evidence"
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    parent_session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    child_id = Column(String, ForeignKey("chat_subagent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+    artifact_refs = Column(JSON, nullable=False, default=list)
+    content_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("ix_subagent_evidence_scope", "owner", "parent_session_id", "created_at"),
+        Index("uq_subagent_evidence_hash", "owner", "parent_session_id", "child_id", "content_hash", unique=True),
+    )
+
+
+class ChatSubagentCandidate(Base):
+    """Immutable candidate snapshot assembled from published evidence."""
+    __tablename__ = "chat_subagent_candidates"
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    parent_session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    submitted_by_child_id = Column(String, ForeignKey("chat_subagent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    evidence_ids = Column(JSON, nullable=False, default=list)
+    content_hash = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="proposed", index=True)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("ix_subagent_candidates_scope", "owner", "parent_session_id", "created_at"),
+        Index("uq_subagent_candidate_hash", "owner", "parent_session_id", "content_hash", unique=True),
+    )
+
+
+class ChatSubagentVerification(Base):
+    """Independent immutable verdict for one candidate."""
+    __tablename__ = "chat_subagent_verifications"
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    parent_session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    candidate_id = Column(String, ForeignKey("chat_subagent_candidates.id", ondelete="CASCADE"), nullable=False, index=True)
+    verifier_child_id = Column(String, ForeignKey("chat_subagent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    verdict = Column(String, nullable=False)
+    notes = Column(Text, nullable=False, default="")
+    content_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("uq_subagent_verifier_candidate", "candidate_id", "verifier_child_id", unique=True),
+    )
+
+
+class AutoResearchExperiment(Base):
+    """Frozen, opt-in optimization experiment. Never a deployment record."""
+    __tablename__ = "auto_research_experiments"
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=True, index=True)
+    baseline_sha = Column(String, nullable=False)
+    candidate_worktree = Column(String, nullable=False)
+    gates = Column(JSON, nullable=False, default=list)
+    objectives = Column(JSON, nullable=False, default=list)
+    status = Column(String, nullable=False, default="open", index=True)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+
+
+class AutoResearchRun(Base):
+    """Immutable train/held-out measurement for a candidate revision."""
+    __tablename__ = "auto_research_runs"
+    id = Column(String, primary_key=True)
+    experiment_id = Column(String, ForeignKey("auto_research_experiments.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    candidate_sha = Column(String, nullable=False, index=True)
+    split = Column(String, nullable=False)
+    metrics = Column(JSON, nullable=False, default=dict)
+    evidence = Column(JSON, nullable=False, default=list)
+    content_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("uq_auto_research_measurement", "experiment_id", "candidate_sha", "split", "content_hash", unique=True),
+    )
+
+
 class ChatMessage(Base):
     """
     SQLAlchemy model for ChatMessage table.

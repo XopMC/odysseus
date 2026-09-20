@@ -19,6 +19,7 @@ from src.embedding_lanes import (
     dedupe_results,
     migrate_legacy_collection,
 )
+from src.harness_efficiency import CORE_AGENT_TOOLS
 
 try:
     import numpy as np
@@ -28,10 +29,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Tools that are ALWAYS included regardless of retrieval results.
-# Keep this deliberately tiny. Domain tools (web, documents, email,
-# cookbook/model serving, files, settings, etc.) are injected by retrieval or
-# keyword intent so a trivial agent prompt like "test" does not carry every
-# domain's schemas and rules.
+# Keep domain tools (web, documents, email, cookbook/model serving, settings,
+# etc.) behind retrieval, while the stable coding harness stays present across
+# every model route and fallback.
 ALWAYS_AVAILABLE = frozenset({
     # Memory is ambient — "remember this" can follow any message regardless
     # of topic. Without this, RAG drops it and the agent falls back to
@@ -42,7 +42,9 @@ ALWAYS_AVAILABLE = frozenset({
     "ask_user",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
-})
+    # ObservationPack placeholders can appear after any large tool result.
+    "read_tool_artifact",
+}) | CORE_AGENT_TOOLS
 
 # Tools that the Personal Assistant always has access to during scheduled
 # check-ins and proactive tasks, in addition to RAG-selected tools.
@@ -72,6 +74,9 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
     "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
+    "read_tool_artifact": "Recall an exact paged chunk of a large prior tool result by its opaque observation id and byte offset.",
+    "publish_subagent_evidence": "Child agent only: publish an append-only finding, reproduction, rejected hypothesis, or verified fact to the shared parent evidence board.",
+    "manage_auto_research_lab": "Opt-in immutable optimization experiment ledger with frozen baseline, fixed gates, train and held-out measurements. Never deploys candidates.",
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",

@@ -30,6 +30,7 @@ from .interaction_tools import (
 )
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, DelegateSubagentTool, ManageSubagentsTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
+from .efficiency_tools import ManageAutoResearchLabTool, PublishSubagentEvidenceTool, ReadToolArtifactTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -69,6 +70,9 @@ TOOL_HANDLERS = {
     "ask_teacher": AskTeacherTool().execute,
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
+    "read_tool_artifact": ReadToolArtifactTool().execute,
+    "publish_subagent_evidence": PublishSubagentEvidenceTool().execute,
+    "manage_auto_research_lab": ManageAutoResearchLabTool().execute,
     "create_session": CreateSessionTool().execute,
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
@@ -88,7 +92,7 @@ PYTHON_TIMEOUT = 30
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
              "apply_patch", "todowrite",
-             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
+             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "read_tool_artifact", "publish_subagent_evidence", "manage_auto_research_lab",
              "create_document", "update_document", "edit_document",
              "search_chats",
              "chat_with_model", "delegate_subagent", "manage_subagents", "create_session", "list_sessions",

@@ -107,6 +107,18 @@ explicitly.
 - **Context continuity** — approval, Stop, pause and provider errors retain the
   last model-visible checkpoint; the displayed percentage cannot fall unless
   an explicit compaction succeeds.
+- **Long-run harness profiles** — `Performance` combines file mutation and its
+  exact verification command into one sealed action and replaces repeatedly
+  transmitted large tool results with owner-scoped, content-addressed recall
+  handles. `Efficiency` additionally accepts only hash/exit-code/exact-quote
+  verified diagnostic receipts and can compact proactively at a completed plan
+  boundary when the projected prefill savings exceed the rewrite cost.
+- **Subagent evidence board** — child agents can publish append-only findings,
+  reproductions and rejected hypotheses. Candidate snapshots are immutable and
+  require a verdict from a different child before acceptance.
+- **Auto-Research Lab** — disabled by default. When explicitly enabled it keeps
+  a frozen baseline, fixed gates and separate train/held-out measurements. It
+  records candidate evidence only and never authorizes or performs deployment.
 
 ### Важно
 

@@ -34,7 +34,7 @@ import { showScoreboard } from './scoreboard.js';
 // ── External dependency imports ──
 import Storage from '../storage.js';
 import uiModule from '../ui.js';
-import sessionModule from '../sessions.js?v=20260920parallelsubagents3';
+import sessionModule from '../sessions.js?v=20260920solpi1';
 import spinnerModule from '../spinner.js';
 import themeModule from '../theme.js';
 import presetsModule from '../presets.js';

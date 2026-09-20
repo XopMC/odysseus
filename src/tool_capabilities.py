@@ -98,7 +98,7 @@ _register(
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
-    {"get_workspace", "glob", "grep", "ls", "read_file"},
+    {"get_workspace", "glob", "grep", "ls", "read_file", "read_tool_artifact"},
     ToolEffect.READ_WORKSPACE,
     result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
 )
@@ -159,6 +159,8 @@ _register(
         "todowrite",
         "update_goal_progress",
         "update_plan_step",
+        "publish_subagent_evidence",
+        "manage_auto_research_lab",
     },
     ToolEffect.WRITE_PRIVATE,
 )
@@ -465,6 +467,18 @@ def capabilities_for_action(tool_name: Any, content: Any) -> ToolCapabilities:
     base = capabilities_for_tool(tool_name)
     if not isinstance(tool_name, str):
         return base
+
+    if tool_name in {"apply_patch", "edit_file", "write_file"}:
+        try:
+            payload = json.loads(content) if isinstance(content, str) and content.strip().startswith("{") else {}
+        except (TypeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict) and isinstance(payload.get("verify"), dict):
+            return ToolCapabilities(
+                frozenset(set(base.effects) | {ToolEffect.EXECUTE_CODE}),
+                ResultIntegrity.WORKSPACE_UNTRUSTED,
+                known=base.known,
+            )
 
     action = _action_from_content(tool_name, content)
     destructive = action in _ACTION_DESTRUCTIVE.get(tool_name, ())

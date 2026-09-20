@@ -301,6 +301,26 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
             timeout_seconds=payload.get("timeout_seconds", 600),
             wait_for=str(payload.get("wait_for") or "all"),
         )
+    if action == "list_evidence":
+        from src.subagent_evidence import list_evidence
+        return list_evidence(owner, session_id, child_id=child_id)
+    if action == "list_candidates":
+        from src.subagent_evidence import list_candidates
+        return list_candidates(owner, session_id)
+    if action == "submit_candidate":
+        from src.subagent_evidence import submit_candidate
+        return submit_candidate(
+            owner, session_id, child_id,
+            title=payload.get("title"), payload=payload.get("payload") or {},
+            evidence_ids=payload.get("evidence_ids") or [],
+        )
+    if action == "verify_candidate":
+        from src.subagent_evidence import verify_candidate
+        return verify_candidate(
+            owner, session_id, str(payload.get("candidate_id") or ""),
+            str(payload.get("verifier_child_id") or child_id),
+            verdict=payload.get("verdict"), notes=payload.get("notes") or "",
+        )
     return {"error": f"Unknown subagent action: {action}", "exit_code": 1}
 
 

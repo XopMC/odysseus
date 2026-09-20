@@ -39,6 +39,7 @@ from src.context_compactor import (
     maybe_compact,
 )
 from src.settings import get_setting
+from src.harness_efficiency import enabled as _efficiency_enabled, profile_name as _efficiency_profile_name
 from src.prompt_security import untrusted_context_message
 from src.tool_security import (
     blocked_tools_for_owner,
@@ -3225,6 +3226,10 @@ def _append_tool_results(
                 "role": "tool",
                 "tool_call_id": tc.get("id", f"call_{round_num}_{j}"),
                 "content": result_text,
+                "_observation_source": {
+                    "tool_name": tool_name or "tool",
+                    "tool_call_id": tc.get("id", f"call_{round_num}_{j}"),
+                },
             }
             capabilities = capabilities_for_action(tool_name, tool_content)
             should_arm_gate = tool_result_should_arm_gate(
@@ -3269,13 +3274,16 @@ def _append_tool_results(
             )
             for record in tool_result_records
         )
-        messages.append(
-            untrusted_context_message(
+        untrusted_result = untrusted_context_message(
                 "tool execution results",
                 tool_output_text,
                 arm_tool_gate=arm_tool_gate,
             )
-        )
+        untrusted_result["_observation_source"] = {
+            "tool_name": "+".join(str(record.get("tool_name") or "tool") for record in tool_result_records),
+            "tool_call_id": f"text-round-{round_num}",
+        }
+        messages.append(untrusted_result)
 
 
 def _compute_final_metrics(
@@ -3639,6 +3647,7 @@ async def stream_agent_loop(
     history_session=None,
     defer_context_shaping: bool = False,
     guidance_provider=None,
+    child_run_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -4064,7 +4073,11 @@ async def stream_agent_loop(
     _relevant_tools = relevant_tools
     _subagent_mode = str(get_setting("agent_subagents_mode", "off") or "off")
     _subagent_models = str(get_setting("agent_subagent_models", "") or "")
-    _subagent_state = {"started": 0, "max_children_per_model": MAX_ACTIVE_PER_MODEL}
+    _subagent_state = {
+        "started": 0,
+        "max_children_per_model": MAX_ACTIVE_PER_MODEL,
+        **({"child_run_id": child_run_id} if child_run_id else {}),
+    }
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
@@ -4078,6 +4091,8 @@ async def stream_agent_loop(
             # actually calls for them (RAG retrieval adds those on a real ask).
             _relevant_tools = set(ALWAYS_AVAILABLE)
             from src.tool_security import PLAN_MODE_READONLY_TOOLS
+            from src.harness_efficiency import CORE_AGENT_TOOLS
+            _relevant_tools.difference_update(CORE_AGENT_TOOLS - PLAN_MODE_READONLY_TOOLS)
             _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
             logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
         else:
@@ -4763,6 +4778,10 @@ async def stream_agent_loop(
     _last_route_revision = ""
     _failed_reads = FailedReadGuard()
     _failed_read_nudges = 0
+    _economic_boundary_pending = False
+    _economic_completed_boundaries = 0
+    _economic_last_boundary_tokens = estimate_tokens(messages)
+    _economic_decision = None
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
     # stuck firing the same tool call over and over with no text — burns
@@ -5262,7 +5281,7 @@ async def stream_agent_loop(
         ).hexdigest()
         if (_tool_inventory_revision != _last_tool_inventory_revision
                 or _route_revision != _last_route_revision):
-            yield f'data: {json.dumps({"type": "tool_inventory", "data": {"revision": _tool_inventory_revision, "route_revision": _route_revision, "tools": sorted(name for name in _selected_tool_names if name), "reason": "initial" if not _last_tool_inventory_revision else "route_or_policy_changed"}})}\n\n'
+            yield f'data: {json.dumps({"type": "tool_inventory", "data": {"revision": _tool_inventory_revision, "route_revision": _route_revision, "tools": sorted(name for name in _selected_tool_names if name), "reason": "initial" if not _last_tool_inventory_revision else "route_or_policy_changed", "harness_profile": _efficiency_profile_name()}})}\n\n'
             _last_tool_inventory_revision = _tool_inventory_revision
             _last_route_revision = _route_revision
         from src.context_policy_runtime import owner_policy as _resolve_context_policy, shape_request
@@ -5330,7 +5349,22 @@ async def stream_agent_loop(
         _before_context = estimate_tokens(messages)
         _compacted_messages, _compact_status = messages, "unchanged"
         _configured_telemetry = None
-        if _context_profile:
+        if _efficiency_enabled("online_context_compact"):
+            from src.context_compaction_economics import decide as _economic_compaction_decide
+            _economic_decision = _economic_compaction_decide(
+                at_boundary=_economic_boundary_pending,
+                used_tokens=int(_before_context * _context_calibration),
+                input_budget=max(1, _working_limit),
+                completed_boundaries=_economic_completed_boundaries,
+                tokens_since_boundary=max(0, _before_context - _economic_last_boundary_tokens),
+            )
+            if _economic_decision.compact:
+                _compacted_messages, _compact_status = await compact_working_context(
+                    messages,
+                    max(1, int(_economic_decision.target_tokens / max(_context_calibration, .01))),
+                    _summarize_working_context,
+                )
+        if _context_profile and _compact_status != "compacted":
             try:
                 from src.model_context import budget_context_for_model
                 _policy_window = await asyncio.to_thread(budget_context_for_model, endpoint_url, model, fallback=0)
@@ -5345,13 +5379,15 @@ async def stream_agent_loop(
                 _route_context_lengths[(endpoint_url, model)] = _last_route_context_length
             except ValueError:
                 _compact_status = 'failed'
-        elif _before_context * _context_calibration >= _working_limit:
+        elif not _context_profile and _compact_status != "compacted" and _before_context * _context_calibration >= _working_limit:
             _compacted_messages, _compact_status = await compact_working_context(
                 messages, int(_working_limit / _context_calibration), _summarize_working_context,
             )
         if _compact_status == "compacted":
             messages = _compacted_messages
             _context_compactions += 1
+            _economic_boundary_pending = False
+            _economic_last_boundary_tokens = estimate_tokens(messages)
             _active_route_state["messages"] = messages
             _active_route_state.pop("request_messages", None)
             checkpoint_message = next(
@@ -5365,7 +5401,7 @@ async def stream_agent_loop(
                     json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
                 ).hexdigest(),
             } if checkpoint_text else None
-            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "checkpoint": checkpoint})}\n\n'
+            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "checkpoint": checkpoint, "economic_decision": (_economic_decision.to_dict() if _economic_decision else None)})}\n\n'
         elif _compact_status in {"failed", "uncompactable"}:
             # Do not silently drop evidence and continue an audit as if the
             # summary succeeded. The user can retry after the provider recovers.
@@ -5411,6 +5447,9 @@ async def stream_agent_loop(
         if _configured_telemetry:
             _working_context['context_policy'] = _configured_telemetry
             _working_context['auto_compact_enabled'] = _configured_policy.auto_compact
+        _working_context['harness_profile'] = _efficiency_profile_name()
+        if _economic_decision:
+            _working_context['economic_compaction'] = _economic_decision.to_dict()
         yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
@@ -5517,8 +5556,22 @@ async def stream_agent_loop(
             # The working checkpoint has already enforced the input budget.
             # A second independent trim here used a different fallback budget
             # and could silently remove the pinned user goal.
-            request_messages = [{k: v for k, v in m.items() if k != "_protected"}
-                                for m in state["messages"]]
+            _provider_messages = state["messages"]
+            if session_id:
+                try:
+                    if _efficiency_enabled("observation_pack"):
+                        from src.observation_pack import project_messages as _project_observations
+                        _provider_messages, _observation_stats = _project_observations(
+                            state["messages"], owner=owner, session_id=session_id,
+                        )
+                        state["observation_pack"] = _observation_stats
+                except Exception:
+                    logger.exception("ObservationPack projection failed open")
+                    _provider_messages = state["messages"]
+            request_messages = [
+                {k: v for k, v in m.items() if k != "_protected" and not k.startswith("_observation_")}
+                for m in _provider_messages
+            ]
             state["request_messages"] = request_messages
             _last_route_request_messages = request_messages
             _last_route_endpoint_url = candidate_url
@@ -7056,10 +7109,62 @@ async def stream_agent_loop(
                 # message removes it as answered.
                 tool_event["ask_user"] = _pending_ask_user_event
             tool_events.append(tool_event)
+            if (
+                block.tool_type == "update_plan_step"
+                and not result.get("error")
+                and result.get("exit_code", 0) in (0, None)
+            ):
+                try:
+                    _plan_update = json.loads(block.content or "{}")
+                except (TypeError, ValueError):
+                    _plan_update = {}
+                if isinstance(_plan_update, dict) and _plan_update.get("status") == "done":
+                    _economic_boundary_pending = True
+                    _economic_completed_boundaries += 1
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
             formatted = format_tool_result(desc, result)
+            # Efficiency profile: large diagnostic logs may be replaced in the
+            # next model request by a cryptographically bound evidence receipt.
+            # The UI/timeline above always retains the original tool output.
+            if _efficiency_enabled("evidence_reducer") and block.tool_type == "bash":
+                try:
+                    from src.evidence_reducer import reduce as _reduce_evidence
+                    from src.endpoint_resolver import resolve_endpoint as _resolve_reducer_endpoint
+                    from src.llm_core import llm_call_async as _reducer_llm_call
+                    _raw_parts = []
+                    for _key in ("stdout", "stderr", "output"):
+                        if result.get(_key):
+                            _raw_parts.append(str(result[_key]))
+                    _raw_diagnostic = "\n".join(_raw_parts)
+                    _util_url, _util_model, _util_headers = _resolve_reducer_endpoint(
+                        "utility", fallback_url=_last_route_endpoint_url or endpoint_url,
+                        fallback_model=model, fallback_headers=headers, owner=owner,
+                    )
+                    async def _call_reducer(_prompt):
+                        return await _reducer_llm_call(
+                            _util_url or endpoint_url, _util_model or model, _prompt,
+                            headers=_util_headers or headers, temperature=0.0,
+                            max_tokens=1600, timeout=90, max_retries=1,
+                            session_id=session_id, require_answer_content=True,
+                        )
+                    _native_id = (
+                        converted_calls[i].get("id")
+                        if used_native and i < len(converted_calls)
+                        else f"round-{round_num}-tool-{i}"
+                    )
+                    _reduced = await _reduce_evidence(
+                        owner=owner, session_id=session_id, tool_call_id=str(_native_id),
+                        tool="bash", command=block.content, text=_raw_diagnostic,
+                        exit_code=int(result.get("exit_code") or 0), llm_call=_call_reducer,
+                    )
+                    if _reduced:
+                        formatted = _reduced["text"]
+                        tool_event["evidence_receipt"] = _reduced["receipt"]
+                        tool_event["artifact_id"] = _reduced["artifact"]["id"]
+                except Exception:
+                    logger.exception("Evidence reducer failed open")
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
             tool_result_records.append(

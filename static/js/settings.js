@@ -1524,6 +1524,8 @@ async function initAgentSettings() {
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');
   var subagentMode = el('set-agentSubagentsMode');
+  var efficiencyProfile = el('set-agentEfficiencyProfile');
+  var autoResearchLab = el('set-autoResearchLabEnabled');
   var subagentModels = el('set-agentSubagentModels');
   var subagentModelsRow = el('set-agentSubagentModelsRow');
   var subagentModelSearch = el('set-agentSubagentModelSearch');
@@ -1675,6 +1677,8 @@ async function initAgentSettings() {
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
     if (subagentMode) subagentMode.value = settings.agent_subagents_mode || 'off';
+    if (efficiencyProfile) efficiencyProfile.value = settings.agent_efficiency_profile || 'performance';
+    if (autoResearchLab) autoResearchLab.checked = !!settings.auto_research_lab_enabled;
     setSelectedModels(settings.agent_subagent_models || '');
     if (subagentModelsRow) subagentModelsRow.hidden = subagentMode?.value !== 'selected_models';
   } catch (e) {}
@@ -1696,6 +1700,8 @@ async function initAgentSettings() {
     if (rounds != null) payload.agent_max_rounds = rounds;
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     if (subagentMode) payload.agent_subagents_mode = subagentMode.value;
+    if (efficiencyProfile) payload.agent_efficiency_profile = efficiencyProfile.value;
+    if (autoResearchLab) payload.auto_research_lab_enabled = !!autoResearchLab.checked;
     if (subagentModels) payload.agent_subagent_models = Array.from(selectedSubagentModels).join(',');
     try {
       await _postSettings(payload);
@@ -1714,6 +1720,8 @@ async function initAgentSettings() {
     if (subagentMode.value === 'selected_models' && !subagentInventory.length) loadSubagentModels(false);
     save();
   });
+  if (efficiencyProfile) efficiencyProfile.addEventListener('change', save);
+  if (autoResearchLab) autoResearchLab.addEventListener('change', save);
   if (subagentModelSearch) subagentModelSearch.addEventListener('input', renderSubagentModels);
   if (subagentModelsRefresh) subagentModelsRefresh.addEventListener('click', function() {
     loadSubagentModels(true);

@@ -164,13 +164,68 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_tool_artifact",
+            "description": "Recall an exact chunk of a large earlier tool result replaced by an ObservationPack handle.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "pattern": "^obs_[a-f0-9]{24}$"},
+                    "offset": {"type": "integer", "minimum": 0}
+                },
+                "required": ["id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "publish_subagent_evidence",
+            "description": "Publish an append-only evidence item from the current child agent to the shared parent evidence board.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["finding", "reproduction", "rejected", "verified"]},
+                    "body": {"type": "string"},
+                    "artifact_refs": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["kind", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_auto_research_lab",
+            "description": "Manage an opt-in immutable optimization experiment ledger. It records fixed gates and train/held-out measurements but never deploys a candidate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "create", "record", "evaluate"]},
+                    "experiment_id": {"type": "string"},
+                    "baseline_sha": {"type": "string"},
+                    "candidate_sha": {"type": "string"},
+                    "candidate_worktree": {"type": "string"},
+                    "split": {"type": "string", "enum": ["train", "heldout"]},
+                    "gates": {"type": "array", "items": {"type": "object"}},
+                    "objectives": {"type": "array", "items": {"type": "string"}},
+                    "metrics": {"type": "object"},
+                    "evidence": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": "Write/save a file to disk",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path to write to"},
-                    "content": {"type": "string", "description": "File content to write"}
+                    "content": {"type": "string", "description": "File content to write"},
+                    "verify": {"type": "object", "description": "After a successful write, run this exact verification command in the same tool action.", "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}, "required": ["command"], "additionalProperties": False}
                 },
                 "required": ["path", "content"]
             }
@@ -187,7 +242,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "path": {"type": "string", "description": "File path to edit"},
                     "old_string": {"type": "string", "description": "Exact text to replace (must match the file, including indentation)"},
                     "new_string": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"}
+                    "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"},
+                    "verify": {"type": "object", "description": "After a successful edit, run this exact verification command in the same tool action.", "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}, "required": ["command"], "additionalProperties": False}
                 },
                 "required": ["path", "old_string", "new_string"]
             }
@@ -204,7 +260,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "patch_text": {
                         "type": "string",
                         "description": "Patch text beginning with *** Begin Patch and ending with *** End Patch"
-                    }
+                    },
+                    "verify": {"type": "object", "description": "After a successful patch, run this exact verification command in the same tool action.", "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}, "required": ["command"], "additionalProperties": False}
                 },
                 "required": ["patch_text"]
             }
@@ -372,12 +429,19 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "read", "message", "stop", "remove", "wait"]},
+                    "action": {"type": "string", "enum": ["list", "read", "message", "stop", "remove", "wait", "list_evidence", "list_candidates", "submit_candidate", "verify_candidate"]},
                     "child_id": {"type": "string"},
                     "child_ids": {"type": "array", "items": {"type": "string"}},
                     "message": {"type": "string"},
                     "wait_for": {"type": "string", "enum": ["all", "any"]},
-                    "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 600}
+                    "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 600},
+                    "candidate_id": {"type": "string"},
+                    "verifier_child_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "payload": {"type": "object"},
+                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                    "verdict": {"type": "string", "enum": ["accepted", "rejected"]},
+                    "notes": {"type": "string"}
                 },
                 "required": ["action"]
             }
@@ -1538,16 +1602,27 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(args)
         else:
             content = args.get("path", "")
+    elif tool_type == "read_tool_artifact":
+        content = json.dumps(args)
+    elif tool_type == "publish_subagent_evidence":
+        content = json.dumps(args, ensure_ascii=False)
+    elif tool_type == "manage_auto_research_lab":
+        content = json.dumps(args, ensure_ascii=False)
     elif tool_type in ("grep", "glob", "ls"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""
     elif tool_type == "write_file":
-        content = args.get("path", "") + "\n" + args.get("content", "")
+        # Action Fusion needs the sealed verify payload to survive conversion.
+        content = json.dumps(args, ensure_ascii=False) if "verify" in args else (
+            args.get("path", "") + "\n" + args.get("content", "")
+        )
     elif tool_type == "edit_file":
         content = json.dumps(args)
     elif tool_type == "apply_patch":
-        content = args.get("patch_text") or args.get("patchText") or args.get("patch") or ""
+        content = json.dumps(args, ensure_ascii=False) if "verify" in args else (
+            args.get("patch_text") or args.get("patchText") or args.get("patch") or ""
+        )
     elif tool_type == "todowrite":
         content = json.dumps(args)
     elif tool_type == "create_document":
@@ -1595,14 +1670,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             "timeout_seconds": args.get("timeout_seconds", 0),
         }, ensure_ascii=False)
     elif tool_type == "manage_subagents":
-        content = json.dumps({
-            "action": args.get("action", "list"),
-            "child_id": args.get("child_id", ""),
-            "child_ids": args.get("child_ids", []),
-            "message": args.get("message", ""),
-            "wait_for": args.get("wait_for", "all"),
-            "timeout_seconds": args.get("timeout_seconds", 600),
-        }, ensure_ascii=False)
+        content = json.dumps(args, ensure_ascii=False)
     elif tool_type == "create_session":
         content = args.get("name", "Untitled") + "\n" + args.get("model", "")
     elif tool_type == "list_sessions":
