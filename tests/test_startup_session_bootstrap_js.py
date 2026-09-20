@@ -26,7 +26,7 @@ _IMPORT_REWRITES = {
     "import uiModule, { autoResize, styledPrompt } from './ui.js';": (
         "import uiModule, { autoResize, styledPrompt } from './ui.mjs';"
     ),
-    "import chatRenderer from './chatRenderer.js?v=20260920solpi3';": (
+    "import chatRenderer from './chatRenderer.js?v=20260921livefix3';": (
         "import chatRenderer from './chatRenderer.mjs';"
     ),
     "import { providerLogo } from './providers.js';": (
@@ -35,7 +35,7 @@ _IMPORT_REWRITES = {
     "import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';": (
         "import { initModelPicker, updateModelPicker } from './modelPicker.mjs';"
     ),
-    "import themeModule from './theme.js';": "import themeModule from './theme.mjs';",
+    "import themeModule from './theme.js?v=20260921livefix3';": "import themeModule from './theme.mjs';",
     "import spinnerModule from './spinner.js';": "import spinnerModule from './spinner.mjs';",
 }
 

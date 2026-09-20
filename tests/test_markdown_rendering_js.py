@@ -149,6 +149,30 @@ def test_process_with_thinking_handles_gemma4_thought_channel(node_available):
     assert "<|channel>" not in html
 
 
+def test_thinking_dom_ids_are_unique_and_stable_per_round_identity(node_available):
+    rendered = _run_markdown_case(
+        "<think>same text</think>",
+        "[mod.processWithThinking(input, {thinkingKey:'message-a:round:1'}), "
+        "mod.processWithThinking(input, {thinkingKey:'message-b:round:1'})]",
+    )
+    first = rendered[0].split('data-thinking-id="', 1)[1].split('"', 1)[0]
+    second = rendered[1].split('data-thinking-id="', 1)[1].split('"', 1)[0]
+    assert first != second
+    assert "message-a-round-1" in first
+    assert "message-b-round-1" in second
+
+
+def test_thinking_toggle_is_scoped_to_clicked_card_even_with_legacy_duplicate_ids():
+    source = (_REPO / "static" / "js" / "markdown.js").read_text(encoding="utf-8")
+    handler = source.split("document.addEventListener('click', function(e)", 1)[1].split(
+        "// Watch the chat history", 1,
+    )[0]
+    assert "header.closest('.thinking-section')" in handler
+    assert "section?.querySelector('.thinking-content')" in handler
+    assert "section?.querySelector('.thinking-toggle')" in handler
+    assert "const content = document.getElementById" not in handler
+
+
 def test_process_with_thinking_strips_empty_gemma4_thought_channel(node_available):
     html = _run_markdown_case(
         "<|channel>thought\n<channel|>Final answer.",

@@ -875,6 +875,7 @@ async def _direct_fallback(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    plan_recovery: bool = False,
 ) -> Optional[Dict]:
     _subproc_env = {
         **os.environ,
@@ -890,6 +891,7 @@ async def _direct_fallback(
             "subproc_env": _subproc_env,
             "session_id": session_id,
             "owner": owner,
+            "plan_recovery": bool(plan_recovery),
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -974,6 +976,7 @@ async def execute_tool_block(
     registry: Optional[ToolRegistry] = None,
     registry_access_provider: Optional[Callable[[], ToolAccess]] = None,
     allowed_tools: Optional[set] = None,
+    plan_recovery: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1141,6 +1144,7 @@ async def execute_tool_block(
                 security_context.delegated_credential
                 if isinstance(security_context, ToolRunSecurityContext) else False
             ),
+            plan_recovery=plan_recovery,
         )
         if isinstance(security_context, ToolRunSecurityContext):
             security_context.observe_tool_result(
@@ -1176,6 +1180,7 @@ async def _execute_tool_block_impl(
     external_untrusted_context_seen: bool = False,
     delegated_credential: bool = False,
     _mutation_queue_held: bool = False,
+    plan_recovery: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1723,6 +1728,7 @@ async def _execute_tool_block_impl(
             progress_cb=progress_cb,
             session_id=session_id,
             owner=owner,
+            plan_recovery=plan_recovery,
         )
 
         if isinstance(res, tuple):

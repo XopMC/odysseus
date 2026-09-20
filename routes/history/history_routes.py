@@ -197,12 +197,71 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 f"Referenced upload is no longer available: {missing_id}",
             )
 
+    def _history_metadata_view(value: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the bounded browser view of durable message metadata.
+
+        The complete replay stays in SQLite + the owner-scoped replay artifact.
+        Shipping up to 5,000 duplicate SSE frames inside every assistant row
+        made a 50-message page tens of megabytes and kept those objects alive in
+        Safari. Canonical round arrays are enough for eager rendering; missing
+        legacy reasoning is reconstructed once before the event list is dropped.
+        """
+        meta = dict(value or {})
+        timeline = meta.get("timeline_v2")
+        events = timeline.get("events") if isinstance(timeline, dict) else None
+        if isinstance(events, list):
+            rounds = list(meta.get("round_reasonings") or [])
+            fill = {index + 1 for index, item in enumerate(rounds) if not str(item or "").strip()}
+            for item in events:
+                payload = item.get("data") if isinstance(item, dict) else None
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except (TypeError, ValueError):
+                        payload = None
+                if not isinstance(payload, dict) or not payload.get("delta"):
+                    continue
+                if payload.get("thinking") is not True and payload.get("channel") not in {"thinking", "thought"}:
+                    continue
+                try:
+                    round_number = max(1, int(payload.get("round") or (payload.get("_replay") or {}).get("round") or 1))
+                except (TypeError, ValueError):
+                    round_number = 1
+                while len(rounds) < round_number:
+                    rounds.append("")
+                    fill.add(len(rounds))
+                if round_number in fill:
+                    rounds[round_number - 1] += str(payload["delta"])
+            if rounds:
+                meta["round_reasonings"] = rounds
+            meta["timeline_v2"] = {
+                key: item for key, item in timeline.items() if key != "events"
+            }
+            meta["timeline_v2"]["event_count"] = len(events)
+
+        bounded_tools = []
+        for event in meta.get("tool_events") or []:
+            if not isinstance(event, dict):
+                continue
+            clean = dict(event)
+            output = str(clean.get("output") or "")
+            replay = clean.get("_replay") if isinstance(clean.get("_replay"), dict) else {}
+            if len(output) > 8192 and replay.get("run_id") and isinstance(replay.get("seq"), int):
+                # Keep the lazy-render threshold crossed; the full value is
+                # loaded from the artifact endpoint only when the user opens it.
+                clean["output"] = output[:8193]
+                clean["output_preview_truncated"] = True
+            bounded_tools.append(clean)
+        if bounded_tools:
+            meta["tool_events"] = bounded_tools
+        return meta
+
     def _db_history_entry(m: DbChatMessage) -> Dict[str, Any]:
         entry = {"role": m.role, "content": _history_display_content(m.content)}
         meta = {}
         if m.meta_data:
             try:
-                meta = json.loads(m.meta_data) or {}
+                meta = _history_metadata_view(json.loads(m.meta_data) or {})
             except (json.JSONDecodeError, ValueError):
                 meta = {}
         # The DB row is canonical. A replay/timeline merge may carry an older
@@ -297,11 +356,19 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             if db.query(DbSession.id).filter(DbSession.id == session_id).first() is None:
                 raise HTTPException(404, f"Session '{session_id}' not found")
             total, canonical_visible, rendered = _rendered_message_totals(db, session_id)
+            from src import agent_runs
+            run = agent_runs.describe_run(session_id)
+            live_units = (
+                int(run.get("live_rendered_units") or 0)
+                if run and run.get("status") == "running" else 0
+            )
             return {
                 "total": total,
                 "canonical_visible_total": canonical_visible,
-                "rendered_total": rendered,
-                "visible_total": rendered,
+                "canonical_rendered_total": rendered,
+                "live_rendered_units": live_units,
+                "rendered_total": rendered + live_units,
+                "visible_total": rendered + live_units,
             }
         finally:
             db.close()

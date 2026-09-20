@@ -132,7 +132,7 @@ class _Run:
         "context_usage", "started_at", "round", "segment", "tool_counter",
         "active_tool_call_id", "on_terminal", "context_revision", "terminal_status",
         "owner", "session_id", "continuation", "durable_seq", "ledger_hash", "terminal_at",
-        "compaction_pending",
+        "compaction_pending", "terminal_reason", "rendered_rounds", "message_saved",
     )
 
     def __init__(self) -> None:
@@ -162,6 +162,9 @@ class _Run:
         self.ledger_hash: Optional[str] = None
         self.terminal_at: Optional[float] = None
         self.compaction_pending: bool = False
+        self.terminal_reason: Optional[str] = None
+        self.rendered_rounds: set[int] = set()
+        self.message_saved: bool = False
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -263,7 +266,10 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
             row.context_revision = run.context_revision
             row.ledger_hash = run.ledger_hash
             row.context_snapshot = dict(run.context_usage) if run.context_usage else None
-            row.continuation = dict(run.continuation or {}) or None
+            continuation = dict(run.continuation or {})
+            if run.terminal_reason:
+                continuation["terminal_reason"] = run.terminal_reason
+            row.continuation = continuation or None
             if effective_status != "running":
                 row.terminal_at = utcnow_naive()
                 run.terminal_at = row.terminal_at.timestamp()
@@ -338,6 +344,18 @@ def _annotate_event(run: _Run, ev: str, seq: int) -> str:
     elif payload.get("delta") and not payload.get("thinking"):
         if run.segment == 0:
             run.segment = 1
+
+    # Keep a cheap live count of the same per-round units that the persisted
+    # renderer exposes. It avoids waiting for the final assistant-row commit
+    # and does not inspect or retain message contents.
+    if payload.get("delta") is not None or event_type == "tool_start":
+        try:
+            rendered_round = max(1, int(payload.get("round") or run.round or 1))
+        except (TypeError, ValueError):
+            rendered_round = max(1, run.round or 1)
+        run.rendered_rounds.add(rendered_round)
+    if event_type == "message_saved":
+        run.message_saved = True
 
     created_at = time.time()
     replay = {
@@ -687,6 +705,8 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
         if terminal_status in {"stopped", "error"}:
             legacy_metadata["stopped"] = terminal_status == "stopped"
             legacy_metadata["cancelled"] = terminal_status == "stopped" and not substantive
+            if run.terminal_reason:
+                legacy_metadata["interruption_reason"] = run.terminal_reason
             if tool_events:
                 legacy_metadata["tool_events"] = tool_events
             if actual_model:
@@ -899,6 +919,8 @@ def describe_run(session_id: str) -> Optional[dict]:
                     "context_revision": row.context_revision or 0,
                     "durable_seq": row.durable_seq,
                     "ledger_hash": row.ledger_hash,
+                    "terminal_reason": (row.continuation or {}).get("terminal_reason"),
+                    "live_rendered_units": 0,
                 }
         except Exception:
             logger.debug("[agent-run] durable run-state lookup failed", exc_info=True)
@@ -913,6 +935,8 @@ def describe_run(session_id: str) -> Optional[dict]:
         "context_revision": run.context_revision,
         "durable_seq": run.durable_seq,
         "ledger_hash": run.ledger_hash,
+        "terminal_reason": run.terminal_reason,
+        "live_rendered_units": 0 if run.message_saved else len(run.rendered_rounds),
     }
 
 
@@ -954,6 +978,7 @@ def recover_durable_runs() -> list[dict]:
                 run.context_usage = state["context_snapshot"]
                 run.status = "stopped"
                 run.terminal_status = "stopped"
+                run.terminal_reason = "process_restarted"
                 _persist_timeline_v2(state["session_id"], run, status="stopped")
                 try:
                     log.checkpoint("stopped")
@@ -966,6 +991,9 @@ def recover_durable_runs() -> list[dict]:
                         row.terminal_at = utcnow_naive()
                         row.last_seq = len(log) - 1
                         row.durable_seq = row.last_seq
+                        continuation = dict(row.continuation or {})
+                        continuation["terminal_reason"] = "process_restarted"
+                        row.continuation = continuation
                 recovered.append(state)
             except (FileNotFoundError, ValueError, OSError):
                 logger.warning("[agent-run] skipping unavailable interrupted replay %s", state["run_id"])
@@ -974,6 +1002,9 @@ def recover_durable_runs() -> list[dict]:
                     if row is not None:
                         row.status = "interrupted"
                         row.terminal_at = utcnow_naive()
+                        continuation = dict(row.continuation or {})
+                        continuation["terminal_reason"] = "process_restarted"
+                        row.continuation = continuation
     except Exception:
         logger.warning("[agent-run] durable run recovery failed", exc_info=True)
     return recovered
@@ -1239,6 +1270,8 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         # Keep is_active() true until persistence is complete. Otherwise a
         # concurrent browser poll can replace the live view with stale history.
         run.terminal_status = "stopped"
+        if not run.terminal_reason:
+            run.terminal_reason = "cancelled"
         # A rapid third replacement can cancel this task while it is still
         # waiting for its predecessor. Close this run's subscribers promptly,
         # but keep the task alive until the predecessor finishes so the next
@@ -1340,6 +1373,7 @@ def start(
             # synchronously before cancelling; _drain's cleanup is idempotent
             # when the task had already started.
             if prev.status == "running":
+                prev.terminal_reason = "superseded_by_new_run"
                 prev.status = "stopped"
                 _persist_run_state(prev, status="stopped", durable=True)
                 _wake_run_subscribers(prev)
@@ -1411,7 +1445,8 @@ async def subscribe(
             _schedule_evict(session_id, run)
 
 
-def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
+def stop(session_id: str, expected_run_id: Optional[str] = None,
+         reason: str = "user_stop") -> bool:
     """Cancel the matching in-flight run (which saves its partial output).
 
     A stale browser may issue Stop after another tab has replaced the session's
@@ -1422,6 +1457,7 @@ def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
     if not expected_run_id or run is None or run.run_id != expected_run_id:
         return False
     if run and run.task and not run.task.done():
+        run.terminal_reason = str(reason or "user_stop")[:80]
         run.task.cancel()
         return True
     return False
@@ -1431,6 +1467,7 @@ async def stop_and_wait(
     session_id: str,
     expected_run_id: Optional[str] = None,
     timeout: float = 15.0,
+    reason: str = "user_stop",
 ) -> bool:
     """Cancel one exact run and wait until its partial transcript is durable."""
     run = _RUNS.get(session_id)
@@ -1439,6 +1476,7 @@ async def stop_and_wait(
     task = run.task
     if task is None or task.done():
         return False
+    run.terminal_reason = str(reason or "user_stop")[:80]
     task.cancel()
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))

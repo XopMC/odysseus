@@ -21,8 +21,19 @@ class CreatePlanTool:
             plan = store.save_plan(
                 owner, session_id, str(data.get("title") or "Plan"),
                 data.get("steps") or [], expected_revision=data.get("expected_revision"),
+                # A post-compaction recovery plan must be able to replace a
+                # terminal plan from an earlier generation. Ordinary API
+                # clients still fail closed unless they explicitly opt in.
+                replace_terminal=bool(ctx.get("plan_recovery")) if isinstance(ctx, dict) else False,
             )
-            return "create_plan", {"plan_update": plan, "output": "Plan saved for user approval.", "exit_code": 0}
+            snapshot = store.get(owner, session_id)
+            goal = snapshot.get("goal")
+            if goal and goal.get("status") == "active" and plan.get("status") == "draft":
+                plan = store.plan_action(owner, session_id, "execute", plan["revision"])
+                output = "Fresh plan saved and started for the active Goal."
+            else:
+                output = "Plan saved for user approval."
+            return "create_plan", {"plan_update": plan, "output": output, "exit_code": 0}
         except Exception as exc:
             return "create_plan: invalid", {"error": str(exc), "exit_code": 1}
 
@@ -118,6 +129,7 @@ class UpdatePlanTool:
                 saved = store.save_plan(
                     owner, session_id, (current or {}).get("title") or "Plan", plan,
                     expected_revision=(current or {}).get("revision", 0),
+                    replace_terminal=bool(ctx.get("plan_recovery")) if isinstance(ctx, dict) else False,
                 )
                 # ``save_plan`` preserves an already executing/done status and
                 # reconciles the existing step IDs. Calling plan_action here
@@ -147,8 +159,10 @@ class UpdatePlanStepTool:
                 owner, session_id, str(data.get("step_id") or ""),
                 str(data.get("status") or ""), summary=str(data.get("summary") or ""),
                 progress={key: data.get(key) or [] for key in (
-                    "files_changed", "verification", "decisions",
-                )} if any(key in data for key in ("files_changed", "verification", "decisions")) else None,
+                    "files_changed", "verification", "decisions", "next_work",
+                )} if any(key in data for key in (
+                    "files_changed", "verification", "decisions", "next_work",
+                )) else None,
                 expected_revision=data.get("expected_revision"),
             )
             return "update_plan_step", {"plan_update": plan, "output": "Plan step updated.", "exit_code": 0}

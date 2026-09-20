@@ -440,6 +440,30 @@ function _getEffectSize() {
   return isNaN(v) ? 1 : v;
 }
 
+// Canvas themes used to repaint at the display refresh rate even while a long
+// Agent run was reconciling Markdown and tool cards. Safari then spent a
+// steady CPU core on decoration. Keep animation fluid when idle, but let chat
+// work win the frame budget during streaming.
+function _nextBgFrame(draw) {
+  requestAnimationFrame((timestamp) => {
+    const countText = document.getElementById('current-meta-count')?.textContent || '';
+    const visibleMessages = Number((countText.match(/\d[\d\s]*/) || ['0'])[0].replace(/\s/g, '')) || 0;
+    // A second browser reconnecting to an active run does not own the local
+    // send-state flag, so size is the cross-device signal. Beyond 500 rendered
+    // units, prioritize chat layout/streaming even when this tab is read-only.
+    const interval = (window.__odysseusChatBusy || visibleMessages >= 500)
+      ? 100
+      : 1000 / 30;
+    const last = Number(draw._odysseusLastFrame || 0);
+    if (!last || timestamp - last >= interval) {
+      draw._odysseusLastFrame = timestamp;
+      draw();
+    } else {
+      _nextBgFrame(draw);
+    }
+  });
+}
+
 // Patterns where the intensity/size sliders have no visible effect.
 const _STATIC_PATTERNS = new Set(['none', 'dots']);
 
@@ -1587,7 +1611,7 @@ function _initSynapse() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _nextBgFrame(draw);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
 
@@ -1671,7 +1695,7 @@ function _initRain() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _nextBgFrame(draw);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     // Intensity also controls rain speed + spawn rate (feels slower/lighter when dim)
@@ -1757,7 +1781,7 @@ function _initConstellations() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _nextBgFrame(draw);
     t += 0.01;
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
@@ -1848,7 +1872,7 @@ function _initPerlinFlow() {
   }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-perlin-flow')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+    _nextBgFrame(draw);
     ctx.fillStyle = getFade();
     ctx.fillRect(0, 0, W, H);
     const c = getColor();
@@ -1902,7 +1926,7 @@ function _initPetals() {
   function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-petals')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+    _nextBgFrame(draw);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     const sz = _getEffectSize();
@@ -1964,7 +1988,7 @@ function _initSparkles() {
   }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-sparkles')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+    _nextBgFrame(draw);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     const sizeMult = _getEffectSize();
@@ -2034,7 +2058,7 @@ function _initEmbers() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _nextBgFrame(draw);
     // Fade previous frame (destination-out keeps canvas transparent where no embers)
     ctx.globalCompositeOperation = 'destination-out';
     ctx.fillStyle = 'rgba(0,0,0,0.18)';

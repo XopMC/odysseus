@@ -265,7 +265,7 @@ def test_detached_run_identity_is_attached_to_live_metrics():
     assert "const streamRunId = res.headers.get('X-Odysseus-Run-Id')" in CHAT_JS
     assert "metrics._costRecordId = _metricsCostRecordId(streamRunId, json)" in CHAT_JS
     assert "'X-Odysseus-Run-Id': runId" in CHAT_JS
-    assert "await agent_runs.stop_and_wait(session_id, _expected_run_id)" in routes
+    assert 'session_id, _expected_run_id, reason="user_stop"' in routes
     assert "_stopExactRun(streamSessionId)" in CHAT_JS
     timeout_block = CHAT_JS.split("timeoutId = setTimeout", 1)[1].split(
         "clearResponseTimeout", 1

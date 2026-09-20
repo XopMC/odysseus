@@ -24,9 +24,17 @@ def test_long_run_timers_and_offscreen_timeline_are_bounded():
     assert "#chat-history > .agent-thread:not(.streaming)" in styles
 
 
+def test_canvas_theme_yields_frame_budget_to_active_agent_runs():
+    source = (ROOT / "static/js/theme.js").read_text(encoding="utf-8")
+    assert "window.__odysseusChatBusy || visibleMessages >= 500" in source
+    assert source.count("_nextBgFrame(draw);") == 8  # helper recursion + seven effects
+    assert "requestAnimationFrame(draw);" not in source
+    assert "theme.js?v=20260921livefix3" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+
+
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260920solpi3"
+    expected = "20260921livefix3"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"

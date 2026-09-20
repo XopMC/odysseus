@@ -20,6 +20,16 @@ def test_stream_status_keeps_public_streaming_state_after_run_metadata_merge():
     assert body.rfind('"status": "streaming"') > body.rfind("describe_run")
 
 
+def test_process_restart_reason_is_persisted_for_success_and_missing_artifact_paths():
+    source = (Path(__file__).resolve().parents[1] / "src/agent_runs.py").read_text(
+        encoding="utf-8"
+    )
+    recovery = source.split("def recover_durable_runs", 1)[1].split(
+        "def event_page", 1,
+    )[0]
+    assert recovery.count('continuation["terminal_reason"] = "process_restarted"') == 2
+
+
 class ReplayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -193,9 +203,27 @@ class DetachedReplayTests(unittest.IsolatedAsyncioTestCase):
 
         run = agent_runs.start('stop-wait-chat', source())
         await started.wait()
-        self.assertTrue(await agent_runs.stop_and_wait('stop-wait-chat', run.run_id))
+        self.assertTrue(await agent_runs.stop_and_wait(
+            'stop-wait-chat', run.run_id, reason='goal_paused',
+        ))
         self.assertTrue(cleaned.is_set())
         self.assertEqual(run.status, 'stopped')
+        self.assertEqual(run.terminal_reason, 'goal_paused')
+        self.assertEqual(agent_runs.describe_run('stop-wait-chat')['terminal_reason'], 'goal_paused')
+
+    async def test_live_rendered_units_track_rounds_until_message_is_saved(self):
+        async def source():
+            yield 'data: ' + json.dumps({'type': 'agent_step', 'round': 1}) + '\n\n'
+            yield 'data: ' + json.dumps({'delta': 'first', 'thinking': True, 'round': 1}) + '\n\n'
+            yield 'data: ' + json.dumps({'type': 'agent_step', 'round': 2}) + '\n\n'
+            yield 'data: ' + json.dumps({'type': 'tool_start', 'tool': 'bash', 'round': 2}) + '\n\n'
+
+        run = agent_runs.start('live-units-chat', source())
+        await run.task
+        self.assertEqual(len(run.rendered_rounds), 2)
+        # Terminal snapshots report zero live additions to prevent double
+        # counting after the canonical assistant row becomes visible.
+        self.assertEqual(agent_runs.describe_run('live-units-chat')['live_rendered_units'], 2)
 
     async def test_terminal_snapshot_is_persisted_before_status_is_visible(self):
         observed = []

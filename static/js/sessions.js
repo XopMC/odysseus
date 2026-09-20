@@ -4,10 +4,10 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260920solpi3';
+import chatRenderer from './chatRenderer.js?v=20260921livefix3';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
-import themeModule from './theme.js';
+import themeModule from './theme.js?v=20260921livefix3';
 import spinnerModule from './spinner.js';
 
 const API_BASE = window.location.origin;
@@ -71,7 +71,7 @@ export async function refreshSessionMessageCount(sessionId) {
         ? Number(res.data.visible_total) : Number(res.data.total);
     if (Number.isFinite(raw) && raw >= 0) {
       const count = Math.floor(raw);
-      window.__odysseusSetServerMessageCount?.(sessionId, count);
+      window.__odysseusSetServerMessageCount?.(sessionId, count, { monotonic: true });
       return count;
     }
   } catch (_) { /* keep the last known authoritative count */ }

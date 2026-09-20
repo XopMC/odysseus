@@ -43,11 +43,13 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
     plan = store.update_plan_step("alice", owned_chat, "verify", "done", expected_revision=plan["revision"],
                                   progress={"files_changed": ["src/a.py"],
                                             "verification": ["pytest: passed"],
-                                            "decisions": ["kept API additive"]})
+                                            "decisions": ["kept API additive"],
+                                            "next_work": ["deploy candidate"]})
     assert plan["status"] == "done"
     assert plan["steps"][0]["progress"] == {
         "files_changed": ["src/a.py"], "verification": ["pytest: passed"],
         "decisions": ["kept API additive"],
+        "next_work": ["deploy candidate"],
     }
 
     goal = store.ensure_goal("alice", owned_chat, "Ship a verified release")
@@ -109,6 +111,50 @@ def test_legacy_plan_steps_have_stable_ids_and_cancel_fence(owned_chat):
     plan = work.plan_action("alice", owned_chat, "cancel", plan["revision"])
     with pytest.raises(WorkConflict):
         work.update_plan_step("alice", owned_chat, plan["steps"][0]["id"], "done", expected_revision=plan["revision"])
+
+
+@pytest.mark.parametrize("terminal_action", ["cancel", "complete"])
+def test_create_plan_tool_replaces_terminal_plan_and_starts_it_for_active_goal(
+    owned_chat, terminal_action,
+):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Old", "- [ ] Old step")
+    if terminal_action == "cancel":
+        plan = work.plan_action("alice", owned_chat, "cancel", plan["revision"])
+    else:
+        plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
+        plan = work.update_plan_step(
+            "alice", owned_chat, plan["steps"][0]["id"], "done",
+            expected_revision=plan["revision"],
+        )
+    assert plan["status"] in {"cancelled", "done"}
+    work.ensure_goal("alice", owned_chat, "Continue after compaction")
+
+    _desc, stale = asyncio.run(execute_tool_block(
+        ToolBlock("create_plan", json.dumps({
+            "title": "Stale plan",
+            "steps": [{"id": "stale-1", "text": "Must remain fenced", "status": "pending"}],
+        })),
+        owner="alice", session_id=owned_chat,
+        security_context=NO_TOOL_SECURITY_CONTEXT,
+    ))
+    assert stale["exit_code"] == 1
+    assert "no longer mutable" in stale["error"]
+
+    _desc, result = asyncio.run(execute_tool_block(
+        ToolBlock("create_plan", json.dumps({
+            "title": "Fresh checkpoint plan",
+            "steps": [{"id": "fresh-1", "text": "Re-read checkpoint", "status": "pending"}],
+        })),
+        owner="alice", session_id=owned_chat,
+        security_context=NO_TOOL_SECURITY_CONTEXT,
+        plan_recovery=True,
+    ))
+
+    assert result["exit_code"] == 0
+    assert result["plan_update"]["status"] == "executing"
+    assert result["plan_update"]["steps"][0]["status"] == "in_progress"
+    assert result["plan_update"]["steps"][0]["id"] == "fresh-1"
 
 
 def test_draft_plan_stays_pending_and_duplicate_text_keeps_distinct_ids(owned_chat):

@@ -229,10 +229,67 @@ def test_message_count_endpoint_does_not_hydrate_latest_timeline(monkeypatch):
     assert response.json() == {
         "total": 3,
         "canonical_visible_total": 3,
+        "canonical_rendered_total": 5,
+        "live_rendered_units": 0,
         "rendered_total": 5,
         "visible_total": 5,
     }
     assert "large reasoning" not in response.text
+    engine.dispose()
+
+
+def test_message_count_includes_unpersisted_live_rounds(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=3)
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    from src import agent_runs
+    monkeypatch.setattr(agent_runs, "describe_run", lambda _sid: {
+        "status": "running", "live_rendered_units": 2,
+    })
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(object()))
+
+    response = TestClient(app).get("/api/session/session-1/message-count")
+    assert response.status_code == 200
+    assert response.json()["canonical_rendered_total"] == 3
+    assert response.json()["live_rendered_units"] == 2
+    assert response.json()["rendered_total"] == 5
+    engine.dispose()
+
+
+def test_history_page_strips_embedded_replay_but_preserves_missing_reasoning(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=3)
+    db = db_factory()
+    try:
+        assistant = db.query(DbChatMessage).filter(DbChatMessage.id == "message-1").one()
+        assistant.meta_data = json.dumps({
+            "round_texts": ["first", "second"],
+            "round_reasonings": ["", "already stored"],
+            "timeline_v2": {"run_id": "a" * 32, "events": [
+                {"data": {"round": 1, "thinking": True, "delta": "recovered "}},
+                {"data": {"round": 1, "thinking": True, "delta": "reasoning"}},
+            ]},
+            "tool_events": [{"output": "x" * 20000,
+                             "_replay": {"run_id": "a" * 32, "seq": 4}}],
+        })
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI(); app.include_router(history_routes.setup_history_routes(object()))
+    payload = TestClient(app).get("/api/history/session-1?limit=10").json()
+    message = next(item for item in payload["history"] if item.get("metadata", {}).get("_db_id") == "message-1")
+    meta = message["metadata"]
+    assert "events" not in meta["timeline_v2"]
+    assert meta["timeline_v2"]["event_count"] == 2
+    assert meta["round_reasonings"] == ["recovered reasoning", "already stored"]
+    assert len(meta["tool_events"][0]["output"]) == 8193
+    assert meta["tool_events"][0]["output_preview_truncated"] is True
+    assert len(json.dumps(payload)) < 20000
     engine.dispose()
 
 

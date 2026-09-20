@@ -6,11 +6,11 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js?v=20260920solpi3';
+import modelsModule from './js/models.js?v=20260921livefix3';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260920solpi3';
+import chatModule from './js/chat.js?v=20260921livefix3';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
@@ -22,13 +22,13 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260920solpi3';
-import sessionModule from './js/sessions.js?v=20260920solpi3';
-import chatWork from './js/chat-work.js?v=20260920solpi3';
-import chatSubagents from './js/chat-subagents.js?v=20260920solpi3';
-import accessModeModule from './js/accessMode.js?v=20260920solpi3';
+import chatRenderer from './js/chatRenderer.js?v=20260921livefix3';
+import sessionModule from './js/sessions.js?v=20260921livefix3';
+import chatWork from './js/chat-work.js?v=20260921livefix3';
+import chatSubagents from './js/chat-subagents.js?v=20260921livefix3';
+import accessModeModule from './js/accessMode.js?v=20260921livefix3';
 import projectsModule from './js/projects.js?v=20260915projects1';
-import { createTeamWorkspace } from './js/team-workspace.js?v=20260920solpi3';
+import { createTeamWorkspace } from './js/team-workspace.js?v=20260921livefix3';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -38,12 +38,12 @@ import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
-import settingsModule from './js/settings.js?v=20260920solpi3';
+import settingsModule from './js/settings.js?v=20260921livefix3';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
 import './js/tileManager.js';
-import themeModule from './js/theme.js';
+import themeModule from './js/theme.js?v=20260921livefix3';
 // IMPORTANT: import cookbook.js with NO ?v= query — the same plain specifier
 // every other importer (cookbook-hwfit.js / cookbook-diagnosis.js) uses. A query
 // mismatch makes the browser load cookbook.js twice as separate modules (two
@@ -379,10 +379,16 @@ function initializeEventListeners() {
         : _chatHistEl.querySelectorAll(':scope > .msg').length;
       _metaCountEl.textContent = n ? `· ${n} msg${n === 1 ? '' : 's'}` : '';
     };
-    window.__odysseusSetServerMessageCount = (sessionId, count) => {
+    window.__odysseusSetServerMessageCount = (sessionId, count, options = {}) => {
       const parsed = Number(count);
-      _authoritativeCountSession = sessionId ? String(sessionId) : null;
-      _authoritativeCount = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+      const nextSession = sessionId ? String(sessionId) : null;
+      let nextCount = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+      if (options.monotonic === true && nextSession === _authoritativeCountSession
+          && Number.isInteger(_authoritativeCount) && Number.isInteger(nextCount)) {
+        nextCount = Math.max(_authoritativeCount, nextCount);
+      }
+      _authoritativeCountSession = nextSession;
+      _authoritativeCount = nextCount;
       _updateMsgCount();
     };
     window.__odysseusClearServerMessageCount = () => {

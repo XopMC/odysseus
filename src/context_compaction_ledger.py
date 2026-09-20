@@ -57,10 +57,23 @@ def settle(owner: Optional[str], session_id: str, generation: int) -> bool:
         ).order_by(ChatContextCompaction.created_at.desc()).first()
         if not row or row.status != "pending_settlement":
             return False
-        row.status = "settled"
-        row.settled_at = utcnow_naive()
-        if row.run_id:
-            run = db.query(ChatRunState).filter(ChatRunState.run_id == row.run_id).first()
+        settled_at = utcnow_naive()
+        # A plan rebuilt after generation N necessarily covers the checkpoint
+        # produced by every earlier compaction. Close those legacy markers in
+        # the same transaction; otherwise Resume sees N-1 as a fresh pending
+        # handshake and can loop through old generations forever.
+        rows = db.query(ChatContextCompaction).filter(
+            ChatContextCompaction.owner == (owner or ""),
+            ChatContextCompaction.session_id == session_id,
+            ChatContextCompaction.status == "pending_settlement",
+            ChatContextCompaction.generation <= int(generation),
+        ).all()
+        for pending_row in rows:
+            pending_row.status = "settled"
+            pending_row.settled_at = settled_at
+        run_ids = {pending_row.run_id for pending_row in rows if pending_row.run_id}
+        for run_id in run_ids:
+            run = db.query(ChatRunState).filter(ChatRunState.run_id == run_id).first()
             if run:
                 continuation = dict(run.continuation or {})
                 state = dict(continuation.get("compaction_settlement") or {})
@@ -69,5 +82,27 @@ def settle(owner: Optional[str], session_id: str, generation: int) -> bool:
                 run.continuation = continuation
         db.commit()
         return True
+    finally:
+        db.close()
+
+
+def pending(owner: Optional[str], session_id: str) -> Optional[dict]:
+    """Return the newest unsettled handshake so a resumed run cannot bypass it."""
+    db = SessionLocal()
+    try:
+        row = db.query(ChatContextCompaction).filter(
+            ChatContextCompaction.owner == (owner or ""),
+            ChatContextCompaction.session_id == session_id,
+            ChatContextCompaction.status == "pending_settlement",
+        ).order_by(ChatContextCompaction.created_at.desc()).first()
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "run_id": row.run_id,
+            "generation": int(row.generation),
+            "status": row.status,
+            "rebuild_marker": dict(row.rebuild_marker or {}),
+        }
     finally:
         db.close()

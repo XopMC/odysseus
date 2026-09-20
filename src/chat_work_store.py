@@ -157,7 +157,8 @@ class ChatWorkStore:
                 "created_at": row.created_at.isoformat() if row.created_at else None,
             } for row in rows]
 
-    def save_plan(self, owner, session_id, title, steps, *, expected_revision=None):
+    def save_plan(self, owner, session_id, title, steps, *, expected_revision=None,
+                  replace_terminal=False):
         title = _clean_text(title or "Plan", "plan title", 1000)
         if isinstance(steps, str):
             steps = checklist_steps(steps)
@@ -186,7 +187,7 @@ class ChatWorkStore:
                 db.add(row)
                 db.flush()
             else:
-                if row.status in {"cancelled", "done"}:
+                if row.status in {"cancelled", "done"} and not replace_terminal:
                     raise WorkConflict("Plan is no longer mutable")
                 if expected_revision is not None and row.revision != expected_revision:
                     raise WorkConflict("Plan changed; reload")
@@ -212,7 +213,7 @@ class ChatWorkStore:
             step_ids = [step["id"] for step in normalized]
             if len(step_ids) != len(set(step_ids)):
                 raise ValueError("Plan step IDs must be unique")
-            prior_status = row.status if row is not None else "draft"
+            prior_status = "draft" if replace_terminal else (row.status if row is not None else "draft")
             status = prior_status if prior_status in {"executing", "done"} else "draft"
             row.title, row.steps, row.status = title, normalized, status
             row.current_step_id = next((s["id"] for s in normalized if s["status"] in {"pending", "in_progress"}), None)
@@ -293,13 +294,14 @@ class ChatWorkStore:
                 target["summary"] = str(summary)[:2000]
             if progress is not None:
                 if not isinstance(progress, dict) or set(progress) - {
-                    "files_changed", "verification", "decisions",
+                    "files_changed", "verification", "decisions", "next_work",
                 }:
                     raise ValueError("Invalid plan progress snapshot")
                 target["progress"] = {
                     "files_changed": _clean_string_list(progress.get("files_changed"), "files_changed"),
                     "verification": _clean_string_list(progress.get("verification"), "verification"),
                     "decisions": _clean_string_list(progress.get("decisions"), "decisions"),
+                    "next_work": _clean_string_list(progress.get("next_work"), "next_work"),
                 }
             unfinished = [s for s in steps if s.get("required", True) and s.get("status") != "done"]
             row.steps = steps

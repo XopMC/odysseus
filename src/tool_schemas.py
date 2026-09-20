@@ -702,6 +702,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "files_changed": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
                 "verification": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
                 "decisions": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
+                "next_work": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
                 "expected_revision": {"type": "integer"}
             }, "required": ["step_id", "status"]}
         }

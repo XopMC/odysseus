@@ -116,7 +116,9 @@ def setup_chat_work_routes():
             from src import agent_runs
             run = agent_runs.describe_run(session_id)
             if run and run.get("status") == "running":
-                if not await agent_runs.stop_and_wait(session_id, run["run_id"]):
+                if not await agent_runs.stop_and_wait(
+                    session_id, run["run_id"], reason="plan_cancelled",
+                ):
                     raise HTTPException(409, "The current plan attempt is still stopping; retry shortly")
         try:
             return store.plan_action(owner, session_id, action, body["expected_revision"])
@@ -144,7 +146,10 @@ def setup_chat_work_routes():
             from src import agent_runs
             run = agent_runs.describe_run(session_id)
             if run and run["status"] == "running":
-                stopped = await agent_runs.stop_and_wait(session_id, run["run_id"])
+                stopped = await agent_runs.stop_and_wait(
+                    session_id, run["run_id"],
+                    reason="goal_paused" if action == "pause" else "goal_cancelled",
+                )
                 if not stopped:
                     raise HTTPException(409, "The current attempt is still stopping; retry shortly")
         try:
@@ -170,7 +175,9 @@ def setup_chat_work_routes():
         if active_id:
             # Wait for the exact attempt to persist its terminal snapshot
             # before changing the objective and starting a continuation.
-            stopped = await agent_runs.stop_and_wait(session_id, active_id)
+            stopped = await agent_runs.stop_and_wait(
+                session_id, active_id, reason="goal_revised",
+            )
             if not stopped:
                 raise HTTPException(409, "The current attempt is still stopping; retry shortly")
         goal = store.revise_goal(owner, session_id, body["objective"], body["expected_revision"])

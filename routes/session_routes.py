@@ -661,7 +661,9 @@ def setup_session_routes(
                 from src import agent_runs
                 active_run = agent_runs.describe_run(sid)
                 if active_run and active_run.get("status") == "running":
-                    if not await agent_runs.stop_and_wait(sid, active_run["run_id"]):
+                    if not await agent_runs.stop_and_wait(
+                        sid, active_run["run_id"], reason="session_deleted",
+                    ):
                         continue
                 
                 # Enforce "starred" protection consistent with single-session delete
@@ -690,7 +692,9 @@ def setup_session_routes(
             from src import agent_runs
             active_run = agent_runs.describe_run(sid)
             if active_run and active_run.get("status") == "running":
-                if not await agent_runs.stop_and_wait(sid, active_run["run_id"]):
+                if not await agent_runs.stop_and_wait(
+                    sid, active_run["run_id"], reason="session_deleted",
+                ):
                     raise HTTPException(409, "The current run is still stopping; retry shortly")
             # Block deletion of starred/favorited sessions
             db = SessionLocal()

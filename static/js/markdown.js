@@ -453,11 +453,31 @@ export function extractThinkingBlocks(text) {
 /**
  * Create a collapsible thinking section
  */
-function createThinkingSection(thinkingContent, index = 0, thinkingTime = null) {
-  const id = `thinking-${Date.now()}-${index}`;
+function _thinkingDomIdentity(identity, index, thinkingContent) {
+  const raw = String(identity || '').trim();
+  if (raw) {
+    const safe = raw.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 120);
+    if (safe) return `thinking-${safe}-${index}`;
+  }
+  // The no-identity fallback stays content-deterministic so streamed prefix
+  // renders equal the final render. Production history/replay always supplies
+  // a run/message+round identity; legacy duplicates are safe because toggles
+  // are resolved inside the clicked section instead of globally by id.
+  return `thinking-local-${index}-${Math.abs(_hashString(String(thinkingContent || '')))}`;
+}
+
+function _hashString(text) {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+  return h;
+}
+
+function createThinkingSection(thinkingContent, index = 0, thinkingTime = null, identity = '') {
+  const id = _thinkingDomIdentity(identity, index, thinkingContent);
+  const persistenceKey = escapeHtml(String(identity || id));
   const timeHtml = thinkingTime ? `<span style="font-size:11px;opacity:0.4;font-variant-numeric:tabular-nums;">${thinkingTime}s</span>` : '';
   return `
-    <div class="thinking-section">
+    <div class="thinking-section" data-thinking-key="${persistenceKey}">
       <div class="thinking-header" data-thinking-id="${id}">
         <div class="thinking-header-left">
           <span>View thinking process</span>
@@ -578,7 +598,7 @@ export function createCollapsible(contentMarkdown, label = 'details') {
     </div>`;
 }
 
-export function processWithThinking(text) {
+export function processWithThinking(text, options = {}) {
   const { thinkingBlocks, content, thinkingTime } = extractThinkingBlocks(text);
 
   let html = '';
@@ -588,7 +608,7 @@ export function processWithThinking(text) {
 
   // Add thinking sections (collapsed by default)
   thinkingBlocks.forEach((block, index) => {
-    html += createThinkingSection(block, index, thinkingTime);
+    html += createThinkingSection(block, index, thinkingTime, options.thinkingKey || '');
   });
 
   // Add the actual content
@@ -1034,6 +1054,10 @@ function _hashThinkingContent(el) {
   }
   return String(h);
 }
+function _thinkingPersistenceKey(content) {
+  const stable = content?.closest?.('.thinking-section')?.dataset?.thinkingKey;
+  return stable || _hashThinkingContent(content);
+}
 function _setThinkingExpanded(content, toggle, header, expanded) {
   if (!content || !toggle) return;
   content.classList.toggle('expanded', expanded);
@@ -1049,16 +1073,19 @@ function _setThinkingExpanded(content, toggle, header, expanded) {
 document.addEventListener('click', function(e) {
   const header = e.target.closest('.thinking-header[data-thinking-id]');
   if (!header) return;
-  const id = header.dataset.thinkingId;
-  const content = document.getElementById(id);
-  const toggle = document.getElementById(id + '-toggle');
+  // Resolve inside the clicked card first. Historical markup may contain a
+  // duplicate legacy id; document.getElementById would then open the first
+  // matching card instead of the one the user actually clicked.
+  const section = header.closest('.thinking-section');
+  const content = section?.querySelector('.thinking-content');
+  const toggle = section?.querySelector('.thinking-toggle');
   if (!content || !toggle) return;
 
   const willExpand = !content.classList.contains('expanded');
   _setThinkingExpanded(content, toggle, header, willExpand);
 
   // Persist by content hash so the choice survives a refresh.
-  const hash = _hashThinkingContent(content);
+  const hash = _thinkingPersistenceKey(content);
   if (!hash) return;
   const set = _loadExpandedSet();
   if (willExpand) set.add(hash);
@@ -1083,11 +1110,10 @@ document.addEventListener('click', function(e) {
       const content = sec.querySelector('.thinking-content');
       if (!content) continue;
       if (content.classList.contains('expanded')) continue;
-      const hash = _hashThinkingContent(content);
+      const hash = _thinkingPersistenceKey(content);
       if (!hash || !set.has(hash)) continue;
       const header = sec.querySelector('.thinking-header[data-thinking-id]');
-      const id = header?.dataset.thinkingId;
-      const toggle = id ? document.getElementById(id + '-toggle') : null;
+      const toggle = sec.querySelector('.thinking-toggle');
       _setThinkingExpanded(content, toggle, header, true);
     }
   };

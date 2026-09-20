@@ -786,7 +786,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; calling this ENDS your turn and their choice comes back as your next message. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
     "create_plan": "- ```create_plan``` — In Plan mode, persist a structured read-only plan for approval. Args: {\"title\":\"...\",\"steps\":[{\"id\":\"step-1\",\"text\":\"...\",\"status\":\"pending\",\"required\":true}]}. This never executes work.",
     "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
-    "update_plan_step": "- ```update_plan_step``` — Update one stable active-plan step only after doing and checking it. Args: {\"step_id\":\"...\",\"status\":\"pending|in_progress|done|blocked\",\"summary\":\"...\"}.",
+    "update_plan_step": "- ```update_plan_step``` — Update one stable active-plan step only after doing and checking it. Args: {\"step_id\":\"...\",\"status\":\"pending|in_progress|done|blocked\",\"summary\":\"...\",\"files_changed\":[],\"decisions\":[],\"verification\":[],\"next_work\":[]}.",
     "get_goal": "- ```get_goal``` — Read the durable active goal, attempt number and checkpoint for this chat.",
     "update_goal_progress": "- ```update_goal_progress``` — Save meaningful progress and a restart-safe checkpoint for the active goal. Args: {\"progress\":\"...\",\"checkpoint\":{},\"waiting_user\":false}.",
     "complete_goal": "- ```complete_goal``` — The ONLY way to finish an active Goal. Call it after verification with {\"summary\":\"...\",\"evidence\":[\"actual check/result\"]}. Prose does not complete a Goal.",
@@ -4786,6 +4786,31 @@ async def stream_agent_loop(
     _pending_compaction_settlement = None
     _compaction_plan_required = False
     _compaction_plan_nudges = 0
+    if session_id:
+        try:
+            from src.context_compaction_ledger import pending as _pending_compaction
+            _pending_compaction_settlement = _pending_compaction(owner, session_id)
+            if _pending_compaction_settlement:
+                _context_compactions = max(
+                    _context_compactions,
+                    int(_pending_compaction_settlement.get("generation") or 0),
+                )
+                _marker = _pending_compaction_settlement.get("rebuild_marker") or {}
+                messages.append({
+                    "role": "system",
+                    "content": str(_marker.get("instruction") or (
+                        "A prior context compaction still requires a fresh durable plan. "
+                        "Call create_plan, update_plan, or update_plan_step before any other work."
+                    )),
+                    "_agent_compaction_rebuild": True,
+                })
+                _compaction_plan_required = True
+                if _base_relevant_tools is not None:
+                    _base_relevant_tools.update({
+                        "create_plan", "update_plan", "update_plan_step", "get_goal",
+                    })
+        except Exception:
+            logger.exception("Failed to restore pending compaction settlement")
     try:
         _economic_cache_ratio = min(1000.0, max(
             0.0, float(get_setting("agent_cache_write_read_ratio", 12.5) or 0.0)
@@ -6151,8 +6176,86 @@ async def stream_agent_loop(
             }]
             if not _plan_calls:
                 _compaction_plan_nudges += 1
-                if _compaction_plan_nudges > 3:
+                if _compaction_plan_nudges >= 1:
+                    # Some local/native models repeatedly answer in prose even
+                    # when the post-compaction instruction accepts only a plan
+                    # tool. Keep the safety handshake, but do not strand a
+                    # long-running Goal: atomically install a minimal durable
+                    # recovery plan and settle only after that succeeds.
+                    _server_plan = None
+                    if session_id and active_goal:
+                        try:
+                            from src.chat_work_store import store as _work_store
+                            _work_snapshot = _work_store.get(owner, session_id)
+                            _old_plan = _work_snapshot.get("plan") or {}
+                            _step_texts = [
+                                "Re-read the active Goal and durable checkpoint",
+                            ]
+                            for _old_step in (_old_plan.get("steps") or []):
+                                _old_text = str(_old_step.get("text") or "").strip()
+                                if (_old_text and _old_step.get("status") != "done"
+                                        and _old_text not in _step_texts):
+                                    _step_texts.append(_old_text)
+                                if len(_step_texts) >= 20:
+                                    break
+                            _step_texts.append("Verify remaining work and update the Goal checkpoint")
+                            _server_plan = _work_store.save_plan(
+                                owner, session_id, "Post-compaction recovery",
+                                [
+                                    {
+                                        "id": f"recovery-{_context_compactions}-{_index}",
+                                        "text": _text,
+                                        "status": "pending",
+                                        "required": True,
+                                    }
+                                    for _index, _text in enumerate(_step_texts, 1)
+                                ],
+                                replace_terminal=True,
+                            )
+                            _server_plan = _work_store.plan_action(
+                                owner, session_id, "execute", _server_plan["revision"],
+                            )
+                            if not _pending_compaction_settlement:
+                                raise RuntimeError("Compaction settlement marker is unavailable")
+                            from src.context_compaction_ledger import settle as _settle_compaction
+                            if not _settle_compaction(owner, session_id, _context_compactions):
+                                raise RuntimeError("Compaction settlement could not be committed")
+                            yield f'data: {json.dumps({"type": "plan_update", "data": _server_plan})}\n\n'
+                            yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _context_compactions, "settlement_id": _pending_compaction_settlement.get("id"), "recovery": "server_plan"})}\n\n'
+                            _pending_compaction_settlement = None
+                            _compaction_plan_required = False
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    "The durable post-compaction recovery plan is now executing. "
+                                    "Continue with its first in-progress step and update it only after verification."
+                                ),
+                            })
+                            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "server_recovery_plan"})}\n\n'
+                            continue
+                        except Exception:
+                            logger.exception("Server-side post-compaction plan recovery failed")
                     yield f'data: {json.dumps({"type": "context_compaction_failed", "reason": "fresh_plan_missing", "message": "Compaction succeeded, but the agent did not rebuild the required fresh plan."})}\n\n'
+                    _fresh_plan_terminal = {
+                        "type": "agent_terminal",
+                        "data": {
+                            "failed": True,
+                            "failure": {
+                                "kind": "context_compaction",
+                                "status": None,
+                                "message": "Compaction succeeded, but the required fresh plan could not be rebuilt.",
+                            },
+                            "model": actual_model,
+                            "requested_model": requested_model,
+                            "endpoint_id": actual_endpoint_id,
+                            "endpoint_label": actual_endpoint_label,
+                            "round_texts": list(round_texts),
+                            "round_reasonings": list(round_reasonings),
+                            "round_timestamps": list(round_timestamps),
+                            "tool_events": list(tool_events),
+                        },
+                    }
+                    yield f'data: {json.dumps(_fresh_plan_terminal)}\n\n'
                     return
                 tool_blocks = []
                 converted_calls = []
@@ -6799,6 +6902,7 @@ async def stream_agent_loop(
                             current_headers=headers,
                             subagent_state=_subagent_state,
                             allowed_tools=(None if _relevant_tools is None else set(_relevant_tools)),
+                            plan_recovery=_fresh_plan_call,
                             **_registry_dispatch_kwargs(),
                         )
                     finally:

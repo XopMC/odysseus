@@ -3,6 +3,7 @@ from sqlalchemy.orm import sessionmaker
 
 from core.database import Base, ChatContextCompaction, ChatRunState, Session
 from src import context_compaction_ledger as ledger
+from pathlib import Path
 
 
 def test_compaction_marker_is_durable_and_settled(monkeypatch):
@@ -15,12 +16,37 @@ def test_compaction_marker_is_durable_and_settled(monkeypatch):
     db.commit()
     db.add(ChatRunState(run_id="r", session_id="s", owner="alice", status="running"))
     db.commit(); db.close()
-    result = ledger.record("alice", "s", 1, ledger_hash="h", before_tokens=100,
+    older = ledger.record("alice", "s", 1, ledger_hash="h1", before_tokens=150,
+                          after_tokens=100, economics={"reason": "economic"})
+    result = ledger.record("alice", "s", 2, ledger_hash="h2", before_tokens=100,
                            after_tokens=50, economics={"reason": "economic"})
     assert result["run_id"] == "r" and result["status"] == "pending_settlement"
-    assert ledger.settle("alice", "s", 1) is True
-    db = store(); row = db.query(ChatContextCompaction).one()
-    assert row.status == "settled" and row.rebuild_marker["kind"] == "rebuild_plan_after_compaction"
+    restored = ledger.pending("alice", "s")
+    assert restored["id"] == result["id"]
+    assert restored["generation"] == 2
+    assert restored["rebuild_marker"]["mandatory"] is True
+    assert ledger.settle("alice", "s", 2) is True
+    assert ledger.pending("alice", "s") is None
+    db = store(); rows = db.query(ChatContextCompaction).order_by(ChatContextCompaction.generation).all()
+    assert [row.status for row in rows] == ["settled", "settled"]
+    row = rows[-1]
+    assert row.rebuild_marker["kind"] == "rebuild_plan_after_compaction"
     assert row.rebuild_marker["mandatory"] is True
     assert "create_plan" in row.rebuild_marker["required_tools"]
     db.close()
+
+
+def test_agent_server_recovery_plan_settles_before_continuing():
+    source = (Path(__file__).resolve().parents[1] / "src/agent_loop.py").read_text(
+        encoding="utf-8"
+    )
+    assert "if _compaction_plan_nudges >= 1:" in source
+    branch = source.split("if _compaction_plan_nudges >= 1:", 1)[1].split(
+        '"type": "context_compaction_failed"', 1,
+    )[0]
+    assert 'replace_terminal=True' in branch
+    assert '_work_store.plan_action(' in branch
+    assert 'if not _settle_compaction(' in branch
+    assert branch.index('if not _settle_compaction(') < branch.index(
+        '"reason": "server_recovery_plan"'
+    )

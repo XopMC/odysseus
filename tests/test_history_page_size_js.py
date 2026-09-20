@@ -30,3 +30,10 @@ def test_message_count_poll_does_not_fetch_latest_history_payload():
         "export async function refreshSessionHistory", 1,
     )[0]
     assert "_historyUrl(" not in count_fn
+    assert "{ monotonic: true }" in count_fn
+
+
+def test_authoritative_live_message_count_is_monotonic():
+    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    assert "options.monotonic === true" in source
+    assert "Math.max(_authoritativeCount, nextCount)" in source

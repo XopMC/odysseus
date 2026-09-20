@@ -3142,7 +3142,9 @@ def setup_chat_routes(
         # Acknowledge only after the partial transcript and replay timeline are
         # durable. This prevents a history poll from repainting the pre-run
         # snapshot while cancellation is still saving the model's output.
-        stopped = await agent_runs.stop_and_wait(session_id, _expected_run_id)
+        stopped = await agent_runs.stop_and_wait(
+            session_id, _expected_run_id, reason="user_stop",
+        )
         goal = None
         owner = effective_user(request)
         if stopped and owner:

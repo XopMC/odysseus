@@ -26,7 +26,10 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
   let section = root?.querySelector?.('.thinking-section');
   if (!section) {
     const shell = document.createElement('div');
-    shell.innerHTML = markdownModule.processWithThinking(`<think>${t('Thinking saved — open to load')}</think>`);
+    shell.innerHTML = markdownModule.processWithThinking(
+      `<think>${t('Thinking saved — open to load')}</think>`,
+      { thinkingKey: `lazy:${runId}:${roundNumber}` },
+    );
     section = shell.querySelector('.thinking-section');
     if (section) root.prepend(section);
   }
@@ -1501,7 +1504,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260920solpi3').then(mod => {
+    import('./sessions.js?v=20260921livefix3').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -2856,7 +2859,11 @@ export function addMessage(role, content, modelName, metadata) {
           if (isLastTextRound && metadata?.rag_sources?.length) {
             agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
           }
-          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(renderSource)) + agentFindingsSuffix;
+          const roundIdentity = `${metadata?._db_id || metadata?.timeline_v2?.run_id || metadata?.timestamp || 'history'}:round:${roundNum}`;
+          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(
+            markdownModule.squashOutsideCode(renderSource),
+            { thinkingKey: roundIdentity },
+          ) + agentFindingsSuffix;
           bindThinkingLabels(body);
           bindLazyHistoryThinking(body, metadata, roundNum, Boolean(reasoning || embeddedThinking));
           wrap.appendChild(body);
@@ -2986,7 +2993,16 @@ export function addMessage(role, content, modelName, metadata) {
           const indicator = document.createElement('div');
           indicator.className = 'stopped-indicator';
           const label = document.createElement('span');
-          label.textContent = metadata.cancelled ? '[Cancelled by user]' : '[Message interrupted]';
+          const reason = metadata.interruption_reason;
+          label.textContent = metadata.cancelled ? '[Cancelled by user]'
+            : reason === 'goal_paused' ? '[Goal paused]'
+            : reason === 'goal_revised' ? '[Goal revised; continuing]'
+            : reason === 'goal_cancelled' ? '[Goal cancelled]'
+            : reason === 'plan_cancelled' ? '[Plan cancelled]'
+            : reason === 'superseded_by_new_run' ? '[Run superseded by a newer request]'
+            : reason === 'session_deleted' ? '[Chat deleted]'
+            : reason === 'user_stop' ? '[Stopped by user]'
+            : '[Message interrupted]';
           indicator.appendChild(label);
           body.appendChild(indicator);
         }
@@ -3113,7 +3129,8 @@ export function addMessage(role, content, modelName, metadata) {
     if (role === 'assistant' && storedThinking) {
       const thinkTime = metadata.thinking_time || null;
       const thinkHtml = markdownModule.processWithThinking(
-        '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + storedThinking + '</think>\n\n' + text
+        '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + storedThinking + '</think>\n\n' + text,
+        { thinkingKey: `${metadata?._db_id || metadata?.timeline_v2?.run_id || metadata?.timestamp || 'history'}:single` },
       );
       b.innerHTML = sourcesPrefix + thinkHtml + findingsSuffix;
 	    } else {
@@ -3169,8 +3186,15 @@ export function addMessage(role, content, modelName, metadata) {
       const stoppedLabel = document.createElement('span');
       // Differentiate between "stopped mid-stream" (had content, can continue)
       // and "cancelled before any content" — the latter has no Continue affordance.
-      stoppedLabel.textContent = metadata.cancelled
-        ? '[Cancelled by user]'
+      const reason = metadata.interruption_reason;
+      stoppedLabel.textContent = metadata.cancelled ? '[Cancelled by user]'
+        : reason === 'goal_paused' ? '[Goal paused]'
+        : reason === 'goal_revised' ? '[Goal revised; continuing]'
+        : reason === 'goal_cancelled' ? '[Goal cancelled]'
+        : reason === 'plan_cancelled' ? '[Plan cancelled]'
+        : reason === 'superseded_by_new_run' ? '[Run superseded by a newer request]'
+        : reason === 'session_deleted' ? '[Chat deleted]'
+        : reason === 'user_stop' ? '[Stopped by user]'
         : '[Message interrupted]';
       stoppedIndicator.appendChild(stoppedLabel);
       // Continue button only makes sense when there's partial content to
