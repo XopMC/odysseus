@@ -7,6 +7,8 @@ import pytest
 from src.tool_capabilities import ToolEffect, capabilities_for_action
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 from src.tool_schemas import function_call_to_tool_block
+from src.action_fusion import remote_fingerprint_command, remote_fenced_verify_command
+import subprocess
 
 
 def _write(path, text, command="test -s sample.txt"):
@@ -100,3 +102,39 @@ async def test_same_path_fusions_are_serialized(tmp_path, monkeypatch):
     ))
     assert [result[1]["exit_code"] for result in results] == [0, 0]
     assert (tmp_path / "sample.txt").read_text() == "second"
+
+
+def test_remote_fence_rejects_changed_file(tmp_path):
+    path = tmp_path / "remote.txt"
+    path.write_text("first")
+    probe = subprocess.run(remote_fingerprint_command([str(path)], None), shell=True,
+                           capture_output=True, text=True, check=True)
+    expected = json.loads(probe.stdout)
+    path.write_text("changed")
+    guarded = subprocess.run(remote_fenced_verify_command(expected, "touch should-not-exist"),
+                             shell=True, cwd=tmp_path, capture_output=True, text=True)
+    assert guarded.returncode == 73
+    assert not (tmp_path / "should-not-exist").exists()
+
+
+@pytest.mark.asyncio
+async def test_host_fusion_fingerprints_then_runs_guarded_verify(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.harness_efficiency.get_setting", lambda *a: "performance")
+    monkeypatch.setattr("src.tool_execution._owner_is_admin", lambda owner: True)
+    monkeypatch.setattr("src.host_execution.enabled_for", lambda owner: owner == "alice")
+    calls = []
+    path = str(tmp_path / "sample.txt")
+    async def fake_execute(tool, content):
+        calls.append((tool, content))
+        if tool == "bash" and "print(json.dumps(out" in content:
+            return {"output": json.dumps({path: "abc"}), "exit_code": 0}
+        return {"output": "ok", "exit_code": 0}
+    monkeypatch.setattr("src.host_execution.execute", fake_execute)
+    _, result = await execute_tool_block(
+        _write(path, "hello", "test -s sample.txt"), owner="alice",
+        workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT,
+    )
+    assert result["exit_code"] == 0 and len(calls) == 3
+    assert calls[0][0] == "write_file"
+    assert calls[1][0] == "bash" and "print(json.dumps(out" in calls[1][1]
+    assert calls[2][0] == "bash" and "Action Fusion fence mismatch" in calls[2][1]

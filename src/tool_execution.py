@@ -1286,7 +1286,10 @@ async def _execute_tool_block_impl(
     # sealed action.  It lives after every policy gate, while the recursive
     # calls below still pass through the individual mutation/bash gates.
     if tool in {"write_file", "edit_file", "apply_patch"}:
-        from src.action_fusion import fingerprints, hold, parse as parse_fusion
+        from src.action_fusion import (
+            fingerprints, hold, parse as parse_fusion,
+            remote_fingerprint_command, remote_fenced_verify_command, lock_keys,
+        )
         from src.harness_efficiency import enabled as efficiency_enabled
 
         try:
@@ -1344,7 +1347,22 @@ async def _execute_tool_block_impl(
                         "mutation": mutation,
                         "verification_skipped": True,
                     }
-                post_mutation = {} if host_mode else fingerprints(fused["paths"], workspace)
+                if host_mode:
+                    _fp_result = await _fusion_host.execute(
+                        "bash", remote_fingerprint_command(fused["paths"], workspace)
+                    )
+                    try:
+                        post_mutation = json.loads(str(_fp_result.get("output") or ""))
+                        if (_fp_result.get("exit_code") != 0 or not isinstance(post_mutation, dict)
+                                or set(post_mutation) != set(lock_keys(fused["paths"], workspace))):
+                            raise ValueError
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        return f"{tool}+verify: fenced", {
+                            "error": "Remote post-mutation fingerprint failed; command was not run.",
+                            "exit_code": 1, "mutation": mutation, "verification_skipped": True,
+                        }
+                else:
+                    post_mutation = fingerprints(fused["paths"], workspace)
                 # Yield once so a non-cooperating external editor can be seen
                 # by the post-mutation fence before the command starts.
                 await asyncio.sleep(0)
@@ -1355,10 +1373,14 @@ async def _execute_tool_block_impl(
                         "mutation": mutation,
                         "verification_skipped": True,
                     }
+                verify_command = (
+                    remote_fenced_verify_command(post_mutation, fused["command"])
+                    if host_mode else fused["command"]
+                )
                 try:
                     verify_desc, verification = await asyncio.wait_for(
                         _execute_tool_block_impl(
-                            SimpleNamespace(tool_type="bash", content=fused["command"]),
+                            SimpleNamespace(tool_type="bash", content=verify_command),
                             **recursive_kwargs,
                         ),
                         timeout=fused["timeout_seconds"],

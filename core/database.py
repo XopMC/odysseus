@@ -327,6 +327,27 @@ class ChatRunState(TimestampMixin, Base):
     __table_args__ = (Index("ix_chat_run_states_owner_session", "owner", "session_id", "updated_at"),)
 
 
+class ChatContextCompaction(Base):
+    """Append-only durable settlement record for one successful compaction."""
+    __tablename__ = "chat_context_compactions"
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id = Column(String, nullable=True, index=True)
+    generation = Column(Integer, nullable=False)
+    ledger_hash = Column(String, nullable=False)
+    before_tokens = Column(Integer, nullable=False)
+    after_tokens = Column(Integer, nullable=False)
+    economics = Column(JSON, nullable=False, default=dict)
+    rebuild_marker = Column(JSON, nullable=False, default=dict)
+    status = Column(String, nullable=False, default="pending_settlement", index=True)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    settled_at = Column(DateTime, nullable=True)
+    __table_args__ = (
+        Index("uq_context_compaction_generation", "owner", "session_id", "run_id", "generation", unique=True),
+    )
+
+
 class ChatSubagentRun(TimestampMixin, Base):
     """Durable child-Agent identity owned by one ordinary chat."""
     __tablename__ = "chat_subagent_runs"
@@ -458,6 +479,28 @@ class AutoResearchRun(Base):
     created_at = Column(DateTime, default=utcnow_naive, nullable=False)
     __table_args__ = (
         Index("uq_auto_research_measurement", "experiment_id", "candidate_sha", "split", "content_hash", unique=True),
+    )
+
+
+class AutoResearchCandidate(Base):
+    """Bounded candidate state; held-out results stay sealed until selection."""
+    __tablename__ = "auto_research_candidates"
+    id = Column(String, primary_key=True)
+    experiment_id = Column(String, ForeignKey("auto_research_experiments.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    ordinal = Column(Integer, nullable=False)
+    candidate_sha = Column(String, nullable=False, index=True)
+    parent_sha = Column(String, nullable=False)
+    hypothesis = Column(Text, nullable=False)
+    patch_ref = Column(Text, nullable=False, default="")
+    status = Column(String, nullable=False, default="proposed", index=True)
+    train_metrics = Column(JSON, nullable=False, default=dict)
+    heldout_metrics = Column(JSON, nullable=False, default=dict)
+    selected_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+    __table_args__ = (
+        Index("uq_auto_research_candidate_sha", "experiment_id", "candidate_sha", unique=True),
+        Index("uq_auto_research_candidate_ordinal", "experiment_id", "ordinal", unique=True),
     )
 
 

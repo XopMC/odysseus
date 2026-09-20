@@ -112,13 +112,20 @@ explicitly.
   transmitted large tool results with owner-scoped, content-addressed recall
   handles. `Efficiency` additionally accepts only hash/exit-code/exact-quote
   verified diagnostic receipts and can compact proactively at a completed plan
-  boundary when the projected prefill savings exceed the rewrite cost.
+  boundary when the projected prefill savings exceed the rewrite cost. Remote
+  trusted-host fusion is hash-fenced too; observation archives have per-owner
+  quotas and are removed with their chat. The reducer can use a dedicated
+  endpoint/model, and the cache write/read price is configurable and fixed for
+  the lifetime of a run.
 - **Subagent evidence board** — child agents can publish append-only findings,
   reproductions and rejected hypotheses. Candidate snapshots are immutable and
   require a verdict from a different child before acceptance.
 - **Auto-Research Lab** — disabled by default. When explicitly enabled it keeps
-  a frozen baseline, fixed gates and separate train/held-out measurements. It
-  records candidate evidence only and never authorizes or performs deployment.
+  a frozen baseline, a bounded candidate lineage, fixed gates, train metrics,
+  Pareto selection and sealed held-out measurements. The A/B harness records
+  tokens, requests, TTFT, duration, completion and quality against a frozen task
+  set (`benchmarks/agent_harness_long_tasks.json`). The lab records candidate
+  evidence only and never authorizes or performs deployment.
 
 ### Важно
 

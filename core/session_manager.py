@@ -626,6 +626,7 @@ class SessionManager:
 
             # Delete session
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            observation_owner = db_session.owner if db_session else None
             if db_session:
                 db.delete(db_session)
 
@@ -633,7 +634,8 @@ class SessionManager:
             # session lives only here (never persisted, or its row was removed
             # out-of-band); without this it can never be cleared and keeps
             # 404ing on every operation (issue #1044).
-            removed_in_memory = self.sessions.pop(session_id, None) is not None
+            removed_session = self.sessions.pop(session_id, None)
+            removed_in_memory = removed_session is not None
 
             if db_session or removed_in_memory:
                 # Commit the document-detach / message-delete above (a no-op when
@@ -644,6 +646,14 @@ class SessionManager:
                     agent_runs.delete_replays_for_session(session_id)
                 except Exception:
                     logger.debug("Replay cleanup skipped for deleted session %s", session_id, exc_info=True)
+                try:
+                    from src.observation_pack import delete_session as delete_observations
+                    delete_observations(
+                        (observation_owner if db_session else getattr(removed_session, "owner", None)),
+                        session_id,
+                    )
+                except Exception:
+                    logger.warning("Observation cleanup failed for deleted session %s", session_id, exc_info=True)
                 logger.info(f"Deleted session {session_id}")
                 return True
             return False

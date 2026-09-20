@@ -11,9 +11,13 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shutil
+import fcntl
+from contextlib import contextmanager
 from typing import Iterable, Optional
 
 from src.constants import DATA_DIR
+from src.settings import get_setting
 
 
 THRESHOLD_BYTES = 10 * 1024
@@ -24,6 +28,7 @@ RECALL_MAX_LINES = 400
 _ID = re.compile(r"^obs_[a-f0-9]{24}$")
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+_LOCK_FLAGS = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
 
 
 def _hash(value: str | bytes) -> str:
@@ -43,6 +48,47 @@ def _path(owner: Optional[str], session_id: Optional[str], observation_id: str) 
     return _scope(owner, session_id) / "objects" / f"{observation_id}.txt"
 
 
+@contextmanager
+def _owner_lock(owner: Optional[str]):
+    root = _scope(owner, "").parent
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if root.is_symlink() or not root.is_dir():
+        raise OSError("Observation owner directory is not regular")
+    fd = os.open(root / ".quota.lock", _LOCK_FLAGS, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def owner_usage(owner: Optional[str]) -> int:
+    root = _scope(owner, "").parent
+    total = 0
+    try:
+        for path in root.glob("*/objects/*.txt"):
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+    except OSError:
+        return total
+    return total
+
+
+def delete_session(owner: Optional[str], session_id: Optional[str]) -> bool:
+    """Remove one exact owner/session archive without following symlinks."""
+    target = _scope(owner, session_id)
+    base = (Path(DATA_DIR) / "tool_observations").resolve()
+    resolved = target.resolve(strict=False)
+    if resolved.parent.parent != base or target.is_symlink():
+        raise OSError("Invalid observation scope")
+    with _owner_lock(owner):
+        if not target.exists():
+            return False
+        shutil.rmtree(target)
+        return True
+
+
 def observation_id(tool_name: str, tool_call_id: str, text: str) -> str:
     content_hash = _hash(text)
     return "obs_" + _hash(f"{tool_name}\0{tool_call_id}\0{content_hash}")[:24]
@@ -55,21 +101,28 @@ def archive(owner: Optional[str], session_id: Optional[str], *, tool_name: str,
         return None
     oid = observation_id(tool_name, tool_call_id, text)
     path = _path(owner, session_id, oid)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.parent.is_symlink() or not path.parent.is_dir():
-        raise OSError("Observation directory is not a regular directory")
-    try:
-        fd = os.open(path, _CREATE_FLAGS, 0o600)
-    except FileExistsError:
-        with os.fdopen(os.open(path, _READ_FLAGS), "rb") as handle:
-            existing = handle.read()
-        if existing != data:
-            raise OSError("Observation integrity mismatch")
-    else:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
+    with _owner_lock(owner):
+        object_limit = max(1024, int(get_setting("observation_pack_object_max_bytes", 16_777_216) or 16_777_216))
+        owner_limit = max(object_limit, int(get_setting("observation_pack_owner_max_bytes", 536_870_912) or 536_870_912))
+        if len(data) > object_limit:
+            raise OSError("Observation exceeds the configured object quota")
+        if not path.exists() and owner_usage(owner) + len(data) > owner_limit:
+            raise OSError("Observation owner quota exceeded")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if path.parent.is_symlink() or not path.parent.is_dir():
+            raise OSError("Observation directory is not a regular directory")
+        try:
+            fd = os.open(path, _CREATE_FLAGS, 0o600)
+        except FileExistsError:
+            with os.fdopen(os.open(path, _READ_FLAGS), "rb") as handle:
+                existing = handle.read()
+            if existing != data:
+                raise OSError("Observation integrity mismatch")
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
     return {
         "id": oid,
         "sha256": _hash(data),

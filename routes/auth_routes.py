@@ -789,6 +789,10 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _INT_RANGES = {
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
+            "observation_pack_owner_max_bytes": (1_048_576, 10_737_418_240),
+            "observation_pack_object_max_bytes": (1024, 268_435_456),
+            "auto_research_max_candidates": (1, 256),
+            "auto_research_max_parallel": (1, 16),
         }
         for key in DEFAULT_SETTINGS:
             if key in RETIRED_SETTING_KEYS:
@@ -810,6 +814,16 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     raise HTTPException(400, "Invalid agent subagent model list")
             if key == "agent_efficiency_profile" and val not in {"off", "performance", "efficiency"}:
                 raise HTTPException(400, "Invalid agent efficiency profile")
+            if key == "agent_cache_write_read_ratio":
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "agent_cache_write_read_ratio must be numeric")
+                if not 0 <= val <= 1000:
+                    raise HTTPException(400, "agent_cache_write_read_ratio must be between 0 and 1000")
+            if key in {"evidence_reducer_endpoint_id", "evidence_reducer_model"}:
+                if not isinstance(val, str) or len(val) > 1000 or "\0" in val:
+                    raise HTTPException(400, f"Invalid {key}")
             current[key] = val
         _save_settings(current)
         return without_retired_settings(current)

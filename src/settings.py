@@ -120,6 +120,17 @@ DEFAULT_SETTINGS = {
     # mechanisms; efficiency additionally enables reducer + proactive compact.
     "agent_efficiency_profile": "performance",  # off | performance | efficiency
     "auto_research_lab_enabled": False,
+    # Harness storage/routing controls. Observation archives are owner-scoped;
+    # over-quota writes fail open so the exact tool result stays in context.
+    "observation_pack_owner_max_bytes": 536_870_912,
+    "observation_pack_object_max_bytes": 16_777_216,
+    "evidence_reducer_endpoint_id": "",
+    "evidence_reducer_model": "",
+    # Relative cost of one cache write compared with one cache read. Captured
+    # once per run so a settings edit cannot move the economic boundary mid-run.
+    "agent_cache_write_read_ratio": 12.5,
+    "auto_research_max_candidates": 24,
+    "auto_research_max_parallel": 2,
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value
@@ -295,6 +306,7 @@ _PER_USER_KEYS = {
     # got injected into the chat composer on first open.
     "default_endpoint_id", "default_model",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
+    "evidence_reducer_endpoint_id", "evidence_reducer_model",
     "research_endpoint_id", "research_model",
 }
 

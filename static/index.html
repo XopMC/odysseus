@@ -245,13 +245,13 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260920solpi1">
-  <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260920solpi1">
+  <link rel="stylesheet" href="/static/style.css?v=20260920solpi2">
+  <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260920solpi2">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260920solpi1">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260920solpi1">
+  <link rel="modulepreload" href="/static/app.js?v=20260920solpi2">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260920solpi2">
   <link rel="modulepreload" href="/static/js/ui.js">
-  <link rel="modulepreload" href="/static/js/sessions.js?v=20260920solpi1">
+  <link rel="modulepreload" href="/static/js/sessions.js?v=20260920solpi2">
   <link rel="modulepreload" href="/static/js/markdown.js">
 </head>
 <body>
@@ -2505,6 +2505,17 @@
                   <span class="admin-toggle-sub">Opt in to immutable local optimization experiments. Candidates are never deployed automatically.</span>
                 </div>
               </div>
+              <div class="settings-row">
+                <label class="settings-label" for="set-agentCacheRatio">Cache write/read ratio</label>
+                <input id="set-agentCacheRatio" type="number" min="0" max="1000" step="0.1" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" for="set-evidenceReducerEndpoint">Evidence reducer route</label>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <input id="set-evidenceReducerEndpoint" type="text" placeholder="endpoint id (optional)" class="settings-select" style="width:210px;">
+                  <input id="set-evidenceReducerModel" type="text" placeholder="model (current if empty)" class="settings-select" style="width:260px;">
+                </div>
+              </div>
               <div class="settings-row subagent-models-row" id="set-agentSubagentModelsRow">
                 <label class="settings-label" for="set-agentSubagentModelSearch">Subagent models</label>
                 <div class="subagent-model-picker">
@@ -2698,14 +2709,14 @@
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
 <script type="module" src="/static/js/dragSort.js"></script>
-<script type="module" src="/static/js/sessions.js?v=20260920solpi1"></script>
+<script type="module" src="/static/js/sessions.js?v=20260920solpi2"></script>
 <script type="module" src="/static/js/memory.js?v=20260722memoryloading1"></script>
 <script type="module" src="/static/js/skills.js"></script>
 <script type="module" src="/static/js/tourHints.js"></script>
 <script type="module" src="/static/js/tourAutoplay.js"></script>
 <script type="module" src="/static/js/fileHandler.js"></script>
 <script type="module" src="/static/js/voiceRecorder.js"></script>
-<script type="module" src="/static/js/models.js?v=20260920solpi1"></script>  <!-- This must come BEFORE app.js -->
+<script type="module" src="/static/js/models.js?v=20260920solpi2"></script>  <!-- This must come BEFORE app.js -->
 <script type="module" src="/static/js/rag.js"></script>
 <script type="module" src="/static/js/presets.js"></script>
 <script type="module" src="/static/js/search.js"></script>
@@ -2713,18 +2724,18 @@
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/document.js?v=20260815approvalsave1"></script>
 <script type="module" src="/static/js/gallery.js?v=20260708match1"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260920solpi1"></script>
+<script type="module" src="/static/js/chatRenderer.js?v=20260920solpi2"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260819approvalcontrol1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260920solpi1"></script>
+  <script type="module" src="/static/js/chat.js?v=20260920solpi2"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260920solpi1"></script>
+<script type="module" src="/static/js/settings.js?v=20260920solpi2"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260920solpi1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260920solpi2"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

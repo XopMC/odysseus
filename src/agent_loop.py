@@ -4782,6 +4782,13 @@ async def stream_agent_loop(
     _economic_completed_boundaries = 0
     _economic_last_boundary_tokens = estimate_tokens(messages)
     _economic_decision = None
+    _pending_compaction_settlement = None
+    try:
+        _economic_cache_ratio = min(1000.0, max(
+            0.0, float(get_setting("agent_cache_write_read_ratio", 12.5) or 0.0)
+        ))
+    except (TypeError, ValueError):
+        _economic_cache_ratio = 12.5
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
     # stuck firing the same tool call over and over with no text — burns
@@ -5357,6 +5364,7 @@ async def stream_agent_loop(
                 input_budget=max(1, _working_limit),
                 completed_boundaries=_economic_completed_boundaries,
                 tokens_since_boundary=max(0, _before_context - _economic_last_boundary_tokens),
+                cache_write_read_ratio=_economic_cache_ratio,
             )
             if _economic_decision.compact:
                 _compacted_messages, _compact_status = await compact_working_context(
@@ -5401,7 +5409,25 @@ async def stream_agent_loop(
                     json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
                 ).hexdigest(),
             } if checkpoint_text else None
-            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "checkpoint": checkpoint, "economic_decision": (_economic_decision.to_dict() if _economic_decision else None)})}\n\n'
+            if checkpoint and session_id:
+                try:
+                    from src.context_compaction_ledger import record as _record_compaction
+                    _pending_compaction_settlement = _record_compaction(
+                        owner, session_id, _context_compactions,
+                        ledger_hash=checkpoint["ledger_hash"], before_tokens=_before_context,
+                        after_tokens=estimate_tokens(messages),
+                        economics=_economic_decision.to_dict() if _economic_decision else {},
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": _pending_compaction_settlement["rebuild_marker"]["instruction"],
+                        "_agent_compaction_rebuild": True,
+                    })
+                    _active_route_state["messages"] = messages
+                except Exception:
+                    logger.exception("Failed to persist compaction settlement marker")
+                    _pending_compaction_settlement = None
+            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "checkpoint": checkpoint, "economic_decision": (_economic_decision.to_dict() if _economic_decision else None), "settlement": _pending_compaction_settlement})}\n\n'
         elif _compact_status in {"failed", "uncompactable"}:
             # Do not silently drop evidence and continue an audit as if the
             # summary succeeded. The user can retry after the provider recovers.
@@ -5996,6 +6022,16 @@ async def stream_agent_loop(
             _round_first_token_logged,
         )
         _finalize_round_usage()
+        if _pending_compaction_settlement and session_id and (
+            round_response.strip() or round_reasoning.strip() or native_tool_calls
+        ):
+            try:
+                from src.context_compaction_ledger import settle as _settle_compaction
+                if _settle_compaction(owner, session_id, _context_compactions):
+                    yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _context_compactions, "settlement_id": _pending_compaction_settlement.get("id")})}\n\n'
+                _pending_compaction_settlement = None
+            except Exception:
+                logger.exception("Failed to settle durable compaction marker")
         _normalized_doc_round = (
             _normalize_stream_document_fences(
                 round_response,
@@ -7139,7 +7175,7 @@ async def stream_agent_loop(
                             _raw_parts.append(str(result[_key]))
                     _raw_diagnostic = "\n".join(_raw_parts)
                     _util_url, _util_model, _util_headers = _resolve_reducer_endpoint(
-                        "utility", fallback_url=_last_route_endpoint_url or endpoint_url,
+                        "evidence_reducer", fallback_url=_last_route_endpoint_url or endpoint_url,
                         fallback_model=model, fallback_headers=headers, owner=owner,
                     )
                     async def _call_reducer(_prompt):
@@ -7163,6 +7199,10 @@ async def stream_agent_loop(
                         formatted = _reduced["text"]
                         tool_event["evidence_receipt"] = _reduced["receipt"]
                         tool_event["artifact_id"] = _reduced["artifact"]["id"]
+                        tool_event["evidence_reducer_route"] = {
+                            "endpoint_url": _util_url or endpoint_url,
+                            "model": _util_model or model,
+                        }
                 except Exception:
                     logger.exception("Evidence reducer failed open")
             tool_results.append(formatted)

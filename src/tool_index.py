@@ -76,7 +76,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
     "read_tool_artifact": "Recall an exact paged chunk of a large prior tool result by its opaque observation id and byte offset.",
     "publish_subagent_evidence": "Child agent only: publish an append-only finding, reproduction, rejected hypothesis, or verified fact to the shared parent evidence board.",
-    "manage_auto_research_lab": "Opt-in immutable optimization experiment ledger with frozen baseline, fixed gates, train and held-out measurements. Never deploys candidates.",
+    "manage_auto_research_lab": "Opt-in bounded recursive optimization loop with generated candidates, train metrics, Pareto selection, sealed held-out evaluation and fixed gates. Never deploys candidates.",
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",

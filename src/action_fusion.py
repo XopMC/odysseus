@@ -8,6 +8,8 @@ import json
 import hashlib
 import os
 import re
+import base64
+import shlex
 from typing import AsyncIterator
 
 
@@ -81,6 +83,53 @@ def fingerprints(paths: list[str], workspace: str | None) -> dict[str, str]:
         except OSError as exc:
             found[path] = f"error:{type(exc).__name__}"
     return found
+
+
+def remote_fingerprint_command(paths: list[str], workspace: str | None) -> str:
+    """Build a data-only host command that fingerprints exact resolved paths."""
+    payload = base64.urlsafe_b64encode(json.dumps(lock_keys(paths, workspace)).encode()).decode()
+    script = (
+        "import base64,hashlib,json,os,sys;"
+        "ps=json.loads(base64.urlsafe_b64decode(sys.argv[1]));out={};"
+        "\nfor p in ps:\n"
+        " try:\n"
+        "  if os.path.islink(p): v='symlink'\n"
+        "  elif not os.path.exists(p): v='missing'\n"
+        "  elif not os.path.isfile(p): v='not-file'\n"
+        "  else:\n"
+        "   h=hashlib.sha256()\n"
+        "   with open(p,'rb') as f:\n"
+        "    for c in iter(lambda:f.read(1048576),b''): h.update(c)\n"
+        "   v=h.hexdigest()\n"
+        " except OSError as e: v='error:'+type(e).__name__\n"
+        " out[p]=v\n"
+        "print(json.dumps(out,sort_keys=True,separators=(',',':')))"
+    )
+    return "python3 -c " + shlex.quote(script) + " " + shlex.quote(payload)
+
+
+def remote_fenced_verify_command(expected: dict[str, str], command: str) -> str:
+    """Verify remote fingerprints and run the requested command in one host call."""
+    payload = base64.urlsafe_b64encode(json.dumps(expected, sort_keys=True).encode()).decode()
+    script = (
+        "import base64,hashlib,json,os,sys;"
+        "exp=json.loads(base64.urlsafe_b64decode(sys.argv[1]));"
+        "\nfor p,want in exp.items():\n"
+        " try:\n"
+        "  if os.path.islink(p): got='symlink'\n"
+        "  elif not os.path.exists(p): got='missing'\n"
+        "  elif not os.path.isfile(p): got='not-file'\n"
+        "  else:\n"
+        "   h=hashlib.sha256()\n"
+        "   with open(p,'rb') as f:\n"
+        "    for c in iter(lambda:f.read(1048576),b''): h.update(c)\n"
+        "   got=h.hexdigest()\n"
+        " except OSError as e: got='error:'+type(e).__name__\n"
+        " if got!=want:\n"
+        "  print('Action Fusion fence mismatch: '+p,file=sys.stderr);sys.exit(73)\n"
+        "os.execvp('bash',['bash','-lc',sys.argv[2]])"
+    )
+    return "python3 -c " + shlex.quote(script) + " " + shlex.quote(payload) + " " + shlex.quote(command)
 
 
 @asynccontextmanager

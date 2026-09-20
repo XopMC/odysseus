@@ -66,3 +66,23 @@ def test_projection_fails_open_when_store_is_unavailable(monkeypatch):
     ], owner="alice", session_id="s1")
     assert projected[0]["content"] == body
     assert info == {"packed": 0, "removed_bytes": 0}
+
+
+def test_owner_quota_and_session_cleanup(monkeypatch, tmp_path):
+    monkeypatch.setattr(pack, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(pack, "get_setting", lambda key, default=None: {
+        "observation_pack_object_max_bytes": 20_000,
+        "observation_pack_owner_max_bytes": 22_000,
+    }.get(key, default))
+    one = pack.archive("alice", "s1", tool_name="bash", tool_call_id="1", text="a" * 12_000)
+    assert one and pack.owner_usage("alice") == 12_000
+    try:
+        pack.archive("alice", "s2", tool_name="bash", tool_call_id="2", text="b" * 12_000)
+    except OSError as exc:
+        assert "quota" in str(exc).lower()
+    else:
+        raise AssertionError("owner quota was not enforced")
+    assert pack.archive("bob", "s2", tool_name="bash", tool_call_id="2", text="b" * 12_000)
+    assert pack.delete_session("alice", "s1") is True
+    assert pack.owner_usage("alice") == 0
+    assert pack.owner_usage("bob") == 12_000

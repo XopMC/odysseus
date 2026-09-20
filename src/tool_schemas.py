@@ -196,14 +196,18 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_auto_research_lab",
-            "description": "Manage an opt-in immutable optimization experiment ledger. It records fixed gates and train/held-out measurements but never deploys a candidate.",
+            "description": "Manage an opt-in bounded optimization loop: propose candidates, record train metrics, select a Pareto frontier, run sealed held-out evaluation, and evaluate fixed gates. Never deploys a candidate.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "create", "record", "evaluate"]},
+                    "action": {"type": "string", "enum": ["list", "create", "propose", "claim", "record", "select_pareto", "candidates", "evaluate", "pause", "resume", "close"]},
                     "experiment_id": {"type": "string"},
+                    "candidate_id": {"type": "string"},
                     "baseline_sha": {"type": "string"},
                     "candidate_sha": {"type": "string"},
+                    "parent_sha": {"type": "string"},
+                    "hypothesis": {"type": "string"},
+                    "patch_ref": {"type": "string"},
                     "candidate_worktree": {"type": "string"},
                     "split": {"type": "string", "enum": ["train", "heldout"]},
                     "gates": {"type": "array", "items": {"type": "object"}},

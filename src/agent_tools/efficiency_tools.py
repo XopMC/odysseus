@@ -66,6 +66,22 @@ class ManageAutoResearchLabTool:
                 candidate_sha=args.get("candidate_sha"), split=args.get("split"),
                 metrics=args.get("metrics") or {}, evidence=args.get("evidence") or [],
             )
+        if action == "propose":
+            return lab.propose(
+                ctx.get("owner"), str(args.get("experiment_id") or ""),
+                candidate_sha=args.get("candidate_sha"), parent_sha=args.get("parent_sha"),
+                hypothesis=args.get("hypothesis"), patch_ref=args.get("patch_ref") or "",
+            )
+        if action == "select_pareto":
+            return lab.select_pareto(ctx.get("owner"), str(args.get("experiment_id") or ""))
+        if action == "candidates":
+            return lab.candidates(ctx.get("owner"), str(args.get("experiment_id") or ""))
+        if action == "claim":
+            return lab.claim(ctx.get("owner"), str(args.get("experiment_id") or ""),
+                             str(args.get("candidate_id") or ""), str(args.get("split") or ""))
+        if action in {"pause", "resume", "close"}:
+            return lab.set_status(ctx.get("owner"), str(args.get("experiment_id") or ""),
+                                  {"pause": "paused", "resume": "open", "close": "closed"}[action])
         if action == "evaluate":
             return lab.evaluate(
                 ctx.get("owner"), str(args.get("experiment_id") or ""),

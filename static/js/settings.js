@@ -1679,6 +1679,12 @@ async function initAgentSettings() {
     if (subagentMode) subagentMode.value = settings.agent_subagents_mode || 'off';
     if (efficiencyProfile) efficiencyProfile.value = settings.agent_efficiency_profile || 'performance';
     if (autoResearchLab) autoResearchLab.checked = !!settings.auto_research_lab_enabled;
+    var cacheRatio = document.getElementById('set-agentCacheRatio');
+    var reducerEndpoint = document.getElementById('set-evidenceReducerEndpoint');
+    var reducerModel = document.getElementById('set-evidenceReducerModel');
+    if (cacheRatio) cacheRatio.value = settings.agent_cache_write_read_ratio ?? 12.5;
+    if (reducerEndpoint) reducerEndpoint.value = settings.evidence_reducer_endpoint_id || '';
+    if (reducerModel) reducerModel.value = settings.evidence_reducer_model || '';
     setSelectedModels(settings.agent_subagent_models || '');
     if (subagentModelsRow) subagentModelsRow.hidden = subagentMode?.value !== 'selected_models';
   } catch (e) {}
@@ -1702,6 +1708,12 @@ async function initAgentSettings() {
     if (subagentMode) payload.agent_subagents_mode = subagentMode.value;
     if (efficiencyProfile) payload.agent_efficiency_profile = efficiencyProfile.value;
     if (autoResearchLab) payload.auto_research_lab_enabled = !!autoResearchLab.checked;
+    var cacheRatio = document.getElementById('set-agentCacheRatio');
+    var reducerEndpoint = document.getElementById('set-evidenceReducerEndpoint');
+    var reducerModel = document.getElementById('set-evidenceReducerModel');
+    if (cacheRatio) payload.agent_cache_write_read_ratio = Number(cacheRatio.value || 12.5);
+    if (reducerEndpoint) payload.evidence_reducer_endpoint_id = reducerEndpoint.value.trim();
+    if (reducerModel) payload.evidence_reducer_model = reducerModel.value.trim();
     if (subagentModels) payload.agent_subagent_models = Array.from(selectedSubagentModels).join(',');
     try {
       await _postSettings(payload);
@@ -1722,6 +1734,9 @@ async function initAgentSettings() {
   });
   if (efficiencyProfile) efficiencyProfile.addEventListener('change', save);
   if (autoResearchLab) autoResearchLab.addEventListener('change', save);
+  ['set-agentCacheRatio', 'set-evidenceReducerEndpoint', 'set-evidenceReducerModel'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.addEventListener('change', save);
+  });
   if (subagentModelSearch) subagentModelSearch.addEventListener('input', renderSubagentModels);
   if (subagentModelsRefresh) subagentModelsRefresh.addEventListener('click', function() {
     loadSubagentModels(true);

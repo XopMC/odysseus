@@ -1,0 +1,17 @@
+[
+  {
+    "id": "repo-audit",
+    "prompt": "Inspect the supplied fixture repository, identify the three seeded defects, propose fixes, and cite exact files and verification evidence.",
+    "quality_gates": ["three_defects_found", "file_citations", "verification_evidence"]
+  },
+  {
+    "id": "multi-round-repair",
+    "prompt": "Repair the seeded failing test using file tools, run the focused test, then run the fixture suite and report both results.",
+    "quality_gates": ["focused_test_passed", "suite_passed", "no_unrelated_changes"]
+  },
+  {
+    "id": "large-output-diagnosis",
+    "prompt": "Run the fixture diagnostic that emits a large log, isolate the exact failure evidence, repair it, and verify the final result.",
+    "quality_gates": ["evidence_preserved", "repair_correct", "final_verification"]
+  }
+]
