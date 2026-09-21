@@ -2668,6 +2668,14 @@ def setup_chat_routes(
                                             "context_compaction_failed": True,
                                             "context_compaction_reason": data.get("reason") or "failed",
                                         }
+                                    elif data.get("type") == "compacted" and active_goal:
+                                        try:
+                                            active_goal = chat_work_store.clear_goal_failure(
+                                                _user, session, reason="context_compaction_succeeded",
+                                            )
+                                            yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                                        except WorkNotFound:
+                                            pass
                                     yield chunk
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.

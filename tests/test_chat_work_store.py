@@ -206,6 +206,13 @@ def test_goal_retriable_checkpoint_failure_stays_active_with_backoff_count(owned
         assert goal["failure_count"] == expected
         assert goal["status"] == "active"
     assert goal["checkpoint"]["reason"] == "context_compaction"
+    recovered = store.clear_goal_failure(
+        "alice", owned_chat, reason="context_compaction_succeeded",
+    )
+    assert recovered["status"] == "active"
+    assert recovered["failure_count"] == 0
+    assert recovered["last_error"] is None
+    assert recovered["checkpoint"]["reason"] == "context_compaction"
 
 
 def test_goal_tools_receive_the_validated_owner_and_session(owned_chat):

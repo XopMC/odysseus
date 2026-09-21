@@ -438,6 +438,29 @@ class ChatWorkStore:
             db.flush()
             return _public_goal(row)
 
+    def clear_goal_failure(self, owner, session_id, *, reason="recovered"):
+        """Clear retry backoff after verified runtime recovery without
+        overwriting the Goal's user-visible progress or durable checkpoint.
+        """
+        with SessionLocal.begin() as db:
+            _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+            ).first()
+            if row is None or row.status != "active":
+                raise WorkNotFound("Active goal not found")
+            if not row.failure_count and not row.last_error:
+                return _public_goal(row)
+            row.failure_count = 0
+            row.last_error = None
+            row.revision += 1
+            self._event(
+                db, owner, session_id, "goal_retry_recovered", row.id, row.revision,
+                {"reason": _clean_text(reason, "recovery reason", 200)},
+            )
+            db.flush()
+            return _public_goal(row)
+
     def complete_goal(self, owner, session_id, summary, evidence):
         summary = _clean_text(summary, "goal completion summary", 12000)
         if not isinstance(evidence, list) or not evidence:
