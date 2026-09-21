@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix22';
-import chatRenderer from './chatRenderer.js?v=20260921livefix22';
+import sessionModule from './sessions.js?v=20260921livefix23';
+import chatRenderer from './chatRenderer.js?v=20260921livefix23';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -1435,24 +1435,27 @@ import { bindUiText, t } from './i18n.js';
     // If currently streaming, keyboard Enter can queue a non-empty composer.
     // Clicking the stop icon should still stop normally, even if text exists.
     if (isStreaming) {
-      const activeGoal = window.chatWork?.getSnapshot?.()?.goal;
-      const goalGuidance = activeGoal?.status === 'active'
-        && String(uiModule.el('message')?.value || '').trim();
+      const composerText = String(uiModule.el('message')?.value || '').trim();
       // A message sent while a Goal is running is guidance for that Goal. Queue
       // it durably on the server and let the running loop consume it at the
       // next round; never reinterpret it as Stop or keep it browser-owned.
-      if (goalGuidance && window.chatWork?.addGuidance) {
+      // The browser snapshot can briefly lag the durable Goal after a deploy
+      // or reconnect.  If there is typed text, ask the server to classify it
+      // as Goal guidance even when the local snapshot still says paused.  A
+      // stale client must never reinterpret Enter-with-text as Stop.
+      if (composerText && window.chatWork?.addGuidance) {
         try {
-          if (await window.chatWork.addGuidance(goalGuidance)) {
+          if (await window.chatWork.addGuidance(composerText)) {
             const input = uiModule.el('message');
             if (input) { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }
             await sessionModule.refreshSessionMessageCount?.(sessionId);
             return;
           }
-        } catch (error) {
-          uiModule.showError?.(error?.message || 'Failed to save Goal guidance');
-          return;
-        }
+        } catch (_) { /* Goal is not active server-side; queue as a normal follow-up below. */ }
+      }
+      if (composerText && queueStreamingComposerRequest()) {
+        window.__odysseusQueueStreamingSubmit = 0;
+        return;
       }
       const queueRequestedAt = Number(window.__odysseusQueueStreamingSubmit || 0);
       const shouldQueueStreamingSubmit = queueRequestedAt && Date.now() - queueRequestedAt < 1200;

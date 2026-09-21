@@ -216,7 +216,10 @@ async function pauseActiveGoal() {
 
 async function addGuidance(message) {
   const text = String(message || '').trim();
-  if (!sessionId || !text || snapshot.goal?.status !== 'active') return false;
+  // The server owns Goal state.  A reconnecting browser may still have a
+  // paused snapshot while the controller has already resumed it; let the
+  // owner-scoped endpoint decide instead of dropping into the Stop path.
+  if (!sessionId || !text) return false;
   const result = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/goal-guidance`, { message: text });
   if (result?.goal) snapshot.goal = result.goal;
   window.chatModule?.appendGoalGuidance?.(result?.guidance);
