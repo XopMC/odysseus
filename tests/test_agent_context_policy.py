@@ -147,6 +147,33 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(telemetry['target_messages'], first_target)
         self.assertEqual(telemetry['effective_target_messages'], second_target)
 
+    async def test_oversized_optional_recent_tail_is_folded_after_safe_retry(self):
+        from src.context_policy import ContextPolicy
+        from src.context_policy_runtime import shape_request
+        messages = [{'role': 'user', 'content': 'evidence ' * 40000}]
+        policy = ContextPolicy(trigger_percent=75, target_percent=15,
+                               recent_groups=4, recent_tokens=2048)
+        record = {'effective': policy.to_dict(), 'revisions': {'owner': 1}}
+        compacted = [{'role': 'system', 'content': 'safe checkpoint'}]
+        with patch(
+            'src.context_policy_runtime.compact_working_context',
+            new=AsyncMock(side_effect=[
+                (messages, 'uncompactable'),
+                (messages, 'uncompactable'),
+                (compacted, 'compacted'),
+            ]),
+        ) as compact:
+            shaped, telemetry = await shape_request(
+                messages, [], record, 65536, AsyncMock(return_value='summary'),
+            )
+        self.assertEqual(shaped, compacted)
+        self.assertEqual(compact.await_count, 3)
+        emergency_policy = compact.await_args_list[2].kwargs['policy']
+        self.assertEqual(emergency_policy.recent_groups, 0)
+        self.assertEqual(emergency_policy.recent_tokens, 0)
+        self.assertEqual(telemetry['effective_recent_groups'], 0)
+        self.assertEqual(telemetry['effective_recent_tokens'], 0)
+
     async def test_disabled_compaction_blocks_overflow_without_request(self):
         self.save({'auto_compact': False})
         sent, summaries, chunks = await self.run_agent([

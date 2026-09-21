@@ -5,6 +5,7 @@ Callers must persist checkpoints and recheck policy identity before dispatch.
 """
 import os
 import math
+from dataclasses import replace
 
 from src.context_policy import ContextPolicy
 from src.context_policy_store import ContextPolicyStore
@@ -42,6 +43,8 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
     action = budget.action(before, auto_compact=policy.auto_compact)
     shaped, status = messages, 'unchanged'
     effective_target = budget.target_messages
+    effective_recent_groups = policy.recent_groups
+    effective_recent_tokens = policy.recent_tokens
     if action == 'blocked':
         raise ValueError('Context is full and automatic compaction is disabled')
     if action == 'compact':
@@ -66,6 +69,23 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
                     policy=policy,
                     target_limit=max(1, math.floor(relaxed / calibration)),
                 )
+            if status == 'uncompactable':
+                # The configured recent tail is optional retention. A few huge
+                # recent tool groups can exceed even the relaxed safe target
+                # after a valid summary was produced. Preserve every pinned
+                # Goal/tool pair and the explicit checkpoint, but fold the
+                # optional tail for this revision instead of restarting the
+                # long Goal with exactly the same impossible shape.
+                effective_recent_groups = 0
+                effective_recent_tokens = 0
+                minimal_policy = replace(policy, recent_groups=0, recent_tokens=0)
+                shaped, status = await compact_working_context(
+                    messages,
+                    max(1, math.floor(budget.trigger_messages / calibration)),
+                    summarize,
+                    policy=minimal_policy,
+                    target_limit=max(1, math.floor(effective_target / calibration)),
+                )
         if status not in {'compacted', 'unchanged'}:
             raise ValueError(
                 f'Configured context checkpoint could not preserve the required history ({status})'
@@ -79,5 +99,7 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
         'trigger_messages': budget.trigger_messages,
         'target_messages': budget.target_messages,
         'effective_target_messages': effective_target,
+        'effective_recent_groups': effective_recent_groups,
+        'effective_recent_tokens': effective_recent_tokens,
         'output_reserve': budget.output_reserve, 'safety_tokens': budget.safety_tokens,
         'revisions': record['revisions']}
