@@ -4,7 +4,7 @@
  * UI utilities for toasts, modals, scrolling, and user feedback
  */
 
-import themeModule from './theme.js?v=20260921livefix9';
+import themeModule from './theme.js?v=20260921livefix10';
 import * as Modals from './modalManager.js';
 import spinnerModule from './spinner.js';
 import { registerMenuDismiss, dismissTopMenu, dismissOrRemove } from './escMenuStack.js';
@@ -451,8 +451,13 @@ export function showError(msg) {
 }
 
 /**
- * Smooth-scroll chat history to bottom using rAF lerp.
- * Throttled during streaming so it doesn't fight user scrolling.
+ * Follow the live tail with one layout read/write per coalesced update.
+ *
+ * The former rAF lerp read `scrollHeight` on every display frame. While text
+ * was streaming the target kept moving, so the loop rarely terminated and
+ * Safari performed a full layout/compositing walk of the entire chat at 60Hz.
+ * One rAF keeps the write aligned with paint without turning auto-scroll into
+ * a permanent layout poller.
  */
 let _scrollThrottleTimer = null;
 export function scrollHistory() {
@@ -475,25 +480,8 @@ function _smoothScrollStep() {
     return;
   }
   const target = box.scrollHeight - box.clientHeight;
-  const current = box.scrollTop;
-  const diff = target - current;
-
-  // If user scrolled up significantly, don't force them down
-  if (diff > 300) {
-    _scrollRafId = null;
-    return;
-  }
-
-  if (diff <= 1) {
-    box.scrollTop = target;
-    _scrollRafId = null;
-    return;
-  }
-
-  // Lerp: gentle catch-up
-  const factor = window.innerWidth <= 768 ? 0.4 : 0.2;
-  box.scrollTop = current + diff * factor;
-  _scrollRafId = requestAnimationFrame(_smoothScrollStep);
+  box.scrollTop = target;
+  _scrollRafId = null;
 }
 
 /**
