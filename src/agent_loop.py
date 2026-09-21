@@ -5585,6 +5585,10 @@ async def stream_agent_loop(
                         after_tokens=estimate_tokens(messages),
                         economics=_economic_decision.to_dict() if _economic_decision else {},
                     )
+                    _context_compactions = max(
+                        _context_compactions,
+                        int((_pending_compaction_settlement.get("rebuild_marker") or {}).get("generation") or 0),
+                    )
                     messages.append({
                         "role": "system",
                         "content": _pending_compaction_settlement["rebuild_marker"]["instruction"],
@@ -6277,10 +6281,15 @@ async def stream_agent_loop(
                             if not _pending_compaction_settlement:
                                 raise RuntimeError("Compaction settlement marker is unavailable")
                             from src.context_compaction_ledger import settle as _settle_compaction
-                            if not _settle_compaction(owner, session_id, _context_compactions):
+                            _settlement_generation = int(
+                                _pending_compaction_settlement.get("generation")
+                                or (_pending_compaction_settlement.get("rebuild_marker") or {}).get("generation")
+                                or _context_compactions
+                            )
+                            if not _settle_compaction(owner, session_id, _settlement_generation):
                                 raise RuntimeError("Compaction settlement could not be committed")
                             yield f'data: {json.dumps({"type": "plan_update", "data": _server_plan})}\n\n'
-                            yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _context_compactions, "settlement_id": _pending_compaction_settlement.get("id"), "recovery": "server_plan"})}\n\n'
+                            yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _settlement_generation, "settlement_id": _pending_compaction_settlement.get("id"), "recovery": "server_plan"})}\n\n'
                             _pending_compaction_settlement = None
                             _compaction_plan_required = False
                             messages.append({
@@ -7006,8 +7015,13 @@ async def stream_agent_loop(
                     if _pending_compaction_settlement and session_id:
                         try:
                             from src.context_compaction_ledger import settle as _settle_compaction
-                            if _settle_compaction(owner, session_id, _context_compactions):
-                                yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _context_compactions, "settlement_id": _pending_compaction_settlement.get("id")})}\n\n'
+                            _settlement_generation = int(
+                                _pending_compaction_settlement.get("generation")
+                                or (_pending_compaction_settlement.get("rebuild_marker") or {}).get("generation")
+                                or _context_compactions
+                            )
+                            if _settle_compaction(owner, session_id, _settlement_generation):
+                                yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _settlement_generation, "settlement_id": _pending_compaction_settlement.get("id")})}\n\n'
                             _pending_compaction_settlement = None
                         except Exception:
                             logger.exception("Failed to settle durable compaction marker")

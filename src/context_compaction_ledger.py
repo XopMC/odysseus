@@ -12,12 +12,20 @@ def record(owner: Optional[str], session_id: str, generation: int, *, ledger_has
            before_tokens: int, after_tokens: int, economics: dict) -> dict:
     db = SessionLocal()
     try:
+        newest = db.query(ChatContextCompaction.generation).filter(
+            ChatContextCompaction.owner == (owner or ""),
+            ChatContextCompaction.session_id == session_id,
+        ).order_by(ChatContextCompaction.generation.desc()).first()
+        newest_generation = int(newest[0]) if newest else 0
+        # A recovered working checkpoint can predate the durable ledger (or
+        # omit its counter). Never reuse an old generation after restart.
+        generation = max(int(generation), newest_generation + 1)
         run = db.query(ChatRunState).filter(
             ChatRunState.owner == (owner or ""), ChatRunState.session_id == session_id,
             ChatRunState.status == "running",
         ).order_by(ChatRunState.updated_at.desc()).first()
         marker = {
-            "kind": "rebuild_plan_after_compaction", "generation": int(generation),
+            "kind": "rebuild_plan_after_compaction", "generation": generation,
             "mandatory": True,
             "required_tools": ["create_plan", "update_plan", "update_plan_step"],
             "instruction": (
@@ -29,7 +37,7 @@ def record(owner: Optional[str], session_id: str, generation: int, *, ledger_has
         }
         row = ChatContextCompaction(
             id=uuid.uuid4().hex, owner=owner or "", session_id=session_id,
-            run_id=run.run_id if run else None, generation=int(generation),
+            run_id=run.run_id if run else None, generation=generation,
             ledger_hash=ledger_hash, before_tokens=int(before_tokens), after_tokens=int(after_tokens),
             economics=dict(economics or {}), rebuild_marker=marker,
         )

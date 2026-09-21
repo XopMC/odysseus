@@ -36,6 +36,31 @@ def test_compaction_marker_is_durable_and_settled(monkeypatch):
     db.close()
 
 
+def test_record_never_reuses_generation_after_recovered_checkpoint(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    store = sessionmaker(bind=engine)
+    monkeypatch.setattr(ledger, "SessionLocal", store)
+    db = store()
+    db.add(Session(id="s", name="n", endpoint_url="u", model="m", owner="alice"))
+    db.commit()
+    db.add(ChatRunState(run_id="r", session_id="s", owner="alice", status="running"))
+    db.commit(); db.close()
+    first = ledger.record("alice", "s", 92, ledger_hash="h1", before_tokens=150,
+                          after_tokens=100, economics={})
+    recovered = ledger.record("alice", "s", 1, ledger_hash="h2", before_tokens=140,
+                              after_tokens=90, economics={})
+    assert first["rebuild_marker"]["generation"] == 92
+    assert recovered["rebuild_marker"]["generation"] == 93
+    assert ledger.settle("alice", "s", 93) is True
+
+
+def test_agent_settles_the_pending_marker_generation_not_local_counter():
+    source = (Path(__file__).resolve().parents[1] / "src/agent_loop.py").read_text()
+    assert '_pending_compaction_settlement.get("generation")' in source
+    assert '_settle_compaction(owner, session_id, _settlement_generation)' in source
+
+
 def test_agent_server_recovery_plan_settles_before_continuing():
     source = (Path(__file__).resolve().parents[1] / "src/agent_loop.py").read_text(
         encoding="utf-8"

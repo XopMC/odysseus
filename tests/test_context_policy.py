@@ -118,10 +118,12 @@ class ConfiguredCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(exchange[0], output)
         self.assertIn(exchange[1], output)
 
-    async def test_oversized_summary_rejected_not_truncated(self):
+    async def test_oversized_summary_is_bounded_with_explicit_marker(self):
         async def huge(prompt):
             return 'Unsupported claim. ' * 500
         output, status = await self.compact(self.messages, 6000, huge,
-            policy=ContextPolicy(summary_tokens=128), target_limit=3000)
-        self.assertEqual(status, 'failed')
-        self.assertIs(output, self.messages)
+            policy=ContextPolicy(summary_tokens=128, recent_groups=0, recent_tokens=0),
+            target_limit=3000)
+        self.assertEqual(status, 'compacted')
+        checkpoint = next(m for m in output if m.get('_agent_working_summary'))
+        self.assertIn('summary exceeded its configured budget', checkpoint['content'])
