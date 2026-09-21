@@ -24,22 +24,24 @@ def test_long_run_timers_and_offscreen_timeline_are_bounded():
     assert "#chat-history > .agent-thread:not(.streaming)" in styles
 
 
-def test_canvas_theme_yields_frame_budget_to_active_agent_runs():
+def test_canvas_theme_keeps_30fps_with_bounded_pixel_and_allocation_cost():
     source = (ROOT / "static/js/theme.js").read_text(encoding="utf-8")
-    assert "const interval = window.__odysseusChatBusy" in source
-    assert "? 1000 / 12" in source
-    assert ": (visibleMessages >= 500 || renderedRows >= 100)" in source
-    assert "? 1000 / 15" in source
-    assert ": 1000 / 30" in source
+    assert "const interval = 1000 / 30" in source
+    assert "visibleMessages" not in source
+    assert "renderedRows" not in source
+    assert "function _getBgCanvasDpr() { return 1; }" in source
+    assert source.count("desynchronized: true") == 7
+    assert source.count("createLinearGradient") == 0
+    assert "refreshEmberSprite(color)" in source
     assert "window.setTimeout(() =>" in source
     assert source.count("_nextBgFrame(draw);") == 7  # one tail call per canvas effect
     assert "requestAnimationFrame(draw);" not in source
-    assert "theme.js?v=20260921livefix7" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+    assert "theme.js?v=20260921livefix8" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
 
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix7"
+    expected = "20260921livefix8"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"

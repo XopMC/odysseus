@@ -290,6 +290,7 @@ export function applyColors(colors) {
 
   // Update favicon to match theme accent color
   _updateFavicon(colors.red || '#e06c75');
+  _invalidateBgStyleCache();
 }
 
 // Per-route SVG shape registry — kept in sync with the inline favicon
@@ -411,20 +412,46 @@ const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellation
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
 
+// Animated backgrounds are deliberately rendered at CSS-pixel resolution.
+// They contain tiny, low-contrast particles, so Retina backing pixels add a
+// 4x fill-rate cost without a visible benefit. Keep computed style reads out
+// of hot particle loops as well; theme controls invalidate this tiny cache.
+const _bgStyleCache = { valid: false, color: '', bg: '', intensity: 1, size: 1 };
+function _invalidateBgStyleCache() { _bgStyleCache.valid = false; }
+function _readBgStyle() {
+  if (_bgStyleCache.valid) return _bgStyleCache;
+  const style = getComputedStyle(document.documentElement);
+  const intensity = parseFloat(style.getPropertyValue('--bg-effect-intensity'));
+  const size = parseFloat(style.getPropertyValue('--bg-effect-size'));
+  _bgStyleCache.color = style.getPropertyValue('--bg-effect-color').trim()
+    || style.getPropertyValue('--fg').trim();
+  _bgStyleCache.bg = style.getPropertyValue('--bg').trim() || '#282c34';
+  _bgStyleCache.intensity = isNaN(intensity) ? 1 : intensity;
+  _bgStyleCache.size = isNaN(size) ? 1 : size;
+  _bgStyleCache.valid = true;
+  return _bgStyleCache;
+}
+function _getBgCanvasDpr() { return 1; }
+function _getEffectColor(fallback = '#9cdef2') { return _readBgStyle().color || fallback; }
+function _getEffectIntensity() { return _readBgStyle().intensity; }
+
 export function applyBgEffectColor(color) {
   document.documentElement.style.setProperty('--bg-effect-color', color || '');
+  _invalidateBgStyleCache();
 }
 
 export function applyBgEffectIntensity(v) {
   // v is 0..1. Default 1 (full intensity) when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0, Math.min(1, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-intensity', String(n));
+  _invalidateBgStyleCache();
 }
 
 export function applyBgEffectSize(v) {
   // v is a multiplier 0.3..2.5. Default 1 when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0.2, Math.min(3, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-size', String(n));
+  _invalidateBgStyleCache();
 }
 
 /** Toggle the global "frosted glass" look — applies a translucent + blurred
@@ -436,8 +463,7 @@ export function applyFrostedGlass(on) {
 
 // Read current size multiplier for JS effects (canvas-based).
 function _getEffectSize() {
-  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-size'));
-  return isNaN(v) ? 1 : v;
+  return _readBgStyle().size;
 }
 
 // Canvas themes used to repaint at the display refresh rate even while a long
@@ -447,20 +473,9 @@ function _getEffectSize() {
 // avoid registering a requestAnimationFrame callback on every display frame:
 // WebKit still wakes and accounts those callbacks even when they skip drawing.
 function _nextBgFrame(draw) {
-  const countText = document.getElementById('current-meta-count')?.textContent || '';
-  const visibleMessages = Number((countText.match(/\d[\d\s]*/) || ['0'])[0].replace(/\s/g, '')) || 0;
-  const renderedRows = document.getElementById('chat-history')?.childElementCount || 0;
-  // A second browser reconnecting to an active run does not own the local
-  // send-state flag, so size is the cross-device signal. Active streaming uses
-  // 12fps; a large idle timeline uses 15fps; small idle chats retain 30fps.
-  // The timeout still lets WebKit sleep between actual canvas draws.
-  const interval = window.__odysseusChatBusy
-    ? 1000 / 12
-    : (visibleMessages >= 500 || renderedRows >= 100)
-      ? 1000 / 15
-      : 1000 / 30;
+  const interval = 1000 / 30;
   const elapsed = performance.now() - Number(draw._odysseusLastFrame || 0);
-  const wait = Math.max(0, interval - elapsed);
+  const wait = document.hidden ? 250 : Math.max(0, interval - elapsed);
   window.setTimeout(() => {
     requestAnimationFrame((timestamp) => {
       draw._odysseusLastFrame = timestamp;
@@ -1567,13 +1582,13 @@ function _initSynapse() {
   if (document.getElementById('synapse-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'synapse-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const dpr = _getBgCanvasDpr();
   const GRID = 24; // matches CSS grid size
   const MAX_PULSES = 20;
   const SPEED_MIN = 2;
@@ -1592,10 +1607,7 @@ function _initSynapse() {
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
 
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
-  }
+  function getColor() { return _getEffectColor(); }
 
   function spawnPulse() {
     const speed = SPEED_MIN + Math.random() * (SPEED_MAX - SPEED_MIN);
@@ -1634,10 +1646,7 @@ function _initSynapse() {
       // Trail (line gradient fading behind the dot)
       const tx = p.x - (p.dx > 0 ? TRAIL_LEN : 0);
       const ty = p.y - (p.dy > 0 ? TRAIL_LEN : 0);
-      const grad = ctx.createLinearGradient(tx, ty, p.x, p.y);
-      grad.addColorStop(0, 'transparent');
-      grad.addColorStop(1, c);
-      ctx.strokeStyle = grad;
+      ctx.strokeStyle = c;
       ctx.globalAlpha = 0.35;
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -1663,13 +1672,13 @@ function _initRain() {
   if (document.getElementById('rain-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'rain-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const dpr = _getBgCanvasDpr();
   let W, H;
   const drops = [];
   const MAX_DROPS = 130;
@@ -1683,10 +1692,7 @@ function _initRain() {
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
 
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
-  }
+  function getColor() { return _getEffectColor(); }
 
   function spawn() {
     const len = 20 + Math.random() * 40;
@@ -1704,8 +1710,7 @@ function _initRain() {
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     // Intensity also controls rain speed + spawn rate (feels slower/lighter when dim)
-    const intenCss = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity'));
-    const inten = isNaN(intenCss) ? 1 : intenCss;
+    const inten = _getEffectIntensity();
     const speedMult = 0.35 + inten * 0.65;
     const sizeMult = _getEffectSize();
 
@@ -1717,10 +1722,7 @@ function _initRain() {
       if (d.y > H + d.len * sizeMult) { drops.splice(i, 1); continue; }
 
       const effLen = d.len * sizeMult;
-      const grad = ctx.createLinearGradient(d.x, d.y - effLen, d.x, d.y);
-      grad.addColorStop(0, 'transparent');
-      grad.addColorStop(1, c);
-      ctx.strokeStyle = grad;
+      ctx.strokeStyle = c;
       ctx.globalAlpha = d.alpha;
       ctx.lineWidth = 1.3 * Math.min(2, Math.max(0.6, sizeMult));
       ctx.beginPath();
@@ -1738,13 +1740,13 @@ function _initConstellations() {
   if (document.getElementById('constellations-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'constellations-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const dpr = _getBgCanvasDpr();
   let W, H;
   const STAR_COUNT = 50;
   const CONNECT_DIST = 120;
@@ -1774,10 +1776,7 @@ function _initConstellations() {
   const _onResize = () => { resize(); initStars(); };
   window.addEventListener('resize', _onResize);
 
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
-  }
+  function getColor() { return _getEffectColor(); }
 
   let t = 0;
   function draw() {
@@ -1844,13 +1843,13 @@ function _initPerlinFlow() {
   if (document.getElementById('perlin-flow-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'perlin-flow-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const dpr = _getBgCanvasDpr();
   let W, H, t = 0;
   const particles = [];
   function resize() {
@@ -1862,8 +1861,8 @@ function _initPerlinFlow() {
   resize();
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
-  function getBg() { return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#282c34'; }
+  function getColor() { return _getEffectColor(); }
+  function getBg() { return _readBgStyle().bg; }
   let _cachedBg = '', _fadeStyle = '';
   function getFade() {
     const bg = getBg();
@@ -1901,13 +1900,13 @@ function _initPetals() {
   if (document.getElementById('petals-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'petals-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const dpr = _getBgCanvasDpr();
   let W, H;
   const petals = [];
   function makePetal() {
@@ -1928,7 +1927,7 @@ function _initPetals() {
   resize();
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
+  function getColor() { return _getEffectColor(); }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-petals')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
     _nextBgFrame(draw);
@@ -1958,13 +1957,13 @@ function _initSparkles() {
   if (document.getElementById('sparkles-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'sparkles-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const dpr = _getBgCanvasDpr();
   let W, H;
   const sparkles = [];
   function makeSpark() {
@@ -1979,7 +1978,7 @@ function _initSparkles() {
   resize();
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
+  function getColor() { return _getEffectColor(); }
   function drawStar(x, y, r, c, alpha) {
     ctx.save(); ctx.translate(x, y); ctx.fillStyle = c; ctx.globalAlpha = alpha;
     // 4-point star
@@ -2016,13 +2015,13 @@ function _initEmbers() {
   if (document.getElementById('embers-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'embers-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const dpr = _getBgCanvasDpr();
   let W, H;
   const embers = [];
   function makeEmber() {
@@ -2049,13 +2048,23 @@ function _initEmbers() {
   resize();
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#c9a95a';
-  }
-  function rgba(hex, a) {
-    const { r, g, b } = hexToRgb(hex) || { r: 0, g: 0, b: 0 };
-    return `rgba(${r},${g},${b},${a})`;
+  function getColor() { return _getEffectColor('#c9a95a'); }
+  const emberSprite = document.createElement('canvas');
+  emberSprite.width = 32;
+  emberSprite.height = 32;
+  const emberSpriteCtx = emberSprite.getContext('2d', { alpha: true });
+  let emberSpriteColor = '';
+  function refreshEmberSprite(color) {
+    if (color === emberSpriteColor) return;
+    emberSpriteColor = color;
+    const { r, g, b } = hexToRgb(color) || { r: 201, g: 169, b: 90 };
+    emberSpriteCtx.clearRect(0, 0, 32, 32);
+    const gradient = emberSpriteCtx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gradient.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    gradient.addColorStop(0.4, `rgba(${r},${g},${b},0.3)`);
+    gradient.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    emberSpriteCtx.fillStyle = gradient;
+    emberSpriteCtx.fillRect(0, 0, 32, 32);
   }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-embers')) {
@@ -2070,6 +2079,8 @@ function _initEmbers() {
     ctx.fillRect(0, 0, W, H);
     ctx.globalCompositeOperation = 'lighter';
     const color = getColor();
+    refreshEmberSprite(color);
+    const sz = _getEffectSize();
     for (let i = embers.length - 1; i >= 0; i--) {
       const e = embers[i];
       e.wobble += 0.03;
@@ -2084,21 +2095,13 @@ function _initEmbers() {
       if (!e.spark && Math.random() < 0.003) e.spark = true;
       const lifeRatio = e.life / e.maxLife;
       const fade = Math.min(1, Math.min(lifeRatio * 4, (1 - lifeRatio) * 3));
-      const sz = _getEffectSize();
       const r = e.r * (e.spark ? 2.4 : 1) * sz;
       const a = (e.spark ? 0.9 : 0.55) * fade;
-      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r * 4);
-      g.addColorStop(0, rgba(color, a));
-      g.addColorStop(0.4, rgba(color, a * 0.3));
-      g.addColorStop(1, rgba(color, 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(e.x - r * 4, e.y - r * 4, r * 8, r * 8);
-      ctx.fillStyle = rgba('#ffffff', a * 0.6);
-      ctx.beginPath();
-      ctx.arc(e.x, e.y, r * 0.5, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.globalAlpha = a;
+      ctx.drawImage(emberSprite, e.x - r * 4, e.y - r * 4, r * 8, r * 8);
       e.spark = false;
     }
+    ctx.globalAlpha = 1;
     if (Math.random() < 0.015) {
       const bx = Math.random() * W;
       for (let i = 0; i < 5; i++) {
