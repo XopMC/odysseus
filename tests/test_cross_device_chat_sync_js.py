@@ -34,6 +34,20 @@ def test_safari_interaction_wakes_a_throttled_remote_stream_probe():
     assert "now - _lastInteractionLiveCheck < 1000" in sync
 
 
+def test_focus_wakeup_is_replayed_after_an_inflight_probe():
+    source = (Path(__file__).resolve().parents[1] / "static/js/sessions.js").read_text(
+        encoding="utf-8"
+    )
+    check = source.split("async function _checkServerStream", 1)[1].split(
+        "export function clearStreamComplete", 1
+    )[0]
+
+    assert "ensureAfterInFlight = false" in check
+    assert "if (ensureAfterInFlight) _liveSessionReruns.add(sessionId)" in check
+    assert "_liveSessionReruns.delete(sessionId)" in check
+    assert "queueMicrotask(() => _checkServerStream(sessionId))" in check
+
+
 def test_second_device_pages_active_run_before_opening_live_sse():
     source = (Path(__file__).resolve().parents[1] / "static/js/chat.js").read_text(
         encoding="utf-8"

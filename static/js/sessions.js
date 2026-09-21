@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260921livefix27';
+import chatRenderer from './chatRenderer.js?v=20260921livefix28';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js?v=20260921livefix20';
@@ -39,6 +39,7 @@ const LIVE_SESSION_POLL_MS = 3000;
 const LIVE_SESSION_READ_TIMEOUT_MS = 15000;
 let _liveSessionTimer = null;
 const _liveSessionChecks = new Map();
+const _liveSessionReruns = new Set();
 const _liveSessionRenderedCounts = new Map();
 let _lastInteractionLiveCheck = 0;
 let _loadingSessionToken = null;
@@ -488,10 +489,11 @@ export function initDependencies() { _ensureLiveSessionSync(); }
 
 function _ensureLiveSessionSync() {
   if (_liveSessionTimer !== null) return;
-  const check = () => {
+  const check = (ensureAfterInFlight = false) => {
     if (document.visibilityState === 'hidden' || !currentSessionId) return;
-    return _checkServerStream(currentSessionId);
+    return _checkServerStream(currentSessionId, { ensureAfterInFlight });
   };
+  const wakeCheck = () => check(true);
   // Safari can keep a background tab's interval throttled and does not always
   // emit window.focus when switching tabs inside the same window.  A user can
   // therefore return to an active remote run while the composer still looks
@@ -504,15 +506,15 @@ function _ensureLiveSessionSync() {
     const now = Date.now();
     if (now - _lastInteractionLiveCheck < 1000) return;
     _lastInteractionLiveCheck = now;
-    return _checkServerStream(currentSessionId);
+    return _checkServerStream(currentSessionId, { ensureAfterInFlight: true });
   };
-  _liveSessionTimer = setInterval(check, LIVE_SESSION_POLL_MS);
-  document.addEventListener('visibilitychange', check);
+  _liveSessionTimer = setInterval(() => check(false), LIVE_SESSION_POLL_MS);
+  document.addEventListener('visibilitychange', wakeCheck);
   document.addEventListener('pointerdown', interactionCheck, true);
   document.addEventListener('focusin', interactionCheck, true);
-  window.addEventListener('focus', check);
-  window.addEventListener('online', check);
-  window.addEventListener('pageshow', check);
+  window.addEventListener('focus', wakeCheck);
+  window.addEventListener('online', wakeCheck);
+  window.addEventListener('pageshow', wakeCheck);
 }
 
 // ── Folder state persistence ──
@@ -2973,10 +2975,14 @@ function _updateRailNotifs() {
  * Discover remote turns in the visible chat and reconcile saved history.
  * One probe/replay chain per selected view; navigation invalidates late reads.
  */
-async function _checkServerStream(sessionId) {
+async function _checkServerStream(sessionId, { ensureAfterInFlight = false } = {}) {
   const navToken = _sessionNavToken;
   const isCurrent = () => currentSessionId === sessionId && _sessionNavToken === navToken;
-  if (!isCurrent() || _liveSessionChecks.get(sessionId) === navToken) return;
+  if (!isCurrent()) return;
+  if (_liveSessionChecks.get(sessionId) === navToken) {
+    if (ensureAfterInFlight) _liveSessionReruns.add(sessionId);
+    return;
+  }
   _liveSessionChecks.set(sessionId, navToken);
   try {
     if (_loadingSessionToken === navToken) return;
@@ -3051,6 +3057,13 @@ async function _checkServerStream(sessionId) {
     // Network loss is not task completion. Retry on the next visible tick.
   } finally {
     if (_liveSessionChecks.get(sessionId) === navToken) _liveSessionChecks.delete(sessionId);
+    if (
+      _liveSessionReruns.delete(sessionId)
+      && isCurrent()
+      && document.visibilityState !== 'hidden'
+    ) {
+      queueMicrotask(() => _checkServerStream(sessionId));
+    }
   }
 }
 
