@@ -20,6 +20,20 @@ def test_server_authoritative_replay_is_not_blocked_by_stale_global_busy_flag():
     assert "window.chatModule?.resumeStream" in check
 
 
+def test_safari_interaction_wakes_a_throttled_remote_stream_probe():
+    source = (Path(__file__).resolve().parents[1] / "static/js/sessions.js").read_text(
+        encoding="utf-8"
+    )
+    sync = source.split("function _ensureLiveSessionSync", 1)[1].split(
+        "// ── Folder state persistence", 1
+    )[0]
+
+    assert "document.addEventListener('pointerdown', interactionCheck, true)" in sync
+    assert "document.addEventListener('focusin', interactionCheck, true)" in sync
+    assert "window.chatModule?.hasActiveStream?.(currentSessionId)" in sync
+    assert "now - _lastInteractionLiveCheck < 1000" in sync
+
+
 def test_second_device_pages_active_run_before_opening_live_sse():
     source = (Path(__file__).resolve().parents[1] / "static/js/chat.js").read_text(
         encoding="utf-8"

@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260921livefix25';
+import chatRenderer from './chatRenderer.js?v=20260921livefix26';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js?v=20260921livefix20';
@@ -40,6 +40,7 @@ const LIVE_SESSION_READ_TIMEOUT_MS = 15000;
 let _liveSessionTimer = null;
 const _liveSessionChecks = new Map();
 const _liveSessionRenderedCounts = new Map();
+let _lastInteractionLiveCheck = 0;
 let _loadingSessionToken = null;
 const _syncedHistory = new Map();
 
@@ -491,8 +492,24 @@ function _ensureLiveSessionSync() {
     if (document.visibilityState === 'hidden' || !currentSessionId) return;
     return _checkServerStream(currentSessionId);
   };
+  // Safari can keep a background tab's interval throttled and does not always
+  // emit window.focus when switching tabs inside the same window.  A user can
+  // therefore return to an active remote run while the composer still looks
+  // idle.  The first real interaction is an authoritative wake-up signal.
+  // Keep this bounded and skip it entirely when a local reader already owns
+  // the stream, so ordinary clicks add no steady-state network traffic.
+  const interactionCheck = () => {
+    if (document.visibilityState === 'hidden' || !currentSessionId) return;
+    if (window.chatModule?.hasActiveStream?.(currentSessionId)) return;
+    const now = Date.now();
+    if (now - _lastInteractionLiveCheck < 1000) return;
+    _lastInteractionLiveCheck = now;
+    return _checkServerStream(currentSessionId);
+  };
   _liveSessionTimer = setInterval(check, LIVE_SESSION_POLL_MS);
   document.addEventListener('visibilitychange', check);
+  document.addEventListener('pointerdown', interactionCheck, true);
+  document.addEventListener('focusin', interactionCheck, true);
   window.addEventListener('focus', check);
   window.addEventListener('online', check);
   window.addEventListener('pageshow', check);
