@@ -37,6 +37,22 @@ def test_empty_history_thinking_is_lazy_loaded_from_durable_run():
     assert "bindLazyHistoryThinking(body, metadata, roundNum" in source
 
 
+def test_preserved_history_thinking_is_not_preparsed_into_hidden_dom():
+    source = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    lazy = source.split("function bindLazyHistoryThinking", 1)[1].split(
+        "// Older saved assistant rows", 1
+    )[0]
+    render = source.split("const preservedReasoning = reasoning || embeddedThinking", 1)[1].split(
+        "if (txt || reasoning || embeddedThinking)", 1
+    )[0]
+
+    assert "inner.textContent = t('Thinking saved — open to load')" in lazy
+    assert "String(data.thinking || '').trim() || fallback" in lazy
+    assert "markdownModule.mdToHtml(fallback)" in lazy
+    assert "const lazyReasoning = Boolean(preservedReasoning)" in render
+    assert "const renderSource = lazyReasoning\n          ? txt" in render
+
+
 def test_history_reducer_appends_every_timeline_delta_for_missing_round():
     source = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
     body = source.split("export function historyRoundReasonings", 1)[1].split("const SEARCH_ICON", 1)[0]

@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix15';
-import chatRenderer from './chatRenderer.js?v=20260921livefix15';
+import sessionModule from './sessions.js?v=20260921livefix18';
+import chatRenderer from './chatRenderer.js?v=20260921livefix18';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';

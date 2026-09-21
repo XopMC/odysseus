@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v417-livefix17';
+const CACHE_NAME = 'odysseus-v418-livefix18';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -39,8 +39,8 @@ const KATEX_FONTS = [
 // exact URL the browser requests, query string included.
 const PRECACHE = [
   '/',
-  '/static/style.css?v=20260921livefix15',
-  '/static/css/team-workspace.css?v=20260921livefix15',
+  '/static/style.css?v=20260921livefix18',
+  '/static/css/team-workspace.css?v=20260921livefix18',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
   '/static/app.js?v=20260921livefix17',
   '/static/js/storage.js',
@@ -48,13 +48,13 @@ const PRECACHE = [
   '/static/js/ui.js',
   '/static/js/markdown.js',
   '/static/js/dragSort.js',
-  '/static/js/sessions.js?v=20260921livefix15',
+  '/static/js/sessions.js?v=20260921livefix18',
   '/static/js/memory.js?v=20260722memoryloading1',
   '/static/js/skills.js',
   '/static/js/tourHints.js',
   '/static/js/fileHandler.js',
   '/static/js/voiceRecorder.js',
-  '/static/js/models.js?v=20260921livefix15',
+  '/static/js/models.js?v=20260921livefix18',
   '/static/js/rag.js',
   '/static/js/presets.js',
   '/static/js/search.js',
@@ -62,22 +62,22 @@ const PRECACHE = [
   '/static/js/tts-ai.js',
   '/static/js/document.js?v=20260815approvalsave1',
   '/static/js/gallery.js?v=20260708match1',
-  '/static/js/chatRenderer.js?v=20260921livefix15',
+  '/static/js/chatRenderer.js?v=20260921livefix18',
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js?v=20260819approvalcontrol1',
-  '/static/js/chat.js?v=20260921livefix15',
+  '/static/js/chat.js?v=20260921livefix18',
   '/static/js/timelineReducer.js',
   '/static/js/chat-work.js?v=20260921livefix17',
   '/static/js/chat-subagents.js?v=20260921livefix17',
-  '/static/js/team-workspace.js?v=20260921livefix15',
-  '/static/js/accessMode.js?v=20260921livefix15',
+  '/static/js/team-workspace.js?v=20260921livefix18',
+  '/static/js/accessMode.js?v=20260921livefix18',
   '/static/js/projects.js?v=20260915projects1',
   '/static/js/cookbook.js',
   '/static/js/search-chat.js',
   '/static/js/compare/index.js',
-  '/static/js/theme.js?v=20260921livefix15',
+  '/static/js/theme.js?v=20260921livefix18',
   '/static/js/censor.js',
-  '/static/js/settings.js?v=20260921livefix15',
+  '/static/js/settings.js?v=20260921livefix18',
   '/static/js/admin.js',
   '/static/js/init.js?v=20260921livefix17',
   '/static/js/slashCommands.js',

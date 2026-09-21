@@ -6,7 +6,7 @@
 // reuse the full existing chat render path.
 
 import uiModule from './ui.js';
-import { selectSession } from './sessions.js?v=20260921livefix15';
+import { selectSession } from './sessions.js?v=20260921livefix18';
 import { sortModelIds } from './modelSort.js';
 
 const API = '/api/assistant';

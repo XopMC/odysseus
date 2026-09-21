@@ -20,9 +20,14 @@ function bindThinkingLabels(root) {
   );
 }
 
-function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
+function canLazyHistoryThinking(metadata) {
   const runId = String(metadata?.timeline_v2?.run_id || '');
-  if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return;
+  return /^[0-9a-f]{32}$/.test(runId);
+}
+
+function bindLazyHistoryThinking(root, metadata, roundNumber, fallbackReasoning = '') {
+  const runId = String(metadata?.timeline_v2?.run_id || '');
+  if (!canLazyHistoryThinking(metadata)) return;
   let section = root?.querySelector?.('.thinking-section');
   if (!section) {
     const shell = document.createElement('div');
@@ -36,9 +41,10 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
   const header = section?.querySelector?.('.thinking-header');
   const inner = section?.querySelector?.('.thinking-content-inner');
   if (!header || !inner) return;
-  if (!hasReasoning) inner.textContent = '';
+  const fallback = String(fallbackReasoning || '').trim();
+  inner.textContent = t('Thinking saved — open to load');
   section.dataset.lazyThinking = 'true';
-  header.addEventListener('click', async () => {
+  const load = async () => {
     if (section.dataset.loaded === 'true' || section.dataset.loading === 'true') return;
     section.dataset.loading = 'true';
     try {
@@ -49,14 +55,32 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, hasReasoning) {
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
-      inner.innerHTML = markdownModule.mdToHtml(String(data.thinking || ''));
+      const preserved = String(data.thinking || '').trim() || fallback;
+      if (!preserved) throw new Error('thinking unavailable');
+      inner.innerHTML = markdownModule.mdToHtml(preserved);
       const stats = section.querySelector('.thinking-stats');
       if (stats) stats.textContent = `${Number(data.duration || 0).toFixed(1)}s · ${Number(data.token_count || 0)} tok`;
       section.dataset.loaded = 'true';
     } catch (_) {
-      if (!hasReasoning) inner.textContent = t('Preserved thinking is unavailable.');
+      if (fallback) {
+        inner.innerHTML = markdownModule.mdToHtml(fallback);
+        section.dataset.loaded = 'true';
+      } else {
+        inner.textContent = t('Preserved thinking is unavailable.');
+      }
     } finally { delete section.dataset.loading; }
-  }, { once: false });
+  };
+  header.addEventListener('click', () => {
+    // The delegated disclosure handler runs later in the same click bubble.
+    // Load only when that action leaves this exact section expanded; collapsing
+    // a historical card must not start an unnecessary artifact request.
+    setTimeout(() => { if (section.querySelector('.thinking-content')?.classList.contains('expanded')) void load(); }, 0);
+  });
+  // A persisted disclosure can expand the card when its DOM is inserted,
+  // without a click in this document. Hydrate it after that reconciliation.
+  requestAnimationFrame(() => {
+    if (section.querySelector('.thinking-content')?.classList.contains('expanded')) void load();
+  });
 }
 
 // Older saved assistant rows kept one combined `thinking` field and the
@@ -1504,7 +1528,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260921livefix15').then(mod => {
+    import('./sessions.js?v=20260921livefix18').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -2794,9 +2818,11 @@ export function addMessage(role, content, modelName, metadata) {
             && /^<think(?:ing)?(?:\s+[^>]*)?>\s*<\/think(?:ing)?>$/i.test(txt)) {
           txt = '';
         }
-        const renderSource = reasoning && !embeddedThinking
-          ? `<think>${reasoning}</think>\n\n${txt}`
-          : rawTxt;
+        const preservedReasoning = reasoning || embeddedThinking;
+        const lazyReasoning = Boolean(preservedReasoning) && canLazyHistoryThinking(metadata);
+        const renderSource = lazyReasoning
+          ? txt
+          : (reasoning && !embeddedThinking ? `<think>${reasoning}</think>\n\n${txt}` : rawTxt);
 
         if (txt || reasoning || embeddedThinking) {
           const wrap = document.createElement('div');
@@ -2865,7 +2891,7 @@ export function addMessage(role, content, modelName, metadata) {
             { thinkingKey: roundIdentity },
           ) + agentFindingsSuffix;
           bindThinkingLabels(body);
-          bindLazyHistoryThinking(body, metadata, roundNum, Boolean(reasoning || embeddedThinking));
+          bindLazyHistoryThinking(body, metadata, roundNum, preservedReasoning);
           wrap.appendChild(body);
           wrap.dataset.raw = renderSource || txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
