@@ -451,12 +451,14 @@ function _nextBgFrame(draw) {
   const visibleMessages = Number((countText.match(/\d[\d\s]*/) || ['0'])[0].replace(/\s/g, '')) || 0;
   const renderedRows = document.getElementById('chat-history')?.childElementCount || 0;
   // A second browser reconnecting to an active run does not own the local
-  // send-state flag, so size is the cross-device signal. Large/streaming chats
-  // keep a visibly smooth 15fps background; the timeout still lets WebKit
-  // sleep between draws. Small idle chats retain the original 30fps cadence.
-  const interval = (window.__odysseusChatBusy || visibleMessages >= 500 || renderedRows >= 100)
-    ? 1000 / 15
-    : 1000 / 30;
+  // send-state flag, so size is the cross-device signal. Active streaming uses
+  // 12fps; a large idle timeline uses 15fps; small idle chats retain 30fps.
+  // The timeout still lets WebKit sleep between actual canvas draws.
+  const interval = window.__odysseusChatBusy
+    ? 1000 / 12
+    : (visibleMessages >= 500 || renderedRows >= 100)
+      ? 1000 / 15
+      : 1000 / 30;
   const elapsed = performance.now() - Number(draw._odysseusLastFrame || 0);
   const wait = Math.max(0, interval - elapsed);
   window.setTimeout(() => {

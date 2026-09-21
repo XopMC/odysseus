@@ -2,7 +2,7 @@
 import Storage from '../storage.js';
 import state from './state.js';
 import { VOTES_STORAGE_KEY } from './icons.js';
-import themeModule from '../theme.js?v=20260921livefix6';
+import themeModule from '../theme.js?v=20260921livefix7';
 import uiModule from '../ui.js';
 
 const escapeHtml = uiModule.esc;
