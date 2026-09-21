@@ -696,7 +696,7 @@ class SubagentRuntime:
         return {"child_id": child_id, "removed": True, "exit_code": 0}
 
     async def wait(self, owner: Optional[str], session_id: str, child_ids: Iterable[str],
-                   *, timeout_seconds=600, wait_for="all") -> dict:
+                   *, timeout_seconds=600, wait_for="any") -> dict:
         ids = [str(cid) for cid in child_ids if str(cid)]
         initial = [self.get(owner, session_id, cid) for cid in ids]
         missing = [cid for cid, row in zip(ids, initial) if row is None]

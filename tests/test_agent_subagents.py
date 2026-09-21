@@ -387,6 +387,21 @@ def test_subagent_timeout_fails_closed(monkeypatch):
     assert "timeout" in invalid_timeout["error"].lower()
 
 
+def test_manage_subagents_wait_defaults_to_first_completion(monkeypatch):
+    captured = {}
+
+    async def wait(owner, session_id, child_ids, **kwargs):
+        captured.update(kwargs)
+        return {"subagents": [], "completed": True, "exit_code": 0}
+
+    monkeypatch.setattr("src.subagent_runtime.runtime.wait", wait)
+    result = asyncio.run(tools.manage_subagents(json.dumps({
+        "action": "wait", "child_ids": ["a", "b"],
+    }), {"owner": "alice", "session_id": "s1"}))
+    assert result["exit_code"] == 0
+    assert captured["wait_for"] == "any"
+
+
 def test_subagent_settings_and_timeline_contract_are_wired():
     root = Path(__file__).resolve().parents[1]
     html = (root / "static/index.html").read_text(encoding="utf-8")

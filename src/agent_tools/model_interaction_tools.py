@@ -312,7 +312,7 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
         return await runtime.wait(
             owner, session_id, child_ids,
             timeout_seconds=payload.get("timeout_seconds", 600),
-            wait_for=str(payload.get("wait_for") or "all"),
+            wait_for=str(payload.get("wait_for") or "any"),
         )
     if action == "list_evidence":
         from src.subagent_evidence import list_evidence
