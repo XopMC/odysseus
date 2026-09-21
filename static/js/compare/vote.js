@@ -2,7 +2,7 @@
 import Storage from '../storage.js';
 import state from './state.js';
 import { _modelDisplayNames } from './models.js';
-import { getModelCost } from '../chatRenderer.js?v=20260921livefix10';
+import { getModelCost } from '../chatRenderer.js?v=20260921livefix11';
 import uiModule from '../ui.js';
 import { VOTES_STORAGE_KEY, VOTES_MAX } from './icons.js';
 import { showScoreboard } from './scoreboard.js';

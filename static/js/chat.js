@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix10';
-import chatRenderer from './chatRenderer.js?v=20260921livefix10';
+import sessionModule from './sessions.js?v=20260921livefix11';
+import chatRenderer from './chatRenderer.js?v=20260921livefix11';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -697,7 +697,11 @@ import { bindUiText, t } from './i18n.js';
   // grows. Terminal paths flush/cancel this scheduler before their final render.
   function _adaptiveLiveRenderDelay(value) {
     const length = String(value ?? '').length;
-    let delay = length >= 128000 ? 400 : length >= 32000 ? 200 : length >= 8000 ? 100 : 50;
+    // Ten visual commits per second still looks continuous, while bounding the
+    // expensive style/layout work Safari performs after every DOM replacement.
+    // Longer tails are progressively slower because markdown parse and tail
+    // reconciliation scale with the amount of unfinished source.
+    let delay = length >= 128000 ? 800 : length >= 32000 ? 400 : length >= 8000 ? 200 : 100;
     if (typeof document !== 'undefined' && document.hidden) delay = Math.max(delay, 500);
     return delay;
   }

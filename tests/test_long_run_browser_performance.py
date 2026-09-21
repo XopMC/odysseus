@@ -12,6 +12,7 @@ def test_live_and_replay_streams_share_coalesced_incremental_renderer():
     assert source.count("_queueIncrementalStreamRender(") >= 4
     assert "delay: _adaptiveLiveRenderDelay" in source
     assert "contentDiv.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(dt))" not in source
+    assert "length >= 128000 ? 800 : length >= 32000 ? 400 : length >= 8000 ? 200 : 100" in source
 
 
 def test_long_run_timers_and_offscreen_timeline_are_bounded():
@@ -47,7 +48,7 @@ def test_canvas_theme_keeps_30fps_with_bounded_pixel_and_allocation_cost():
     assert "window.setTimeout(() =>" in source
     assert source.count("_nextBgFrame(draw);") == 6  # one tail call per remaining canvas effect
     assert "requestAnimationFrame(draw);" not in source
-    assert "theme.js?v=20260921livefix10" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+    assert "theme.js?v=20260921livefix11" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
 
 
 def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
@@ -63,7 +64,7 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix10"
+    expected = "20260921livefix11"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"
