@@ -24,6 +24,17 @@ class ContextPolicyTests(unittest.TestCase):
         self.assertEqual(ContextPolicy(requested_window=8192).budget(131072).window, 8192)
         self.assertEqual(policy.budget(131072, hard_input_max=10000).input_tokens, 10000)
 
+    def test_target_below_tool_schemas_does_not_block_a_request_with_headroom(self):
+        policy = ContextPolicy(output_reserve=4096, safety_tokens=0,
+                               safety_percent=0, trigger_percent=75,
+                               target_percent=15)
+        budget = policy.budget(100000, schema_tokens=20000)
+        self.assertEqual(budget.input_tokens, 95904)
+        self.assertEqual(budget.trigger_messages, 51928)
+        self.assertEqual(budget.target_messages, 1)
+        self.assertEqual(budget.hard_messages, 75904)
+        self.assertEqual(budget.action(8000), 'continue')
+
     def test_invalid_policies_and_no_space_fail_closed(self):
         for values in ({'auto_compact': 1}, {'trigger_percent': 50, 'target_percent': 50},
                        {'safety_percent': -1}, {'summary_tokens': True},

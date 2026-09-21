@@ -60,10 +60,17 @@ class ContextPolicy:
             available = min(available, hard_input_max)
         trigger = available * self.trigger_percent // 100
         target = available * self.target_percent // 100
-        if available <= 0 or target <= schema_tokens:
+        # The configured target is a desired post-compaction size, not a
+        # prerequisite for starting a request.  A low target may be smaller
+        # than a large native tool schema while both the trigger and hard
+        # input budgets still have ample room for messages.  Reject only when
+        # schemas leave no usable request space; shape_request can then relax
+        # an unattainable compaction target below the trigger without losing
+        # the configured policy or its telemetry.
+        if available <= schema_tokens or trigger <= schema_tokens:
             raise ValueError('Context policy leaves no usable input budget after reserves and tool schemas')
         return ContextBudget(window, available, self.output_reserve, safety, schema_tokens,
-                             trigger - schema_tokens, target - schema_tokens,
+                             trigger - schema_tokens, max(1, target - schema_tokens),
                              available - schema_tokens)
 
 
