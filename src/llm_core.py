@@ -2426,6 +2426,17 @@ async def llm_call_async(
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
+        # Checkpoint/summarizer calls require a compact final answer, not a
+        # reasoning-only completion. Self-hosted Qwen/Gemma-compatible servers
+        # (including LM Studio/llama.cpp) accept this standard chat-template
+        # control; cloud-compatible providers are deliberately excluded because
+        # many reject unknown top-level fields.
+        if (
+            require_answer_content
+            and _supports_thinking(model)
+            and _is_self_hosted_openai_compatible(url)
+        ):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         _apply_local_cache_affinity(payload, url, session_id)
