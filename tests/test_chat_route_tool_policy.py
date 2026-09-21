@@ -130,6 +130,23 @@ def test_workspace_auto_escalation_keeps_shell_tools():
     assert "if auto_escalated and not _workspace_agent_intent:" in source
 
 
+def test_goal_continuation_does_not_inherit_web_only_tool_clamp():
+    """Synthetic Goal prompts may mention web work but must retain the full
+    parent tool policy so children do not inherit contradictory allow/deny sets.
+    """
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    assert "if _explicit_web_intent and not active_goal and not goal_continuation:" in source
+
+
+def test_compaction_failure_retries_goal_without_fake_user_wait():
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    branch = source.split(
+        '"Context checkpoint failed; the server will retry automatically with the preserved ledger."',
+        1,
+    )[1][:300]
+    assert "waiting_user=False" in branch
+
+
 # ── Functional tests of the disabled-tools logic ───────────────
 
 

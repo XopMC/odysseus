@@ -5407,14 +5407,60 @@ async def stream_agent_loop(
         if _explicit_budget not in (0, 6000):
             _working_limit = min(_working_limit, max(1, _explicit_budget - max(max_tokens or 1024, 512) - _schema_tokens))
 
+        # Resolve the explicit Utility route first, its configured fallbacks
+        # next, and the currently selected chat route last. A stale/unloaded
+        # Utility model must not strand a durable Goal in a fake user-waiting
+        # state; if Utility is not configured the resolver naturally returns
+        # the current selected route.
+        try:
+            from src.endpoint_resolver import (
+                resolve_endpoint as _resolve_summary_endpoint,
+                resolve_utility_fallback_candidates as _summary_fallbacks,
+            )
+            _summary_primary = await asyncio.to_thread(
+                _resolve_summary_endpoint,
+                "utility", endpoint_url, model, headers, owner,
+            )
+            _summary_routes = dedupe_model_candidates([
+                _summary_primary,
+                *await asyncio.to_thread(_summary_fallbacks, owner),
+                (endpoint_url, model, headers),
+            ])
+        except Exception:
+            logger.warning("Context summarizer route resolution failed; using selected route")
+            _summary_routes = [(endpoint_url, model, headers)]
+
         async def _summarize_working_context(prompt):
             from src.llm_core import llm_call_async
             if _context_profile and owner_policy(owner) != _context_profile:
                 raise ValueError('Context policy changed before summarization')
-            return await llm_call_async(endpoint_url, model, prompt,
-                                        temperature=.2, max_tokens=min(_configured_policy.summary_tokens, _configured_policy.output_reserve) if _configured_policy else 4096,
-                                        headers=headers, timeout=_configured_policy.summary_timeout_seconds if _configured_policy else 120, max_retries=1,
-                                        session_id=session_id, require_answer_content=True)
+            last_error = None
+            for summary_url, summary_model, summary_headers in _summary_routes:
+                try:
+                    return await llm_call_async(
+                        summary_url, summary_model, prompt,
+                        temperature=.2,
+                        max_tokens=(
+                            min(_configured_policy.summary_tokens, _configured_policy.output_reserve)
+                            if _configured_policy else 4096
+                        ),
+                        headers=summary_headers,
+                        timeout=(
+                            _configured_policy.summary_timeout_seconds
+                            if _configured_policy else 120
+                        ),
+                        max_retries=1, session_id=session_id,
+                        require_answer_content=True,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Context summarizer candidate failed (%s); trying next route",
+                        type(exc).__name__,
+                    )
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("No context summarizer route is available")
 
         _before_context = estimate_tokens(messages)
         _compacted_messages, _compact_status = messages, "unchanged"

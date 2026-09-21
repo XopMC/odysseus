@@ -1692,7 +1692,12 @@ def setup_chat_routes(
         _explicit_web_intent = _explicit_web_intent or bool(_tool_intent and _tool_intent.category == "web")
         if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
             disabled_tools.update(WEB_TOOL_NAMES)
-        if _explicit_web_intent:
+        # A server-owned Goal continuation is a synthetic control message, not
+        # a fresh request to narrow the whole run to web-only tools. The Goal
+        # may mention web research while still needing files, shell and child
+        # agents; applying this clamp made full-access children inherit the
+        # same tools in both allowed_tools and disabled_tools.
+        if _explicit_web_intent and not active_goal and not goal_continuation:
             # A direct lookup/search request should not drift into personal
             # tools or shell fallbacks. It can only use web_search/web_fetch
             # when the request's explicit web setting enabled them.
@@ -2723,9 +2728,9 @@ def setup_chat_routes(
                                                 active_goal = chat_work_store.update_goal(
                                                     _user,
                                                     session,
-                                                    "Context checkpoint failed; update the context policy or retry explicitly.",
+                                                    "Context checkpoint failed; the server will retry automatically with the preserved ledger.",
                                                     {"reason": "context_compaction", "run_failure": terminal_metadata["failure"]},
-                                                    waiting_user=True,
+                                                    waiting_user=False,
                                                 )
                                             else:
                                                 active_goal = chat_work_store.record_goal_failure(
