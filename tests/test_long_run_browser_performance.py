@@ -164,3 +164,13 @@ def test_stateful_chat_modules_have_one_browser_identity():
     for name, refs in references.items():
         assert refs, f"no references found for {name}.js"
         assert all(version == expected for _, version in refs), refs
+
+    # The outer entrypoint must move with stateful module revisions. Otherwise
+    # Safari can reuse an older app.js which imports a second, older sessions.js
+    # identity even though index.html also preloads the new one.
+    index = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
+    for asset in ("app.js", "js/init.js"):
+        versioned = f"/{'static/'}{asset}?v={expected}"
+        assert versioned in index
+        assert versioned in worker
