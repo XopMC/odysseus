@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix12';
-import chatRenderer from './chatRenderer.js?v=20260921livefix12';
+import sessionModule from './sessions.js?v=20260921livefix13';
+import chatRenderer from './chatRenderer.js?v=20260921livefix13';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -2695,6 +2695,7 @@ import { bindUiText, t } from './i18n.js';
       let _liveThinkDomId = null;
       let _liveThinkRenderThrottle = null;
       let _liveThinkLatestText = '';
+      let _liveThinkRenderedText = '';
       let _liveThinkTimerId = null;
       let _liveThinkReducedMotion = false;
 
@@ -2748,7 +2749,18 @@ import { bindUiText, t } from './i18n.js';
         const thinkBox = target.closest('.thinking-content');
         const nearBottom = !thinkBox || thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
         target.style.whiteSpace = 'pre-wrap';
-        target.textContent = _liveThinkLatestText;
+        if (_liveThinkLatestText.startsWith(_liveThinkRenderedText)
+            && target.childNodes.length <= 1
+            && (!target.firstChild || target.firstChild.nodeType === Node.TEXT_NODE)) {
+          const delta = _liveThinkLatestText.slice(_liveThinkRenderedText.length);
+          if (delta) {
+            if (target.firstChild) target.firstChild.appendData(delta);
+            else target.appendChild(document.createTextNode(delta));
+          }
+        } else {
+          target.textContent = _liveThinkLatestText;
+        }
+        _liveThinkRenderedText = _liveThinkLatestText;
         if (thinkBox && nearBottom) thinkBox.scrollTop = thinkBox.scrollHeight;
         if (nearBottom) uiModule.scrollHistory();
       }
@@ -2794,6 +2806,7 @@ import { bindUiText, t } from './i18n.js';
         if (rich && _liveThinkInner && _liveThinkInner.isConnected) {
           _liveThinkInner.style.whiteSpace = '';
           _liveThinkInner.innerHTML = markdownModule.mdToHtml(_liveThinkLatestText);
+          _liveThinkRenderedText = _liveThinkLatestText;
         }
         return _liveThinkLatestText;
       };
@@ -3403,6 +3416,7 @@ import { bindUiText, t } from './i18n.js';
                   _liveThinkTimerEl = thinkContent.querySelector('.live-think-timer');
                   _liveThinkToggle = thinkContent.querySelector('.live-think-toggle');
                   _liveThinkLatestText = '';
+                  _liveThinkRenderedText = '';
                   _cancelLiveThinkingWork();
                   _queueLiveThinking(roundText);
                   // Whirlpool spinner

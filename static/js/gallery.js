@@ -9,7 +9,7 @@ import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { topPortalZ } from './toolWindowZOrder.js';
-import sessionModule from './sessions.js?v=20260921livefix12';
+import sessionModule from './sessions.js?v=20260921livefix13';
 import fileHandlerModule from './fileHandler.js';
 
 const API_BASE = window.location.origin;
