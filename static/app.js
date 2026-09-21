@@ -6,11 +6,11 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js?v=20260921livefix18';
+import modelsModule from './js/models.js?v=20260921livefix21';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260921livefix18';
+import chatModule from './js/chat.js?v=20260921livefix21';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
@@ -22,7 +22,7 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260921livefix18';
+import chatRenderer from './js/chatRenderer.js?v=20260921livefix21';
 import sessionModule from './js/sessions.js?v=20260921livefix21';
 import chatWork from './js/chat-work.js?v=20260921livefix17';
 import chatSubagents from './js/chat-subagents.js?v=20260921livefix17';

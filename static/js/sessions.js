@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260921livefix18';
+import chatRenderer from './chatRenderer.js?v=20260921livefix21';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js?v=20260921livefix20';
@@ -144,6 +144,12 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
     Number.isFinite(Number(data.rendered_total)) ? Number(data.rendered_total)
       : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
   );
+  const refreshedRenderedCount = Number.isFinite(Number(data.rendered_total))
+    ? Number(data.rendered_total)
+    : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total);
+  if (Number.isFinite(refreshedRenderedCount)) {
+    _liveSessionRenderedCounts.set(sessionId, Math.floor(refreshedRenderedCount));
+  }
   if (nearBottom) uiModule.scrollHistoryInstant();
   else box.scrollTop = Math.max(0, oldTop + box.scrollHeight - oldHeight);
   window.refreshChatContextHeader?.('remote-history');
@@ -2204,11 +2210,13 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
         next_cursor: data.next_cursor,
         has_more_before: !!data.has_more_before,
       };
-      window.__odysseusSetServerMessageCount?.(
-        id,
-        Number.isFinite(Number(data.rendered_total)) ? Number(data.rendered_total)
-          : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
-      );
+      const initialRenderedCount = Number.isFinite(Number(data.rendered_total))
+        ? Number(data.rendered_total)
+        : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total);
+      window.__odysseusSetServerMessageCount?.(id, initialRenderedCount);
+      if (Number.isFinite(initialRenderedCount)) {
+        _liveSessionRenderedCounts.set(id, Math.floor(initialRenderedCount));
+      }
       // The model returned by /api/history is the authoritative one the
       // backend will use for this session. Write it back into the cached
       // session meta and refresh the picker so the displayed model can
@@ -2988,17 +2996,23 @@ async function _checkServerStream(sessionId) {
     // rendered count tells us whether the canonical transcript can possibly
     // have changed. Avoid fetching and JSON-parsing the newest history row on
     // every idle tick of every device; on very long chats that was the largest
-    // remaining source of steady background I/O.
+    // remaining source of steady background I/O. A changed authoritative count
+    // already proves that the visible transcript changed, so reconcile the
+    // bounded tail directly instead of paying for a second limit=1 aggregate.
     if (renderedCountChanged) {
-      const tail = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
-      if (!tail.ok || !isCurrent()) return;
-      const latest = tail.data;
-      if (!isCurrent()) return;
-      if (Array.isArray(latest.history) && _syncedHistory.get(sessionId) !== _historyStamp(latest)) {
-        const refreshed = await refreshSessionHistory(sessionId);
-        // limit=1 can contain only a hidden system message, unlike the visible
-        // last row in a larger page. Retain the probe stamp to avoid reload loops.
-        if (refreshed && isCurrent()) _syncedHistory.set(sessionId, _historyStamp(latest));
+      if (renderedCount !== null) {
+        await refreshSessionHistory(sessionId);
+      } else {
+        // Compatibility fallback for an older server or a transient failure of
+        // the lightweight count endpoint. It is intentionally not the normal
+        // polling path.
+        const tail = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
+        if (!tail.ok || !isCurrent()) return;
+        const latest = tail.data;
+        if (Array.isArray(latest.history) && _syncedHistory.get(sessionId) !== _historyStamp(latest)) {
+          const refreshed = await refreshSessionHistory(sessionId);
+          if (refreshed && isCurrent()) _syncedHistory.set(sessionId, _historyStamp(latest));
+        }
       }
     }
     // A stale local busy bit must not suppress the server-authoritative live
