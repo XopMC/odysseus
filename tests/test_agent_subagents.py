@@ -617,6 +617,96 @@ def test_parallel_children_receive_independent_model_contexts(monkeypatch):
         db.commit(); db.close()
 
 
+def test_child_retries_transient_transport_failure_only_before_first_tool(monkeypatch):
+    owner = "retry-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="retry test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    calls = 0
+
+    async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield 'event: error\ndata: {"error":"Read timeout","status":504}\n\n'
+            return
+        yield 'data: {"delta":"recovered","round":1}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe retry", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        row = runtime.get(owner, session_id, child["child_id"])
+        assert row["status"] == "completed"
+        assert row["result"] == "recovered"
+        assert calls == 2
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        assert [event["kind"] for event in events].count("transport_retry") == 1
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
+def test_child_never_retries_after_tool_start(monkeypatch):
+    owner = "no-retry-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="no retry test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    calls = 0
+
+    async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield 'data: {"type":"tool_start","tool":"read_file","round":1}\n\n'
+        yield 'event: error\ndata: {"error":"Read timeout","status":504}\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="do not replay", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        row = runtime.get(owner, session_id, child["child_id"])
+        assert row["status"] == "failed"
+        assert calls == 1
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        assert not any(event["kind"] == "transport_retry" for event in events)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
 def test_local_transport_allows_four_subagent_prompts_in_flight(monkeypatch):
     import src.llm_core as llm_core
 

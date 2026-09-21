@@ -372,8 +372,9 @@ class SubagentRuntime:
 
         try:
             waiting_payload = None
+            tool_started = False
             async def consume():
-                nonlocal waiting_payload
+                nonlocal waiting_payload, tool_started
                 async for frame in stream_agent_loop(
                     endpoint_url, model, messages, headers=headers or {},
                     session_id=session_id, owner=owner, workspace=workspace,
@@ -422,12 +423,40 @@ class SubagentRuntime:
                         else:
                             await flush(force=True)
                             kind = str(event.get("type") or "event")
+                            if kind == "tool_start":
+                                tool_started = True
                             if kind == "ask_user":
                                 waiting_payload = event.get("data") or event
                             if kind == "metrics":
                                 self._merge_metrics(child_id, owner, event.get("data") or {})
                             self._event(child_id, owner, session_id, kind, event)
-            await asyncio.wait_for(consume(), timeout=timeout_seconds)
+            deadline = time.monotonic() + timeout_seconds
+            for transport_attempt in range(2):
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError()
+                    await asyncio.wait_for(consume(), timeout=remaining)
+                    break
+                except RuntimeError as exc:
+                    transient = any(marker in str(exc).lower() for marker in (
+                        "read timeout", "connection pool timeout", "upstream timeout",
+                        "network error", "cannot reach", "unreachable", "terminated",
+                    ))
+                    if transport_attempt or tool_started or not transient:
+                        raise
+                    # No tool was started, so replaying the model request cannot
+                    # duplicate an external side effect. Discard partial text,
+                    # preserve a visible retry event and retry exactly once.
+                    output_parts.clear(); reasoning_parts.clear()
+                    pending_delta.clear(); pending_thinking.clear()
+                    waiting_payload = None
+                    history.context_checkpoint = None
+                    history.context_checkpoint_count = 0
+                    self._event(child_id, owner, session_id, "transport_retry", {
+                        "attempt": 2, "reason": str(exc)[:160],
+                    })
+                    await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
             await flush(force=True)
             final = "".join(output_parts).strip()
             if waiting_payload:
