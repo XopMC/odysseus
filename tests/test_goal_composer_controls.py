@@ -55,6 +55,12 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert "window.refreshChatContextHeader?.('goal-paused')" in work
     assert "additional guidance for the active goal" in chat
     assert "await window.chatWork.addGuidance(composerText)" in chat
+    submit = chat.split("export async function handleChatSubmit", 1)[1].split(
+        "export function", 1
+    )[0]
+    assert "activeGoalGuidance" in submit
+    assert "window.chatWork?.getSnapshot?.()?.goal?.status === 'active'" in submit
+    assert submit.index("activeGoalGuidance") < submit.index("if (isStreaming)")
     assert "if (composerText && queueStreamingComposerRequest())" in chat
     assert "snapshot.goal?.status !== 'active'" not in work.split("async function addGuidance", 1)[1].split("function armCollapse", 1)[0]
     assert "/goal-guidance" in work

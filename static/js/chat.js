@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix26';
-import chatRenderer from './chatRenderer.js?v=20260921livefix26';
+import sessionModule from './sessions.js?v=20260921livefix27';
+import chatRenderer from './chatRenderer.js?v=20260921livefix27';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -1430,6 +1430,31 @@ import { bindUiText, t } from './i18n.js';
     if (window.compareModule && window.compareModule.isActive()) {
       window.compareModule.handleCompareSubmit();
       return;
+    }
+
+    // Goal ownership is server state, while `isStreaming` is only this tab's
+    // reader state.  After reload/reconnect (or in a second tab) the server can
+    // still be running an active Goal even when this closure has no local SSE
+    // reader.  Route typed input as durable guidance before consulting the
+    // local stream flag; otherwise Enter falls through to a normal send whose
+    // exact-run replacement pauses the Goal.
+    const activeGoalGuidance = String(uiModule.el('message')?.value || '').trim();
+    if (
+      activeGoalGuidance
+      && window.chatWork?.getSnapshot?.()?.goal?.status === 'active'
+      && window.chatWork?.addGuidance
+    ) {
+      try {
+        if (await window.chatWork.addGuidance(activeGoalGuidance)) {
+          const input = uiModule.el('message');
+          if (input) { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }
+          await sessionModule.refreshSessionMessageCount?.(sessionId);
+          return;
+        }
+      } catch (_) {
+        // A concurrent explicit Pause/Cancel wins. Continue through the normal
+        // submit path using the authoritative response from the endpoint.
+      }
     }
 
     // If currently streaming, keyboard Enter can queue a non-empty composer.

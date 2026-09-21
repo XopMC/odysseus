@@ -8,7 +8,7 @@ import uiModule from './ui.js';
 import { bindUiText } from './i18n.js';
 import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
-import { modelColor } from './chatRenderer.js?v=20260921livefix26';
+import { modelColor } from './chatRenderer.js?v=20260921livefix27';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { openCookbookDependencies } from './cookbook-diagnosis.js';
 import { _hwfitCache } from './cookbook-hwfit.js';
