@@ -77,3 +77,17 @@ def test_agent_server_recovery_plan_settles_before_continuing():
     )
     assert '"status": "done" if _index == 1 else "pending"' in branch
     assert "Continue with its first unfinished step" in branch
+
+
+def test_subagent_uses_private_recovery_plan_without_mutating_parent_plan():
+    source = (Path(__file__).resolve().parents[1] / "src/agent_loop.py").read_text(
+        encoding="utf-8"
+    )
+    branch = source.split("elif session_id and _pending_compaction_settlement:", 1)[1].split(
+        '"type": "context_compaction_failed"', 1,
+    )[0]
+    assert '"_agent_private_recovery_plan": True' in branch
+    assert '_work_store.save_plan' not in branch
+    assert 'if not _settle_compaction(owner, session_id, _settlement_generation)' in branch
+    assert '"recovery": "private_working_plan"' in branch
+    assert '"reason": "private_recovery_plan"' in branch

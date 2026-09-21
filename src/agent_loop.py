@@ -6355,6 +6355,40 @@ async def stream_agent_loop(
                             continue
                         except Exception:
                             logger.exception("Server-side post-compaction plan recovery failed")
+                    elif session_id and _pending_compaction_settlement:
+                        # Detached subagents deliberately do not own or mutate
+                        # the parent's durable Goal/Plan.  They still need the
+                        # SoL-Pi post-compaction continuation, so install a
+                        # private pinned working plan in this child ledger and
+                        # settle the same compaction generation atomically.
+                        try:
+                            from src.context_compaction_ledger import settle as _settle_compaction
+                            _settlement_generation = int(
+                                _pending_compaction_settlement.get("generation")
+                                or (_pending_compaction_settlement.get("rebuild_marker") or {}).get("generation")
+                                or _context_compactions
+                            )
+                            _private_plan = {
+                                "role": "system",
+                                "content": (
+                                    "Post-compaction private working plan: (1) re-read the assigned objective "
+                                    "and durable checkpoint; (2) continue the first unfinished item; "
+                                    "(3) verify the result before reporting it to the parent."
+                                ),
+                                "_context_pinned": True,
+                                "_agent_private_recovery_plan": True,
+                            }
+                            messages.append(_private_plan)
+                            if not _settle_compaction(owner, session_id, _settlement_generation):
+                                messages.pop()
+                                raise RuntimeError("Compaction settlement could not be committed")
+                            yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _settlement_generation, "settlement_id": _pending_compaction_settlement.get("id"), "recovery": "private_working_plan"})}\n\n'
+                            _pending_compaction_settlement = None
+                            _compaction_plan_required = False
+                            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "private_recovery_plan"})}\n\n'
+                            continue
+                        except Exception:
+                            logger.exception("Private post-compaction plan recovery failed")
                     yield f'data: {json.dumps({"type": "context_compaction_failed", "reason": "fresh_plan_missing", "message": "Compaction succeeded, but the agent did not rebuild the required fresh plan."})}\n\n'
                     _fresh_plan_terminal = {
                         "type": "agent_terminal",
