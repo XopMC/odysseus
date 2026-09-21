@@ -39,6 +39,7 @@ const LIVE_SESSION_POLL_MS = 3000;
 const LIVE_SESSION_READ_TIMEOUT_MS = 15000;
 let _liveSessionTimer = null;
 const _liveSessionChecks = new Map();
+const _liveSessionRenderedCounts = new Map();
 let _loadingSessionToken = null;
 const _syncedHistory = new Map();
 
@@ -482,10 +483,6 @@ function _ensureLiveSessionSync() {
   if (_liveSessionTimer !== null) return;
   const check = () => {
     if (document.visibilityState === 'hidden' || !currentSessionId) return;
-    // Keep the visible badge identical across devices while a detached run is
-    // active; the DOM contains different transient replay nodes on each
-    // client, so a local element count is never authoritative.
-    void refreshSessionMessageCount(currentSessionId);
     return _checkServerStream(currentSessionId);
   };
   _liveSessionTimer = setInterval(check, LIVE_SESSION_POLL_MS);
@@ -2962,6 +2959,19 @@ async function _checkServerStream(sessionId) {
     // Skip if research is running — it has its own progress UI
     if (_researchingSessions.has(sessionId)) return;
 
+    // Keep the visible badge identical across devices while a detached run is
+    // active; the DOM contains different transient replay nodes on each
+    // client, so a local element count is never authoritative.  This probe is
+    // part of the guarded discovery chain so a slow server cannot create
+    // overlapping count/status/history requests every three seconds.
+    const renderedCount = await refreshSessionMessageCount(sessionId);
+    if (!isCurrent()) return;
+    const previousRenderedCount = _liveSessionRenderedCounts.get(sessionId);
+    const renderedCountChanged = renderedCount === null
+      || previousRenderedCount === undefined
+      || renderedCount !== previousRenderedCount;
+    if (renderedCount !== null) _liveSessionRenderedCounts.set(sessionId, renderedCount);
+
     // Skip if the SSE reader is still actively connected — it handles rendering
     if (window.chatModule && window.chatModule.hasActiveStream && window.chatModule.hasActiveStream(sessionId)) return;
 
@@ -2974,17 +2984,22 @@ async function _checkServerStream(sessionId) {
     const info = res.ok ? res.data : { status: 'idle' };
     if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId)) return;
 
-    // A remote turn can finish between status probes. Compare a one-message
-    // history page, then fetch/render the canonical tail only when it changed.
-    const tail = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
-    if (!tail.ok || !isCurrent()) return;
-    const latest = tail.data;
-    if (!isCurrent()) return;
-    if (Array.isArray(latest.history) && _syncedHistory.get(sessionId) !== _historyStamp(latest)) {
-      const refreshed = await refreshSessionHistory(sessionId);
-      // limit=1 can contain only a hidden system message, unlike the visible
-      // last row in a larger page. Retain the probe stamp to avoid reload loops.
-      if (refreshed && isCurrent()) _syncedHistory.set(sessionId, _historyStamp(latest));
+    // A remote turn can finish between status probes. The cheap authoritative
+    // rendered count tells us whether the canonical transcript can possibly
+    // have changed. Avoid fetching and JSON-parsing the newest history row on
+    // every idle tick of every device; on very long chats that was the largest
+    // remaining source of steady background I/O.
+    if (renderedCountChanged) {
+      const tail = await _readLiveSession(_historyUrl(sessionId, { limit: 1 }));
+      if (!tail.ok || !isCurrent()) return;
+      const latest = tail.data;
+      if (!isCurrent()) return;
+      if (Array.isArray(latest.history) && _syncedHistory.get(sessionId) !== _historyStamp(latest)) {
+        const refreshed = await refreshSessionHistory(sessionId);
+        // limit=1 can contain only a hidden system message, unlike the visible
+        // last row in a larger page. Retain the probe stamp to avoid reload loops.
+        if (refreshed && isCurrent()) _syncedHistory.set(sessionId, _historyStamp(latest));
+      }
     }
     // A stale local busy bit must not suppress the server-authoritative live
     // attach after reload.  The exact active-stream registry is the ownership

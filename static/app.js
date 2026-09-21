@@ -23,7 +23,7 @@ import {
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260921livefix18';
-import sessionModule from './js/sessions.js?v=20260921livefix18';
+import sessionModule from './js/sessions.js?v=20260921livefix21';
 import chatWork from './js/chat-work.js?v=20260921livefix17';
 import chatSubagents from './js/chat-subagents.js?v=20260921livefix17';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';

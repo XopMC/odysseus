@@ -33,6 +33,18 @@ def test_message_count_poll_does_not_fetch_latest_history_payload():
     assert "{ monotonic: true }" in count_fn
 
 
+def test_idle_live_sync_only_probes_history_after_rendered_count_changes():
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+    check = source.split("async function _checkServerStream", 1)[1].split(
+        "export function clearStreamComplete", 1,
+    )[0]
+
+    assert "const renderedCount = await refreshSessionMessageCount(sessionId);" in check
+    assert "const renderedCountChanged" in check
+    guarded_history = check.split("if (renderedCountChanged) {", 1)[1]
+    assert "_historyUrl(sessionId, { limit: 1 })" in guarded_history
+
+
 def test_authoritative_live_message_count_is_monotonic():
     source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     assert "options.monotonic === true" in source

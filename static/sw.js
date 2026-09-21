@@ -48,7 +48,7 @@ const PRECACHE = [
   '/static/js/ui.js',
   '/static/js/markdown.js',
   '/static/js/dragSort.js',
-  '/static/js/sessions.js?v=20260921livefix18',
+  '/static/js/sessions.js?v=20260921livefix21',
   '/static/js/memory.js?v=20260722memoryloading1',
   '/static/js/skills.js',
   '/static/js/tourHints.js',
