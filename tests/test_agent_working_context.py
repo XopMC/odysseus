@@ -94,6 +94,27 @@ def test_empty_or_failed_summary_never_discards_evidence():
         assert out == msgs and status == "failed"
 
 
+def test_oversized_summary_is_bounded_with_explicit_durable_log_marker():
+    from src.context_policy import ContextPolicy
+    msgs = history()
+    policy = ContextPolicy(
+        trigger_percent=75, target_percent=50,
+        recent_groups=0, recent_tokens=0, summary_tokens=128,
+    )
+    async def verbose(_):
+        return "verified checkpoint detail " * 2000
+    out, status = asyncio.run(ac.compact_working_context(
+        msgs, 5000, verbose, policy=policy, target_limit=4000,
+    ))
+    assert status == "compacted"
+    checkpoint = next(m for m in out if m.get("_agent_working_summary"))
+    assert "middle omitted" in checkpoint["content"]
+    assert "durable tool/reasoning log" in checkpoint["content"]
+    assert ac.estimate_tokens([
+        {"role": "assistant", "content": checkpoint["content"].split("<<<UNTRUSTED_SOURCE_DATA>>>", 1)[-1]}
+    ]) < 300
+
+
 def test_compaction_folds_previous_summary_and_keeps_multicall_batch():
     msgs = history()
     prior = {"role": "system", "content": "Previous evidence", "_agent_working_summary": True}

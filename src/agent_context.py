@@ -177,7 +177,34 @@ async def compact_working_context(messages, limit, summarize, *, policy=None, ta
         if not summary or summary.startswith("<think>"):
             raise ValueError("Summarizer returned no usable answer")
         if policy is not None and estimate_tokens([{'role': 'assistant', 'content': summary}]) > policy.summary_tokens:
-            raise ValueError('Summary exceeds configured token budget')
+            marker = (
+                "\n[Checkpoint summary exceeded its configured budget; middle omitted. "
+                "Consult the durable tool/reasoning log before relying on omitted details.]\n"
+            )
+            # Preserve both the initial objective/constraints and the newest
+            # verification/next-work tail. Binary search against the same token
+            # estimator used by the policy instead of guessing a character
+            # ratio. The omission is explicit and original artifacts remain.
+            low, high, fitted = 0, len(summary), ""
+            while low <= high:
+                keep = (low + high) // 2
+                left = keep // 2
+                right = keep - left
+                candidate = summary[:left] + marker + (summary[-right:] if right else "")
+                if estimate_tokens([{'role': 'assistant', 'content': candidate}]) <= policy.summary_tokens:
+                    fitted = candidate
+                    low = keep + 1
+                else:
+                    high = keep - 1
+            if not fitted:
+                raise ValueError('Summary omission marker exceeds configured token budget')
+            logger.warning(
+                "Working context summary exceeded budget and was explicitly bounded: before=%s after=%s limit=%s",
+                estimate_tokens([{'role': 'assistant', 'content': summary}]),
+                estimate_tokens([{'role': 'assistant', 'content': fitted}]),
+                policy.summary_tokens,
+            )
+            summary = fitted
     except Exception as exc:
         logger.warning("Working context compaction failed: %s", type(exc).__name__)
         return messages, "failed"
