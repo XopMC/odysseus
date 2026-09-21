@@ -121,6 +121,29 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(str(sent[0]['messages'])), len(str(history)))
         self.assertIn('"compacted"', chunks)
 
+    async def test_aggressive_target_relaxes_below_trigger_when_pins_do_not_fit(self):
+        from src.context_policy import ContextPolicy
+        from src.context_policy_runtime import shape_request
+        messages = [{'role': 'user', 'content': 'evidence ' * 40000}]
+        policy = ContextPolicy(trigger_percent=75, target_percent=15)
+        record = {'effective': policy.to_dict(), 'revisions': {'owner': 1}}
+        compacted = [{'role': 'system', 'content': 'safe checkpoint'}]
+        with patch(
+            'src.context_policy_runtime.compact_working_context',
+            new=AsyncMock(side_effect=[(messages, 'uncompactable'), (compacted, 'compacted')]),
+        ) as compact:
+            shaped, telemetry = await shape_request(
+                messages, [], record, 65536, AsyncMock(return_value='summary'),
+            )
+        self.assertEqual(shaped, compacted)
+        self.assertEqual(compact.await_count, 2)
+        first_target = compact.await_args_list[0].kwargs['target_limit']
+        second_target = compact.await_args_list[1].kwargs['target_limit']
+        self.assertGreater(second_target, first_target)
+        self.assertLess(second_target, telemetry['trigger_messages'])
+        self.assertEqual(telemetry['target_messages'], first_target)
+        self.assertEqual(telemetry['effective_target_messages'], second_target)
+
     async def test_disabled_compaction_blocks_overflow_without_request(self):
         self.save({'auto_compact': False})
         sent, summaries, chunks = await self.run_agent([

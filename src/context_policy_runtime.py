@@ -41,20 +41,43 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
     before = math.ceil(estimate_tokens(messages) * calibration)
     action = budget.action(before, auto_compact=policy.auto_compact)
     shaped, status = messages, 'unchanged'
+    effective_target = budget.target_messages
     if action == 'blocked':
         raise ValueError('Context is full and automatic compaction is disabled')
     if action == 'compact':
         shaped, status = await compact_working_context(messages,
             max(1, math.floor(budget.trigger_messages / calibration)), summarize,
             policy=policy, target_limit=max(1, math.floor(budget.target_messages / calibration)))
+        if status == 'uncompactable':
+            # A very aggressive configured target can be smaller than pinned
+            # Goal/tool groups even though a safe checkpoint still fits below
+            # the trigger. Relax only the effective target for this revision;
+            # keep the configured value visible and never cross the trigger.
+            relaxed = max(
+                budget.target_messages,
+                min(budget.trigger_messages - 1, math.floor(budget.trigger_messages * .9)),
+            )
+            if relaxed > budget.target_messages:
+                effective_target = relaxed
+                shaped, status = await compact_working_context(
+                    messages,
+                    max(1, math.floor(budget.trigger_messages / calibration)),
+                    summarize,
+                    policy=policy,
+                    target_limit=max(1, math.floor(relaxed / calibration)),
+                )
         if status not in {'compacted', 'unchanged'}:
-            raise ValueError('Configured context checkpoint could not preserve the required history')
+            raise ValueError(
+                f'Configured context checkpoint could not preserve the required history ({status})'
+            )
     after = math.ceil(estimate_tokens(shaped) * calibration)
     if after > budget.hard_messages:
         raise ValueError('Context exceeds the configured input budget')
     return shaped, {'status': status, 'before_tokens': before + budget.schema_tokens,
         'after_tokens': after + budget.schema_tokens, 'source': 'estimated',
         'window': budget.window, 'input_budget': budget.input_tokens,
-        'trigger_messages': budget.trigger_messages, 'target_messages': budget.target_messages,
+        'trigger_messages': budget.trigger_messages,
+        'target_messages': budget.target_messages,
+        'effective_target_messages': effective_target,
         'output_reserve': budget.output_reserve, 'safety_tokens': budget.safety_tokens,
         'revisions': record['revisions']}

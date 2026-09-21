@@ -124,6 +124,10 @@ async def compact_working_context(messages, limit, summarize, *, policy=None, ta
         if estimate_tokens(protected) >= target_limit:
             # No summary can make protected content smaller. Avoid spending
             # an inference request only to reject its result afterwards.
+            logger.info(
+                "Working context target below protected groups: protected=%s target=%s",
+                estimate_tokens(protected), target_limit,
+            )
             return messages, 'uncompactable'
     groups = [group for group in all_groups if not any(id(m) in pinned_ids for m in group)]
     if len(groups) < 2:
@@ -189,8 +193,16 @@ async def compact_working_context(messages, limit, summarize, *, policy=None, ta
     retained.update(pinned_ids)
     compacted = systems + [checkpoint] + [m for m in convo if id(m) in retained]
     if estimate_tokens(compacted) >= estimate_tokens(messages):
+        logger.warning(
+            "Working context summary did not reduce tokens: before=%s after=%s",
+            estimate_tokens(messages), estimate_tokens(compacted),
+        )
         return messages, "failed"
     if estimate_tokens(compacted) > (target_limit if policy is not None else limit):
+        logger.info(
+            "Working context result exceeds target: after=%s target=%s",
+            estimate_tokens(compacted), target_limit if policy is not None else limit,
+        )
         return messages, "uncompactable"
     return compacted, "compacted"
 
