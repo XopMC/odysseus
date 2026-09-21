@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v419-livefix19';
+const CACHE_NAME = 'odysseus-v420-livefix20';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -39,7 +39,7 @@ const KATEX_FONTS = [
 // exact URL the browser requests, query string included.
 const PRECACHE = [
   '/',
-  '/static/style.css?v=20260921livefix19',
+  '/static/style.css?v=20260921livefix20',
   '/static/css/team-workspace.css?v=20260921livefix18',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
   '/static/app.js?v=20260921livefix17',
@@ -75,7 +75,7 @@ const PRECACHE = [
   '/static/js/cookbook.js',
   '/static/js/search-chat.js',
   '/static/js/compare/index.js',
-  '/static/js/theme.js?v=20260921livefix19',
+  '/static/js/theme.js?v=20260921livefix20',
   '/static/js/censor.js',
   '/static/js/settings.js?v=20260921livefix18',
   '/static/js/admin.js',
