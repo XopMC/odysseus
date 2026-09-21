@@ -1,7 +1,9 @@
 """Diagnostics routes — /api/db/stats, /api/rag/stats, /api/test/youtube, /api/test-research."""
 
+import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException, Form, Request
@@ -11,6 +13,61 @@ from core.constants import DEFAULT_HOST, DATA_DIR
 from core.middleware import require_admin
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_diagnostics() -> Dict[str, Any]:
+    """Content-free long-run health counters for admin diagnostics."""
+    from src.chat_replay_log import MAX_RUN_BYTES, MAX_TOTAL_BYTES
+
+    replay_root = Path(DATA_DIR) / "chat-replay"
+    files = [path for path in replay_root.iterdir() if path.is_file()] if replay_root.exists() else []
+    total_bytes = sum(path.stat().st_size for path in files)
+    per_run = {}
+    for path in files:
+        per_run[path.stem] = per_run.get(path.stem, 0) + path.stat().st_size
+    largest_run_bytes = max(per_run.values(), default=0)
+
+    rss_bytes = 0
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                rss_bytes = int(line.split()[1]) * 1024
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+
+    active_runs = active_subagents = 0
+    try:
+        from core.database import ChatRunState, ChatSubagentRun, SessionLocal
+        from src.subagent_runtime import ACTIVE_STATUSES
+        db = SessionLocal()
+        try:
+            active_runs = db.query(ChatRunState).filter(ChatRunState.status == "running").count()
+            active_subagents = db.query(ChatSubagentRun).filter(
+                ChatSubagentRun.status.in_(ACTIVE_STATUSES),
+                ChatSubagentRun.removed.is_(False),
+            ).count()
+        finally:
+            db.close()
+    except Exception:
+        logger.debug("runtime diagnostics DB counters unavailable", exc_info=True)
+
+    db_path = Path(DATA_DIR) / "app.db"
+    return {
+        "process": {"pid": os.getpid(), "rss_bytes": rss_bytes},
+        "runs": {"active": active_runs, "active_subagents": active_subagents},
+        "storage": {
+            "database_bytes": db_path.stat().st_size if db_path.exists() else 0,
+            "replay_bytes": total_bytes,
+            "replay_files": len(files),
+            "replay_runs": len(per_run),
+            "largest_replay_run_bytes": largest_run_bytes,
+            "max_replay_run_bytes": MAX_RUN_BYTES,
+            "max_replay_total_bytes": MAX_TOTAL_BYTES,
+            "replay_total_percent": round(total_bytes * 100 / MAX_TOTAL_BYTES, 3),
+            "largest_run_percent": round(largest_run_bytes * 100 / MAX_RUN_BYTES, 3),
+        },
+    }
 
 
 def setup_diagnostics_routes(
@@ -27,7 +84,13 @@ def setup_diagnostics_routes(
         ntfy, and provider endpoints. Non-intrusive probes — safe to poll."""
         require_admin(request)
         from src.service_health import collect_service_health
-        return await collect_service_health(rag_manager, memory_vector)
+        started = asyncio.get_running_loop().time()
+        await asyncio.sleep(0)
+        loop_lag_ms = max(0.0, (asyncio.get_running_loop().time() - started) * 1000)
+        result = await collect_service_health(rag_manager, memory_vector)
+        result["runtime"] = _runtime_diagnostics()
+        result["runtime"]["process"]["event_loop_lag_ms"] = round(loop_lag_ms, 3)
+        return result
 
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:

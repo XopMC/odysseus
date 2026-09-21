@@ -64,5 +64,9 @@ def test_admin_gets_report(monkeypatch):
     r = client.get("/api/diagnostics/services")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"overall", "services", "timestamp"}
+    assert set(body) == {"overall", "services", "timestamp", "runtime"}
     assert body["overall"] == "ok"
+    assert set(body["runtime"]) == {"process", "runs", "storage"}
+    assert body["runtime"]["storage"]["max_replay_run_bytes"] > 0
+    assert body["runtime"]["storage"]["max_replay_total_bytes"] > 0
+    assert body["runtime"]["process"]["event_loop_lag_ms"] >= 0
