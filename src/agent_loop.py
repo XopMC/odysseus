@@ -6299,7 +6299,13 @@ async def stream_agent_loop(
                                     {
                                         "id": f"recovery-{_context_compactions}-{_index}",
                                         "text": _text,
-                                        "status": "pending",
+                                        # Building this fallback already read
+                                        # the durable Goal/checkpoint and the
+                                        # previous unfinished plan above. Mark
+                                        # that recovery step truthfully done;
+                                        # plan_action atomically starts the
+                                        # first remaining work step.
+                                        "status": "done" if _index == 1 else "pending",
                                         "required": True,
                                     }
                                     for _index, _text in enumerate(_step_texts, 1)
@@ -6327,7 +6333,7 @@ async def stream_agent_loop(
                                 "role": "system",
                                 "content": (
                                     "The durable post-compaction recovery plan is now executing. "
-                                    "Continue with its first in-progress step and update it only after verification."
+                                    "Continue with its first unfinished step and update it only after verification."
                                 ),
                             })
                             yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "server_recovery_plan"})}\n\n'

@@ -75,3 +75,5 @@ def test_agent_server_recovery_plan_settles_before_continuing():
     assert branch.index('if not _settle_compaction(') < branch.index(
         '"reason": "server_recovery_plan"'
     )
+    assert '"status": "done" if _index == 1 else "pending"' in branch
+    assert "Continue with its first unfinished step" in branch
