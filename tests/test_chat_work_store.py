@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta
 import json
+from pathlib import Path
 import uuid
 
 import pytest
@@ -246,6 +247,37 @@ def test_goal_guidance_is_durable_and_does_not_pause_goal(owned_chat):
             session_id=owned_chat, role="user", content="Also verify HTTP and HTTPS",
         ).one()
         assert json.loads(saved.meta_data)["goal_guidance"] is True
+
+
+def test_goal_background_context_is_hidden_untrusted_and_durable(owned_chat):
+    from src.prompt_security import untrusted_context_message
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Ship the release")
+    context = untrusted_context_message("background job output", "tool result")
+    result = store.add_goal_background_context("alice", owned_chat, context, "job-1")
+    item = result["guidance"]
+    assert result["goal"]["status"] == "active"
+    assert item["context_message"]["metadata"]["trusted"] is False
+    current = store.get("alice", owned_chat)["goal"]
+    assert current["checkpoint"]["guidance"][-1]["id"] == item["id"]
+    with SessionLocal() as db:
+        saved = db.query(ChatMessage).filter_by(
+            session_id=owned_chat, role="user", content=context["content"],
+        ).one()
+        metadata = json.loads(saved.meta_data)
+    assert metadata["hidden"] == 1
+    assert metadata["hidden_from_user_view"] is True
+    assert metadata["trusted"] is False
+    assert metadata["bg_job_id"] == "job-1"
+
+
+def test_agent_loop_preserves_background_context_as_untrusted_data():
+    source = (Path(__file__).resolve().parents[1] / "src/agent_loop.py").read_text()
+    block = source.split("context_message = item.get", 1)[1].split(
+        "_round_had_correction = True", 1,
+    )[0]
+    assert '"metadata": dict(context_message.get("metadata") or {})' in block
+    assert '"Additional user guidance' in block
 
 
 def test_terminal_run_attaches_timeline_v2_without_removing_legacy_metadata(monkeypatch, owned_chat):

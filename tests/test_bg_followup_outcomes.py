@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src import agent_loop, agent_runs, ai_interaction, bg_monitor, settings
+from src import agent_loop, agent_runs, ai_interaction, bg_monitor, chat_work_store, settings
 
 
 def _setup(monkeypatch, chunks):
@@ -36,10 +36,34 @@ def _setup(monkeypatch, chunks):
     monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: Manager())
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: False)
     monkeypatch.setattr(bg_monitor.bg_jobs, "result_text", lambda rec: "Job output")
+    monkeypatch.setattr(chat_work_store.store, "get", lambda owner, session_id: {"goal": None})
     monkeypatch.setattr(settings, "get_setting", lambda key, default=None: {
         "agent_max_rounds": 80, "agent_max_tool_calls": 25,
     }.get(key, default))
     return captured, session
+
+
+def test_active_goal_queues_untrusted_background_context_without_second_agent(monkeypatch):
+    captured, session = _setup(monkeypatch, [{"delta": "must not run"}])
+    queued = []
+
+    class GoalStore:
+        def get(self, owner, session_id):
+            return {"goal": {"status": "active"}}
+
+        def add_goal_background_context(self, owner, session_id, message, job_id):
+            queued.append((owner, session_id, message, job_id))
+
+    monkeypatch.setattr(chat_work_store, "store", GoalStore())
+    handled = asyncio.run(bg_monitor._run_followup({"id": "job-goal", "session_id": session.id}))
+    assert handled is True
+    assert captured["messages"] == []
+    assert captured["saves"] == 0
+    assert len(queued) == 1
+    owner, session_id, message, job_id = queued[0]
+    assert (owner, session_id, job_id) == ("test-owner", "test-session", "job-goal")
+    assert message["metadata"]["trusted"] is False
+    assert "UNTRUSTED SOURCE DATA" in message["content"]
 
 
 @pytest.mark.parametrize("event,status,reason", [

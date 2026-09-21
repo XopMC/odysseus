@@ -5265,10 +5265,20 @@ async def stream_agent_loop(
                     if not isinstance(item, dict) or not item.get("id") or item["id"] in _goal_guidance_seen:
                         continue
                     _goal_guidance_seen.add(item["id"])
-                    messages.append({
-                        "role": "user",
-                        "content": "Additional user guidance for the active Goal:\n" + str(item.get("text") or ""),
-                    })
+                    context_message = item.get("context_message")
+                    if isinstance(context_message, dict):
+                        # Background/tool output remains untrusted data and
+                        # must never inherit user-guidance authority.
+                        messages.append({
+                            "role": "user",
+                            "content": str(context_message.get("content") or ""),
+                            "metadata": dict(context_message.get("metadata") or {}),
+                        })
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": "Additional user guidance for the active Goal:\n" + str(item.get("text") or ""),
+                        })
                     _round_had_correction = True
             except Exception:
                 logger.exception("Failed to refresh active Goal guidance")

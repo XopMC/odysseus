@@ -384,6 +384,69 @@ class ChatWorkStore:
             db.flush()
             return {"goal": _public_goal(row), "guidance": item}
 
+    def add_goal_background_context(self, owner, session_id, context_message, job_id):
+        """Queue a completed background result under the active Goal lease.
+
+        The content stays explicitly untrusted and hidden from the visible
+        transcript.  The live loop consumes the guidance at its next round;
+        a later Goal attempt sees the same hidden durable message in history.
+        """
+        if not isinstance(context_message, dict) or context_message.get("role") != "user":
+            raise ValueError("Background context must be a user-role message object")
+        metadata = dict(context_message.get("metadata") or {})
+        if metadata.get("trusted") is not False:
+            raise ValueError("Background context must remain untrusted")
+        content = str(context_message.get("content") or "").strip()
+        if not content or "\0" in content:
+            raise ValueError("Background context must contain text")
+        if len(content) > 12000:
+            content = (
+                content[:6000]
+                + "\n[Background result excerpt; middle omitted. Full result remains in the job log.]\n"
+                + content[-6000:]
+            )
+        job_id = _clean_text(str(job_id or ""), "background job id", 200)
+        now = utcnow_naive()
+        with SessionLocal.begin() as db:
+            session = _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+            ).first()
+            if row is None or row.status not in {"active", "paused", "waiting_user"}:
+                raise WorkConflict("Goal is not available for background context")
+            guidance = dict(row.checkpoint or {}).get("guidance") or []
+            guidance = list(guidance) if isinstance(guidance, list) else []
+            item = {
+                "id": uuid.uuid4().hex,
+                "context_message": {"role": "user", "content": content, "metadata": metadata},
+                "source": "background_job",
+                "job_id": job_id,
+                "created_at": now.isoformat(),
+            }
+            guidance.append(item)
+            row.checkpoint = {**dict(row.checkpoint or {}), "guidance": guidance[-100:]}
+            row.revision += 1
+            hidden_metadata = {
+                **metadata,
+                "hidden": 1,
+                "hidden_from_user_view": True,
+                "bg_job_id": job_id,
+                "goal_background_context": True,
+                "guidance_id": item["id"],
+            }
+            db.add(ChatMessage(
+                id=uuid.uuid4().hex, session_id=session_id, role="user", content=content,
+                meta_data=json.dumps(hidden_metadata), timestamp=now,
+            ))
+            session.message_count = int(session.message_count or 0) + 1
+            session.last_message_at = now
+            self._event(
+                db, owner, session_id, "background_context", row.id, row.revision,
+                {"guidance_id": item["id"], "job_id": job_id},
+            )
+            db.flush()
+            return {"goal": _public_goal(row), "guidance": item}
+
     def update_goal(self, owner, session_id, progress, checkpoint=None, *, waiting_user=False):
         progress = _clean_text(progress, "goal progress", 12000)
         if checkpoint is not None and not isinstance(checkpoint, dict):
