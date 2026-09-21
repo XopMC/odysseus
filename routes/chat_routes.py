@@ -2725,12 +2725,12 @@ def setup_chat_routes(
                                     if active_goal:
                                         try:
                                             if failure_kind == "context_compaction":
-                                                active_goal = chat_work_store.update_goal(
+                                                active_goal = chat_work_store.record_goal_failure(
                                                     _user,
                                                     session,
                                                     "Context checkpoint failed; the server will retry automatically with the preserved ledger.",
                                                     {"reason": "context_compaction", "run_failure": terminal_metadata["failure"]},
-                                                    waiting_user=False,
+                                                    keep_active=True,
                                                 )
                                             else:
                                                 active_goal = chat_work_store.record_goal_failure(
@@ -2951,7 +2951,11 @@ def setup_chat_routes(
                     if current_goal.get("status") != "active":
                         return
                 failures = max(0, int(current_goal.get("failure_count") or 0))
-                await asyncio.sleep(min(4.0, 0.35 * (2 ** max(0, failures - 1))))
+                # Retriable checkpoint failures intentionally keep a Goal
+                # active. Bound their retry rate so a provider/policy problem
+                # cannot spin hundreds of model attempts while still allowing
+                # autonomous recovery when a summarizer route comes back.
+                await asyncio.sleep(min(60.0, 0.5 * (2 ** max(0, failures - 1))))
                 if agent_runs.is_active(session):
                     return
                 lease = chat_work_store.acquire_goal_lease(_user, session, ttl_seconds=90)

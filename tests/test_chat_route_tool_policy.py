@@ -144,7 +144,7 @@ def test_compaction_failure_retries_goal_without_fake_user_wait():
         '"Context checkpoint failed; the server will retry automatically with the preserved ledger."',
         1,
     )[1][:300]
-    assert "waiting_user=False" in branch
+    assert "keep_active=True" in branch
 
 
 # ── Functional tests of the disabled-tools logic ───────────────

@@ -5464,6 +5464,7 @@ async def stream_agent_loop(
 
         _before_context = estimate_tokens(messages)
         _compacted_messages, _compact_status = messages, "unchanged"
+        _compact_failure_detail = None
         _configured_telemetry = None
         if _efficiency_enabled("online_context_compact"):
             from src.context_compaction_economics import decide as _economic_compaction_decide
@@ -5527,7 +5528,12 @@ async def stream_agent_loop(
                 _working_limit = _configured_telemetry['trigger_messages']
                 _last_route_context_length = _configured_telemetry['window']
                 _route_context_lengths[(endpoint_url, model)] = _last_route_context_length
-            except ValueError:
+            except ValueError as exc:
+                _compact_failure_detail = str(exc)[:500]
+                logger.warning(
+                    "Configured context shaping failed: %s",
+                    _compact_failure_detail,
+                )
                 _compact_status = 'failed'
         elif not _context_profile and _compact_status != "compacted" and _before_context * _context_calibration >= _working_limit:
             _compacted_messages, _compact_status = await compact_working_context(
@@ -5593,6 +5599,7 @@ async def stream_agent_loop(
             _checkpoint_failure_event = {
                 "type": "context_compaction_failed",
                 "reason": _compact_status,
+                "detail": _compact_failure_detail,
                 "message": "Context checkpoint failed; stopping safely without discarding the conversation.",
             }
             yield f'data: {json.dumps(_checkpoint_failure_event)}\n\n'

@@ -195,6 +195,19 @@ def test_goal_model_failures_retry_then_wait_for_user(owned_chat):
     assert goal["status"] == "waiting_user"
 
 
+def test_goal_retriable_checkpoint_failure_stays_active_with_backoff_count(owned_chat):
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Keep the durable goal alive")
+    for expected in range(1, 7):
+        goal = store.record_goal_failure(
+            "alice", owned_chat, "Context checkpoint failed",
+            {"reason": "context_compaction"}, keep_active=True,
+        )
+        assert goal["failure_count"] == expected
+        assert goal["status"] == "active"
+    assert goal["checkpoint"]["reason"] == "context_compaction"
+
+
 def test_goal_tools_receive_the_validated_owner_and_session(owned_chat):
     store = ChatWorkStore()
     store.ensure_goal("alice", owned_chat, "Persist checkpoints")

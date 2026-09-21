@@ -408,7 +408,7 @@ class ChatWorkStore:
             db.flush()
             return _public_goal(row)
 
-    def record_goal_failure(self, owner, session_id, error, checkpoint=None):
+    def record_goal_failure(self, owner, session_id, error, checkpoint=None, *, keep_active=False):
         """Persist bounded transport/model retry state for the server controller."""
         error = _clean_text(error, "goal error", 2000)
         if checkpoint is not None and not isinstance(checkpoint, dict):
@@ -425,7 +425,7 @@ class ChatWorkStore:
             row.progress = "Model attempt failed; the server will retry automatically."
             if checkpoint is not None:
                 row.checkpoint = {**dict(row.checkpoint or {}), **checkpoint}
-            if row.failure_count >= 3:
+            if row.failure_count >= 3 and not keep_active:
                 row.status = "waiting_user"
                 row.progress = "The model endpoint failed repeatedly; user attention is required."
             else:
