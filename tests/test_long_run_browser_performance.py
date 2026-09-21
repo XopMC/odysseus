@@ -115,6 +115,12 @@ def test_subagent_live_updates_preserve_buttons_and_hidden_detail_stays_idle():
     assert "card?.classList.contains('expanded')" in refresh
 
 
+def test_context_popup_does_not_mislabel_active_run_as_manual_compaction():
+    source = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
+    assert "rows.push(['Run status', 'Active'])" in source
+    assert "rows.push(['Manual compact', 'Run active'])" not in source
+
+
 def test_streaming_turn_uses_containment_and_compositor_only_indicators():
     styles = (ROOT / "static/style.css").read_text(encoding="utf-8")
 

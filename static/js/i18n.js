@@ -229,6 +229,7 @@ const RU = Object.freeze({
   'Backend tokens':'Токены сервера модели', 'Estimate':'Оценка', 'Window model':'Модель окна контекста',
   'Messages':'Сообщения', 'Auto compact':'Автосжатие', 'Stored chat (est.)':'Сохранённый чат (оценка)',
   'Manual compact':'Ручное сжатие', 'Run active':'Задача выполняется',
+  'Run status':'Статус запуска', 'Active':'Активен',
   'Compacting':'Сжатие контекста', 'Compact failed':'Не удалось сжать контекст',
   'Settings':'Настройки', 'Interface language':'Язык интерфейса', 'Language':'Язык',
   'Language saved':'Язык сохранён', 'Saving language…':'Сохраняем язык…', 'Unable to save language':'Не удалось сохранить язык',

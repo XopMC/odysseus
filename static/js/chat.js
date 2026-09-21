@@ -228,7 +228,7 @@ import { bindUiText, t } from './i18n.js';
     if (d.context_status === 'working_checkpoint' && d.backend_measurement?.context_percent != null) {
       rows.push(['Last backend request', `${Number(d.backend_measurement.context_percent).toFixed(1)}%`]);
     }
-    if (d.active_run) rows.push(['Manual compact', 'Run active']);
+    if (d.active_run) rows.push(['Run status', 'Active']);
     if (d.saved_context_policy) {
       rows.push(['Threshold basis', d.threshold_basis === 'usable_input' ? 'Usable input budget' : 'Model window']);
       rows.push(['Settings apply', 'Next request']);
@@ -243,7 +243,7 @@ import { bindUiText, t } from './i18n.js';
       const b = document.createElement('span');
       b.textContent = value;
       b.title = value;
-      if (['Scope', 'Count source', 'Manual compact', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request'].includes(label)) {
+      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request'].includes(label)) {
         bindUiText(b, value);
         bindUiText(b, value, 'title');
       }
