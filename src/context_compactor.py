@@ -576,5 +576,6 @@ def _update_session_history(session, split_point: int, summary: str,
     session.context_checkpoint_count = covered_count
     from core import models as core_models
     persist_checkpoint = getattr(getattr(core_models, "_SESSION_MANAGER_INSTANCE", None), "persist_context_checkpoint", None)
-    if persist_checkpoint:
-        persist_checkpoint(session.id)
+    session_id = getattr(session, "id", None)
+    if persist_checkpoint and session_id:
+        persist_checkpoint(session_id)
