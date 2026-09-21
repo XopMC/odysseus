@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix24';
-import chatRenderer from './chatRenderer.js?v=20260921livefix24';
+import sessionModule from './sessions.js?v=20260921livefix25';
+import chatRenderer from './chatRenderer.js?v=20260921livefix25';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -845,7 +845,7 @@ import { bindUiText, t } from './i18n.js';
   function _getForegroundStreamState() {
     try {
       const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
-      return sid ? (_activeStreams.get(sid) || null) : null;
+      return sid ? (_activeStreams.get(sid) || _resumingStreams.get(sid) || null) : null;
     } catch (_) {
       return null;
     }
@@ -5312,6 +5312,14 @@ import { bindUiText, t } from './i18n.js';
     // Reserve before awaiting headers: multiple discovery/recovery callers
     // must never render the same replay twice.
     _resumingStreams.set(sessionId, subscription);
+    // A detached run is already active even while /resume is waiting to flush
+    // headers. Surface Stop immediately; otherwise a quiet model call leaves
+    // the composer looking idle until the first replay byte arrives.
+    _syncForegroundStreamGlobals();
+    const pendingResumeSubmitBtn = document.querySelector?.('.send-btn');
+    if (pendingResumeSubmitBtn && isCurrentView()) {
+      updateSubmitButton('streaming', pendingResumeSubmitBtn);
+    }
     const replayWatchdog = setInterval(() => {
       if (!isCurrentView() || Date.now() - subscription.lastActivity > 45000) {
         cancelResumedStream(sessionId, subscription);
@@ -5945,6 +5953,7 @@ import { bindUiText, t } from './i18n.js';
     } finally {
       clearInterval(replayWatchdog);
       if (_resumingStreams.get(sessionId) === subscription) _resumingStreams.delete(sessionId);
+      _syncForegroundStreamGlobals();
     }
   }
 
@@ -5957,6 +5966,7 @@ import { bindUiText, t } from './i18n.js';
     subscription.abortCtrl.abort();
     if (subscription.reader) subscription.reader.cancel().catch(() => {});
     if (_resumingStreams.get(sessionId) === subscription) _resumingStreams.delete(sessionId);
+    _syncForegroundStreamGlobals();
   }
 
   /**

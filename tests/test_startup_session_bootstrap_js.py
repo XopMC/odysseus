@@ -26,7 +26,7 @@ _IMPORT_REWRITES = {
     "import uiModule, { autoResize, styledPrompt } from './ui.js';": (
         "import uiModule, { autoResize, styledPrompt } from './ui.mjs';"
     ),
-    "import chatRenderer from './chatRenderer.js?v=20260921livefix24';": (
+    "import chatRenderer from './chatRenderer.js?v=20260921livefix25';": (
         "import chatRenderer from './chatRenderer.mjs';"
     ),
     "import { providerLogo } from './providers.js';": (

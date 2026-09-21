@@ -135,6 +135,24 @@ def test_subagent_detail_is_generation_fenced_incremental_and_bounded():
     assert "detailText.length > MAX_DETAIL_CHARS" in detail
 
 
+def test_pending_resume_exposes_stop_before_response_headers_arrive():
+    source = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
+    foreground = source.split("function _getForegroundStreamState", 1)[1].split(
+        "function _syncForegroundStreamGlobals", 1,
+    )[0]
+    resume = source.split("export async function resumeStream", 1)[1].split(
+        "export function cancelResumedStream", 1,
+    )[0]
+    cancel = source.split("export function cancelResumedStream", 1)[1].split(
+        "export async function checkBackgroundStreams", 1,
+    )[0]
+    assert "_activeStreams.get(sid) || _resumingStreams.get(sid)" in foreground
+    assert "_resumingStreams.set(sessionId, subscription);\n    // A detached run" in resume
+    assert "updateSubmitButton('streaming', pendingResumeSubmitBtn)" in resume
+    assert "_resumingStreams.delete(sessionId);\n      _syncForegroundStreamGlobals();" in resume
+    assert "_resumingStreams.delete(sessionId);\n    _syncForegroundStreamGlobals();" in cancel
+
+
 def test_context_popup_does_not_mislabel_active_run_as_manual_compaction():
     source = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
     assert "rows.push(['Run status', 'Active'])" in source
@@ -184,7 +202,7 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix24"
+    expected = "20260921livefix25"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"
