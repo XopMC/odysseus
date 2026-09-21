@@ -187,7 +187,6 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
   const root = document.documentElement;
   const chatBar = document.querySelector('.chat-input-bar');
   const attachStrip = document.getElementById('attach-strip');
-  const chatContainer = document.getElementById('chat-container');
   const _syncComposerClearance = () => {
     let top = window.innerHeight;
     for (const el of [attachStrip, chatBar]) {
@@ -204,12 +203,14 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
     if (chatBar) ro.observe(chatBar);
     if (attachStrip) ro.observe(attachStrip);
   }
-  if (chatContainer && typeof MutationObserver !== 'undefined') {
-    new MutationObserver(_syncComposerClearance).observe(chatContainer, {
-      attributes: true,
-      attributeFilter: ['class'],
-    });
-  }
+  // Do not measure from a MutationObserver callback. During long live runs
+  // WebKit delivers mutation records immediately after every streamed DOM
+  // commit; calling getBoundingClientRect() from that microtask forces a full
+  // synchronous layout of the entire (potentially huge) conversation. The
+  // elements that determine this value are already covered by ResizeObserver,
+  // while viewport changes are covered below. A chat-container class change
+  // that actually affects composer geometry necessarily resizes chatBar or the
+  // attachment strip and is therefore observed without a forced layout.
   if (chatBar) chatBar.addEventListener('transitionend', _syncComposerClearance);
   window.addEventListener('resize', _syncComposerClearance);
 }

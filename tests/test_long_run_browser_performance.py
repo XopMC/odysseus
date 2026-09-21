@@ -37,6 +37,17 @@ def test_live_autoscroll_does_not_poll_layout_on_every_animation_frame():
     assert "box.scrollTop = 2147483647" in implementation
 
 
+def test_live_dom_mutations_do_not_force_composer_layout_measurement():
+    source = (ROOT / "static/js/init.js").read_text(encoding="utf-8")
+    start = source.index("/* Keep minimized tool chips above the composer.")
+    end = source.index("/* ---- Resizable sidebar", start)
+    implementation = source[start:end]
+
+    assert "ResizeObserver(_syncComposerClearance)" in implementation
+    assert "window.addEventListener('resize', _syncComposerClearance)" in implementation
+    assert "new MutationObserver(_syncComposerClearance)" not in implementation
+
+
 def test_streaming_turn_uses_containment_and_compositor_only_indicators():
     styles = (ROOT / "static/style.css").read_text(encoding="utf-8")
 
