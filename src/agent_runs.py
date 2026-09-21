@@ -816,6 +816,13 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
                 "truncated": truncated,
             }
             row.meta_data = json.dumps(metadata, ensure_ascii=False)
+            # Bump the cheap Session revision used by message-count polling.
+            # The assistant row's timestamp is its event time and must remain
+            # stable; Session.updated_at is the correct cache invalidation key
+            # for terminal timeline/round metadata changes.
+            session_row = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if session_row is not None:
+                session_row.updated_at = datetime.utcnow()
             synced_message_id = str(row.id)
             synced_metadata = dict(metadata)
 

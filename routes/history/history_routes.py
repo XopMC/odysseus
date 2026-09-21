@@ -176,6 +176,19 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         tags=["history"],
         dependencies=[Depends(require_chat_api_token_scope)],
     )
+    # Long chats make the renderer-aware aggregate moderately expensive: it
+    # evaluates JSON metadata for every stored row. Cache it against the small
+    # denormalized Session revision tuple. Live run units are added separately
+    # below, so the badge remains live without rescanning thousands of rows on
+    # every three-second poll from every browser.
+    _rendered_totals_cache: Dict[str, tuple[tuple[Any, ...], tuple[int, int, int]]] = {}
+
+    def _session_count_signature(row: DbSession) -> tuple[Any, ...]:
+        return (
+            int(row.message_count or 0),
+            row.updated_at.isoformat() if row.updated_at else None,
+            row.last_message_at.isoformat() if row.last_message_at else None,
+        )
 
     def _reserve_message_uploads(
         request: Request,
@@ -353,11 +366,22 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         _verify_session_owner(request, session_id)
         db = SessionLocal()
         try:
-            if db.query(DbSession.id).filter(DbSession.id == session_id).first() is None:
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session is None:
                 raise HTTPException(404, f"Session '{session_id}' not found")
-            total, canonical_visible, rendered = _rendered_message_totals(db, session_id)
             from src import agent_runs
             run = agent_runs.describe_run(session_id)
+            signature = _session_count_signature(db_session)
+            cached = _rendered_totals_cache.get(session_id)
+            if cached is not None and cached[0] == signature:
+                total, canonical_visible, rendered = cached[1]
+            else:
+                total, canonical_visible, rendered = _rendered_message_totals(db, session_id)
+                if len(_rendered_totals_cache) >= 2048:
+                    _rendered_totals_cache.clear()
+                _rendered_totals_cache[session_id] = (
+                    signature, (total, canonical_visible, rendered),
+                )
             live_units = (
                 int(run.get("live_rendered_units") or 0)
                 if run and run.get("status") == "running" else 0

@@ -238,6 +238,35 @@ def test_message_count_endpoint_does_not_hydrate_latest_timeline(monkeypatch):
     engine.dispose()
 
 
+def test_message_count_reuses_aggregate_until_session_revision_changes(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=3)
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(object()))
+    client = TestClient(app)
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda _c, _u, statement, *_a: statements.append(statement))
+
+    assert client.get("/api/session/session-1/message-count").status_code == 200
+    assert client.get("/api/session/session-1/message-count").status_code == 200
+    aggregate_reads = [value for value in statements if "json_extract" in value.lower()]
+    assert len(aggregate_reads) == 1
+
+    db = db_factory()
+    try:
+        row = db.query(DbSession).filter(DbSession.id == "session-1").one()
+        row.updated_at = datetime(2026, 1, 1, 13, 0, 0)
+        db.commit()
+    finally:
+        db.close()
+    assert client.get("/api/session/session-1/message-count").status_code == 200
+    aggregate_reads = [value for value in statements if "json_extract" in value.lower()]
+    assert len(aggregate_reads) == 2
+    engine.dispose()
+
+
 def test_message_count_includes_unpersisted_live_rounds(monkeypatch):
     engine, db_factory = _database()
     _seed_session(db_factory, message_count=3)
