@@ -40,21 +40,43 @@ function render() {
   el('subagents-badge').textContent = String(active || rows.length);
   el('subagents-summary').textContent = `${active} ${t('subagents active')} · ${rows.length} ${t('subagents total')}`;
   const list = el('subagents-list');
-  list.replaceChildren();
+  const existing = new Map(
+    [...list.querySelectorAll(':scope > .subagent-row')]
+      .map(node => [node.dataset.childId, node])
+  );
+  const wanted = new Set(rows.map(row => String(row.child_id)));
+  for (const [childId, node] of existing) {
+    if (!wanted.has(childId)) { node.remove(); existing.delete(childId); }
+  }
+  const currentOrder = [...list.children].map(node => node.dataset.childId);
+  const nextOrder = rows.map(row => String(row.child_id));
+  const reorder = currentOrder.length !== nextOrder.length
+    || currentOrder.some((childId, index) => childId !== nextOrder[index]);
   for (const row of rows) {
-    const item = document.createElement('div'); item.className = 'subagent-row'; item.dataset.childId = row.child_id;
-    const main = document.createElement('div'); main.className = 'subagent-main';
-    const name = document.createElement('div'); name.className = 'subagent-name'; name.textContent = row.name || `Subagent ${row.ordinal || ''}`;
-    const model = document.createElement('div'); model.className = 'subagent-model'; model.textContent = row.model || '';
-    const objective = document.createElement('div'); objective.className = 'subagent-objective'; objective.textContent = row.objective || '';
-    const status = document.createElement('span'); status.className = `subagent-status ${row.status}`; status.textContent = t(`Subagent ${row.status}`);
-    main.append(name, model, objective, status);
-    const actions = document.createElement('div'); actions.className = 'subagent-actions';
-    const view = document.createElement('button'); view.type='button'; view.textContent=t('View'); view.dataset.action='view';
-    actions.appendChild(view);
-    if (activeStates.has(row.status)) { const stop=document.createElement('button'); stop.type='button'; stop.textContent=t('Stop'); stop.dataset.action='stop'; actions.appendChild(stop); }
-    else { const remove=document.createElement('button'); remove.type='button'; remove.textContent=t('Remove'); remove.dataset.action='remove'; actions.appendChild(remove); }
-    item.append(main, actions); list.appendChild(item);
+    const childId = String(row.child_id);
+    let item = existing.get(childId);
+    if (!item) {
+      item = document.createElement('div'); item.className = 'subagent-row'; item.dataset.childId = childId;
+      const main = document.createElement('div'); main.className = 'subagent-main';
+      for (const className of ['subagent-name', 'subagent-model', 'subagent-objective']) {
+        const node = document.createElement('div'); node.className = className; main.appendChild(node);
+      }
+      const status = document.createElement('span'); status.className = 'subagent-status'; main.appendChild(status);
+      const actions = document.createElement('div'); actions.className = 'subagent-actions';
+      const view = document.createElement('button'); view.type='button'; view.dataset.action='view'; actions.appendChild(view);
+      const secondary = document.createElement('button'); secondary.type='button'; secondary.dataset.secondary='true'; actions.appendChild(secondary);
+      item.append(main, actions); existing.set(childId, item);
+    }
+    item.querySelector('.subagent-name').textContent = row.name || `Subagent ${row.ordinal || ''}`;
+    item.querySelector('.subagent-model').textContent = row.model || '';
+    item.querySelector('.subagent-objective').textContent = row.objective || '';
+    const status = item.querySelector('.subagent-status'); status.className = `subagent-status ${row.status}`; status.textContent = t(`Subagent ${row.status}`);
+    const view = item.querySelector('button[data-action="view"]'); view.textContent = t('View');
+    const secondary = item.querySelector('button[data-secondary="true"]');
+    const secondaryAction = activeStates.has(row.status) ? 'stop' : 'remove';
+    secondary.dataset.action = secondaryAction;
+    secondary.textContent = t(secondaryAction === 'stop' ? 'Stop' : 'Remove');
+    if (!item.isConnected || reorder) list.appendChild(item);
   }
 }
 
@@ -111,9 +133,11 @@ async function refreshKeepStream(expected) {
   try {
     const data=await json(`${api}/api/chat/subagents/${encodeURIComponent(expected)}`);
     if (sessionId!==expected) return; rows=data.subagents||[]; render();
-    if (selectedId) {
+    const detail = el('subagent-detail');
+    const card = el('subagents-status');
+    if (selectedId && detail && !detail.hidden && card?.classList.contains('expanded')) {
       clearTimeout(detailTimer);
-      detailTimer = setTimeout(() => void showDetail(selectedId).catch(() => {}), 300);
+      detailTimer = setTimeout(() => void showDetail(selectedId).catch(() => {}), 800);
     }
   } catch (_) {}
 }

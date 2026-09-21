@@ -103,6 +103,18 @@ def test_explicit_thinking_collapse_survives_live_to_history_identity_change():
     assert "_setThinkingExpanded(content, toggle, header, false)" in markdown
 
 
+def test_subagent_live_updates_preserve_buttons_and_hidden_detail_stays_idle():
+    source = (ROOT / "static/js/chat-subagents.js").read_text(encoding="utf-8")
+    render = source.split("function render()", 1)[1].split("async function showDetail", 1)[0]
+    assert "replaceChildren" not in render
+    assert "const existing = new Map(" in render
+    assert "existing.get(childId)" in render
+    assert "if (!item.isConnected || reorder) list.appendChild(item);" in render
+    refresh = source.split("async function refreshKeepStream", 1)[1].split("function bind()", 1)[0]
+    assert "!detail.hidden" in refresh
+    assert "card?.classList.contains('expanded')" in refresh
+
+
 def test_streaming_turn_uses_containment_and_compositor_only_indicators():
     styles = (ROOT / "static/style.css").read_text(encoding="utf-8")
 
