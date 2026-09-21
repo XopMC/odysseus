@@ -31,6 +31,12 @@ function _queueIncrementalStreamRender(el, value, {render = text => text} = {}) 
 function _flushIncrementalStreamRender() {}
 function _cancelIncrementalStreamRender() {}
 function _cancelIncrementalStreamTree() {}
+// resumeStream now publishes its reserved reconnect state immediately so the
+// foreground Stop control is available before response headers arrive.  The
+// focused fallback harness does not construct the full composer UI; keep the
+// publication hook explicit here while the dedicated reconnect tests exercise
+// its real implementation.
+function _syncForegroundStreamGlobals() {}
 """
     return support + "\nasync function resumeStream" + body.rstrip()
 
