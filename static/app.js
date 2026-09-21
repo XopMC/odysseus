@@ -90,6 +90,25 @@ function _isForegroundChatBusy() {
     || (sendBtn && (sendBtn.title || '').toLowerCase().includes('stop'));
 }
 
+function _hasActiveGoalForGuidance() {
+  return window.chatWork?.getSnapshot?.()?.goal?.status === 'active';
+}
+
+function _submitBusyComposerInput(input, form) {
+  if (!input || !input.value || !input.value.trim()) return false;
+  // Active Goal input is durable guidance, not a browser-owned follow-up.
+  // Always let handleChatSubmit route it through /goal-guidance so Enter and
+  // the send button have identical behaviour on desktop and mobile.
+  if (_hasActiveGoalForGuidance()) {
+    _submitChatFormDirect(form);
+    return true;
+  }
+  if (chatModule?.queueStreamingComposerRequest?.()) return true;
+  window.__odysseusQueueStreamingSubmit = Date.now();
+  _submitChatFormDirect(form);
+  return true;
+}
+
 function _shouldQueueFromMobileEnter(e, input) {
   return e.key === 'Enter'
     && !e.shiftKey
@@ -121,13 +140,7 @@ function _submitMobileQueuedInput(input) {
   const last = Number(input.dataset.mobileQueueSubmitAt || 0);
   if (now - last < 300) return true;
   input.dataset.mobileQueueSubmitAt = String(now);
-  if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
-    return true;
-  }
-  window.__odysseusQueueStreamingSubmit = now;
-  const form = document.getElementById('chat-form');
-  _submitChatFormDirect(form);
-  return true;
+  return _submitBusyComposerInput(input, document.getElementById('chat-form'));
 }
 
 function _syncMobileEnterKeyHint(input) {
@@ -3571,10 +3584,8 @@ function initializeEventListeners() {
         const form = el('chat-form');
         if (form) {
           if (_isForegroundChatBusy() && textarea.value && textarea.value.trim()) {
-            if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
-              return;
-            }
-            window.__odysseusQueueStreamingSubmit = Date.now();
+            _submitBusyComposerInput(textarea, form);
+            return;
           }
           _submitChatFormDirect(form);
         }
@@ -4203,10 +4214,8 @@ function startOdysseusApp() {
           return;
         }
         if (_isForegroundChatBusy() && messageInput.value && messageInput.value.trim()) {
-          if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
-            return;
-          }
-          window.__odysseusQueueStreamingSubmit = Date.now();
+          _submitBusyComposerInput(messageInput, document.getElementById('chat-form'));
+          return;
         }
         _submitChatFormDirect(document.getElementById('chat-form'));
       }

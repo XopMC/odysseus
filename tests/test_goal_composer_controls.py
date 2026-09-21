@@ -56,6 +56,10 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert "additional guidance for the active goal" in chat
     assert "await window.chatWork.addGuidance(goalGuidance)" in chat
     assert "/goal-guidance" in work
+    assert "function _hasActiveGoalForGuidance()" in app
+    assert "if (_hasActiveGoalForGuidance())" in app
+    assert "_submitBusyComposerInput(textarea, form);" in app
+    assert "_submitBusyComposerInput(messageInput, document.getElementById('chat-form'));" in app
     assert "appendGoalGuidance" in chat and "appendGoalGuidance" in work
     assert "setTimeout(continueGoal, 350)" not in work
     assert "if (active) setPlanMode" not in app
