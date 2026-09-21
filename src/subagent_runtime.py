@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, Optional
 from src.database import ChatSubagentEvent, ChatSubagentRun, SessionLocal
 from src.harness_efficiency import CORE_AGENT_TOOLS
 from src.subagent_limits import MAX_ACTIVE_PER_MODEL
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -70,8 +71,12 @@ class SubagentRuntime:
             cutoff = datetime.fromtimestamp(time.time() - 90, tz=timezone.utc).replace(tzinfo=None)
             rows = db.query(ChatSubagentRun).filter(
                 ChatSubagentRun.status.in_(ACTIVE_STATUSES),
-                ChatSubagentRun.heartbeat_at.isnot(None),
-                ChatSubagentRun.heartbeat_at < cutoff,
+                or_(
+                    ChatSubagentRun.worker_id.is_(None),
+                    ChatSubagentRun.worker_id != self._worker_id,
+                    ChatSubagentRun.heartbeat_at.is_(None),
+                    ChatSubagentRun.heartbeat_at < cutoff,
+                ),
             ).all()
             for row in rows:
                 row.status = "interrupted"

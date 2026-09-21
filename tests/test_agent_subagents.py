@@ -1,14 +1,19 @@
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from src.agent_tools import model_interaction_tools as tools
 from src.tool_capabilities import ToolRunSecurityContext
 from src import tool_execution
+from core.database import Base
 from src.database import ChatSubagentEvent, ChatSubagentRun, Session, SessionLocal
-from src.subagent_runtime import CHILD_CORE_TOOLS, runtime
+from src.subagent_runtime import CHILD_CORE_TOOLS, SubagentRuntime, runtime
 
 
 def test_subagent_disabled_fails_before_model_dispatch(monkeypatch):
@@ -26,6 +31,30 @@ def test_child_runtime_has_stable_file_and_verification_tool_core():
         "edit_file", "apply_patch", "bash", "python", "read_tool_artifact",
         "publish_subagent_evidence", "manage_auto_research_lab", "todowrite",
     }
+
+
+def test_restart_fences_children_owned_by_the_previous_worker(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    store = sessionmaker(bind=engine)
+    monkeypatch.setattr("src.subagent_runtime.SessionLocal", store)
+    db = store()
+    db.add(Session(id="s", name="n", endpoint_url="u", model="m", owner="alice"))
+    db.commit()
+    db.add(ChatSubagentRun(
+        id="c" * 32, parent_session_id="s", owner="alice", ordinal=1,
+        name="Subagent 1", objective="check", assigned_context="", model="m",
+        endpoint_id="ep", status="running", slot=1, worker_id="previous-worker",
+        heartbeat_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    ))
+    db.commit(); db.close()
+    restarted = SubagentRuntime()
+    children = restarted.list("alice", "s")
+    assert children[0]["status"] == "interrupted"
+    db = store(); row = db.query(ChatSubagentRun).one()
+    assert row.slot is None
+    assert "restarted" in row.error.lower()
+    db.close()
 
 
 def test_same_model_subagent_is_bounded_and_has_stable_child_identity(monkeypatch):
