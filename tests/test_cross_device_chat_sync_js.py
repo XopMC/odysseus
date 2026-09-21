@@ -80,6 +80,9 @@ def test_cross_device_subscription_lifecycle(scenario):
         setInterval:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearInterval:noop,
         fetch:async(url,options={})=>{requests.push({url:String(url),options});
           if(scenario.startsWith('idle_')||scenario==='hidden_focus'){
+            if(String(url).includes('/message-count')){
+              return {ok:true,status:200,json:async()=>({rendered_total:remoteHistory.length,visible_total:remoteHistory.length,total:remoteHistory.length})};
+            }
             if(String(url).includes('/api/history/')){
               const limit=new URL(url).searchParams.get('limit');
               return {ok:true,json:async()=>({history:limit==='1'?remoteHistory.slice(-1):remoteHistory,model:'qwen',total:remoteHistory.length})};
