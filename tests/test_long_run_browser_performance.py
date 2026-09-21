@@ -30,18 +30,29 @@ def test_canvas_theme_keeps_30fps_with_bounded_pixel_and_allocation_cost():
     assert "visibleMessages" not in source
     assert "renderedRows" not in source
     assert "function _getBgCanvasDpr() { return 1; }" in source
-    assert source.count("desynchronized: true") == 7
+    assert source.count("desynchronized: true") == 6
     assert source.count("createLinearGradient") == 0
     assert "refreshEmberSprite(color)" in source
     assert "window.setTimeout(() =>" in source
-    assert source.count("_nextBgFrame(draw);") == 7  # one tail call per canvas effect
+    assert source.count("_nextBgFrame(draw);") == 6  # one tail call per remaining canvas effect
     assert "requestAnimationFrame(draw);" not in source
-    assert "theme.js?v=20260921livefix8" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+    assert "theme.js?v=20260921livefix9" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+
+
+def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
+    source = (ROOT / "static/js/theme.js").read_text(encoding="utf-8")
+    styles = (ROOT / "static/style.css").read_text(encoding="utf-8")
+
+    assert "synapse-canvas" not in source
+    assert "id = 'synapse-layer'" in source
+    assert "animation-name: synapse-pulse-x" in styles
+    assert "animation-name: synapse-pulse-y" in styles
+    assert "translate3d" in styles
 
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix8"
+    expected = "20260921livefix9"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"

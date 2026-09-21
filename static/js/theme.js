@@ -491,7 +491,7 @@ export function applyBgPattern(pattern) {
   const p = pattern || 'none';
   document.body.classList.remove(..._BG_CLASSES);
   // Clean up any canvas backgrounds
-  document.querySelectorAll('#synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
+  document.querySelectorAll('#synapse-layer, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
   if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
   // Hide sliders that do nothing on static patterns.
@@ -1579,92 +1579,22 @@ export function getCustomThemes() { return _loadCustomThemes(); }
 // ── Synapse background effect ──
 // Uses the CSS grid pattern as base, overlays fast-moving small light pulses on grid lines
 function _initSynapse() {
-  if (document.getElementById('synapse-canvas')) return;
-  const canvas = document.createElement('canvas');
-  canvas.id = 'synapse-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;contain:strict;transform:translateZ(0);';
-  // Decorative background effect — hide from assistive tech so screen readers
-  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
-  canvas.setAttribute('aria-hidden', 'true');
-  document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
-  const dpr = _getBgCanvasDpr();
+  if (document.getElementById('synapse-layer')) return;
+  const layer = document.createElement('div');
+  layer.id = 'synapse-layer';
+  layer.setAttribute('aria-hidden', 'true');
   const GRID = 24; // matches CSS grid size
   const MAX_PULSES = 20;
-  const SPEED_MIN = 2;
-  const SPEED_MAX = 22;
-  const TRAIL_LEN = 12; // pixels of trailing glow
-
-  let W, H, cols, rows, pulses = [];
-
-  function resize() {
-    W = window.innerWidth; H = window.innerHeight;
-    canvas.width = W * dpr; canvas.height = H * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    cols = Math.ceil(W / GRID); rows = Math.ceil(H / GRID);
+  for (let i = 0; i < MAX_PULSES; i++) {
+    const pulse = document.createElement('i');
+    const horizontal = Math.random() > 0.5;
+    pulse.className = `synapse-pulse ${horizontal ? 'horizontal' : 'vertical'}`;
+    pulse.style.setProperty('--synapse-line', `${Math.floor(Math.random() * 80) * GRID}px`);
+    pulse.style.setProperty('--synapse-duration', `${2.8 + Math.random() * 6.5}s`);
+    pulse.style.setProperty('--synapse-delay', `${-Math.random() * 9}s`);
+    layer.appendChild(pulse);
   }
-  resize();
-  const _onResize = () => resize();
-  window.addEventListener('resize', _onResize);
-
-  function getColor() { return _getEffectColor(); }
-
-  function spawnPulse() {
-    const speed = SPEED_MIN + Math.random() * (SPEED_MAX - SPEED_MIN);
-    if (Math.random() > 0.5) {
-      // Horizontal — pick a grid row
-      const row = Math.floor(Math.random() * (rows + 1));
-      pulses.push({ x: -TRAIL_LEN, y: row * GRID, dx: speed, dy: 0 });
-    } else {
-      // Vertical — pick a grid column
-      const col = Math.floor(Math.random() * (cols + 1));
-      pulses.push({ x: col * GRID, y: -TRAIL_LEN, dx: 0, dy: speed });
-    }
-  }
-
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-synapse')) {
-      window.removeEventListener('resize', _onResize);
-      canvas.remove();
-      return;
-    }
-    _nextBgFrame(draw);
-    ctx.clearRect(0, 0, W, H);
-    const c = getColor();
-
-    // Spawn
-    if (pulses.length < MAX_PULSES && Math.random() < 0.12) spawnPulse();
-
-    // Draw pulses as small bright dots with a short trail
-    for (let i = pulses.length - 1; i >= 0; i--) {
-      const p = pulses[i];
-      p.x += p.dx; p.y += p.dy;
-
-      // Off screen — remove
-      if (p.x > W + TRAIL_LEN || p.y > H + TRAIL_LEN) { pulses.splice(i, 1); continue; }
-
-      // Trail (line gradient fading behind the dot)
-      const tx = p.x - (p.dx > 0 ? TRAIL_LEN : 0);
-      const ty = p.y - (p.dy > 0 ? TRAIL_LEN : 0);
-      ctx.strokeStyle = c;
-      ctx.globalAlpha = 0.35;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(tx, ty);
-      ctx.lineTo(p.x, p.y);
-      ctx.stroke();
-
-      // Bright dot at head
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = c;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 1.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.globalAlpha = 1;
-  }
-  draw();
+  document.body.prepend(layer);
 }
 
 // ── Rain — thin vertical streaks falling ──

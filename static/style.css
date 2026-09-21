@@ -200,7 +200,7 @@ html {
 :root { --bg-effect-intensity: 1; }
 
 /* Canvas-based effects — single source of truth for intensity */
-#synapse-canvas, #rain-canvas, #constellations-canvas,
+#synapse-layer, #rain-canvas, #constellations-canvas,
 #perlin-flow-canvas, #petals-canvas, #sparkles-canvas,
 #embers-canvas {
   opacity: var(--bg-effect-intensity, 1);
@@ -211,10 +211,51 @@ body.bg-pattern-dots {
   background-size: 20px 20px; background-attachment: fixed;
 }
 body.bg-pattern-synapse {
-  /* CSS grid as base, canvas pulses overlay */
+  /* CSS grid as base, compositor-only pulses overlay */
   background-image: linear-gradient(color-mix(in srgb, var(--bg-effect-color, var(--fg)) calc(3.5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px),
     linear-gradient(90deg, color-mix(in srgb, var(--bg-effect-color, var(--fg)) calc(3.5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px);
   background-size: 24px 24px; background-attachment: fixed;
+}
+#synapse-layer {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+  contain: strict;
+  color: var(--bg-effect-color, var(--fg));
+}
+.synapse-pulse {
+  position: absolute;
+  display: block;
+  opacity: 0.55;
+  background: linear-gradient(90deg, transparent, currentColor 70%, currentColor);
+  will-change: transform;
+  animation-duration: var(--synapse-duration);
+  animation-delay: var(--synapse-delay);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.synapse-pulse.horizontal {
+  top: var(--synapse-line);
+  left: -18px;
+  width: 18px;
+  height: 1px;
+  animation-name: synapse-pulse-x;
+}
+.synapse-pulse.vertical {
+  top: -18px;
+  left: var(--synapse-line);
+  width: 1px;
+  height: 18px;
+  background: linear-gradient(180deg, transparent, currentColor 70%, currentColor);
+  animation-name: synapse-pulse-y;
+}
+@keyframes synapse-pulse-x {
+  to { transform: translate3d(calc(100vw + 36px), 0, 0); }
+}
+@keyframes synapse-pulse-y {
+  to { transform: translate3d(0, calc(100vh + 36px), 0); }
 }
 body.bg-pattern-perlin-flow,
 body.bg-pattern-petals,
