@@ -11,6 +11,12 @@ let collapseTimer = null;
 let refreshTimer = null;
 let detailTimer = null;
 let generation = 0;
+let detailGeneration = 0;
+let detailSession = '';
+let detailChild = '';
+let detailCursor = 0;
+let detailText = '';
+const MAX_DETAIL_CHARS = 250000;
 
 const el = id => document.getElementById(id);
 async function json(url, options = {}) {
@@ -81,11 +87,23 @@ function render() {
 }
 
 async function showDetail(childId) {
+  const expectedSession = sessionId;
+  const myGeneration = ++detailGeneration;
+  const reset = detailSession !== expectedSession || detailChild !== childId;
+  if (reset) {
+    detailSession = expectedSession; detailChild = childId;
+    detailCursor = 0; detailText = '';
+  }
   selectedId = childId;
-  const detail = await json(`${api}/api/chat/subagents/${encodeURIComponent(sessionId)}/${encodeURIComponent(childId)}`);
+  const detail = await json(`${api}/api/chat/subagents/${encodeURIComponent(expectedSession)}/${encodeURIComponent(childId)}`);
+  if (myGeneration !== detailGeneration || sessionId !== expectedSession || selectedId !== childId) return;
   el('subagent-detail').hidden = false;
   el('subagent-detail-title').textContent = `${detail.name} · ${detail.status}`;
-  const events = await json(`${api}/api/chat/subagents/${encodeURIComponent(sessionId)}/events?after=0&limit=1000&tail=true&child_id=${encodeURIComponent(childId)}`);
+  const events = await json(
+    `${api}/api/chat/subagents/${encodeURIComponent(expectedSession)}/events?after=${detailCursor}`
+    + `&limit=${reset ? 1000 : 200}&tail=${reset ? 'true' : 'false'}&child_id=${encodeURIComponent(childId)}`
+  );
+  if (myGeneration !== detailGeneration || sessionId !== expectedSession || selectedId !== childId) return;
   const text = [];
   for (const event of events.events || []) {
     if (event.kind === 'thinking') text.push(`[thinking] ${event.payload?.text || ''}`);
@@ -96,8 +114,18 @@ async function showDetail(childId) {
       const ask=event.payload.ask_user;
       text.push(`\n? ${ask.question || 'Input required'}\n${(ask.options || []).map(option => `- ${option.label || option}`).join('\n')}\n`);
     }
+    detailCursor = Math.max(detailCursor, Number(event.seq || event.id || 0));
   }
-  el('subagent-output').textContent = text.join('') || detail.result || detail.error || 'No output yet.';
+  const addition = text.join('');
+  if (addition) detailText += addition;
+  if (!detailText || detailText === 'No output yet.') {
+    detailText = detail.result || detail.error || 'No output yet.';
+  }
+  if (detailText.length > MAX_DETAIL_CHARS) {
+    detailText = `[older output omitted]\n${detailText.slice(-MAX_DETAIL_CHARS)}`;
+  }
+  const output = el('subagent-output');
+  if (output.textContent !== detailText) output.textContent = detailText;
   const messageRow = el('subagent-message')?.closest('.subagent-message-row');
   if (messageRow) messageRow.hidden = !activeStates.has(detail.status);
   armCollapse();
@@ -105,9 +133,11 @@ async function showDetail(childId) {
 
 async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   const myGeneration = ++generation;
+  ++detailGeneration;
   sessionId = id || '';
   if (source) { source.close(); source = null; }
   rows = []; cursor = 0; selectedId = '';
+  detailSession = ''; detailChild = ''; detailCursor = 0; detailText = '';
   if (el('subagent-detail')) el('subagent-detail').hidden = true;
   if (!sessionId) { render(); return; }
   try {

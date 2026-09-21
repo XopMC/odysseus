@@ -83,6 +83,33 @@ async def test_generic_settings_hide_and_preserve_retired_fallbacks(monkeypatch)
     assert store["tts_enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_subagent_model_limits_settings_validate_and_round_trip(monkeypatch):
+    store = dict(settings_mod.DEFAULT_SETTINGS)
+    monkeypatch.setattr(auth_routes, "migrate_from_settings", lambda: None)
+    monkeypatch.setattr(auth_routes, "_load_settings", lambda: dict(store))
+
+    def save_settings(updated):
+        store.clear(); store.update(updated)
+
+    monkeypatch.setattr(auth_routes, "_save_settings", save_settings)
+    router = auth_routes.setup_auth_routes(_AuthManager())
+    set_settings = _route(router, "/api/auth/settings", "POST")
+    value = {"worker-a@endpoint": 1, "worker-b@endpoint": 4}
+    response = await set_settings(_Request({"agent_subagent_model_limits": value}, admin=True))
+    assert response["agent_subagent_model_limits"] == value
+    assert store["agent_subagent_model_limits"] == value
+
+    invalid_values = [
+        [], "bad", {"worker": 0}, {"worker": 5}, {"worker": True},
+        {"bad\0key": 2}, {"": 2},
+    ]
+    for invalid in invalid_values:
+        with pytest.raises(Exception) as caught:
+            await set_settings(_Request({"agent_subagent_model_limits": invalid}, admin=True))
+        assert getattr(caught.value, "status_code", None) == 400
+
+
 def test_manage_settings_tombstones_legacy_fallback_key(monkeypatch):
     store = {
         **settings_mod.DEFAULT_SETTINGS,

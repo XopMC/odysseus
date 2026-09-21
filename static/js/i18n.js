@@ -289,6 +289,7 @@ const RU = Object.freeze({
   'Loading models…':'Загрузка моделей…', 'Failed to load models':'Не удалось загрузить модели',
   'No matching models':'Нет подходящих моделей', 'No models available':'Нет доступных моделей',
   'models selected':'моделей выбрано', 'Unavailable endpoint':'Недоступный endpoint',
+  'Max subagents':'Максимум сабагентов',
   'Goal pending':'Цель ожидает запуска',
   'Import local favorites':'Импортировать локальное избранное',
   'Failed to import local favorites':'Не удалось импортировать локальное избранное',

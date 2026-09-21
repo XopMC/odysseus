@@ -163,6 +163,18 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         allowed = [str(item).strip() for item in allowed if str(item).strip()]
     else:
         allowed = []
+    raw_model_limits = get_setting("agent_subagent_model_limits", {})
+    model_limits = {}
+    if isinstance(raw_model_limits, dict):
+        for raw_spec, raw_limit in raw_model_limits.items():
+            if not isinstance(raw_spec, str) or isinstance(raw_limit, bool):
+                continue
+            try:
+                parsed_limit = int(raw_limit)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= parsed_limit <= MAX_ACTIVE_PER_MODEL:
+                model_limits[raw_spec] = parsed_limit
 
     max_active_for_model = MAX_ACTIVE_PER_MODEL
     if mode == "same_model":
@@ -190,6 +202,7 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         state = ctx.get("subagent_state") if isinstance(ctx.get("subagent_state"), dict) else {}
         cache_key = (
             ctx.get("owner") or "", tuple(allowed),
+            tuple(sorted(model_limits.items())),
             str(ctx.get("current_model") or ""),
             str(ctx.get("current_endpoint_url") or "").rstrip("/"),
         )
@@ -209,10 +222,14 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
                     str(candidate_model) == str(ctx.get("current_model") or "")
                     and str(candidate_url).rstrip("/") == str(ctx.get("current_endpoint_url") or "").rstrip("/")
                 )
+                configured_capacity = model_limits.get(spec, MAX_ACTIVE_PER_MODEL)
                 pool.append({
                     "spec": spec, "url": candidate_url, "model": candidate_model,
                     "headers": candidate_headers or {}, "endpoint_id": endpoint_id,
-                    "capacity": MAX_ACTIVE_ON_PARENT_MODEL if is_parent else MAX_ACTIVE_PER_MODEL,
+                    "capacity": (
+                        min(configured_capacity, MAX_ACTIVE_ON_PARENT_MODEL)
+                        if is_parent else configured_capacity
+                    ),
                 })
             cached = {"key": cache_key, "pool": pool}
             state["_resolved_model_pool"] = cached

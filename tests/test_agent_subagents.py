@@ -162,6 +162,87 @@ def test_selected_models_are_allocated_breadth_first_before_reuse(monkeypatch):
     assert all(row["max_active_for_model"] == 4 for row in spawned)
 
 
+def test_selected_models_honor_individual_capacities(monkeypatch):
+    allowed = ["worker-a@endpoint-a", "worker-b@endpoint-b", "worker-c@endpoint-c"]
+    values = {
+        "agent_subagents_mode": "selected_models",
+        "agent_subagent_models": ",".join(allowed),
+        "agent_subagent_model_limits": {
+            allowed[0]: 1,
+            allowed[1]: 2,
+            allowed[2]: 4,
+        },
+    }
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: values.get(key, default))
+
+    def resolve(spec, owner=None):
+        model, endpoint = spec.rsplit("@", 1)
+        return f"http://{endpoint}/v1/chat/completions", model, {}
+
+    counts, spawned = {}, []
+
+    def active_count(**kwargs):
+        return counts.get((kwargs["model"], kwargs["endpoint_id"]), 0)
+
+    async def spawn(**kwargs):
+        key = (kwargs["model"], kwargs["endpoint_id"])
+        counts[key] = counts.get(key, 0) + 1
+        spawned.append(kwargs)
+        return {"child_id": str(len(spawned)), "model": kwargs["model"],
+                "status": "queued", "exit_code": 0}
+
+    monkeypatch.setattr("src.ai_interaction._resolve_model", resolve)
+    monkeypatch.setattr("src.subagent_runtime.runtime.active_count", active_count)
+    monkeypatch.setattr("src.subagent_runtime.runtime.spawn", spawn)
+    ctx = {"owner": "alice", "session_id": "s1", "subagent_state": {},
+           "current_endpoint_url": "http://parent/v1/chat/completions",
+           "current_model": "parent"}
+
+    async def scenario():
+        for idx in range(7):
+            result = await tools.delegate_subagent(json.dumps({
+                "objective": f"Task {idx}", "model": "auto",
+            }), ctx)
+            assert result["exit_code"] == 0
+
+    asyncio.run(scenario())
+    assert [row["model"] for row in spawned] == [
+        "worker-a", "worker-b", "worker-c", "worker-b",
+        "worker-c", "worker-c", "worker-c",
+    ]
+    assert [row["max_active_for_model"] for row in spawned] == [1, 2, 4, 2, 4, 4, 4]
+
+
+def test_selected_parent_capacity_is_clamped_and_cache_tracks_limit_changes(monkeypatch):
+    spec = "parent@endpoint-parent"
+    values = {
+        "agent_subagents_mode": "selected_models",
+        "agent_subagent_models": spec,
+        "agent_subagent_model_limits": {spec: 4},
+    }
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: values.get(key, default))
+    monkeypatch.setattr("src.ai_interaction._resolve_model", lambda _spec, owner=None: (
+        "http://endpoint-parent/v1/chat/completions", "parent", {},
+    ))
+    captured = []
+    monkeypatch.setattr("src.subagent_runtime.runtime.active_count", lambda **kwargs: 0)
+
+    async def spawn(**kwargs):
+        captured.append(kwargs)
+        return {"child_id": str(len(captured)), "model": kwargs["model"],
+                "status": "queued", "exit_code": 0}
+
+    monkeypatch.setattr("src.subagent_runtime.runtime.spawn", spawn)
+    state = {}
+    ctx = {"owner": "alice", "session_id": "s1", "subagent_state": state,
+           "current_endpoint_url": "http://endpoint-parent/v1/chat/completions",
+           "current_model": "parent"}
+    asyncio.run(tools.delegate_subagent(json.dumps({"objective": "one", "model": "auto"}), ctx))
+    values["agent_subagent_model_limits"] = {spec: 1}
+    asyncio.run(tools.delegate_subagent(json.dumps({"objective": "two", "model": "auto"}), ctx))
+    assert [row["max_active_for_model"] for row in captured] == [3, 1]
+
+
 def test_model_claimed_pin_cannot_bypass_breadth_first_allocation(monkeypatch):
     allowed = [f"worker-{idx}@endpoint-{idx}" for idx in range(1, 4)]
     values = {
@@ -311,6 +392,8 @@ def test_subagent_settings_and_timeline_contract_are_wired():
     assert 'id="subagents-status"' in html
     assert "settingsModule.open('tools')" in app
     assert "agent_subagents_mode" in settings and "agent_subagent_models" in settings
+    assert "agent_subagent_model_limits" in settings
+    assert "subagent-model-limit" in settings and "subagent-model-limit" in style
     assert "/api/team/models?refresh=true" in settings
     assert "model) + '@' + String(endpointKey)" in settings
     assert "Never use create_session for subagents" in loop

@@ -9,6 +9,7 @@ let eventSource = null;
 let eventSourceSession = '';
 let eventReconnectTimer = null;
 let collapseTimer = null;
+let refreshGeneration = 0;
 
 const el = id => document.getElementById(id);
 const json = async (url, options = {}) => {
@@ -116,10 +117,25 @@ function renderGoal() {
 function render() { renderPlan(); renderGoal(); }
 
 async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
-  sessionId = id || '';
-  if (!sessionId) { closeEventStream(); snapshot = { plan: null, goal: null, cursor: 0 }; render(); return snapshot; }
-  try { snapshot = await json(`${api}/api/chat/work/${encodeURIComponent(sessionId)}`); }
-  catch (error) { if (error.message !== 'Chat not found') console.warn('[chat-work]', error); }
+  const targetSession = id || '';
+  const myGeneration = ++refreshGeneration;
+  const switched = targetSession !== sessionId;
+  sessionId = targetSession;
+  if (switched) {
+    closeEventStream();
+    snapshot = { plan: null, goal: null, cursor: 0 };
+    render();
+  }
+  if (!targetSession) return snapshot;
+  try {
+    const next = await json(`${api}/api/chat/work/${encodeURIComponent(targetSession)}`);
+    if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
+    snapshot = next;
+  } catch (error) {
+    if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
+    if (error.message !== 'Chat not found') console.warn('[chat-work]', error);
+  }
+  if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
   render();
   connectEventStream();
   return snapshot;

@@ -814,6 +814,24 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             if key == "agent_subagent_models":
                 if not isinstance(val, str) or len(val) > 12000 or "\0" in val:
                     raise HTTPException(400, "Invalid agent subagent model list")
+            if key == "agent_subagent_model_limits":
+                if not isinstance(val, dict) or len(val) > 256:
+                    raise HTTPException(400, "Invalid agent subagent model limits")
+                normalized_limits = {}
+                for raw_spec, raw_limit in val.items():
+                    if (
+                        not isinstance(raw_spec, str)
+                        or not raw_spec
+                        or len(raw_spec) > 1000
+                        or "\0" in raw_spec
+                    ):
+                        raise HTTPException(400, "Invalid subagent model limit key")
+                    if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+                        raise HTTPException(400, "Subagent model limits must be integers")
+                    if not 1 <= raw_limit <= 4:
+                        raise HTTPException(400, "Subagent model limits must be between 1 and 4")
+                    normalized_limits[raw_spec] = raw_limit
+                val = normalized_limits
             if key == "agent_efficiency_profile" and val not in {"off", "performance", "efficiency"}:
                 raise HTTPException(400, "Invalid agent efficiency profile")
             if key == "agent_cache_write_read_ratio":

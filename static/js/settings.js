@@ -1540,7 +1540,18 @@ async function initAgentSettings() {
   if (!toolsInput) return;
 
   var selectedSubagentModels = new Set();
+  var subagentModelLimits = {};
   var subagentInventory = [];
+
+  function setSubagentModelLimits(raw) {
+    subagentModelLimits = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    Object.entries(raw).forEach(function(entry) {
+      var spec = String(entry[0] || '');
+      var limit = parseInt(entry[1], 10);
+      if (spec && limit >= 1 && limit <= 4) subagentModelLimits[spec] = limit;
+    });
+  }
 
   function setSelectedModels(raw) {
     selectedSubagentModels = new Set(String(raw || '').split(',').map(function(item) {
@@ -1634,10 +1645,29 @@ async function initAgentSettings() {
       endpoint.className = 'subagent-model-option-endpoint';
       endpoint.textContent = row.endpointName + ' · ' + row.endpointId;
       text.append(name, endpoint);
-      label.append(checkbox, text);
+      var limit = document.createElement('select');
+      limit.className = 'subagent-model-limit';
+      limit.setAttribute('aria-label', t('Max subagents') + ': ' + row.model);
+      limit.title = t('Max subagents');
+      [1, 2, 3, 4].forEach(function(value) {
+        var option = document.createElement('option');
+        option.value = String(value);
+        option.textContent = String(value);
+        limit.appendChild(option);
+      });
+      limit.value = String(subagentModelLimits[row.spec] || 4);
+      limit.disabled = !checkbox.checked;
+      limit.addEventListener('click', function(event) { event.stopPropagation(); });
+      limit.addEventListener('change', function(event) {
+        event.stopPropagation();
+        subagentModelLimits[row.spec] = Math.max(1, Math.min(4, parseInt(limit.value, 10) || 4));
+        save();
+      });
+      label.append(checkbox, text, limit);
       checkbox.addEventListener('change', function() {
         if (checkbox.checked) selectedSubagentModels.add(row.spec);
         else selectedSubagentModels.delete(row.spec);
+        limit.disabled = !checkbox.checked;
         if (subagentModels) subagentModels.value = Array.from(selectedSubagentModels).join(',');
         updateSelectedModelCount();
         save();
@@ -1694,6 +1724,7 @@ async function initAgentSettings() {
     if (reducerEndpoint) reducerEndpoint.value = settings.evidence_reducer_endpoint_id || '';
     if (reducerModel) reducerModel.value = settings.evidence_reducer_model || '';
     setSelectedModels(settings.agent_subagent_models || '');
+    setSubagentModelLimits(settings.agent_subagent_model_limits || {});
     if (subagentModelsRow) subagentModelsRow.hidden = subagentMode?.value !== 'selected_models';
   } catch (e) {}
 
@@ -1726,7 +1757,15 @@ async function initAgentSettings() {
     if (cacheRatio) payload.agent_cache_write_read_ratio = Number(cacheRatio.value || 12.5);
     if (reducerEndpoint) payload.evidence_reducer_endpoint_id = reducerEndpoint.value.trim();
     if (reducerModel) payload.evidence_reducer_model = reducerModel.value.trim();
-    if (subagentModels) payload.agent_subagent_models = Array.from(selectedSubagentModels).join(',');
+    if (subagentModels) {
+      payload.agent_subagent_models = Array.from(selectedSubagentModels).join(',');
+      payload.agent_subagent_model_limits = {};
+      selectedSubagentModels.forEach(function(spec) {
+        payload.agent_subagent_model_limits[spec] = Math.max(
+          1, Math.min(4, parseInt(subagentModelLimits[spec], 10) || 4)
+        );
+      });
+    }
     try {
       await _postSettings(payload);
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +

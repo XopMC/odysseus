@@ -115,6 +115,26 @@ def test_subagent_live_updates_preserve_buttons_and_hidden_detail_stays_idle():
     assert "card?.classList.contains('expanded')" in refresh
 
 
+def test_goal_plan_refresh_fences_late_responses_from_old_sessions():
+    source = (ROOT / "static/js/chat-work.js").read_text(encoding="utf-8")
+    refresh = source.split("async function refresh", 1)[1].split("function handleEvent", 1)[0]
+    assert "const myGeneration = ++refreshGeneration" in refresh
+    assert "myGeneration !== refreshGeneration || sessionId !== targetSession" in refresh
+    assert "closeEventStream();" in refresh
+    assert "snapshot = { plan: null, goal: null, cursor: 0 };" in refresh
+
+
+def test_subagent_detail_is_generation_fenced_incremental_and_bounded():
+    source = (ROOT / "static/js/chat-subagents.js").read_text(encoding="utf-8")
+    detail = source.split("async function showDetail", 1)[1].split("async function refresh", 1)[0]
+    assert "const myGeneration = ++detailGeneration" in detail
+    assert "sessionId !== expectedSession || selectedId !== childId" in detail
+    assert "after=${detailCursor}" in detail
+    assert "reset ? 1000 : 200" in detail
+    assert "if (output.textContent !== detailText)" in detail
+    assert "detailText.length > MAX_DETAIL_CHARS" in detail
+
+
 def test_context_popup_does_not_mislabel_active_run_as_manual_compaction():
     source = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
     assert "rows.push(['Run status', 'Active'])" in source
@@ -164,7 +184,7 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix23"
+    expected = "20260921livefix24"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"

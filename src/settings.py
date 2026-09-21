@@ -116,6 +116,9 @@ DEFAULT_SETTINGS = {
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
     "agent_subagents_mode": "off",  # off | same_model | selected_models
     "agent_subagent_models": "",  # comma-separated exact model or model@endpoint names
+    # Per exact selected model@endpoint capacity. Missing entries retain the
+    # legacy limit (4, or 3 when the route is also the active parent model).
+    "agent_subagent_model_limits": {},
     # Harness efficiency: performance enables only deterministic/local
     # mechanisms; efficiency additionally enables reducer + proactive compact.
     "agent_efficiency_profile": "performance",  # off | performance | efficiency
