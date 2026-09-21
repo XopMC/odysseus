@@ -32,6 +32,7 @@ function renderPlan() {
   const draftEnabled = !!document.getElementById('plan-toggle')?.checked;
   const plan = snapshot.plan;
   node.hidden = plan?.status === 'cancelled' || (!draftEnabled && !plan);
+  if (node.hidden) el('subagents-status')?.style.removeProperty('top');
   if (plan?.status === 'cancelled') {
     window.__odysseusSetPlanMode?.(false);
     return;
@@ -228,7 +229,24 @@ function armCollapse(node) {
   collapseTimer = setTimeout(() => {
     node.classList.remove('expanded');
     node.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded', 'false');
+    if (node.id === 'plan-mode-status') {
+      el('subagents-status')?.style.removeProperty('top');
+    }
   }, 4000);
+}
+
+function placeSubagentsBelowPlan(plan, expanded) {
+  const subagents = el('subagents-status');
+  if (!subagents) return;
+  if (!expanded) {
+    subagents.style.removeProperty('top');
+    return;
+  }
+  requestAnimationFrame(() => {
+    if (!plan.classList.contains('expanded') || subagents.hidden) return;
+    const bottom = plan.getBoundingClientRect().bottom;
+    subagents.style.top = `${Math.ceil(bottom + 8)}px`;
+  });
 }
 
 async function pollEvents() {
@@ -302,6 +320,7 @@ function bind() {
     toggle?.addEventListener('click', () => {
       const open = node.classList.toggle('expanded');
       toggle.setAttribute('aria-expanded', String(open));
+      if (node.id === 'plan-mode-status') placeSubagentsBelowPlan(node, open);
       if (open) {
         const subagents = document.getElementById('subagents-status');
         subagents?.classList.remove('expanded');

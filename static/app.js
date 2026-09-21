@@ -24,8 +24,8 @@ import {
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260921livefix15';
 import sessionModule from './js/sessions.js?v=20260921livefix15';
-import chatWork from './js/chat-work.js?v=20260921livefix15';
-import chatSubagents from './js/chat-subagents.js?v=20260921livefix15';
+import chatWork from './js/chat-work.js?v=20260921livefix17';
+import chatSubagents from './js/chat-subagents.js?v=20260921livefix17';
 import accessModeModule from './js/accessMode.js?v=20260921livefix15';
 import projectsModule from './js/projects.js?v=20260915projects1';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260921livefix15';
@@ -3173,6 +3173,14 @@ function initializeEventListeners() {
       dock.style.left = leftPx + 'px';
       dock.style.right = rightPx + 'px';
     }
+    let _dockOffsetRaf = 0;
+    const scheduleDockOffset = () => {
+      if (_dockOffsetRaf) return;
+      _dockOffsetRaf = requestAnimationFrame(() => {
+        _dockOffsetRaf = 0;
+        updateDockOffset();
+      });
+    };
     updateDockOffset();
     // Recompute when sidebar resizes, collapses, or moves sides
     if (window.ResizeObserver) {
@@ -3184,12 +3192,12 @@ function initializeEventListeners() {
     }
     window.addEventListener('resize', updateDockOffset);
     // Side-flip / collapse toggles class names on body or sidebar
-    new MutationObserver(updateDockOffset).observe(document.body, {
+    new MutationObserver(scheduleDockOffset).observe(document.body, {
       attributes: true, attributeFilter: ['class'],
     });
     const sbEl = document.getElementById('sidebar');
     if (sbEl) {
-      new MutationObserver(updateDockOffset).observe(sbEl, {
+      new MutationObserver(scheduleDockOffset).observe(sbEl, {
         attributes: true, attributeFilter: ['class', 'style'],
       });
     }

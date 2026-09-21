@@ -441,7 +441,15 @@ function _applyDockInternal(modal, side, dockClass) {
         setTimeout(_doAnchor, 250);
         setTimeout(_doAnchor, 500);
       };
-      const navObs = new MutationObserver(reanchor);
+      let reanchorRaf = 0;
+      const scheduleReanchor = () => {
+        if (reanchorRaf) return;
+        reanchorRaf = requestAnimationFrame(() => {
+          reanchorRaf = 0;
+          reanchor();
+        });
+      };
+      const navObs = new MutationObserver(scheduleReanchor);
       if (sidebar) navObs.observe(sidebar, { attributes: true, attributeFilter: ['class', 'style'] });
       // Only react to doc-view toggling — NOT to every body attribute mutation.
       // Listening broadly caused thrashing last time and crashed the tab.
@@ -450,7 +458,7 @@ function _applyDockInternal(modal, side, dockClass) {
         const cur = document.body.classList.contains('doc-view');
         if (cur !== _lastDocView) {
           _lastDocView = cur;
-          reanchor();
+          scheduleReanchor();
           // Rebind the resize observer — the doc pane gets created/destroyed
           // when doc-view flips, so the previous target may be stale.
           _bindDocResizeObs();
@@ -973,8 +981,6 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     });
   }
 
-  new MutationObserver(_positionEdgeDockResizeHandles).observe(document.body, { attributes: true, attributeFilter: ['class'] });
-  new MutationObserver(_positionEdgeDockResizeHandles).observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
   let raf = 0;
   const schedulePosition = () => {
     if (raf) return;
@@ -983,6 +989,11 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       _positionEdgeDockResizeHandles();
     });
   };
+  // Body/root attributes are also changed by sidebar, composer and dock UI.
+  // MutationObserver runs before layout; never measure dock rectangles in that
+  // microtask. One rAF covers all mutations in the same UI commit.
+  new MutationObserver(schedulePosition).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  new MutationObserver(schedulePosition).observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
   new MutationObserver(schedulePosition).observe(document.body, { childList: true });
   window.addEventListener('resize', _positionEdgeDockResizeHandles);
   window.addEventListener('odysseus:modal-opened', _positionEdgeDockResizeHandles);
@@ -1072,8 +1083,16 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
   });
 
   document.body.appendChild(stripe);
-  new MutationObserver(_position).observe(document.body, { attributes: true, attributeFilter: ['class'] });
-  new MutationObserver(_position).observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
+  let positionRaf = 0;
+  const scheduleSplitPosition = () => {
+    if (positionRaf) return;
+    positionRaf = requestAnimationFrame(() => {
+      positionRaf = 0;
+      _position();
+    });
+  };
+  new MutationObserver(scheduleSplitPosition).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  new MutationObserver(scheduleSplitPosition).observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
   window.addEventListener('resize', _position);
   _position();
 })();

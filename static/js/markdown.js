@@ -1032,16 +1032,17 @@ export default markdownModule;
 // reload. LocalStorage holds a Set of expanded hashes; we observe the chat
 // history and re-expand matching sections as they're inserted.
 const THINK_EXPANDED_KEY = 'odysseus-thinking-expanded';
-function _loadExpandedSet() {
-  try { return new Set(JSON.parse(localStorage.getItem(THINK_EXPANDED_KEY) || '[]')); }
+const THINK_COLLAPSED_KEY = 'odysseus-thinking-collapsed';
+function _loadThinkingSet(key) {
+  try { return new Set(JSON.parse(localStorage.getItem(key) || '[]')); }
   catch { return new Set(); }
 }
-function _saveExpandedSet(set) {
+function _saveThinkingSet(key, set) {
   try {
     const arr = [...set];
     // Bound storage growth — keep the most recent 200 entries.
     if (arr.length > 200) arr.splice(0, arr.length - 200);
-    localStorage.setItem(THINK_EXPANDED_KEY, JSON.stringify(arr));
+    localStorage.setItem(key, JSON.stringify(arr));
   } catch {}
 }
 function _hashThinkingContent(el) {
@@ -1054,9 +1055,10 @@ function _hashThinkingContent(el) {
   }
   return String(h);
 }
-function _thinkingPersistenceKey(content) {
+function _thinkingPersistenceKeys(content) {
   const stable = content?.closest?.('.thinking-section')?.dataset?.thinkingKey;
-  return stable || _hashThinkingContent(content);
+  const contentHash = _hashThinkingContent(content);
+  return [...new Set([stable, contentHash].filter(Boolean))];
 }
 function _setThinkingExpanded(content, toggle, header, expanded) {
   if (!content || !toggle) return;
@@ -1085,12 +1087,16 @@ document.addEventListener('click', function(e) {
   _setThinkingExpanded(content, toggle, header, willExpand);
 
   // Persist by content hash so the choice survives a refresh.
-  const hash = _thinkingPersistenceKey(content);
-  if (!hash) return;
-  const set = _loadExpandedSet();
-  if (willExpand) set.add(hash);
-  else set.delete(hash);
-  _saveExpandedSet(set);
+  const keys = _thinkingPersistenceKeys(content);
+  if (!keys.length) return;
+  const expanded = _loadThinkingSet(THINK_EXPANDED_KEY);
+  const collapsed = _loadThinkingSet(THINK_COLLAPSED_KEY);
+  for (const key of keys) {
+    if (willExpand) { expanded.add(key); collapsed.delete(key); }
+    else { expanded.delete(key); collapsed.add(key); }
+  }
+  _saveThinkingSet(THINK_EXPANDED_KEY, expanded);
+  _saveThinkingSet(THINK_COLLAPSED_KEY, collapsed);
 });
 
 // Watch the chat history; whenever a thinking section appears, expand it if
@@ -1104,17 +1110,21 @@ document.addEventListener('click', function(e) {
       ? [root]
       : [...root.querySelectorAll('.thinking-section')];
     if (!sections.length) return;
-    const set = _loadExpandedSet();
-    if (!set.size) return;
+    const expanded = _loadThinkingSet(THINK_EXPANDED_KEY);
+    const collapsed = _loadThinkingSet(THINK_COLLAPSED_KEY);
+    if (!expanded.size && !collapsed.size) return;
     for (const sec of sections) {
       const content = sec.querySelector('.thinking-content');
       if (!content) continue;
-      if (content.classList.contains('expanded')) continue;
-      const hash = _thinkingPersistenceKey(content);
-      if (!hash || !set.has(hash)) continue;
+      const keys = _thinkingPersistenceKeys(content);
+      if (!keys.length) continue;
       const header = sec.querySelector('.thinking-header[data-thinking-id]');
       const toggle = sec.querySelector('.thinking-toggle');
-      _setThinkingExpanded(content, toggle, header, true);
+      if (keys.some(key => collapsed.has(key))) {
+        _setThinkingExpanded(content, toggle, header, false);
+      } else if (keys.some(key => expanded.has(key))) {
+        _setThinkingExpanded(content, toggle, header, true);
+      }
     }
   };
   const start = () => {

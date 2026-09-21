@@ -48,6 +48,61 @@ def test_live_dom_mutations_do_not_force_composer_layout_measurement():
     assert "new MutationObserver(_syncComposerClearance)" not in implementation
 
 
+def test_live_history_mutation_observer_defers_scroll_layout_and_never_reanchors_composer():
+    source = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    start = source.index("const container = document.getElementById('chat-history');")
+    end = source.index("</script>", start)
+    implementation = source[start:end]
+    update = implementation[implementation.index("function update()"):
+                            implementation.index("let _scrollRaf")]
+
+    assert "new MutationObserver(scheduleUpdate)" in implementation
+    assert "requestAnimationFrame(() =>" in implementation
+    assert "reposition();" not in update
+    assert "new MutationObserver(update)" not in implementation
+    assert "geometryObserver.observe(attachStrip)" in implementation
+    assert "geometryObserver.observe(workStatusRow)" in implementation
+
+
+def test_attribute_observers_defer_geometry_reads_until_animation_frame():
+    init = (ROOT / "static/js/init.js").read_text(encoding="utf-8")
+    app = (ROOT / "static/app.js").read_text(encoding="utf-8")
+    snap = (ROOT / "static/js/modalSnap.js").read_text(encoding="utf-8")
+
+    assert "new MutationObserver(_scheduleSync)" in init
+    assert "new MutationObserver(_sync).observe(sidebar" not in init
+    assert "new MutationObserver(_sync).observe(rail" not in init
+    assert "new MutationObserver(scheduleDockOffset)" in app
+    assert "new MutationObserver(updateDockOffset)" not in app
+    assert "new MutationObserver(schedulePosition).observe(document.documentElement" in snap
+    assert "new MutationObserver(_positionEdgeDockResizeHandles).observe" not in snap
+    assert "new MutationObserver(scheduleSplitPosition).observe(document.documentElement" in snap
+    assert "new MutationObserver(_position).observe" not in snap
+    assert "const navObs = new MutationObserver(scheduleReanchor)" in snap
+
+
+def test_plan_popover_reflows_subagents_button_instead_of_covering_it():
+    work = (ROOT / "static/js/chat-work.js").read_text(encoding="utf-8")
+    subagents = (ROOT / "static/js/chat-subagents.js").read_text(encoding="utf-8")
+
+    assert "function placeSubagentsBelowPlan" in work
+    assert "plan.getBoundingClientRect().bottom" in work
+    assert "subagents.style.top" in work
+    assert "placeSubagentsBelowPlan(node, open)" in work
+    assert "card.style.removeProperty('top')" in subagents
+
+
+def test_explicit_thinking_collapse_survives_live_to_history_identity_change():
+    markdown = (ROOT / "static/js/markdown.js").read_text(encoding="utf-8")
+
+    assert "const THINK_COLLAPSED_KEY = 'odysseus-thinking-collapsed'" in markdown
+    assert "function _thinkingPersistenceKeys(content)" in markdown
+    assert "[stable, contentHash].filter(Boolean)" in markdown
+    assert "collapsed.add(key)" in markdown
+    assert "keys.some(key => collapsed.has(key))" in markdown
+    assert "_setThinkingExpanded(content, toggle, header, false)" in markdown
+
+
 def test_streaming_turn_uses_containment_and_compositor_only_indicators():
     styles = (ROOT / "static/style.css").read_text(encoding="utf-8")
 

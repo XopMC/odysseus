@@ -163,6 +163,14 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
       root.style.setProperty('--sidebar-w', sw + 'px');
     }
   };
+  let _syncRaf = 0;
+  const _scheduleSync = () => {
+    if (_syncRaf) return;
+    _syncRaf = requestAnimationFrame(() => {
+      _syncRaf = 0;
+      _sync();
+    });
+  };
   _sync();
   if (typeof ResizeObserver !== 'undefined') {
     const ro = new ResizeObserver(_sync);
@@ -171,12 +179,13 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
   }
   // Class flips (sidebar.hidden ↔ visible) don't trigger ResizeObserver
   // until layout settles a frame later; also watch the class attribute
-  // so we re-sync immediately when the user toggles the hamburger.
+  // so we re-sync when the user toggles the hamburger. Attribute observers run
+  // in a microtask, so defer geometry reads until the next animation frame.
   if (sidebar && typeof MutationObserver !== 'undefined') {
-    new MutationObserver(_sync).observe(sidebar, { attributes: true, attributeFilter: ['class', 'style'] });
+    new MutationObserver(_scheduleSync).observe(sidebar, { attributes: true, attributeFilter: ['class', 'style'] });
   }
   if (rail && typeof MutationObserver !== 'undefined') {
-    new MutationObserver(_sync).observe(rail, { attributes: true, attributeFilter: ['class', 'style'] });
+    new MutationObserver(_scheduleSync).observe(rail, { attributes: true, attributeFilter: ['class', 'style'] });
   }
   window.addEventListener('resize', _sync);
 }

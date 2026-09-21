@@ -248,7 +248,7 @@
   <link rel="stylesheet" href="/static/style.css?v=20260921livefix15">
   <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260921livefix15">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260921livefix15">
+  <link rel="modulepreload" href="/static/app.js?v=20260921livefix17">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260921livefix15">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js?v=20260921livefix15">
@@ -1393,6 +1393,8 @@
   (function(){
     const container = document.getElementById('chat-history');
     const chatBar = document.querySelector('.chat-input-bar');
+    const attachStrip = document.getElementById('attach-strip');
+    const workStatusRow = document.getElementById('chat-work-status-row');
     const bottomBtn = document.getElementById('scroll-bottom-btn');
     if (!container || !chatBar || !bottomBtn) return;
 
@@ -1403,7 +1405,6 @@
     }
 
     function update() {
-      reposition();
       const scrollable = container.scrollHeight > container.clientHeight + 10;
       const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300;
       if (scrollable && !atBottom) {
@@ -1418,6 +1419,21 @@
     let _scrollRaf = null;
     let _scrollTimeout = null;
     let _scrollingToBottom = false;
+    let _updateRaf = null;
+
+    // Live markdown replaces child nodes in bursts. WebKit delivers those
+    // records in a MutationObserver microtask, before its normal layout pass;
+    // reading scroll metrics there forces a synchronous layout of the entire
+    // conversation. Coalesce the visibility check into the next frame. The
+    // button anchor is independent of message DOM and is maintained by the
+    // chat-bar ResizeObserver/window resize paths below.
+    function scheduleUpdate() {
+      if (_updateRaf) return;
+      _updateRaf = requestAnimationFrame(() => {
+        _updateRaf = null;
+        update();
+      });
+    }
 
     function cancelAutoScroll() {
       if (_scrollRaf) { cancelAnimationFrame(_scrollRaf); _scrollRaf = null; }
@@ -1443,8 +1459,14 @@
       step();
       _scrollTimeout = setTimeout(() => { if (_scrollingToBottom) { container.scrollTop = target; _scrollingToBottom = false; } }, 1500);
     });
-    new ResizeObserver(reposition).observe(chatBar);
-    new MutationObserver(update).observe(container, {childList:true, subtree:true});
+    const geometryObserver = new ResizeObserver(reposition);
+    geometryObserver.observe(chatBar);
+    // These siblings can move the composer without changing its own size.
+    // ResizeObserver runs after layout, so anchoring here preserves placement
+    // without measuring from every chat-history mutation.
+    if (attachStrip) geometryObserver.observe(attachStrip);
+    if (workStatusRow) geometryObserver.observe(workStatusRow);
+    new MutationObserver(scheduleUpdate).observe(container, {childList:true, subtree:true});
     window.addEventListener('resize', reposition);
     update();
   })();
@@ -2763,8 +2785,8 @@
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260921livefix15"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260921livefix15"></script>  <!-- app.js must be LAST -->
-  <script type="module" src="/static/js/init.js?v=20260921livefix16"></script>
+<script type="module" src="/static/app.js?v=20260921livefix17"></script>  <!-- app.js must be LAST -->
+  <script type="module" src="/static/js/init.js?v=20260921livefix17"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
 </body>

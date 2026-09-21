@@ -127,7 +127,7 @@ function bind() {
   toggle?.addEventListener('click', () => {
     const open=card.classList.toggle('expanded'); toggle.setAttribute('aria-expanded', String(open));
     if(open) {
-      const plan=document.getElementById('plan-mode-status'); plan?.classList.remove('expanded'); plan?.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded','false');
+      const plan=document.getElementById('plan-mode-status'); plan?.classList.remove('expanded'); plan?.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded','false'); card.style.removeProperty('top');
       armCollapse();
     }
   });

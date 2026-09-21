@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v416-livefix16';
+const CACHE_NAME = 'odysseus-v417-livefix17';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -42,7 +42,7 @@ const PRECACHE = [
   '/static/style.css?v=20260921livefix15',
   '/static/css/team-workspace.css?v=20260921livefix15',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
-  '/static/app.js?v=20260921livefix15',
+  '/static/app.js?v=20260921livefix17',
   '/static/js/storage.js',
   '/static/js/appConfig.js',
   '/static/js/ui.js',
@@ -67,8 +67,8 @@ const PRECACHE = [
   '/static/js/chatStream.js?v=20260819approvalcontrol1',
   '/static/js/chat.js?v=20260921livefix15',
   '/static/js/timelineReducer.js',
-  '/static/js/chat-work.js?v=20260921livefix15',
-  '/static/js/chat-subagents.js?v=20260921livefix15',
+  '/static/js/chat-work.js?v=20260921livefix17',
+  '/static/js/chat-subagents.js?v=20260921livefix17',
   '/static/js/team-workspace.js?v=20260921livefix15',
   '/static/js/accessMode.js?v=20260921livefix15',
   '/static/js/projects.js?v=20260915projects1',
@@ -79,7 +79,7 @@ const PRECACHE = [
   '/static/js/censor.js',
   '/static/js/settings.js?v=20260921livefix15',
   '/static/js/admin.js',
-  '/static/js/init.js?v=20260921livefix16',
+  '/static/js/init.js?v=20260921livefix17',
   '/static/js/slashCommands.js',
   '/static/js/emailInbox.js',
   '/static/js/emailLibrary/utils.js',

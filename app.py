@@ -180,7 +180,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 # missing-timeout httpx call locks up the entire server for everyone.
 import asyncio as _asyncio
 from starlette.middleware.base import BaseHTTPMiddleware as _BaseHTTPMiddleware
-from starlette.responses import JSONResponse as _JSONResponse
+from starlette.responses import JSONResponse as _JSONResponse, Response as _Response
 
 REQUEST_HARD_TIMEOUT = float(os.getenv("REQUEST_HARD_TIMEOUT", "45"))
 _TIMEOUT_EXEMPT_PREFIXES = (
@@ -236,6 +236,29 @@ class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
             response = await call_next(request)
             status = getattr(response, "status_code", 0) or 0
             return response
+        except RuntimeError as exc:
+            # BaseHTTPMiddleware raises this exact error when a browser closes
+            # an SSE/replay request during reload or reconnect before the
+            # downstream streaming response yields its first frame. That is a
+            # normal client disconnect, not an application 500. Restrict the
+            # conversion to known long-lived GET streams so a genuinely broken
+            # non-streaming handler still fails loudly.
+            path = request.url.path or ""
+            expected_stream_disconnect = (
+                request.method == "GET"
+                and str(exc) == "No response returned."
+                and (
+                    path.startswith("/api/chat/resume/")
+                    or (
+                        path.startswith("/api/chat/subagents/")
+                        and path.endswith("/events/stream")
+                    )
+                )
+            )
+            if not expected_stream_disconnect:
+                raise
+            status = 499
+            return _Response(status_code=499)
         finally:
             elapsed = time.perf_counter() - start
             try:
