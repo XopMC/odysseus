@@ -233,7 +233,7 @@ body.bg-pattern-synapse {
   will-change: transform;
   animation-duration: var(--synapse-duration);
   animation-delay: var(--synapse-delay);
-  animation-timing-function: linear;
+  animation-timing-function: steps(var(--synapse-steps, 180), end);
   animation-iteration-count: infinite;
 }
 .synapse-pulse.horizontal {

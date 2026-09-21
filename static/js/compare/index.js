@@ -36,7 +36,7 @@ import Storage from '../storage.js';
 import uiModule from '../ui.js';
 import sessionModule from '../sessions.js?v=20260921livefix18';
 import spinnerModule from '../spinner.js';
-import themeModule from '../theme.js?v=20260921livefix18';
+import themeModule from '../theme.js?v=20260921livefix19';
 import presetsModule from '../presets.js';
 import markdownModule from '../markdown.js';
 import { bindMenuDismiss } from '../escMenuStack.js';

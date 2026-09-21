@@ -127,7 +127,7 @@ def test_canvas_theme_keeps_30fps_with_bounded_pixel_and_allocation_cost():
     assert "window.setTimeout(() =>" in source
     assert source.count("_nextBgFrame(draw);") == 6  # one tail call per remaining canvas effect
     assert "requestAnimationFrame(draw);" not in source
-    assert "theme.js?v=20260921livefix18" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+    assert "theme.js?v=20260921livefix19" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
 
 
 def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
@@ -139,6 +139,9 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
     assert "animation-name: synapse-pulse-x" in styles
     assert "animation-name: synapse-pulse-y" in styles
     assert "translate3d" in styles
+    assert "const MAX_PULSES = 8" in source
+    assert "duration * 30" in source
+    assert "steps(var(--synapse-steps" in styles
 
 
 def test_stateful_chat_modules_have_one_browser_identity():

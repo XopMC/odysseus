@@ -35,7 +35,7 @@ _IMPORT_REWRITES = {
     "import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';": (
         "import { initModelPicker, updateModelPicker } from './modelPicker.mjs';"
     ),
-    "import themeModule from './theme.js?v=20260921livefix18';": "import themeModule from './theme.mjs';",
+    "import themeModule from './theme.js?v=20260921livefix19';": "import themeModule from './theme.mjs';",
     "import spinnerModule from './spinner.js';": "import spinnerModule from './spinner.mjs';",
 }
 

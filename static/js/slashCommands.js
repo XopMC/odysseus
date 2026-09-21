@@ -15,7 +15,7 @@ import sessionModule from './sessions.js?v=20260921livefix18';
 import modelsModule from './models.js?v=20260921livefix18';
 import chatRenderer from './chatRenderer.js?v=20260921livefix18';
 import spinnerModule from './spinner.js';
-import themeModule from './theme.js?v=20260921livefix18';
+import themeModule from './theme.js?v=20260921livefix19';
 import documentModule from './document.js?v=20260815approvalsave1';
 import workspaceModule from './workspace.js';
 import settingsModule from './settings.js';

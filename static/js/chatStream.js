@@ -4,7 +4,7 @@
 
 import uiModule from './ui.js';
 import Storage from './storage.js';
-import themeModule from './theme.js?v=20260921livefix18';
+import themeModule from './theme.js?v=20260921livefix19';
 import markdownModule from './markdown.js';
 import sessionModule from './sessions.js?v=20260921livefix18';
 import documentModule from './document.js?v=20260815approvalsave1';

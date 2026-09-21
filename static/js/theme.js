@@ -1584,13 +1584,18 @@ function _initSynapse() {
   layer.id = 'synapse-layer';
   layer.setAttribute('aria-hidden', 'true');
   const GRID = 24; // matches CSS grid size
-  const MAX_PULSES = 20;
+  // Eight independent compositor layers keep the field visibly alive without
+  // making WebKit walk twenty animated layers on every display refresh. Each
+  // pulse is quantized to ~30 visual updates/second below.
+  const MAX_PULSES = 8;
   for (let i = 0; i < MAX_PULSES; i++) {
     const pulse = document.createElement('i');
     const horizontal = Math.random() > 0.5;
+    const duration = 2.8 + Math.random() * 6.5;
     pulse.className = `synapse-pulse ${horizontal ? 'horizontal' : 'vertical'}`;
     pulse.style.setProperty('--synapse-line', `${Math.floor(Math.random() * 80) * GRID}px`);
-    pulse.style.setProperty('--synapse-duration', `${2.8 + Math.random() * 6.5}s`);
+    pulse.style.setProperty('--synapse-duration', `${duration}s`);
+    pulse.style.setProperty('--synapse-steps', String(Math.max(1, Math.round(duration * 30))));
     pulse.style.setProperty('--synapse-delay', `${-Math.random() * 9}s`);
     layer.appendChild(pulse);
   }
