@@ -2,7 +2,7 @@
  * Deep Research side panel — open/close, form, job rendering, library.
  */
 import * as jobs from './jobs.js?v=20260630researchthumb';
-import themeModule from '../theme.js?v=20260921livefix4';
+import themeModule from '../theme.js?v=20260921livefix5';
 import createResearchSynapse from '../researchSynapse.js';
 import spinnerModule from '../spinner.js';
 import { sortModelIds } from '../modelSort.js';

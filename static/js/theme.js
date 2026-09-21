@@ -449,10 +449,11 @@ function _getEffectSize() {
 function _nextBgFrame(draw) {
   const countText = document.getElementById('current-meta-count')?.textContent || '';
   const visibleMessages = Number((countText.match(/\d[\d\s]*/) || ['0'])[0].replace(/\s/g, '')) || 0;
+  const renderedRows = document.getElementById('chat-history')?.childElementCount || 0;
   // A second browser reconnecting to an active run does not own the local
   // send-state flag, so size is the cross-device signal. Large/streaming chats
   // get a calm 4fps background; the timeout keeps WebKit asleep between draws.
-  const interval = (window.__odysseusChatBusy || visibleMessages >= 500)
+  const interval = (window.__odysseusChatBusy || visibleMessages >= 500 || renderedRows >= 100)
     ? 250
     : 1000 / 30;
   const elapsed = performance.now() - Number(draw._odysseusLastFrame || 0);
