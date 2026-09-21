@@ -18,6 +18,7 @@ async def _no_response(_request):
     "path",
     [
         "/api/chat/resume/session-id",
+        "/api/chat/work/session-id/events/stream",
         "/api/chat/subagents/session-id/events/stream",
     ],
 )

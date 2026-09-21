@@ -250,6 +250,10 @@ class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
                 and (
                     path.startswith("/api/chat/resume/")
                     or (
+                        path.startswith("/api/chat/work/")
+                        and path.endswith("/events/stream")
+                    )
+                    or (
                         path.startswith("/api/chat/subagents/")
                         and path.endswith("/events/stream")
                     )
