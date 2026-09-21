@@ -1156,6 +1156,10 @@ async def _startup_event():
             await asyncio.sleep(0.5)
             from src import agent_runs
             from src.chat_work_store import store as chat_work_store
+            from src.subagent_runtime import runtime as subagent_runtime
+            stale_children = await asyncio.to_thread(subagent_runtime.recover_stale)
+            if stale_children:
+                logger.info("[startup] fenced %d stale subagent run(s)", stale_children)
             recovered = await asyncio.to_thread(agent_runs.recover_durable_runs)
             recovered_by_session = {
                 str(item.get("session_id")): item.get("continuation") or {}

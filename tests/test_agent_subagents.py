@@ -49,12 +49,22 @@ def test_restart_fences_children_owned_by_the_previous_worker(monkeypatch):
     ))
     db.commit(); db.close()
     restarted = SubagentRuntime()
+    assert restarted.recover_stale() == 1
     children = restarted.list("alice", "s")
     assert children[0]["status"] == "interrupted"
     db = store(); row = db.query(ChatSubagentRun).one()
     assert row.slot is None
     assert "restarted" in row.error.lower()
     db.close()
+
+
+def test_app_startup_fences_subagents_before_resuming_goals():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
+    recovery = source.split("async def _recover_detached_chat_work", 1)[1].split(
+        "async def _recover_auto_research_work", 1,
+    )[0]
+    assert "subagent_runtime.recover_stale" in recovery
+    assert recovery.index("subagent_runtime.recover_stale") < recovery.index("agent_runs.recover_durable_runs")
 
 
 def test_same_model_subagent_is_bounded_and_has_stable_child_identity(monkeypatch):

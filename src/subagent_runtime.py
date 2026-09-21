@@ -63,9 +63,9 @@ class SubagentRuntime:
         self._recovered = False
         self._worker_id = uuid.uuid4().hex
 
-    def _recover_stale(self) -> None:
+    def _recover_stale(self) -> int:
         if self._recovered:
-            return
+            return 0
         db = SessionLocal()
         try:
             cutoff = datetime.fromtimestamp(time.time() - 90, tz=timezone.utc).replace(tzinfo=None)
@@ -86,8 +86,13 @@ class SubagentRuntime:
                 row.revision += 1
             db.commit()
             self._recovered = True
+            return len(rows)
         finally:
             db.close()
+
+    def recover_stale(self) -> int:
+        """Fence children from a previous web worker during app startup."""
+        return self._recover_stale()
 
     def _event(self, child_id: str, owner: Optional[str], session_id: str,
                kind: str, payload: dict) -> int:
