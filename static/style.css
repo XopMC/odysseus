@@ -2211,6 +2211,12 @@ body.bg-pattern-sparkles {
         content-visibility: visible;
       }
     }
+    /* Keep live text/style invalidation inside the active turn. Size remains
+       content-driven, but descendants no longer force a full-tree style walk. */
+    #chat-history > .msg.streaming,
+    #chat-history > .agent-thread.streaming {
+      contain: layout style;
+    }
     .msg-user {
       align-items: flex-end;
       margin-left: auto;
@@ -10006,40 +10012,13 @@ body.fullwidth-chat .chat-history {
   opacity: 0;
 }
 .agent-thread.streaming::after {
-  animation: synapse-capped-short 0.8s ease-in-out infinite;
+  top: 10px;
+  animation: thread-activity-dot 0.8s ease-in-out infinite;
+  will-change: transform, opacity;
 }
-.agent-thread.streaming.has-top::after {
-  animation: synapse-capped 0.8s ease-in-out infinite;
-}
-.agent-thread.streaming.has-bottom::after {
-  animation: synapse-travel-short 0.8s ease-in-out infinite;
-}
-.agent-thread.streaming.has-top.has-bottom::after {
-  animation: synapse-travel 0.8s ease-in-out infinite;
-}
-@keyframes synapse-travel {
-  0% { top: 0%; opacity: 0; }
-  5% { opacity: 0.5; }
-  85% { opacity: 0.35; }
-  100% { top: 100%; opacity: 0; }
-}
-@keyframes synapse-capped {
-  0% { top: 0%; opacity: 0; }
-  5% { opacity: 0.5; }
-  70% { opacity: 0.35; top: calc(100% - 20px); }
-  100% { opacity: 0; top: calc(100% - 20px); }
-}
-@keyframes synapse-travel-short {
-  0% { top: 14px; opacity: 0; }
-  5% { opacity: 0.5; }
-  85% { opacity: 0.35; }
-  100% { top: 100%; opacity: 0; }
-}
-@keyframes synapse-capped-short {
-  0% { top: 14px; opacity: 0; }
-  5% { opacity: 0.5; }
-  70% { opacity: 0.35; top: calc(100% - 20px); }
-  100% { opacity: 0; top: calc(100% - 20px); }
+@keyframes thread-activity-dot {
+  0%, 100% { opacity: 0.18; transform: scale(0.7); }
+  50% { opacity: 0.65; transform: scale(1.25); }
 }
 .agent-thread-node {
   position: relative;
@@ -10077,13 +10056,14 @@ body.fullwidth-chat .chat-history {
 }
 .agent-thread-node.running .agent-thread-dot {
   background: var(--red);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 25%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 20%, transparent);
   animation: thread-pulse 1.5s ease-in-out infinite;
+  will-change: transform, opacity;
   top: 10px;
 }
 @keyframes thread-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 20%, transparent); }
-  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--red) 10%, transparent); }
+  0%, 100% { opacity: 0.7; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
 }
 .agent-thread-node.error .agent-thread-dot {
   background: var(--color-error);
@@ -24312,6 +24292,13 @@ body:not(.welcome-ready) #welcome-screen {
 /* Per-token streaming fade — new words materialize */
 .token-new {
   animation: token-fade 0.4s ease-out both;
+}
+
+/* Replacing the live tail already provides motion. Hundreds of short-lived
+   opacity animations create avoidable compositor/style work in long runs. */
+.agent-thread.streaming .token-new,
+.msg.streaming .token-new {
+  animation: none;
 }
 
 @keyframes token-fade {

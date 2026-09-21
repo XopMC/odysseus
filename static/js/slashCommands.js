@@ -11,11 +11,11 @@ window.cancelActiveTour = function cancelActiveTour() {
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix11';
-import modelsModule from './models.js?v=20260921livefix11';
-import chatRenderer from './chatRenderer.js?v=20260921livefix11';
+import sessionModule from './sessions.js?v=20260921livefix12';
+import modelsModule from './models.js?v=20260921livefix12';
+import chatRenderer from './chatRenderer.js?v=20260921livefix12';
 import spinnerModule from './spinner.js';
-import themeModule from './theme.js?v=20260921livefix11';
+import themeModule from './theme.js?v=20260921livefix12';
 import documentModule from './document.js?v=20260815approvalsave1';
 import workspaceModule from './workspace.js';
 import settingsModule from './settings.js';

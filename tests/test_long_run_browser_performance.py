@@ -36,6 +36,18 @@ def test_live_autoscroll_does_not_poll_layout_on_every_animation_frame():
     assert "box.scrollTop = target" in implementation
 
 
+def test_streaming_turn_uses_containment_and_compositor_only_indicators():
+    styles = (ROOT / "static/style.css").read_text(encoding="utf-8")
+
+    assert "#chat-history > .agent-thread.streaming" in styles
+    assert "contain: layout style" in styles
+    assert ".agent-thread.streaming .token-new" in styles
+    activity = styles[styles.index("@keyframes thread-activity-dot"):]
+    activity = activity[:activity.index(".agent-thread-node")]
+    assert "top:" not in activity
+    assert "transform: scale" in activity
+
+
 def test_canvas_theme_keeps_30fps_with_bounded_pixel_and_allocation_cost():
     source = (ROOT / "static/js/theme.js").read_text(encoding="utf-8")
     assert "const interval = 1000 / 30" in source
@@ -48,7 +60,7 @@ def test_canvas_theme_keeps_30fps_with_bounded_pixel_and_allocation_cost():
     assert "window.setTimeout(() =>" in source
     assert source.count("_nextBgFrame(draw);") == 6  # one tail call per remaining canvas effect
     assert "requestAnimationFrame(draw);" not in source
-    assert "theme.js?v=20260921livefix11" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+    assert "theme.js?v=20260921livefix12" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
 
 
 def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
@@ -64,7 +76,7 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix11"
+    expected = "20260921livefix12"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"
