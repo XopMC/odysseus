@@ -17,8 +17,26 @@ import time
 
 _WORD = struct.Struct('!Q')
 MAX_EVENT_BYTES = 2 * 1024 * 1024
-MAX_RUN_BYTES = 256 * 1024 * 1024
-MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+
+
+def _storage_limit(name, default, *, minimum, maximum):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+# Replay is durable chat history, not a cache. Keep bounded DoS protection,
+# but provide enough headroom for multi-hour runs and let operators override it.
+MAX_RUN_BYTES = _storage_limit(
+    "ODYSSEUS_REPLAY_MAX_RUN_BYTES", 1024 * 1024 * 1024,
+    minimum=16 * 1024 * 1024, maximum=64 * 1024 * 1024 * 1024,
+)
+MAX_TOTAL_BYTES = max(MAX_RUN_BYTES, _storage_limit(
+    "ODYSSEUS_REPLAY_MAX_TOTAL_BYTES", 16 * 1024 * 1024 * 1024,
+    minimum=64 * 1024 * 1024, maximum=512 * 1024 * 1024 * 1024,
+))
 logger = logging.getLogger(__name__)
 
 

@@ -69,4 +69,5 @@ def test_admin_gets_report(monkeypatch):
     assert set(body["runtime"]) == {"process", "runs", "storage"}
     assert body["runtime"]["storage"]["max_replay_run_bytes"] > 0
     assert body["runtime"]["storage"]["max_replay_total_bytes"] > 0
+    assert body["runtime"]["storage"]["replay_status"] in {"ok", "warning", "critical"}
     assert body["runtime"]["process"]["event_loop_lag_ms"] >= 0

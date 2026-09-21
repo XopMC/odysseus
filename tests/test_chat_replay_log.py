@@ -8,6 +8,13 @@ from src.chat_replay_log import ReplayLog, ReplayLimitError
 from src import agent_runs
 
 
+def test_long_run_replay_defaults_leave_operational_headroom():
+    import src.chat_replay_log as replay
+    assert replay.MAX_RUN_BYTES >= 1024 * 1024 * 1024
+    assert replay.MAX_TOTAL_BYTES >= 16 * 1024 * 1024 * 1024
+    assert replay.MAX_TOTAL_BYTES >= replay.MAX_RUN_BYTES
+
+
 def test_stream_status_keeps_public_streaming_state_after_run_metadata_merge():
     route = (Path(__file__).resolve().parents[1] / "routes/chat_routes.py").read_text(
         encoding="utf-8"

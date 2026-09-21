@@ -53,6 +53,8 @@ def _runtime_diagnostics() -> Dict[str, Any]:
         logger.debug("runtime diagnostics DB counters unavailable", exc_info=True)
 
     db_path = Path(DATA_DIR) / "app.db"
+    total_percent = round(total_bytes * 100 / MAX_TOTAL_BYTES, 3)
+    largest_percent = round(largest_run_bytes * 100 / MAX_RUN_BYTES, 3)
     return {
         "process": {"pid": os.getpid(), "rss_bytes": rss_bytes},
         "runs": {"active": active_runs, "active_subagents": active_subagents},
@@ -64,8 +66,13 @@ def _runtime_diagnostics() -> Dict[str, Any]:
             "largest_replay_run_bytes": largest_run_bytes,
             "max_replay_run_bytes": MAX_RUN_BYTES,
             "max_replay_total_bytes": MAX_TOTAL_BYTES,
-            "replay_total_percent": round(total_bytes * 100 / MAX_TOTAL_BYTES, 3),
-            "largest_run_percent": round(largest_run_bytes * 100 / MAX_RUN_BYTES, 3),
+            "replay_total_percent": total_percent,
+            "largest_run_percent": largest_percent,
+            "replay_status": (
+                "critical" if max(total_percent, largest_percent) >= 90
+                else "warning" if max(total_percent, largest_percent) >= 70
+                else "ok"
+            ),
         },
     }
 
