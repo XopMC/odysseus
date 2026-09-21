@@ -17,6 +17,7 @@ let detailChild = '';
 let detailCursor = 0;
 let detailText = '';
 const MAX_DETAIL_CHARS = 250000;
+const listRefreshKinds = new Set(['created', 'status', 'removed', 'guidance']);
 
 const el = id => document.getElementById(id);
 async function json(url, options = {}) {
@@ -153,9 +154,24 @@ function connect() {
   source = new EventSource(`${api}/api/chat/subagents/${encodeURIComponent(sessionId)}/events/stream?after=${cursor}`);
   source.onmessage = event => {
     if (sessionId !== expected) return;
-    try { const data=JSON.parse(event.data); cursor=Math.max(cursor, Number(data.seq||0)); } catch (_) {}
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => void refreshKeepStream(expected), 180);
+    let data = null;
+    try { data=JSON.parse(event.data); cursor=Math.max(cursor, Number(data.seq||0)); } catch (_) {}
+    // Token/thinking/tool-output events do not change the summary rows.  The
+    // former code re-fetched the entire list for every streamed delta (up to
+    // several requests per second per browser).  Refresh the list only for a
+    // structural event; an open detail panel has its own bounded tail fetch.
+    if (!data || listRefreshKinds.has(String(data.kind || ''))) {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => void refreshKeepStream(expected), 250);
+    }
+    const detail = el('subagent-detail');
+    const card = el('subagents-status');
+    const eventChild = String(data?.child_id || data?.payload?.child_id || '');
+    if (selectedId && (!eventChild || eventChild === selectedId)
+        && detail && !detail.hidden && card?.classList.contains('expanded')) {
+      clearTimeout(detailTimer);
+      detailTimer = setTimeout(() => void showDetail(selectedId).catch(() => {}), 800);
+    }
   };
   source.onerror = () => { source?.close(); source=null; setTimeout(() => { if (sessionId===expected) connect(); }, 1200); };
 }
@@ -163,12 +179,6 @@ async function refreshKeepStream(expected) {
   try {
     const data=await json(`${api}/api/chat/subagents/${encodeURIComponent(expected)}`);
     if (sessionId!==expected) return; rows=data.subagents||[]; render();
-    const detail = el('subagent-detail');
-    const card = el('subagents-status');
-    if (selectedId && detail && !detail.hidden && card?.classList.contains('expanded')) {
-      clearTimeout(detailTimer);
-      detailTimer = setTimeout(() => void showDetail(selectedId).catch(() => {}), 800);
-    }
   } catch (_) {}
 }
 

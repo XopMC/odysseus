@@ -110,9 +110,13 @@ def test_subagent_live_updates_preserve_buttons_and_hidden_detail_stays_idle():
     assert "const existing = new Map(" in render
     assert "existing.get(childId)" in render
     assert "if (!item.isConnected || reorder) list.appendChild(item);" in render
+    live = source.split("source.onmessage = event =>", 1)[1].split("source.onerror", 1)[0]
+    assert "listRefreshKinds.has" in live
+    assert "!detail.hidden" in live
+    assert "card?.classList.contains('expanded')" in live
+    assert "detailTimer = setTimeout" in live
     refresh = source.split("async function refreshKeepStream", 1)[1].split("function bind()", 1)[0]
-    assert "!detail.hidden" in refresh
-    assert "card?.classList.contains('expanded')" in refresh
+    assert "showDetail" not in refresh
 
 
 def test_goal_plan_refresh_fences_late_responses_from_old_sessions():
@@ -202,7 +206,7 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix28"
+    expected = "20260921livefix29"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"
