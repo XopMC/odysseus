@@ -435,6 +435,25 @@ class SubagentRuntime:
                             if kind == "metrics":
                                 self._merge_metrics(child_id, owner, event.get("data") or {})
                             self._event(child_id, owner, session_id, kind, event)
+                            # stream_agent_loop uses a typed terminal event for
+                            # failures that must stop safely (for example an
+                            # unbuildable context checkpoint).  [DONE] still
+                            # follows that event, so treating it as an ordinary
+                            # timeline record would incorrectly publish the
+                            # child as completed.  Persist the evidence first,
+                            # then fail the child without transport retry.
+                            if kind == "agent_terminal":
+                                terminal = event.get("data") or {}
+                                if isinstance(terminal, dict) and terminal.get("failed"):
+                                    failure = terminal.get("failure") or {}
+                                    message = (
+                                        failure.get("message")
+                                        if isinstance(failure, dict)
+                                        else ""
+                                    )
+                                    raise RuntimeError(
+                                        str(message or "Subagent terminated with a failed checkpoint")
+                                    )
             deadline = time.monotonic() + timeout_seconds
             for transport_attempt in range(2):
                 try:

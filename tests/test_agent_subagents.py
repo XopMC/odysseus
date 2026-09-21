@@ -717,6 +717,55 @@ def test_child_never_retries_after_tool_start(monkeypatch):
         db.commit(); db.close()
 
 
+def test_child_terminal_failure_is_not_published_as_completed(monkeypatch):
+    owner = "terminal-failure-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="terminal failure test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    calls = 0
+
+    async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield 'data: {"type":"context_compaction_failed","reason":"failed"}\n\n'
+        yield ('data: {"type":"agent_terminal","data":{"failed":true,'
+               '"failure":{"kind":"context_compaction","message":"No usable input budget"}}}\n\n')
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="terminal failure", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        row = runtime.get(owner, session_id, child["child_id"])
+        assert row["status"] == "failed"
+        assert "No usable input budget" in row["error"]
+        assert calls == 1
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        kinds = [event["kind"] for event in events]
+        assert "context_compaction_failed" in kinds
+        assert "agent_terminal" in kinds
+        assert "transport_retry" not in kinds
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
 def test_local_transport_allows_four_subagent_prompts_in_flight(monkeypatch):
     import src.llm_core as llm_core
 
