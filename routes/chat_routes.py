@@ -1219,6 +1219,18 @@ def setup_chat_routes(
                 access_mode = normalize_access_mode(
                     requested_access_mode, default=DEFAULT_ACCESS_MODE
                 ) or DEFAULT_ACCESS_MODE
+            # The owner-scoped Full access preference is durable and must be
+            # authoritative for detached Goal continuations and their child
+            # agents. Browser tool toggles are ephemeral and can be stale or
+            # absent after reload; inheriting their false value made children
+            # advertise bash/web in allowed_tools while also disabling them.
+            # Role privileges, workspace confinement, delegated credentials,
+            # global admin disables and dispatch-time safety policy still run
+            # below and remain authoritative.
+            if access_mode == "full_access":
+                allow_bash = "true"
+                allow_web_search = "true"
+                _search_enabled = True
             logger.info("[access-mode] owner=%r mode=%s", owner, access_mode)
             if tool_approval_id:
                 _reject_delegated_tool_approval(request)

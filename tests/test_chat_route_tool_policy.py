@@ -211,6 +211,17 @@ def test_json_body_allow_bash_false_disables_bash():
     assert "bash" in disabled
 
 
+def test_full_access_is_durable_for_goal_and_subagent_tool_inventory():
+    """A stale browser toggle must not strip tools from full-access children."""
+    source = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text()
+    block = source.split('if access_mode == "full_access":', 1)[1].split(
+        'logger.info("[access-mode]', 1
+    )[0]
+    assert 'allow_bash = "true"' in block
+    assert 'allow_web_search = "true"' in block
+    assert "_search_enabled = True" in block
+
+
 def test_json_body_allow_web_search_true_enables_web():
     """API caller sending {"allow_web_search": true} gets web tools enabled."""
     disabled = _build_disabled_tools(allow_web_search="true")
