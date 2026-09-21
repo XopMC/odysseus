@@ -147,6 +147,37 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(telemetry['target_messages'], first_target)
         self.assertEqual(telemetry['effective_target_messages'], second_target)
 
+    async def test_relaxed_target_reuses_identical_summary_prompt(self):
+        from src.context_policy import ContextPolicy
+        from src.context_policy_runtime import shape_request
+        messages = [{'role': 'user', 'content': 'evidence ' * 40000}]
+        policy = ContextPolicy(trigger_percent=75, target_percent=15)
+        record = {'effective': policy.to_dict(), 'revisions': {'owner': 1}}
+        compacted = [{'role': 'system', 'content': 'safe checkpoint'}]
+        summarize = AsyncMock(return_value='summary')
+        calls = 0
+
+        async def fake_compact(_messages, _limit, summary_fn, **kwargs):
+            nonlocal calls
+            calls += 1
+            await summary_fn([{'role': 'user', 'content': 'same evidence'}])
+            return (_messages, 'uncompactable') if calls == 1 else (compacted, 'compacted')
+
+        with patch('src.context_policy_runtime.compact_working_context', new=fake_compact):
+            shaped, _telemetry = await shape_request(
+                messages, [], record, 65536, summarize,
+            )
+        self.assertEqual(shaped, compacted)
+        self.assertEqual(summarize.await_count, 1)
+
+    def test_explicit_policy_skips_the_parallel_economic_compactor(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] / 'src/agent_loop.py').read_text()
+        self.assertIn(
+            'if _efficiency_enabled("online_context_compact") and not _context_profile:',
+            source,
+        )
+
     async def test_oversized_optional_recent_tail_is_folded_after_safe_retry(self):
         from src.context_policy import ContextPolicy
         from src.context_policy_runtime import shape_request

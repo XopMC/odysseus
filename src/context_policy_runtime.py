@@ -5,6 +5,8 @@ Callers must persist checkpoints and recheck policy identity before dispatch.
 """
 import os
 import math
+import hashlib
+import json
 from dataclasses import replace
 
 from src.context_policy import ContextPolicy
@@ -45,11 +47,20 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
     effective_target = budget.target_messages
     effective_recent_groups = policy.recent_groups
     effective_recent_tokens = policy.recent_tokens
+    summary_cache = {}
+
+    async def summarize_once(prompt):
+        key = hashlib.sha256(json.dumps(
+            prompt, sort_keys=True, ensure_ascii=False, default=str,
+        ).encode('utf-8')).hexdigest()
+        if key not in summary_cache:
+            summary_cache[key] = await summarize(prompt)
+        return summary_cache[key]
     if action == 'blocked':
         raise ValueError('Context is full and automatic compaction is disabled')
     if action == 'compact':
         shaped, status = await compact_working_context(messages,
-            max(1, math.floor(budget.trigger_messages / calibration)), summarize,
+            max(1, math.floor(budget.trigger_messages / calibration)), summarize_once,
             policy=policy, target_limit=max(1, math.floor(budget.target_messages / calibration)))
         if status == 'uncompactable':
             # A very aggressive configured target can be smaller than pinned
@@ -65,7 +76,7 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
                 shaped, status = await compact_working_context(
                     messages,
                     max(1, math.floor(budget.trigger_messages / calibration)),
-                    summarize,
+                    summarize_once,
                     policy=policy,
                     target_limit=max(1, math.floor(relaxed / calibration)),
                 )
@@ -82,7 +93,7 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
                 shaped, status = await compact_working_context(
                     messages,
                     max(1, math.floor(budget.trigger_messages / calibration)),
-                    summarize,
+                    summarize_once,
                     policy=minimal_policy,
                     target_limit=max(1, math.floor(effective_target / calibration)),
                 )

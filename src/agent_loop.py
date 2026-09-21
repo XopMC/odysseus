@@ -5503,7 +5503,10 @@ async def stream_agent_loop(
         _compacted_messages, _compact_status = messages, "unchanged"
         _compact_failure_detail = None
         _configured_telemetry = None
-        if _efficiency_enabled("online_context_compact"):
+        # An explicit ContextPolicy is the single authority for trigger,
+        # retention and target. Running the economics compactor first caused
+        # duplicate summarizer calls and model-slot contention on long Goals.
+        if _efficiency_enabled("online_context_compact") and not _context_profile:
             from src.context_compaction_economics import decide as _economic_compaction_decide
             try:
                 _keep_recent = max(1000, int(get_setting("agent_online_compact_keep_recent_tokens", 20_000) or 20_000))
