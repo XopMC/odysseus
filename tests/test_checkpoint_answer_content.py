@@ -4,6 +4,8 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from src import llm_core
+from src.agent_loop import _checkpoint_generation_budgets, _checkpoint_summary_prompt
+from src.context_policy import ContextPolicy
 
 
 @pytest.mark.parametrize("content", ["", None, [{"type": "thinking", "thinking": "reason only"}]])
@@ -37,3 +39,16 @@ def test_local_thinking_checkpoint_requests_final_answer_mode(monkeypatch):
     ))
     assert result == "verified summary"
     assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_checkpoint_retry_adds_user_no_think_and_extra_reasoning_headroom():
+    prompt = [
+        {"role": "system", "content": "Return only a summary. /no_think"},
+        {"role": "user", "content": "Evidence"},
+    ]
+    prepared = _checkpoint_summary_prompt(prompt)
+    assert prepared[-1]["content"].startswith("/no_think\n")
+    assert prompt[-1]["content"] == "Evidence"
+    assert _checkpoint_generation_budgets(ContextPolicy(
+        summary_tokens=1200, output_reserve=4096,
+    )) == [3600, 8192]

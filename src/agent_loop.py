@@ -2286,6 +2286,34 @@ def _prior_context_compactions(messages: List[Dict]) -> int:
     return generation
 
 
+def _checkpoint_summary_prompt(prompt: List[Dict]) -> List[Dict]:
+    """Put Qwen's no-thinking directive in the user turn as well as system."""
+    copied = [dict(item) for item in (prompt or [])]
+    for item in reversed(copied):
+        if item.get("role") != "user":
+            continue
+        content = str(item.get("content") or "")
+        if not content.lstrip().startswith("/no_think"):
+            item["content"] = "/no_think\n" + content
+        break
+    return copied
+
+
+def _checkpoint_generation_budgets(policy) -> List[int]:
+    if policy is None:
+        return [4096, 8192]
+    first = min(
+        int(policy.output_reserve),
+        max(int(policy.summary_tokens) * 3, int(policy.summary_tokens) + 1024),
+    )
+    # Some local thinking models consume the first completion entirely as
+    # reasoning despite enable_thinking=false. One bounded retry gets enough
+    # headroom to emit the required final answer; the final checkpoint is still
+    # validated and fitted to summary_tokens by compact_working_context.
+    retry = min(16384, max(8192, first * 2))
+    return list(dict.fromkeys((max(1, first), retry)))
+
+
 def _durable_model_checkpoint(messages: List[Dict], max_chars: int = 1_500_000) -> List[Dict]:
     """Copy the model-visible user/assistant/tool ledger without runtime policy.
 
@@ -5436,34 +5464,37 @@ async def stream_agent_loop(
                 raise ValueError('Context policy changed before summarization')
             last_error = None
             for summary_url, summary_model, summary_headers in _summary_routes:
-                try:
-                    return await llm_call_async(
-                        summary_url, summary_model, prompt,
-                        temperature=.2,
-                        max_tokens=(
-                            min(
-                                _configured_policy.output_reserve,
-                                max(
-                                    _configured_policy.summary_tokens * 3,
-                                    _configured_policy.summary_tokens + 1024,
-                                ),
+                summary_prompt = _checkpoint_summary_prompt(prompt)
+                budgets = _checkpoint_generation_budgets(_configured_policy)
+                for attempt_index, generation_budget in enumerate(budgets):
+                    try:
+                        return await llm_call_async(
+                            summary_url, summary_model, summary_prompt,
+                            temperature=.2, max_tokens=generation_budget,
+                            headers=summary_headers,
+                            timeout=(
+                                _configured_policy.summary_timeout_seconds
+                                if _configured_policy else 120
+                            ),
+                            max_retries=1, session_id=session_id,
+                            require_answer_content=True,
+                        )
+                    except Exception as exc:
+                        last_error = exc
+                        no_answer = "no answer content" in str(
+                            getattr(exc, "detail", exc)
+                        ).lower()
+                        if no_answer and attempt_index == 0 and len(budgets) > 1:
+                            logger.warning(
+                                "Context summarizer returned reasoning only; retrying with %s tokens",
+                                budgets[1],
                             )
-                            if _configured_policy else 4096
-                        ),
-                        headers=summary_headers,
-                        timeout=(
-                            _configured_policy.summary_timeout_seconds
-                            if _configured_policy else 120
-                        ),
-                        max_retries=1, session_id=session_id,
-                        require_answer_content=True,
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    logger.warning(
-                        "Context summarizer candidate failed (%s); trying next route",
-                        type(exc).__name__,
-                    )
+                            continue
+                        logger.warning(
+                            "Context summarizer candidate failed (%s); trying next route",
+                            type(exc).__name__,
+                        )
+                        break
             if last_error is not None:
                 raise last_error
             raise RuntimeError("No context summarizer route is available")
