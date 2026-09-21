@@ -114,7 +114,10 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         ] + [{'role':'user','content':'Continue verification'}]
         sent, summaries, chunks = await self.run_agent(history)
         self.assertEqual(len(summaries), 1)
-        self.assertEqual(summaries[0][1]['max_tokens'], 256)
+        # Thinking-capable local models need generation headroom before their
+        # bounded final summary. The compacted answer is still validated
+        # against summary_tokens=256.
+        self.assertEqual(summaries[0][1]['max_tokens'], 1024)
         self.assertEqual(sent[0]['kwargs']['max_tokens'], 1024)
         self.assertIn('Original requirement', str(sent[0]['messages']))
         self.assertIn('Continue verification', str(sent[0]['messages']))

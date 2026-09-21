@@ -5441,7 +5441,13 @@ async def stream_agent_loop(
                         summary_url, summary_model, prompt,
                         temperature=.2,
                         max_tokens=(
-                            min(_configured_policy.summary_tokens, _configured_policy.output_reserve)
+                            min(
+                                _configured_policy.output_reserve,
+                                max(
+                                    _configured_policy.summary_tokens * 3,
+                                    _configured_policy.summary_tokens + 1024,
+                                ),
+                            )
                             if _configured_policy else 4096
                         ),
                         headers=summary_headers,
