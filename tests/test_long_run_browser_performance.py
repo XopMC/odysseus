@@ -32,9 +32,9 @@ def test_live_autoscroll_does_not_poll_layout_on_every_animation_frame():
     end = source.index("export function scrollHistoryInstant", start)
     implementation = source[start:end]
 
-    assert implementation.count("scrollHeight") == 1
+    assert implementation.count("scrollHeight") == 0
     assert "requestAnimationFrame(_smoothScrollStep)" not in implementation
-    assert "box.scrollTop = target" in implementation
+    assert "box.scrollTop = 2147483647" in implementation
 
 
 def test_streaming_turn_uses_containment_and_compositor_only_indicators():
@@ -61,7 +61,7 @@ def test_canvas_theme_keeps_30fps_with_bounded_pixel_and_allocation_cost():
     assert "window.setTimeout(() =>" in source
     assert source.count("_nextBgFrame(draw);") == 6  # one tail call per remaining canvas effect
     assert "requestAnimationFrame(draw);" not in source
-    assert "theme.js?v=20260921livefix13" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
+    assert "theme.js?v=20260921livefix14" in (ROOT / "static/sw.js").read_text(encoding="utf-8")
 
 
 def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
@@ -77,7 +77,7 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix13"
+    expected = "20260921livefix14"
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"

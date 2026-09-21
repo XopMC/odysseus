@@ -4,7 +4,7 @@
  * UI utilities for toasts, modals, scrolling, and user feedback
  */
 
-import themeModule from './theme.js?v=20260921livefix13';
+import themeModule from './theme.js?v=20260921livefix14';
 import * as Modals from './modalManager.js';
 import spinnerModule from './spinner.js';
 import { registerMenuDismiss, dismissTopMenu, dismissOrRemove } from './escMenuStack.js';
@@ -479,8 +479,10 @@ function _smoothScrollStep() {
     _scrollRafId = null;
     return;
   }
-  const target = box.scrollHeight - box.clientHeight;
-  box.scrollTop = target;
+  // Browsers clamp oversized scrollTop values to the real maximum. This moves
+  // to the live tail without reading content dimensions and therefore
+  // cannot synchronously flush layout for the entire timeline.
+  box.scrollTop = 2147483647;
   _scrollRafId = null;
 }
 

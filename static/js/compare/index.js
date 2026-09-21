@@ -34,9 +34,9 @@ import { showScoreboard } from './scoreboard.js';
 // ── External dependency imports ──
 import Storage from '../storage.js';
 import uiModule from '../ui.js';
-import sessionModule from '../sessions.js?v=20260921livefix13';
+import sessionModule from '../sessions.js?v=20260921livefix14';
 import spinnerModule from '../spinner.js';
-import themeModule from '../theme.js?v=20260921livefix13';
+import themeModule from '../theme.js?v=20260921livefix14';
 import presetsModule from '../presets.js';
 import markdownModule from '../markdown.js';
 import { bindMenuDismiss } from '../escMenuStack.js';
