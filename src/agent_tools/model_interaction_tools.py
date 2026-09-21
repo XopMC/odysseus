@@ -142,7 +142,6 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
     objective = str(payload.get("objective") or "").strip()
     assigned_context = str(payload.get("context") or "").strip()
     requested_model = str(payload.get("model") or "same").strip()
-    pin_model = payload.get("pin_model") is True
     if not objective or len(objective) > 20000 or len(assigned_context) > 100000:
         return {"error": "Subagent objective/context is missing or too large", "exit_code": 1}
     try:
@@ -222,17 +221,14 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
             return {"error": "No configured subagent model is currently available", "exit_code": 1,
                     "policy": "unavailable_transport"}
 
-        if pin_model:
-            if automatic:
-                return {"error": "pin_model requires an exact configured model", "exit_code": 1,
-                        "policy": "disabled_by_policy"}
-            candidates = [candidate for candidate in pool if candidate["spec"] == requested_model]
-        else:
-            # A model supplied without pin_model is only a tie-break preference.
-            # Allocation remains breadth-first across every selected route.
-            candidates = pool
-            if not automatic:
-                candidates = sorted(candidates, key=lambda candidate: candidate["spec"] != requested_model)
+        # The LLM is not an authority for routing.  Older schemas exposed a
+        # ``pin_model`` boolean and the model could falsely claim the user had
+        # pinned a route, sending every child to one backend.  An exact model
+        # is only a tie-break preference: active count remains the primary
+        # sort key, so all selected routes are used before any route is reused.
+        candidates = pool
+        if not automatic:
+            candidates = sorted(candidates, key=lambda candidate: candidate["spec"] != requested_model)
 
         ranked = []
         for order, candidate in enumerate(candidates):

@@ -149,7 +149,7 @@ def test_selected_models_are_allocated_breadth_first_before_reuse(monkeypatch):
     async def scenario():
         for idx in range(6):
             # Even if a model repeats the first allowed value, it is merely a
-            # preference unless the user explicitly requested pin_model.
+            # preference and cannot bypass breadth-first allocation.
             result = await tools.delegate_subagent(json.dumps({
                 "objective": f"Task {idx}", "model": allowed[0],
             }), ctx)
@@ -160,6 +160,52 @@ def test_selected_models_are_allocated_breadth_first_before_reuse(monkeypatch):
         "worker-1", "worker-2", "worker-3", "worker-4", "worker-5", "worker-1",
     ]
     assert all(row["max_active_for_model"] == 4 for row in spawned)
+
+
+def test_model_claimed_pin_cannot_bypass_breadth_first_allocation(monkeypatch):
+    allowed = [f"worker-{idx}@endpoint-{idx}" for idx in range(1, 4)]
+    values = {
+        "agent_subagents_mode": "selected_models",
+        "agent_subagent_models": ",".join(allowed),
+    }
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: values.get(key, default))
+
+    def resolve(spec, owner=None):
+        model, endpoint = spec.rsplit("@", 1)
+        return f"http://{endpoint}/v1/chat/completions", model, {}
+
+    counts = {}
+    spawned = []
+
+    def active_count(**kwargs):
+        return counts.get((kwargs["model"], kwargs["endpoint_id"]), 0)
+
+    async def spawn(**kwargs):
+        key = (kwargs["model"], kwargs["endpoint_id"])
+        counts[key] = counts.get(key, 0) + 1
+        spawned.append(kwargs)
+        return {"child_id": str(len(spawned)), "model": kwargs["model"],
+                "status": "queued", "exit_code": 0}
+
+    monkeypatch.setattr("src.ai_interaction._resolve_model", resolve)
+    monkeypatch.setattr("src.subagent_runtime.runtime.active_count", active_count)
+    monkeypatch.setattr("src.subagent_runtime.runtime.spawn", spawn)
+    ctx = {"owner": "alice", "session_id": "s1", "subagent_state": {},
+           "current_endpoint_url": "http://parent/v1/chat/completions",
+           "current_model": "parent"}
+
+    async def scenario():
+        for idx in range(4):
+            result = await tools.delegate_subagent(json.dumps({
+                "objective": f"Task {idx}", "model": allowed[0],
+                "pin_model": True,
+            }), ctx)
+            assert result["exit_code"] == 0
+
+    asyncio.run(scenario())
+    assert [row["model"] for row in spawned] == [
+        "worker-1", "worker-2", "worker-3", "worker-1",
+    ]
 
 
 def test_parent_model_gets_three_child_slots_then_allocator_uses_other_models(monkeypatch):

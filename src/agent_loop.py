@@ -4680,9 +4680,9 @@ async def stream_agent_loop(
                 if _subagent_mode == "same_model"
                 else (
                     "Allowed child models: " + (_subagent_models or "none configured") + ". "
-                    "Pass model='auto' unless the user explicitly assigns one child to one exact model. "
+                    "Pass model='auto' unless the user names a preferred configured model. "
                     "The server distributes automatic children breadth-first across all selected models. "
-                    "Set pin_model=true only for an explicit user-requested assignment."
+                    "An exact model is only a preference; every selected route is used before reuse."
                 )
             )
             _prepend_agent_directive(route_messages, (
