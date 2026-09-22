@@ -10,11 +10,13 @@ import threading
 import re
 import os
 import math
+import random
 from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
 from src.subagent_limits import MAX_ACTIVE_PER_MODEL
+from core.log_safety import redact_url
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -174,6 +176,7 @@ class LLMConfig:
     DEFAULT_MAX_TOKENS = 0
     MAX_RETRIES = 3
     RETRY_DELAY = 0.5
+    RETRY_BUDGET_SECONDS = 10.0
     STREAM_TIMEOUT = 300
     # TCP+TLS connect budget for a SINGLE attempt. The old hard-coded 3.0s
     # assumed LAN/Tailscale peers ('SYN in <100ms'); it is too tight for public
@@ -185,7 +188,21 @@ class LLMConfig:
     CONNECT_TIMEOUT = float(os.getenv('LLM_CONNECT_TIMEOUT', '10') or '10')
 
 
-class _FallbackIneligibleHTTPException(HTTPException):
+class _ModelHTTPException(HTTPException):
+    """HTTP failure with a stable, non-sensitive machine category."""
+
+    def __init__(
+        self, status_code: int, detail: str, *,
+        category: Optional[str] = None, outcome_unknown: bool = False,
+    ):
+        super().__init__(status_code, detail)
+        self.error_category = category or _model_error_category(
+            status_code, detail, outcome_unknown=outcome_unknown,
+        )
+        self.retryable = False
+
+
+class _FallbackIneligibleHTTPException(_ModelHTTPException):
     """HTTP-shaped provider failure that must never advance a route chain."""
 
     fallback_eligible = False
@@ -2065,11 +2082,35 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     try:
         note_model_activity(target_url, model)
         r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
-    except Exception as e:
-        raise HTTPException(502, f"POST {target_url} failed: {e}")
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        raise _ModelHTTPException(503, "Could not connect to model endpoint")
+    except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ProtocolError, httpx.NetworkError):
+        raise _FallbackIneligibleHTTPException(
+            504, "Model transport failed after request delivery; outcome unknown",
+            outcome_unknown=True,
+        )
+    except httpx.RequestError:
+        raise _FallbackIneligibleHTTPException(
+            502, "Model request transport failed before completion",
+            category="transport",
+        )
     if not r.is_success:
-        raise HTTPException(502, f"Upstream {target_url} -> {r.status_code}: {r.text}")
-    data = r.json()
+        friendly = _format_upstream_error(r.status_code, r.text, target_url)
+        error_type = (
+            _ModelHTTPException if r.status_code in (429, 503)
+            else _FallbackIneligibleHTTPException
+        )
+        raise error_type(
+            r.status_code, friendly,
+            category=_model_error_category(r.status_code, r.text),
+        )
+    try:
+        data = r.json()
+    except (ValueError, TypeError):
+        raise _FallbackIneligibleHTTPException(
+            502, "Model returned an invalid response schema",
+            category="schema_mismatch",
+        )
     try:
         if provider == "anthropic":
             response = _parse_anthropic_response(data)
@@ -2090,7 +2131,10 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         _set_cached_response(cache_key, response)
         return response
     except Exception:
-        raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
+        raise _FallbackIneligibleHTTPException(
+            502, "Model returned an unexpected response schema",
+            category="schema_mismatch",
+        )
 
 
 def _candidate_is_configured(candidate) -> bool:
@@ -2176,6 +2220,8 @@ def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
         try:
             return llm_call(url, model, messages, headers=headers, **kwargs)
         except Exception as e:
+            if getattr(e, "fallback_eligible", None) is False:
+                raise
             last_err = e
             tag = "primary" if i == 0 else "candidate"
             logger.warning(f"[fallback] {tag} {model} failed ({type(e).__name__}); trying next")
@@ -2193,6 +2239,8 @@ async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
         try:
             return await llm_call_async(url, model, messages, headers=headers, **kwargs)
         except Exception as e:
+            if getattr(e, "fallback_eligible", None) is False:
+                raise
             last_err = e
             tag = "primary" if i == 0 else "candidate"
             logger.warning(f"[fallback] {tag} {model} failed ({type(e).__name__}); trying next")
@@ -2211,6 +2259,55 @@ def _nonstream_error_status(error: Exception) -> Optional[int]:
     if isinstance(error, httpx.ReadTimeout):
         return 504
     return None
+
+
+def _model_retry_wait_seconds(
+    *, status: int, attempt: int, deadline: float, now: float,
+    retry_after: Optional[str] = None, jitter: Optional[float] = None,
+) -> Optional[float]:
+    """Bound pre-content overload retries by time as well as attempt count."""
+    if status not in (429, 503) or now >= deadline:
+        return None
+    if jitter is None:
+        jitter = random.uniform(0.5, 1.0)
+    backoff = min(4.0, LLMConfig.RETRY_DELAY * (2 ** max(0, attempt - 1)))
+    delay = backoff * max(0.5, min(1.0, jitter))
+    if retry_after is not None:
+        try:
+            server_delay = float(retry_after.strip())
+        except (TypeError, ValueError, AttributeError):
+            server_delay = 0.0
+        if math.isfinite(server_delay) and server_delay > 0:
+            delay = max(delay, server_delay)
+    return delay if now + delay <= deadline else None
+
+
+def _model_error_category(
+    status: Optional[int], detail: str = "", *, outcome_unknown: bool = False,
+) -> str:
+    """Classify provider failures for telemetry without treating text as authority."""
+    if outcome_unknown:
+        return "unknown_outcome"
+    if status == 429:
+        return "rate_limit"
+    marker = str(detail or "")[:1000].lower()
+    if any(token in marker for token in (
+        "context length", "context window", "maximum context", "prompt is too long",
+    )):
+        return "context"
+    if any(token in marker for token in (
+        "json schema", "tool schema", "invalid schema", "function schema",
+    )):
+        return "schema_mismatch"
+    if status in (404, 503) and "model" in marker and any(
+        token in marker for token in ("not loaded", "unloaded", "not found", "unavailable")
+    ):
+        return "provider_unload"
+    if status in (408, 504):
+        return "timeout"
+    if status is not None and status >= 500:
+        return "transport"
+    return "provider_error"
 
 
 async def llm_call_async_with_route_fallback(
@@ -2447,6 +2544,8 @@ async def llm_call_async(
 
     call_timeout = _call_timeout(timeout)
     attempt = 0
+    max_retries = max(1, min(LLMConfig.MAX_RETRIES, int(max_retries)))
+    retry_deadline = time.monotonic() + LLMConfig.RETRY_BUDGET_SECONDS
     while attempt < max_retries:
         attempt += 1
         start = time.time()
@@ -2462,10 +2561,21 @@ async def llm_call_async(
                     f"LLM async call to {target_url} failed in {duration:.2f}s "
                     f"(attempt {attempt}): HTTP {r.status_code} {friendly}"
                 )
-                if r.status_code in (429, 502, 503, 504) and attempt < max_retries:
-                    await asyncio.sleep(LLMConfig.RETRY_DELAY)
-                    continue
-                raise HTTPException(r.status_code, friendly)
+                if r.status_code in (502, 504):
+                    raise _FallbackIneligibleHTTPException(r.status_code, friendly)
+                if attempt < max_retries:
+                    wait = _model_retry_wait_seconds(
+                        status=r.status_code, attempt=attempt,
+                        deadline=retry_deadline, now=time.monotonic(),
+                        retry_after=r.headers.get("retry-after"),
+                    )
+                    if wait is not None:
+                        await asyncio.sleep(wait)
+                        continue
+                raise _ModelHTTPException(
+                    r.status_code, friendly,
+                    category=_model_error_category(r.status_code, r.text),
+                )
             logger.info(f"LLM async call to {target_url} succeeded in {duration:.2f}s (attempt {attempt})")
             _clear_host_dead(target_url)
             data = r.json()
@@ -2476,7 +2586,14 @@ async def llm_call_async(
                     detail = provider_error.get("message") or provider_error.get("type") or str(provider_error)
                 else:
                     detail = str(provider_error)
-                raise HTTPException(status, detail or "Upstream request failed")
+                category = _model_error_category(status, detail)
+                error_type = (
+                    _ModelHTTPException if status in (429, 503)
+                    else _FallbackIneligibleHTTPException
+                )
+                raise error_type(
+                    status, detail or "Upstream request failed", category=category,
+                )
             try:
                 reported_model = data.get("model") if isinstance(data, dict) else None
                 actual_model = (
@@ -2520,22 +2637,30 @@ async def llm_call_async(
             except Exception:
                 raise _FallbackIneligibleHTTPException(
                     502,
-                    f"Unexpected schema from {target_url}: {str(data)[:400]}",
+                    "Model returned an unexpected response schema",
+                    category="schema_mismatch",
                 )
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             duration = time.time() - start
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"LLM async connect to {target_url} failed after {duration:.2f}s: {e}{_tail}")
+            logger.warning(
+                "LLM async connect to %s failed after %.2fs (%s)%s",
+                redact_url(target_url), duration, type(e).__name__, _tail,
+            )
             if _cooled or attempt >= max_retries:
-                raise HTTPException(503, f"Cannot reach {_host_key(target_url)}: {e}")
-            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+                raise HTTPException(503, f"Cannot reach {redact_url(_host_key(target_url))}")
+            wait = _model_retry_wait_seconds(
+                status=503, attempt=attempt, deadline=retry_deadline,
+                now=time.monotonic(),
+            )
+            if wait is None:
+                raise HTTPException(503, f"Cannot reach {redact_url(_host_key(target_url))}")
+            await asyncio.sleep(wait)
         except httpx.ReadTimeout as e:
             duration = time.time() - start
             logger.warning(f"LLM async read timed out after {duration:.2f}s: {e}")
-            if attempt >= max_retries:
-                raise HTTPException(504, f"POST {target_url} timed out after {max_retries} attempts")
-            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+            raise _FallbackIneligibleHTTPException(504, "Model response timed out after request delivery; outcome unknown", outcome_unknown=True)
         except httpx.PoolTimeout as e:
             duration = time.time() - start
             logger.warning(f"LLM async connection pool timed out after {duration:.2f}s: {e}")
@@ -2546,40 +2671,25 @@ async def llm_call_async(
                 )
             if attempt >= max_retries:
                 raise HTTPException(504, f"POST {target_url} timed out after {max_retries} attempts")
-            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+            wait = _model_retry_wait_seconds(
+                status=503, attempt=attempt, deadline=retry_deadline,
+                now=time.monotonic(),
+            )
+            if wait is None:
+                raise HTTPException(504, "Could not acquire an upstream connection within retry budget")
+            await asyncio.sleep(wait)
         except httpx.WriteTimeout as e:
             duration = time.time() - start
             logger.warning(f"LLM async upstream timeout after {duration:.2f}s: {e}")
-            if availability_only_transport:
-                raise _FallbackIneligibleHTTPException(
-                    504,
-                    f"POST {target_url} failed during request delivery",
-                )
-            if attempt >= max_retries:
-                raise HTTPException(504, f"POST {target_url} timed out after {max_retries} attempts")
-            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+            raise _FallbackIneligibleHTTPException(504, "Model request delivery timed out; outcome unknown", outcome_unknown=True)
         except httpx.ProtocolError as e:
             duration = time.time() - start
             logger.warning(f"LLM async protocol failure after {duration:.2f}s: {e}")
-            if availability_only_transport:
-                raise _FallbackIneligibleHTTPException(
-                    502,
-                    f"POST {target_url} failed with a protocol error",
-                )
-            if attempt >= max_retries:
-                raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
-            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+            raise _FallbackIneligibleHTTPException(502, "Model transport protocol failed; outcome unknown", outcome_unknown=True)
         except httpx.NetworkError as e:
             duration = time.time() - start
             logger.warning(f"LLM async network failure after {duration:.2f}s: {e}")
-            if availability_only_transport:
-                raise _FallbackIneligibleHTTPException(
-                    502,
-                    f"POST {target_url} failed with a network error",
-                )
-            if attempt >= max_retries:
-                raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
-            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+            raise _FallbackIneligibleHTTPException(502, "Model network transport failed; outcome unknown", outcome_unknown=True)
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 502
             raise HTTPException(status, str(e))
@@ -2606,7 +2716,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground"):
+                     tool_choice_none: bool = False, workload: str = "foreground",
+                     on_model_request=None):
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         async for chunk in _stream_llm_inner(
@@ -2621,6 +2732,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tools=tools,
             session_id=session_id,
             tool_choice_none=tool_choice_none,
+            on_model_request=on_model_request,
         ):
             yield chunk
 
@@ -2629,7 +2741,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False, on_model_request=None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2717,6 +2829,17 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     # path, which -- unlike llm_call -- does not retry the connect.
     stream_timeout = _stream_timeout(timeout)
 
+    def _request_budget_denial():
+        """Count only a model transport POST, immediately before it starts."""
+        if on_model_request is None:
+            return None
+        denial = on_model_request()
+        if denial is None:
+            return None
+        if not isinstance(denial, dict) or denial.get("type") != "budget_exceeded":
+            raise ValueError("Invalid model request budget event")
+        return f'data: {json.dumps(denial)}\n\n'
+
     if _is_host_dead(target_url):
         yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
         return
@@ -2732,12 +2855,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _responses_model_announced = False
         try:
             client = _get_http_client()
+            denial = _request_budget_denial()
+            if denial is not None:
+                yield denial
+                return
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_chatgpt_subscription_error(r.status_code, raw)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -2831,7 +2958,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             logger.warning(f"ChatGPT Subscription stream connect to {target_url} failed: {e}{_tail}")
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
         except httpx.PoolTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
         except httpx.WriteTimeout:
@@ -2853,12 +2980,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _ollama_model_announced = False
         try:
             client = _get_http_client()
+            denial = _request_budget_denial()
+            if denial is not None:
+                yield denial
+                return
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -2925,7 +3056,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             logger.warning(f"Ollama stream connect to {target_url} failed: {e}{_tail}")
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
         except httpx.PoolTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
         except httpx.WriteTimeout:
@@ -2952,12 +3083,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _anth_block_type = ""
         try:
             client = _get_http_client()
+            denial = _request_budget_denial()
+            if denial is not None:
+                yield denial
+                return
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     # SSE allows "data:value" with no space after the colon
@@ -3078,7 +3213,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
         except httpx.PoolTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
         except httpx.WriteTimeout:
@@ -3133,12 +3268,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     try:
         client = _get_http_client()
         h = await apply_kimi_code_headers_async(client, h, target_url)
+        denial = _request_budget_denial()
+        if denial is not None:
+            yield denial
+            return
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
                 friendly = _format_upstream_error(r.status_code, raw, target_url)
-                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
                 return
 
             async for line in r.aiter_lines():
@@ -3394,7 +3533,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
         yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
     except httpx.ReadTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
     except httpx.PoolTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
     except httpx.WriteTimeout:
@@ -3574,6 +3713,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
     fallback_on_empty = bool(kwargs.pop("fallback_on_empty", True))
     candidate_request_factory = kwargs.pop("candidate_request_factory", None)
     candidate_route_descriptors = kwargs.pop("candidate_route_descriptors", None)
+    request_budget_nonce = getattr(kwargs.get("on_model_request"), "budget_nonce", None)
     eligible_statuses = None if fallback_statuses is None else frozenset(fallback_statuses)
 
     raw_candidates = list(candidates or [])
@@ -3690,6 +3830,13 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
 
                 delta = event_data.get("delta")
                 event_type = event_data.get("type")
+                if event_type == "budget_exceeded":
+                    if (isinstance(request_budget_nonce, str) and request_budget_nonce
+                            and event_data.get("_budget_nonce") == request_budget_nonce):
+                        yield chunk
+                        return
+                    # Provider data cannot impersonate an internal budget.
+                    continue
                 substantive = (
                     isinstance(delta, str) and bool(delta.strip())
                 ) or (

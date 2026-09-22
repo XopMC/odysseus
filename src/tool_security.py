@@ -42,8 +42,17 @@ BUILTIN_EMAIL_TOOLS = frozenset({
 NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "bash",
     "python",
+    "run_tests",
+    "run_lint",
+    "inspect_process",
+    "inspect_port",
+    "tail_log",
+    "http_probe",
     "manage_bg_jobs",
     "read_file",
+    "compare_files",
+    "verify_hashes",
+    "inspect_toolchain",
     "write_file",
     "edit_file",
     "apply_patch",
@@ -165,7 +174,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "generate_image", "edit_image", "trigger_research", "manage_research",
     # Shell is never read-only-safe; block it explicitly so it stays out of plan
     # mode even if the schema list fails to load.
-    "bash", "python",
+    "bash", "python", "run_tests", "run_lint",
     # Controls shell processes (kill); plan mode can't run bash anyway.
     "manage_bg_jobs",
     "update_plan_step", "update_goal_progress", "complete_goal",

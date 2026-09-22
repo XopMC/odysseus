@@ -60,6 +60,12 @@ class ReplayTests(unittest.TestCase):
         self.log.checkpoint('done')
         self.assertEqual(ReplayLog(self.temp.name, 'a' * 32, 'alice-chat').page()['status'], 'done')
 
+    def test_read_only_reopen_does_not_scan_all_replay_artifacts(self):
+        self.log.append('complete')
+        with patch.object(Path, 'iterdir', side_effect=AssertionError('global replay scan')):
+            reopened = ReplayLog(self.temp.name, 'a' * 32, 'alice-chat')
+            self.assertEqual(reopened.page()['events'][0]['event'], 'complete')
+
     def test_foreign_session_and_invalid_paths(self):
         with self.assertRaises(FileNotFoundError):
             ReplayLog(self.temp.name, 'a' * 32, 'bob-chat')

@@ -6,7 +6,7 @@ import json
 import asyncio
 import time
 
-from src.observation_pack import recall
+from src.observation_pack import recall, search
 
 
 _research_drivers: dict[str, asyncio.Task] = {}
@@ -143,7 +143,8 @@ class ReadToolArtifactTool:
                 raise ValueError
             oid = str(args.get("id") or "")
             offset = int(args.get("offset") or 0)
-            chunk = recall(ctx.get("owner"), ctx.get("session_id"), oid, offset)
+            chunk = recall(ctx.get("owner"), ctx.get("session_id"), oid, offset,
+                           run_id=ctx.get("parent_run_id"))
         except (FileNotFoundError, OSError, TypeError, ValueError):
             return {"error": "Stored tool observation is unavailable", "exit_code": 1}
         header = (
@@ -151,6 +152,25 @@ class ReadToolArtifactTool:
             f"next_offset={chunk['next_offset']} eof={str(chunk['eof']).lower()}]"
         )
         return {"output": header + "\n" + chunk["text"], "exit_code": 0, **chunk}
+
+
+class SearchArtifactsTool:
+    async def execute(self, content: str, ctx: dict) -> dict:
+        run_id = ctx.get("parent_run_id")
+        if not run_id or not ctx.get("session_id"):
+            return {"error": "Artifact search requires an active run and chat",
+                    "code": "not_supported_by_route", "exit_code": 1}
+        try:
+            args = json.loads(content or "{}")
+            if not isinstance(args, dict) or set(args) - {"query", "limit", "cursor"}:
+                raise ValueError
+            page = search(ctx.get("owner"), ctx["session_id"], run_id,
+                          args.get("query"), limit=args.get("limit", 10),
+                          cursor=args.get("cursor"))
+        except (OSError, TypeError, ValueError):
+            return {"error": "Artifact search is unavailable or arguments are invalid",
+                    "code": "invalid_arguments", "exit_code": 1}
+        return {"output": json.dumps(page, ensure_ascii=False), "exit_code": 0, **page}
 
 
 class PublishSubagentEvidenceTool:

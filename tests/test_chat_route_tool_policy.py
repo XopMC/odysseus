@@ -138,13 +138,14 @@ def test_goal_continuation_does_not_inherit_web_only_tool_clamp():
     assert "if _explicit_web_intent and not active_goal and not goal_continuation:" in source
 
 
-def test_compaction_failure_retries_goal_without_fake_user_wait():
+def test_compaction_failure_records_reason_for_bounded_goal_retry():
     source = _CHAT_ROUTES.read_text(encoding="utf-8")
     branch = source.split(
-        '"Context checkpoint failed; the server will retry automatically with the preserved ledger."',
+        '"Context checkpoint failed; the prior ledger is preserved."',
         1,
     )[1][:300]
-    assert "keep_active=True" in branch
+    assert '"reason": "context_compaction"' in branch
+    assert "keep_active=True" not in branch
 
 
 # ── Functional tests of the disabled-tools logic ───────────────

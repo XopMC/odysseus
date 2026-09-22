@@ -24,6 +24,24 @@ function _loader() {
   return document.getElementById(LOADER_ID);
 }
 
+function _markSessionTargetHydration() {
+  // A persisted chat is still loading even though the shell is interactive.
+  // Never show the new-chat welcome or a placeholder 0% as if they described
+  // that chat before its server-owned snapshot has arrived.
+  if (!/^#[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(window.location?.hash || '')) return;
+  document.body?.classList.add('session-target-hydrating');
+  const status = document.getElementById('session-restore-loading');
+  if (status) status.hidden = false;
+  document.getElementById('chat-container')?.setAttribute('aria-busy', 'true');
+}
+
+function _clearSessionTargetHydration() {
+  document.body?.classList.remove('session-target-hydrating');
+  const status = document.getElementById('session-restore-loading');
+  if (status) status.hidden = true;
+  document.getElementById('chat-container')?.setAttribute('aria-busy', 'false');
+}
+
 /** Run `fn` after the next paint has committed (two animation frames). */
 export function afterNextPaint(fn) {
   requestAnimationFrame(() => requestAnimationFrame(fn));
@@ -50,6 +68,7 @@ function _makeLoaderInert(loader) {
 export function revealApplicationShellAfterPaint() {
   const loader = _loader();
   if (!loader || loader.dataset.shellRevealScheduled === 'true') return;
+  _markSessionTargetHydration();
   loader.dataset.shellRevealScheduled = 'true';
   afterNextPaint(() => _makeLoaderInert(_loader()));
 }
@@ -121,6 +140,7 @@ export function runDeferredRouteOpener({ sessionsSettled = false } = {}) {
  */
 export function settleSessionHydration(loadSessions) {
   const settle = (succeeded) => {
+    _clearSessionTargetHydration();
     if (!succeeded) {
       markSessionListUnavailableIfStillBootstrapping();
       // A later unrelated caller must not be able to release a stale startup

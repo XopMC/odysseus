@@ -164,6 +164,10 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
     else:
         allowed = []
     raw_model_limits = get_setting("agent_subagent_model_limits", {})
+    try:
+        max_children_per_run = max(0, min(int(get_setting("agent_max_children_per_run", 0)), 256))
+    except (TypeError, ValueError):
+        max_children_per_run = 0
     model_limits = {}
     if isinstance(raw_model_limits, dict):
         for raw_spec, raw_limit in raw_model_limits.items():
@@ -279,6 +283,7 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         external_untrusted_context_seen=bool(ctx.get("external_untrusted_context_seen")),
         delegated_credential=bool(ctx.get("delegated_credential")),
         max_active_for_model=max_active_for_model,
+        max_children_per_run=max_children_per_run,
     )
 
 

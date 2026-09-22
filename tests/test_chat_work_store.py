@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from core.database import ChatMessage, Session, SessionLocal
+from core.database import Base, ChatMessage, Session, SessionLocal, engine
 from src import agent_runs
 from src.agent_tools import ToolBlock
 from src.chat_work_store import ChatWorkStore, WorkConflict, WorkNotFound
@@ -17,6 +17,10 @@ from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 
 @pytest.fixture
 def owned_chat():
+    # The suite uses an in-memory SQLite URL. Earlier threaded route fixtures
+    # can replace/close its connection, so import-time init_db is not a stable
+    # precondition for this fixture when files are run in collection order.
+    Base.metadata.create_all(bind=engine)
     session_id = "work-" + uuid.uuid4().hex
     with SessionLocal.begin() as db:
         db.add(Session(
@@ -30,6 +34,13 @@ def owned_chat():
             row = db.query(Session).filter_by(id=session_id).first()
             if row is not None:
                 db.delete(row)
+
+
+@pytest.fixture
+def canonical_run_db(monkeypatch):
+    """Undo a legacy suite's global DB-factory replacement for run tests."""
+    from core import database
+    monkeypatch.setattr(database, "SessionLocal", SessionLocal)
 
 
 def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
@@ -66,6 +77,47 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
     assert store.events("alice", owned_chat)
     with pytest.raises(WorkNotFound):
         store.get("bob", owned_chat)
+
+
+def test_legacy_plan_update_marks_terminal_when_all_required_steps_done(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Arithmetic", "- [ ] Direct\n- [ ] Independent")
+    original_ids = [step["id"] for step in plan["steps"]]
+    plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
+    plan = work.save_plan("alice", owned_chat, "Arithmetic", "- [x] Direct\n- [x] Independent",
+                          expected_revision=plan["revision"])
+    assert plan["status"] == "done"
+    assert plan["current_step_id"] is None
+    assert [step["id"] for step in plan["steps"]] == original_ids
+
+
+def test_goal_stall_wait_reason_is_durable_owner_scoped_and_cleared_on_resume(owned_chat):
+    store = ChatWorkStore()
+    goal = store.ensure_goal("alice", owned_chat, "Harmless verification")
+    goal = store.update_goal(
+        "alice", owned_chat, "No new safe progress after repeated continuation attempts.",
+        {"round": 6, "reason": "repeated_premature_stop"}, waiting_user=True,
+    )
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "repeated_premature_stop"
+    with pytest.raises(WorkNotFound):
+        store.wait_metadata("bob", owned_chat)
+    goal = store.goal_action("alice", owned_chat, "resume", goal["revision"])
+    assert goal["status"] == "active"
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] is None
+    goal = store.update_goal(
+        "alice", owned_chat, "Question requires an answer",
+        {"question_id": "question-1", "question": "Which safe profile?"}, waiting_user=True,
+    )
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "ask_user"
+
+
+def test_repeated_provider_failure_has_explicit_wait_reason(owned_chat):
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Harmless verification")
+    for _ in range(3):
+        goal = store.record_goal_failure("alice", owned_chat, "Provider unavailable")
+    assert goal["status"] == "waiting_user"
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "provider_failure"
 
 
 def test_single_user_goal_and_model_tools_accept_null_request_owner(monkeypatch):
@@ -196,24 +248,400 @@ def test_goal_model_failures_retry_then_wait_for_user(owned_chat):
     assert goal["status"] == "waiting_user"
 
 
-def test_goal_retriable_checkpoint_failure_stays_active_with_backoff_count(owned_chat):
+def test_manual_goal_resume_dispatch_failure_waits_immediately(owned_chat):
+    store = ChatWorkStore()
+    goal = store.ensure_goal("alice", owned_chat, "Harmless verification")
+    goal = store.goal_action("alice", owned_chat, "pause", goal["revision"])
+    goal = store.goal_action("alice", owned_chat, "resume", goal["revision"])
+    failed = store.record_goal_failure(
+        "alice", owned_chat, "Goal continuation HTTP 503",
+        {"reason": "continuation_dispatch_failed"}, force_wait_user=True,
+    )
+    assert failed["status"] == "waiting_user"
+    assert failed["failure_count"] == 1
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "dispatch_failure"
+
+
+def test_goal_tool_budget_waits_with_durable_exact_run_snapshot(owned_chat):
+    store = ChatWorkStore()
+    initial = store.ensure_goal("alice", owned_chat, "Harmless bounded task")
+    goal = store.wait_on_goal_budget(
+        "alice", owned_chat, resource="tool_calls", used=2, limit=2,
+        run_id="a" * 32, expected_goal_id=initial["id"],
+        expected_attempt=initial["attempt"],
+    )
+    assert goal["status"] == "waiting_user"
+    assert goal["checkpoint"]["budget"] == {
+        "resource": "tool_calls", "used": 2, "limit": 2, "run_id": "a" * 32,
+    }
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "resource_budget"
+    assert store.events("alice", owned_chat)[-1]["type"] == "goal_budget_exceeded"
+    with pytest.raises(WorkConflict):
+        store.wait_on_goal_budget("alice", owned_chat, resource="tool_calls",
+                                  used=2, limit=2, run_id="a" * 32,
+                                  expected_goal_id=initial["id"],
+                                  expected_attempt=initial["attempt"])
+
+
+def test_goal_model_round_budget_waits_instead_of_resetting_attempt(owned_chat):
+    store = ChatWorkStore()
+    initial = store.ensure_goal("alice", owned_chat, "Harmless bounded task")
+    goal = store.wait_on_goal_budget(
+        "alice", owned_chat, resource="model_rounds", used=4, limit=4,
+        run_id="b" * 32, expected_goal_id=initial["id"],
+        expected_attempt=initial["attempt"],
+    )
+    assert goal["status"] == "waiting_user"
+    assert goal["attempt"] == initial["attempt"]
+    assert goal["checkpoint"]["budget"]["resource"] == "model_rounds"
+    assert store.wait_metadata("alice", owned_chat)["budget"]["limit"] == 4
+
+
+def test_goal_model_token_budget_waits_with_exact_usage(owned_chat):
+    store = ChatWorkStore()
+    initial = store.ensure_goal("alice", owned_chat, "Harmless bounded task")
+    goal = store.wait_on_goal_budget(
+        "alice", owned_chat, resource="model_tokens", used=1200, limit=1000,
+        usage_source="estimated",
+        run_id="c" * 32, expected_goal_id=initial["id"],
+        expected_attempt=initial["attempt"],
+    )
+    assert goal["status"] == "waiting_user"
+    assert goal["checkpoint"]["budget"] == {
+        "resource": "model_tokens", "used": 1200, "limit": 1000,
+        "run_id": "c" * 32, "usage_source": "estimated",
+    }
+    assert store.wait_metadata("alice", owned_chat)["budget"]["used"] == 1200
+
+
+def test_goal_model_request_budget_waits_with_exact_run(owned_chat):
+    store = ChatWorkStore()
+    initial = store.ensure_goal("alice", owned_chat, "Harmless bounded task")
+    goal = store.wait_on_goal_budget(
+        "alice", owned_chat, resource="model_requests", used=2, limit=2,
+        run_id="d" * 32, expected_goal_id=initial["id"],
+        expected_attempt=initial["attempt"],
+    )
+    assert goal["status"] == "waiting_user"
+    assert goal["checkpoint"]["budget"] == {
+        "resource": "model_requests", "used": 2, "limit": 2, "run_id": "d" * 32,
+    }
+
+
+def test_goal_lease_cas_rejects_a_revised_attempt(owned_chat):
+    store = ChatWorkStore()
+    initial = store.ensure_goal("alice", owned_chat, "Harmless task")
+    revised = store.revise_goal(
+        "alice", owned_chat, "Revised harmless task", initial["revision"],
+    )
+    assert store.acquire_goal_lease(
+        "alice", owned_chat, expected_goal_id=initial["id"],
+        expected_attempt=initial["attempt"],
+    ) is None
+    token = store.acquire_goal_lease(
+        "alice", owned_chat, expected_goal_id=revised["id"],
+        expected_attempt=revised["attempt"],
+    )
+    assert token
+    assert store.consume_goal_lease("alice", owned_chat, token)["attempt"] == revised["attempt"] + 1
+
+
+def test_goal_dispatch_rejects_stale_attempt_before_model_request(monkeypatch, owned_chat):
+    import src.goal_controller as controller
+    from src.chat_effect_inbox import inbox
+
+    work = ChatWorkStore()
+    initial = work.ensure_goal("alice", owned_chat, "Harmless task")
+    revised = work.revise_goal(
+        "alice", owned_chat, "Revised harmless task", initial["revision"],
+    )
+    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [])
+    monkeypatch.setattr(agent_runs, "is_active", lambda session: False)
+
+    async def same_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(controller.asyncio, "to_thread", same_thread)
+
+    class ForbiddenClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("A stale attempt must not dispatch a model request")
+
+    monkeypatch.setattr(controller.httpx, "AsyncClient", ForbiddenClient)
+    assert asyncio.run(controller.dispatch_goal_continuation(
+        "alice", owned_chat, reason="terminal_done",
+        expected_goal_id=initial["id"], expected_attempt=initial["attempt"],
+    )) is False
+    current = work.get("alice", owned_chat)["goal"]
+    assert (current["status"], current["attempt"]) == ("active", revised["attempt"])
+
+
+def test_stale_run_error_cannot_mark_revised_goal_failed(owned_chat):
+    work = ChatWorkStore()
+    initial = work.ensure_goal("alice", owned_chat, "Harmless task")
+    revised = work.revise_goal(
+        "alice", owned_chat, "Revised harmless task", initial["revision"],
+    )
+    with pytest.raises(WorkConflict):
+        work.record_goal_failure(
+            "alice", owned_chat, "Old run failed",
+            expected_goal_id=initial["id"],
+            expected_attempt=initial["attempt"],
+        )
+    current = work.get("alice", owned_chat)["goal"]
+    assert current["status"] == "active"
+    assert current["attempt"] == revised["attempt"]
+    assert current["failure_count"] == 0
+
+
+def test_stale_goal_budget_cannot_park_a_new_attempt(owned_chat):
+    store = ChatWorkStore()
+    initial = store.ensure_goal("alice", owned_chat, "Harmless bounded task")
+    revised = store.revise_goal(
+        "alice", owned_chat, "Revised harmless task", initial["revision"],
+    )
+    assert revised["attempt"] > initial["attempt"]
+    with pytest.raises(WorkConflict):
+        store.wait_on_goal_budget(
+            "alice", owned_chat, resource="tool_calls", used=2, limit=2,
+            run_id="a" * 32, expected_goal_id=initial["id"],
+            expected_attempt=initial["attempt"],
+        )
+    assert store.get("alice", owned_chat)["goal"]["status"] == "active"
+
+
+def test_goal_controller_http_failure_parks_manual_resume_without_success(monkeypatch, owned_chat):
+    import src.goal_controller as controller
+    from src.chat_effect_inbox import inbox
+
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Harmless verification")
+    goal = work.goal_action("alice", owned_chat, "pause", goal["revision"])
+    work.goal_action("alice", owned_chat, "resume", goal["revision"])
+    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [])
+    monkeypatch.setattr(agent_runs, "is_active", lambda session: False)
+    monkeypatch.setattr(agent_runs, "continuation_for_session", lambda session: {})
+
+    async def same_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(controller.asyncio, "to_thread", same_thread)
+
+    class Response:
+        status_code = 503
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return False
+
+    class Client:
+        def __init__(self, **_): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return False
+        def stream(self, *_, **__): return Response()
+
+    monkeypatch.setattr(controller.httpx, "AsyncClient", Client)
+    assert asyncio.run(controller.dispatch_goal_continuation(
+        "alice", owned_chat, reason="goal_resumed",
+    )) is False
+    state = work.get("alice", owned_chat)["goal"]
+    assert state["status"] == "waiting_user"
+    assert state["checkpoint"]["_wait_reason"] == "dispatch_failure"
+
+
+def test_goal_controller_reports_missing_selected_model_without_echoing_response(monkeypatch, owned_chat):
+    import src.goal_controller as controller
+    from src.chat_effect_inbox import inbox
+
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Harmless verification")
+    goal = work.goal_action("alice", owned_chat, "pause", goal["revision"])
+    work.goal_action("alice", owned_chat, "resume", goal["revision"])
+    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [])
+    monkeypatch.setattr(agent_runs, "is_active", lambda session: False)
+    monkeypatch.setattr(agent_runs, "continuation_for_session", lambda session: {})
+
+    async def same_thread(func, *args, **kwargs): return func(*args, **kwargs)
+    monkeypatch.setattr(controller.asyncio, "to_thread", same_thread)
+
+    class Response:
+        status_code = 400
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return False
+        async def aread(self):
+            return b'{"detail":"No model selected for this chat. private-marker"}'
+
+    class Client:
+        def __init__(self, **_): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return False
+        def stream(self, *_, **__): return Response()
+
+    monkeypatch.setattr(controller.httpx, "AsyncClient", Client)
+    assert asyncio.run(controller.dispatch_goal_continuation(
+        "alice", owned_chat, reason="goal_resumed",
+    )) is False
+    state = work.get("alice", owned_chat)["goal"]
+    assert state["checkpoint"]["failure_code"] == "model_unselected"
+    assert "Choose a model" in state["progress"]
+    assert "private-marker" not in json.dumps(state)
+
+
+def test_goal_alternating_provider_errors_still_exhaust_retry_budget(owned_chat):
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Harmless verification")
+    for expected, error in enumerate(("HTTP 503", "Transport timeout", "HTTP 502"), 1):
+        goal = store.record_goal_failure("alice", owned_chat, error)
+        assert goal["failure_count"] == expected
+    assert goal["status"] == "waiting_user"
+    assert goal["last_error"] == "HTTP 502"
+
+
+@pytest.mark.parametrize("last_seq,expected_next", [(-1, 0), (0, 1)])
+def test_recovered_run_snapshot_uses_exact_zero_cursor(owned_chat, canonical_run_db, monkeypatch, last_seq, expected_next):
+    from core.database import ChatRunState, utcnow_naive
+
+    run_id = uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(
+            run_id=run_id, session_id=owned_chat, owner="alice",
+            status="interrupted", started_at=utcnow_naive(),
+            last_seq=last_seq, durable_seq=last_seq,
+            context_revision=1, ledger_hash="a" * 64,
+        ))
+    monkeypatch.delitem(agent_runs._RUNS, owned_chat, raising=False)
+    snapshot = agent_runs.describe_run(owned_chat)
+    assert snapshot["run_id"] == run_id
+    assert snapshot["last_seq"] == last_seq
+    assert snapshot["next_seq"] == expected_next
+
+
+def test_restart_recovery_fences_run_and_replays_once(owned_chat, canonical_run_db, monkeypatch, tmp_path):
+    from core.database import ChatRunState, ChatMessage as DbChatMessage, utcnow_naive
+    from src.chat_replay_log import ReplayLog
+
+    run_id = uuid.uuid4().hex
+    log = ReplayLog(str(tmp_path), run_id, owned_chat, create=True)
+    log.append('data: {"delta":"partial safe fixture"}\n\n')
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(
+            run_id=run_id, session_id=owned_chat, owner="alice", status="running",
+            started_at=utcnow_naive(), last_seq=0, durable_seq=0,
+            context_revision=4, ledger_hash="a" * 64,
+            context_snapshot={"model": "fixture", "used_tokens": 40, "context_length": 1000},
+            continuation={"allow_bash": False},
+        ))
+    monkeypatch.setattr(agent_runs, "replay_root", lambda: str(tmp_path))
+    monkeypatch.delitem(agent_runs._RUNS, owned_chat, raising=False)
+
+    recovered = agent_runs.recover_durable_runs()
+    assert [state["run_id"] for state in recovered] == [run_id]
+    snapshot = agent_runs.describe_run(owned_chat)
+    assert snapshot["status"] == "interrupted"
+    assert snapshot["terminal_reason"] == "process_restarted"
+    assert snapshot["durable_seq"] == 0
+    assert snapshot["next_seq"] == 1
+    assert snapshot["context_revision"] == 4
+    assert agent_runs.event_page(owned_chat, after_seq=-1)["events"][0]["seq"] == 0
+    with SessionLocal() as db:
+        first_count = db.query(DbChatMessage).filter_by(session_id=owned_chat, role="assistant").count()
+    assert first_count == 1
+    assert agent_runs.recover_durable_runs() == []
+    with SessionLocal() as db:
+        assert db.query(DbChatMessage).filter_by(session_id=owned_chat, role="assistant").count() == first_count
+
+
+def test_non_durable_checkpoint_never_rolls_zero_durable_cursor_back(owned_chat, canonical_run_db):
+    from core.database import ChatRunState, utcnow_naive
+
+    run = agent_runs._Run()
+    run.run_id = uuid.uuid4().hex
+    run.session_id = owned_chat
+    run.owner = "alice"
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(
+            run_id=run.run_id, session_id=owned_chat, owner="alice", status="running",
+            started_at=utcnow_naive(), last_seq=0, durable_seq=0,
+            context_revision=0,
+        ))
+    agent_runs._persist_run_state(run, status="running", durable=False)
+    with SessionLocal() as db:
+        row = db.query(ChatRunState).filter_by(run_id=run.run_id).one()
+        assert row.durable_seq == 0
+        assert row.ledger_hash == run.ledger_hash
+        assert row.ledger_hash is not None
+
+
+def test_unchanged_run_context_checkpoint_does_not_scan_prior_runs(owned_chat, canonical_run_db):
+    from core.database import ChatRunState, engine, utcnow_naive
+    from sqlalchemy import event
+
+    run = agent_runs._Run()
+    run.run_id = uuid.uuid4().hex
+    run.session_id = owned_chat
+    run.owner = "alice"
+    run.context_usage = {"model": "fixture", "used_tokens": 1000,
+                         "context_length": 8000, "source": "backend"}
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(
+            run_id=run.run_id, session_id=owned_chat, owner="alice", status="running",
+            started_at=utcnow_naive(), last_seq=-1, durable_seq=-1,
+            context_revision=1, context_snapshot=dict(run.context_usage),
+        ))
+        for _ in range(10):
+            db.add(ChatRunState(
+                run_id=uuid.uuid4().hex, session_id=owned_chat, owner="alice", status="done",
+                started_at=utcnow_naive(), last_seq=0, durable_seq=0,
+                context_revision=1, context_snapshot=dict(run.context_usage),
+            ))
+    selects = []
+
+    def count_select(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT") and "chat_run_states" in statement:
+            selects.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_select)
+    try:
+        agent_runs._persist_run_state(run, status="running", durable=False)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_select)
+    assert len(selects) == 1, selects
+
+
+def test_goal_repeated_checkpoint_failure_waits_without_losing_ledger(owned_chat):
     store = ChatWorkStore()
     store.ensure_goal("alice", owned_chat, "Keep the durable goal alive")
-    for expected in range(1, 7):
+    for expected in range(1, 4):
         goal = store.record_goal_failure(
             "alice", owned_chat, "Context checkpoint failed",
-            {"reason": "context_compaction"}, keep_active=True,
+            {"reason": "context_compaction", "ledger_hash": "a" * 64},
         )
         assert goal["failure_count"] == expected
-        assert goal["status"] == "active"
+        assert goal["status"] == ("waiting_user" if expected == 3 else "active")
     assert goal["checkpoint"]["reason"] == "context_compaction"
-    recovered = store.clear_goal_failure(
-        "alice", owned_chat, reason="context_compaction_succeeded",
+    assert goal["checkpoint"]["ledger_hash"] == "a" * 64
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "context_compaction"
+    with pytest.raises(WorkNotFound):
+        store.record_goal_failure("alice", owned_chat, "Context checkpoint failed",
+                                  {"reason": "context_compaction"})
+    resumed = store.goal_action("alice", owned_chat, "resume", goal["revision"])
+    assert resumed["status"] == "active"
+    assert resumed["checkpoint"]["ledger_hash"] == "a" * 64
+
+
+def test_goal_checkpoint_failure_can_wait_immediately_without_losing_ledger(owned_chat):
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Keep the durable goal alive")
+    failed = store.record_goal_failure(
+        "alice", owned_chat, "Context checkpoint failed",
+        {"reason": "context_compaction", "failure_code": "context_uncompactable",
+         "ledger_hash": "b" * 64}, force_wait_user=True,
     )
-    assert recovered["status"] == "active"
-    assert recovered["failure_count"] == 0
-    assert recovered["last_error"] is None
-    assert recovered["checkpoint"]["reason"] == "context_compaction"
+    assert failed["status"] == "waiting_user"
+    assert failed["failure_count"] == 1
+    assert failed["checkpoint"]["ledger_hash"] == "b" * 64
+    assert failed["checkpoint"]["failure_code"] == "context_uncompactable"
+    assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "context_compaction"
+    assert store.wait_metadata("alice", owned_chat)["failure_code"] == "context_uncompactable"
 
 
 def test_goal_tools_receive_the_validated_owner_and_session(owned_chat):

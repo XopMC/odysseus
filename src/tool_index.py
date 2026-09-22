@@ -75,9 +75,25 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
     "read_tool_artifact": "Recall an exact paged chunk of a large prior tool result by its opaque observation id and byte offset.",
+    "search_artifacts": "Search bounded snippets of archived full tool outputs from this run, returning owner-scoped artifact IDs without sending the full output to the model.",
     "publish_subagent_evidence": "Child agent only: publish an append-only finding, reproduction, rejected hypothesis, or verified fact to the shared parent evidence board.",
     "manage_auto_research_lab": "Opt-in blind recursive research workflow: parallel trajectory exploration, map-reduce, proposal, independent implementer/reviewer revisions, train validation, Pareto selection, sealed held-out verdicts and fixed gates. Never deploys candidates.",
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
+    "search_files": "Search code with ripgrep semantics. Return a short paged file list by default, or exact matching lines on request. Scoped by the same workspace and sensitive-file policy as grep.",
+    "list_tree": "Show a bounded directory tree and file sizes without opening file bodies. Skips hidden, generated and sensitive paths.",
+    "file_outline": "Show exact Python AST classes, functions and methods with line numbers without sending source text. Other languages are explicitly unavailable.",
+    "git_status": "Read structured Git status in an allowed repository: staged, unstaged and untracked files with HEAD hash. Prefer over bash git status.",
+    "git_diff": "Read a bounded file-level Git diff and before/after blob hashes for one allowed repository file. Prefer over bash git diff.",
+    "git_log": "Read bounded structured Git history with commit hashes, parents, dates and subjects. Prefer over bash git log.",
+    "compare_files": "Compare two allowed files or before/after snapshots using exact SHA-256 hashes and a bounded normalized unified diff. Read only, no mutation.",
+    "verify_hashes": "Verify the model's claimed SHA-256 hashes against actual allowed files, reporting exact mismatches without returning contents.",
+    "run_tests": "Run a discovered pytest or npm test profile in the workspace with bounded output, timeout and exact exit code. Prefer over bash for standard project tests.",
+    "run_lint": "Run a discovered npm lint profile in the workspace with bounded output, timeout and exact exit code. Prefer over bash for standard project lint.",
+    "inspect_process": "Inspect a single process owned by the registered host user; returns exact PID start ticks for safe follow-up diagnostics. No argv or environment.",
+    "inspect_port": "Check whether a fenced PID owns one TCP listening socket on the registered host; requires start_ticks from inspect_process.",
+    "tail_log": "Read a bounded log tail under the registered host workspace, fenced to the same process start_ticks. No arbitrary host path.",
+    "http_probe": "Run a read-only HEAD health probe for a configured endpoint_id, with pinned DNS, verified TLS, safe response headers and latency. Never accepts a model URL or POST body.",
+    "inspect_toolchain": "Inspect fixed installed Python, Node, Git, compiler, LSP and container CLI versions, plus package versions; optional network check only for one registered endpoint.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",
     "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
@@ -358,6 +374,36 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
+        frozenset({"compare_files", "compare files", "сравни файлы", "сравнить файлы"}):
+            {"compare_files"},
+        frozenset({"verify_hashes", "verify hashes", "проверь хеши", "проверить хеши"}):
+            {"verify_hashes"},
+        frozenset({"search_artifacts", "search artifacts", "archived tool output", "сохранённый вывод инструмента"}):
+            {"search_artifacts"},
+        frozenset({"directory tree", "folder tree", "list tree", "list_tree", "дерево файлов", "дерево каталогов"}):
+            {"list_tree"},
+        frozenset({"file outline", "symbol outline", "outline file", "file_outline", "структура файла", "символы файла"}):
+            {"file_outline"},
+        frozenset({"git status", "git_status", "статус git", "статус репозитория"}):
+            {"git_status"},
+        frozenset({"git diff", "git_diff", "дифф git", "изменения git"}):
+            {"git_diff"},
+        frozenset({"git log", "git_log", "история git", "история коммитов"}):
+            {"git_log"},
+        frozenset({"run tests", "run_tests", "pytest", "запусти тесты", "прогони тесты"}):
+            {"run_tests"},
+        frozenset({"run lint", "run_lint", "запусти линтер", "прогони линтер"}):
+            {"run_lint"},
+        frozenset({"inspect_process", "inspect process", "проверь процесс"}):
+            {"inspect_process"},
+        frozenset({"inspect_port", "inspect port", "проверь порт"}):
+            {"inspect_port"},
+        frozenset({"tail_log", "tail log", "хвост лога"}):
+            {"tail_log"},
+        frozenset({"http_probe", "http probe", "проверь эндпоинт"}):
+            {"http_probe"},
+        frozenset({"inspect_toolchain", "toolchain diagnostics", "package diagnostics", "проверь инструменты разработки"}):
+            {"inspect_toolchain"},
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then

@@ -64,12 +64,14 @@ if (typeof document !== 'undefined') {
  */
 async function _postSettings(body) {
   try {
-    return await fetch('/api/auth/settings', {
+    const response = await fetch('/api/auth/settings', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    if (!response.ok) throw new Error(`Settings save failed (HTTP ${response.status})`);
+    return response;
   } finally {
     invalidateSettings();
   }
@@ -436,7 +438,10 @@ async function initDefaultChat() {
       });
       msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
+    } catch (e) {
+      msg.textContent = t('Failed to save');
+      msg.style.color = 'var(--red)';
+    }
   }
 
   _registerAiEndpointRefresh(function(endpoints) {
@@ -493,7 +498,10 @@ async function initUtilityModel() {
       });
       msg.textContent = t('Saved'); msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 1500);
-    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
+    } catch (e) {
+      msg.textContent = t('Failed to save');
+      msg.style.color = 'var(--red)';
+    }
   }
 
   epSel.addEventListener('change', function() { refreshModels(''); saveUtility(); });
@@ -1522,6 +1530,11 @@ async function initResearchSearchSettings() {
 async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
+  var goalRoundsInput = el('set-goalMaxRounds');
+  var goalTokensInput = el('set-goalMaxTotalTokens');
+  var goalRequestsInput = el('set-goalMaxModelRequests');
+  var goalWallInput = el('set-goalMaxWallSeconds');
+  var childrenInput = el('set-agentMaxChildrenPerRun');
   var supInput = el('set-agentSupervisorLadder');
   var subagentMode = el('set-agentSubagentsMode');
   var efficiencyProfile = el('set-agentEfficiencyProfile');
@@ -1709,6 +1722,11 @@ async function initAgentSettings() {
     var settings = await res.json();
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
+    if (goalRoundsInput) goalRoundsInput.value = settings.goal_max_rounds ?? 200;
+    if (goalTokensInput) goalTokensInput.value = settings.goal_max_total_tokens ?? 0;
+    if (goalRequestsInput) goalRequestsInput.value = settings.goal_max_model_requests ?? 0;
+    if (goalWallInput) goalWallInput.value = settings.goal_max_wall_seconds ?? 0;
+    if (childrenInput) childrenInput.value = settings.agent_max_children_per_run ?? 0;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
     if (subagentMode) subagentMode.value = settings.agent_subagents_mode || 'off';
     if (efficiencyProfile) efficiencyProfile.value = settings.agent_efficiency_profile || 'performance';
@@ -1739,10 +1757,25 @@ async function initAgentSettings() {
   async function save() {
     var tools = clampInt(toolsInput.value, 0, 1000, 0);
     var rounds = roundsInput ? clampInt(roundsInput.value, 1, 200, 20) : null;
+    var goalRounds = goalRoundsInput ? clampInt(goalRoundsInput.value, 1, 200, 200) : null;
+    var goalTokens = goalTokensInput ? clampInt(goalTokensInput.value, 0, 10000000, 0) : null;
+    var goalRequests = goalRequestsInput ? clampInt(goalRequestsInput.value, 0, 10000, 0) : null;
+    var goalWall = goalWallInput ? clampInt(goalWallInput.value, 0, 86400, 0) : null;
+    var maxChildren = childrenInput ? clampInt(childrenInput.value, 0, 256, 0) : null;
     toolsInput.value = tools;                       // reflect the clamped value
     if (roundsInput) roundsInput.value = rounds;
+    if (goalRoundsInput) goalRoundsInput.value = goalRounds;
+    if (goalTokensInput) goalTokensInput.value = goalTokens;
+    if (goalRequestsInput) goalRequestsInput.value = goalRequests;
+    if (goalWallInput) goalWallInput.value = goalWall;
+    if (childrenInput) childrenInput.value = maxChildren;
     var payload = { agent_max_tool_calls: tools };
     if (rounds != null) payload.agent_max_rounds = rounds;
+    if (goalRounds != null) payload.goal_max_rounds = goalRounds;
+    if (goalTokens != null) payload.goal_max_total_tokens = goalTokens;
+    if (goalRequests != null) payload.goal_max_model_requests = goalRequests;
+    if (goalWall != null) payload.goal_max_wall_seconds = goalWall;
+    if (maxChildren != null) payload.agent_max_children_per_run = maxChildren;
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     if (subagentMode) payload.agent_subagents_mode = subagentMode.value;
     if (efficiencyProfile) payload.agent_efficiency_profile = efficiencyProfile.value;
@@ -1772,11 +1805,32 @@ async function initAgentSettings() {
         (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
-    } catch (e) { msg.textContent = t('Failed to save'); msg.style.color = 'var(--red)'; }
+    } catch (e) {
+      msg.textContent = t('Failed to save');
+      msg.style.color = 'var(--red)';
+      // A rejected admin/CSRF write must not leave local checkboxes looking
+      // authoritative. Restore the server's actual subagent policy.
+      try {
+        const currentResponse = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+        if (currentResponse.ok) {
+          const current = await currentResponse.json();
+          if (subagentMode) subagentMode.value = current.agent_subagents_mode || 'off';
+          setSelectedModels(current.agent_subagent_models || '');
+          setSubagentModelLimits(current.agent_subagent_model_limits || {});
+          if (subagentModelsRow) subagentModelsRow.hidden = subagentMode?.value !== 'selected_models';
+          renderSubagentModels();
+        }
+      } catch (_) { /* Keep the visible error when a refresh is unavailable. */ }
+    }
   }
 
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
+  if (goalRoundsInput) goalRoundsInput.addEventListener('change', save);
+  if (goalTokensInput) goalTokensInput.addEventListener('change', save);
+  if (goalRequestsInput) goalRequestsInput.addEventListener('change', save);
+  if (goalWallInput) goalWallInput.addEventListener('change', save);
+  if (childrenInput) childrenInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
   if (subagentMode) subagentMode.addEventListener('change', function() {
     if (subagentModelsRow) subagentModelsRow.hidden = subagentMode.value !== 'selected_models';
@@ -1807,6 +1861,45 @@ async function initAgentSettings() {
 /* ═══════════════════════════════════════════
    APPEARANCE TAB
    ═══════════════════════════════════════════ */
+function initCapabilityInventory() {
+  const button = el('set-capabilityInventoryRefresh');
+  const status = el('set-capabilityInventoryStatus');
+  const list = el('set-capabilityInventoryList');
+  if (!button || !status || !list) return;
+  const labels = {
+    lsp: 'LSP', dap: 'DAP', browser: 'Browser', worktree: 'Worktree',
+    cross_host_worktree: 'Cross-host worktree', sandbox: 'Sandbox',
+    mcp: 'MCP', models: 'Models',
+  };
+  async function refresh() {
+    button.disabled = true;
+    status.textContent = t('Loading capabilities…');
+    try {
+      const response = await fetch('/api/codex/inventory', { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await response.json();
+      list.replaceChildren();
+      Object.entries(data.capabilities || {}).forEach(([key, entry]) => {
+        const row = document.createElement('div');
+        row.className = 'settings-row';
+        const label = document.createElement('strong');
+        label.textContent = t(labels[key] || key);
+        const detail = document.createElement('span');
+        detail.textContent = `${t(entry.status || 'unavailable')} — ${t(entry.reason || '')}`;
+        row.append(label, detail);
+        list.append(row);
+      });
+      status.textContent = '';
+    } catch (_) {
+      status.textContent = t('Failed to load capabilities');
+    } finally {
+      button.disabled = false;
+    }
+  }
+  button.addEventListener('click', refresh);
+  refresh();
+}
+
 function initAppearance() {
   syncAppearanceCheckboxes();
   syncPrivacyCheckboxes();
@@ -2438,6 +2531,7 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initCapabilityInventory();
   initAppearance();
   initShortcuts();
   initAccount();

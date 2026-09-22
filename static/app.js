@@ -6,11 +6,11 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js?v=20260921livefix29';
+import modelsModule from './js/models.js?v=20260922approval1';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260921livefix29';
+import chatModule from './js/chat.js?v=20260922batch1';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
@@ -20,14 +20,14 @@ import {
   runDeferredRouteOpener,
   deferRouteOpener,
   settleSessionHydration
-} from './js/startupShell.js';
+} from './js/startupShell.js?v=20260922restore1';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260921livefix29';
-import sessionModule from './js/sessions.js?v=20260921livefix29';
-import chatWork from './js/chat-work.js?v=20260921livefix17';
-import chatSubagents from './js/chat-subagents.js?v=20260921livefix29';
+import chatRenderer from './js/chatRenderer.js?v=20260922batch1';
+import sessionModule from './js/sessions.js?v=20260922approval1';
+import chatWork from './js/chat-work.js?v=20260922batch1';
+import chatSubagents from './js/chat-subagents.js?v=20260922batch1';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';
-import projectsModule from './js/projects.js?v=20260915projects1';
+import projectsModule from './js/projects.js?v=20260922projects2';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260921livefix18';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
@@ -38,7 +38,7 @@ import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
-import settingsModule from './js/settings.js?v=20260921livefix18';
+import settingsModule from './js/settings.js?v=20260922batch2';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -56,6 +56,7 @@ import ttsModule from './js/tts-ai.js';
 import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { getSettings } from './js/appConfig.js';
+import { bindUiText, t } from './js/i18n.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 
@@ -655,6 +656,45 @@ function initializeEventListeners() {
   }
 
   // Export menu: Delete current chat
+  // Content-free technical archive for owner-authorized incident triage.
+  if (exportMenu && !el('export-incident-btn')) {
+    const incidentBtn = document.createElement('button');
+    incidentBtn.type = 'button';
+    incidentBtn.id = 'export-incident-btn';
+    incidentBtn.className = 'export-dropdown-item';
+    const label = document.createElement('span');
+    label.textContent = 'Technical incident (no chat content)';
+    incidentBtn.appendChild(label);
+    bindUiText(label, 'Technical incident (no chat content)');
+    exportMenu.insertBefore(incidentBtn, el('export-delete-btn'));
+    incidentBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      const sessionId = sessionModule.getCurrentSessionId();
+      if (!sessionId) return;
+      incidentBtn.disabled = true;
+      try {
+        const res = await fetch(`${API_BASE}/api/chat/incident/${encodeURIComponent(sessionId)}`, {
+          credentials: 'same-origin', cache: 'no-store',
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = `odysseus-incident-${sessionId}.zip`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+      } catch (_) {
+        uiModule.showError(t('Failed to export technical incident'));
+      } finally {
+        incidentBtn.disabled = false;
+      }
+    });
+  }
+
   const exportDeleteBtn = el('export-delete-btn');
   if (exportDeleteBtn) {
     exportDeleteBtn.addEventListener('click', async (e) => {

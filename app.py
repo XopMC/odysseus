@@ -232,6 +232,8 @@ class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         start = time.perf_counter()
         status = 500
+        from src.http_stream_paths import is_expected_stream_request
+        expected_stream = is_expected_stream_request(request.method, request.url.path or "")
         try:
             response = await call_next(request)
             status = getattr(response, "status_code", 0) or 0
@@ -243,21 +245,9 @@ class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
             # normal client disconnect, not an application 500. Restrict the
             # conversion to known long-lived GET streams so a genuinely broken
             # non-streaming handler still fails loudly.
-            path = request.url.path or ""
             expected_stream_disconnect = (
-                request.method == "GET"
+                expected_stream
                 and str(exc) == "No response returned."
-                and (
-                    path.startswith("/api/chat/resume/")
-                    or (
-                        path.startswith("/api/chat/work/")
-                        and path.endswith("/events/stream")
-                    )
-                    or (
-                        path.startswith("/api/chat/subagents/")
-                        and path.endswith("/events/stream")
-                    )
-                )
             )
             if not expected_stream_disconnect:
                 raise
@@ -269,7 +259,7 @@ class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
                 threshold = float(os.getenv("ODYSSEUS_SLOW_REQUEST_LOG_SECONDS", "0.75") or "0.75")
             except Exception:
                 threshold = 0.75
-            if elapsed >= threshold:
+            if elapsed >= threshold and not (expected_stream and status in {200, 499}):
                 logging.getLogger("app.slow_request").warning(
                     "slow_request method=%s path=%s status=%s elapsed=%.3fs",
                     request.method,
@@ -1155,6 +1145,7 @@ async def _startup_event():
             # controller posts the first continuation request.
             await asyncio.sleep(0.5)
             from src import agent_runs
+            from src.chat_effect_inbox import inbox as effect_inbox
             from src.chat_work_store import store as chat_work_store
             from src.subagent_runtime import runtime as subagent_runtime
             stale_children = await asyncio.to_thread(subagent_runtime.recover_stale)
@@ -1178,6 +1169,20 @@ async def _startup_event():
                 session_id = str(goal.get("session_id") or "")
                 owner = goal.get("owner")
                 if not session_id or agent_runs.is_active(session_id):
+                    continue
+                unknown_effects = await asyncio.to_thread(
+                    effect_inbox.unknown, owner, session_id,
+                )
+                if unknown_effects:
+                    try:
+                        await asyncio.to_thread(
+                            chat_work_store.update_goal, owner, session_id,
+                            "A tool outcome is unknown after restart; inspect the effect inbox before continuing.",
+                            {"reason": "unknown_side_effect", "intent_ids": [item["id"] for item in unknown_effects]},
+                            waiting_user=True,
+                        )
+                    except Exception:
+                        logger.exception("Failed to fence Goal with unknown effect")
                     continue
                 lease = await asyncio.to_thread(chat_work_store.acquire_goal_lease, owner, session_id)
                 if not lease:

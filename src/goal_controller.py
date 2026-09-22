@@ -7,6 +7,7 @@ the lease and starts the detached run before the mutation request returns.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import httpx
@@ -17,13 +18,37 @@ from src.constants import internal_api_base
 logger = logging.getLogger(__name__)
 
 
-async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reason: str) -> bool:
+def _known_dispatch_rejection(status: int, raw: bytes) -> tuple[str, str]:
+    """Classify only fixed server messages; never persist arbitrary detail text."""
+    if status == 400:
+        try:
+            detail = json.loads(raw[:2048]).get("detail")
+        except (ValueError, AttributeError, TypeError):
+            detail = None
+        if isinstance(detail, str):
+            if detail.startswith("No model selected for this chat"):
+                return "model_unselected", "Goal continuation: no model selected"
+            if detail.startswith("Selected model endpoint was removed") or detail.startswith("Selected model endpoint is not configured"):
+                return "model_endpoint_unavailable", "Goal continuation: selected model endpoint is unavailable"
+    return f"http_{status}", f"Goal continuation HTTP {status}"
+
+
+async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reason: str,
+                                     expected_goal_id: str | None = None,
+                                     expected_attempt: int | None = None) -> bool:
     from src import agent_runs
-    from src.chat_work_store import WorkNotFound, store
+    from src.chat_effect_inbox import inbox
+    from src.chat_work_store import WorkConflict, WorkNotFound, store
 
     if not session_id or agent_runs.is_active(session_id):
         return False
-    lease = await asyncio.to_thread(store.acquire_goal_lease, owner, session_id)
+    if await asyncio.to_thread(inbox.unknown, owner, session_id):
+        logger.warning("Goal continuation fenced by unknown effect for session %s", session_id)
+        return False
+    lease = await asyncio.to_thread(
+        store.acquire_goal_lease, owner, session_id,
+        expected_goal_id=expected_goal_id, expected_attempt=expected_attempt,
+    )
     if not lease:
         return False
     prior = agent_runs.continuation_for_session(session_id)
@@ -47,6 +72,7 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
             "X-Odysseus-Owner": str(owner),
         })
     failure = None
+    failure_code = None
     try:
         timeout = httpx.Timeout(20.0, read=20.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -55,17 +81,23 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
                 headers=headers, data=form,
             ) as response:
                 if response.status_code >= 400:
-                    failure = f"Goal continuation HTTP {response.status_code}"
+                    raw = await response.aread() if response.status_code == 400 else b""
+                    failure_code, failure = _known_dispatch_rejection(response.status_code, raw)
     except Exception:
         failure = "Goal continuation connection failed"
+        failure_code = "transport"
     if failure:
         logger.warning("%s for session %s (%s)", failure, session_id, reason)
         try:
             await asyncio.to_thread(
                 store.record_goal_failure, owner, session_id, failure,
-                {"reason": reason},
+                {"reason": "continuation_dispatch_failed", "dispatch_reason": reason,
+                 "failure_code": failure_code},
+                force_wait_user=True,
+                expected_goal_id=expected_goal_id,
+                expected_attempt=expected_attempt,
             )
-        except WorkNotFound:
+        except (WorkNotFound, WorkConflict):
             pass
         return False
     return True

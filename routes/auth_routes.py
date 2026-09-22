@@ -20,6 +20,7 @@ from core.auth import (
 )
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
+from src.owner_identity import auth_disabled
 from src.settings_scrub import scrub_settings
 from src.settings import (
     load_settings as _load_settings,
@@ -244,16 +245,22 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         keeps account controls usable from a phone or another browser while
         preventing a cross-site form from replaying a session cookie.
         """
+        name = _csrf_cookie_for_request(request)
+        scheme = "https" if name == CSRF_COOKIE_HTTPS else "http"
+        # In the explicit no-login mode the mutation middleware does not
+        # require CSRF. Do not make every local UI write trigger a 401 or
+        # manufacture a token without an authenticated owner.
+        if auth_disabled():
+            return {"csrf_token": "", "scheme": scheme}
         user = _get_current_user(request)
         if not user:
             raise HTTPException(401, "Not authenticated")
-        name = _csrf_cookie_for_request(request)
         token = request.cookies.get(name) or secrets.token_urlsafe(32)
         response.set_cookie(
             key=name, value=token, httponly=False, samesite="lax",
             secure=_secure_cookie(request), path="/", max_age=TOKEN_TTL,
         )
-        return {"csrf_token": token, "scheme": "https" if name == CSRF_COOKIE_HTTPS else "http"}
+        return {"csrf_token": token, "scheme": scheme}
 
     @router.get("/status")
     async def auth_status(request: Request):
@@ -788,6 +795,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         # sane range so a bad value can't disable the agent or let it run away.
         _INT_RANGES = {
             "agent_max_rounds": (1, 200),
+            "goal_max_rounds": (1, 200),
+            "goal_max_total_tokens": (0, 10_000_000),
+            "goal_max_model_requests": (0, 10_000),
+            "goal_max_wall_seconds": (0, 86_400),
+            "agent_max_children_per_run": (0, 256),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
             "observation_pack_owner_max_bytes": (1_048_576, 10_737_418_240),
             "observation_pack_object_max_bytes": (1024, 268_435_456),

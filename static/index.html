@@ -245,13 +245,13 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260921livefix20">
+  <link rel="stylesheet" href="/static/style.css?v=20260922batch1">
   <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260921livefix18">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260921livefix29">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260921livefix29">
+  <link rel="modulepreload" href="/static/app.js?v=20260922batch2">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260922batch1">
   <link rel="modulepreload" href="/static/js/ui.js">
-  <link rel="modulepreload" href="/static/js/sessions.js?v=20260921livefix29">
+  <link rel="modulepreload" href="/static/js/sessions.js?v=20260922approval1">
   <link rel="modulepreload" href="/static/js/markdown.js">
 </head>
 <body>
@@ -1034,6 +1034,7 @@
     })();
     </script>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
+    <div id="session-restore-loading" role="status" aria-live="polite" hidden>Loading chat…</div>
     <section id="team-workspace" hidden></section>
 
     <!-- Attachments strip -->
@@ -1075,9 +1076,32 @@
           </div>
         </div>
       </section>
+      <section id="wait-mode-status" class="chat-work-card wait-work-card" hidden>
+        <button type="button" id="wait-toggle" class="chat-work-card-head chat-work-card-toggle" aria-expanded="false" aria-label="Why is the agent waiting?" title="Why is the agent waiting?"><strong>?</strong></button>
+        <div class="chat-work-popover wait-popover">
+          <strong>Why is the agent waiting?</strong>
+          <div class="wait-grid">
+            <span>Phase</span><span id="wait-phase"></span>
+            <span>Duration</span><span id="wait-duration"></span>
+            <span>Run ID</span><span id="wait-run-id"></span>
+            <span>Child ID</span><span id="wait-child-id"></span>
+            <span>Model</span><span id="wait-model"></span>
+            <span>Endpoint</span><span id="wait-endpoint"></span>
+            <span>Tool</span><span id="wait-tool"></span>
+            <span>Lease</span><span id="wait-lease"></span>
+            <span>Checkpoint</span><span id="wait-checkpoint"></span>
+            <span>Recovery</span><span id="wait-recovery"></span>
+          </div>
+          <div id="wait-unknown-effects" class="wait-effect-inbox" hidden aria-live="polite"></div>
+          <div class="chat-work-actions">
+            <button type="button" id="wait-refresh">Refresh status</button>
+            <button type="button" id="wait-action" hidden></button>
+          </div>
+        </div>
+      </section>
       <section id="goal-mode-status" class="chat-work-card goal-work-card" hidden>
         <div class="chat-work-card-head goal-work-card-head">
-          <button type="button" class="chat-work-card-toggle goal-work-card-main" aria-expanded="false"><strong>Goal</strong><span id="goal-work-objective-preview"></span><span id="goal-work-state"></span></button>
+          <button type="button" class="chat-work-card-toggle goal-work-card-main" aria-expanded="false"><strong>Goal</strong><span id="goal-work-objective-preview"></span><span id="goal-work-health-indicator" class="goal-work-health-indicator" hidden aria-label="No verified progress">!</span><span id="goal-work-ui-lag" class="goal-work-health-indicator" hidden aria-label="UI long tasks">⚠</span><span id="goal-work-state"></span></button>
           <div class="goal-work-quick-actions">
             <button type="button" id="goal-work-quick-pause" aria-label="Pause goal" title="Pause goal">&#x23F8;</button>
             <button type="button" id="goal-work-quick-resume" aria-label="Resume goal" title="Resume goal">&#x25B6;</button>
@@ -1087,6 +1111,7 @@
         <div class="chat-work-popover">
         <textarea id="goal-work-objective" class="chat-work-current" aria-label="Goal objective"></textarea>
         <div id="goal-work-progress"></div>
+        <div id="goal-work-health-detail" class="goal-work-health-detail" role="status" hidden></div>
         <div class="chat-work-actions">
           <button type="button" id="goal-work-save">Save goal</button>
           <button type="button" id="goal-work-pause">Pause</button>
@@ -2502,6 +2527,26 @@
                 <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
               </div>
               <div class="settings-row">
+                <label class="settings-label" for="set-goalMaxRounds">Max steps per Goal attempt</label>
+                <input id="set-goalMaxRounds" type="text" inputmode="numeric" placeholder="200" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" for="set-goalMaxTotalTokens">Max model tokens per Goal attempt</label>
+                <input id="set-goalMaxTotalTokens" type="text" inputmode="numeric" placeholder="0 = unlimited" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" for="set-goalMaxModelRequests">Max model requests per Goal attempt</label>
+                <input id="set-goalMaxModelRequests" type="text" inputmode="numeric" placeholder="0 = unlimited" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" for="set-goalMaxWallSeconds" data-i18n="Max seconds per Goal attempt (safe boundaries)">Max seconds per Goal attempt (safe boundaries)</label>
+                <input id="set-goalMaxWallSeconds" type="text" inputmode="numeric" placeholder="0 = unlimited" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" for="set-agentMaxChildrenPerRun">Max children per run</label>
+                <input id="set-agentMaxChildrenPerRun" type="text" inputmode="numeric" placeholder="0 = unlimited" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
                 <label class="settings-label" for="set-agentSubagentsMode">Subagents</label>
                 <select id="set-agentSubagentsMode" class="settings-select" style="width:180px;">
                   <option value="off">Off</option>
@@ -2585,6 +2630,13 @@
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Built-in Tools</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Enable or disable tools available to the AI agent.</div>
             <div id="adm-builtin-tools-list" class="admin-user-list"></div>
+          </div>
+          <div class="admin-card" style="margin-bottom:12px;">
+            <h2>Capability inventory</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Current host capabilities; experimental does not mean verified on every endpoint.</div>
+            <button type="button" id="set-capabilityInventoryRefresh" class="btn btn-small">Refresh capabilities</button>
+            <div id="set-capabilityInventoryStatus" role="status" aria-live="polite"></div>
+            <div id="set-capabilityInventoryList" class="settings-col"></div>
           </div>
         </div>
 
@@ -2759,14 +2811,14 @@
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
 <script type="module" src="/static/js/dragSort.js"></script>
-<script type="module" src="/static/js/sessions.js?v=20260921livefix29"></script>
+<script type="module" src="/static/js/sessions.js?v=20260922approval1"></script>
 <script type="module" src="/static/js/memory.js?v=20260722memoryloading1"></script>
 <script type="module" src="/static/js/skills.js"></script>
 <script type="module" src="/static/js/tourHints.js"></script>
 <script type="module" src="/static/js/tourAutoplay.js"></script>
 <script type="module" src="/static/js/fileHandler.js"></script>
 <script type="module" src="/static/js/voiceRecorder.js"></script>
-<script type="module" src="/static/js/models.js?v=20260921livefix29"></script>  <!-- This must come BEFORE app.js -->
+<script type="module" src="/static/js/models.js?v=20260922approval1"></script>  <!-- This must come BEFORE app.js -->
 <script type="module" src="/static/js/rag.js"></script>
 <script type="module" src="/static/js/presets.js"></script>
 <script type="module" src="/static/js/search.js"></script>
@@ -2774,19 +2826,19 @@
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/document.js?v=20260815approvalsave1"></script>
 <script type="module" src="/static/js/gallery.js?v=20260708match1"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260921livefix29"></script>
+<script type="module" src="/static/js/chatRenderer.js?v=20260922batch1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260819approvalcontrol1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260921livefix29"></script>
+  <script type="module" src="/static/js/chat.js?v=20260922batch1"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js?v=20260921livefix20"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260921livefix18"></script>
+<script type="module" src="/static/js/settings.js?v=20260922batch2"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260921livefix29"></script>  <!-- app.js must be LAST -->
-  <script type="module" src="/static/js/init.js?v=20260921livefix29"></script>
+<script type="module" src="/static/app.js?v=20260922batch2"></script>  <!-- app.js must be LAST -->
+  <script type="module" src="/static/js/init.js?v=20260922approval1"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
 </body>

@@ -8,7 +8,7 @@ import copy
 import posixpath
 import re
 
-READ_TOOLS = frozenset({'read_file', 'ls', 'glob', 'grep', 'get_workspace'})
+READ_TOOLS = frozenset({'read_file', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'compare_files', 'verify_hashes', 'inspect_toolchain', 'get_workspace'})
 WRITE_TOOLS = frozenset({'write_file', 'edit_file', 'apply_patch'})
 _SECRET_DIRS = frozenset({'.ssh', '.gnupg', '.aws', '.azure', '.secrets', '.credentials'})
 _SECRET_FILES = frozenset({'.app_key', '.netrc', '.git-credentials', '.npmrc', '.pypirc',
@@ -123,6 +123,26 @@ def normalize_file_args(tool, args, cwd, write_scope=None, realpath=None, protec
     result = copy.deepcopy(args)
     if tool == 'get_workspace':
         check(cwd, False)
+        return result
+    if tool == 'inspect_toolchain':
+        if set(result) - {'endpoint_id'}:
+            raise PermissionError('unsupported toolchain arguments')
+        check(cwd, False)
+        return result
+    if tool == 'compare_files':
+        if set(result) != {'before', 'after'}:
+            raise PermissionError('two comparison paths required')
+        result['before'] = check(result['before'], False)
+        result['after'] = check(result['after'], False)
+        return result
+    if tool == 'verify_hashes':
+        files = result.get('files')
+        if set(result) != {'files'} or not isinstance(files, list) or not 1 <= len(files) <= 16:
+            raise PermissionError('bounded hash assertions required')
+        for item in files:
+            if not isinstance(item, dict) or set(item) != {'path', 'sha256'}:
+                raise PermissionError('invalid hash assertion')
+            item['path'] = check(item['path'], False)
         return result
     if tool == 'apply_patch':
         key = next((key for key in ('patch_text', 'patchText', 'patch') if key in result), 'patch_text')

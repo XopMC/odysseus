@@ -1051,6 +1051,8 @@ class TeamRuntime:
                         result = {**result, 'exit_code': 1, 'not_executed': True}
                 elif intent['created']:
                     result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'], token)
+                    from src.tool_errors import enrich_tool_error
+                    result = enrich_tool_error(result)
                     self.store.record_tool_result(owner, team_id, intent['id'], token, result)
                 elif not effectful and intent['status'] == 'abandoned':
                     # Interrupted read-only calls may safely be repeated; give
@@ -1058,9 +1060,13 @@ class TeamRuntime:
                     retry = self.store.record_tool_intent(owner, team_id, worker['id'], token,
                         name, args, effectful=False, idempotency_key=call['id'] + ':' + worker['attempt_id'])
                     result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'], token)
+                    from src.tool_errors import enrich_tool_error
+                    result = enrich_tool_error(result)
                     self.store.record_tool_result(owner, team_id, retry['id'], token, result)
                 else:
                     raise RuntimeError('Uncertain tool outcome requires explicit reconciliation; not replayed')
+                from src.tool_errors import enrich_tool_error
+                result = enrich_tool_error(result)
                 if (type(result.get('exit_code')) is int and result['exit_code'] == 0
                         and not result.get('error') and not result.get('not_executed')):
                     if name not in team_collaboration.TEAM_TOOLS:

@@ -101,6 +101,11 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
             raise ValueError(
                 f'Configured context checkpoint could not preserve the required history ({status})'
             )
+        if status == 'unchanged':
+            # The threshold was crossed, yet the compactor produced no new
+            # checkpoint. Dispatching unchanged would repeat the same costly
+            # decision next round and misrepresent the run as healthy.
+            raise ValueError('Context compaction made no reduction at the configured trigger')
     after = math.ceil(estimate_tokens(shaped) * calibration)
     if after > budget.hard_messages:
         raise ValueError('Context exceeds the configured input budget')

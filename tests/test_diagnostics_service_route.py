@@ -66,8 +66,30 @@ def test_admin_gets_report(monkeypatch):
     body = r.json()
     assert set(body) == {"overall", "services", "timestamp", "runtime"}
     assert body["overall"] == "ok"
-    assert set(body["runtime"]) == {"process", "runs", "storage"}
+    assert set(body["runtime"]) == {"process", "runs", "storage", "slo"}
     assert body["runtime"]["storage"]["max_replay_run_bytes"] > 0
     assert body["runtime"]["storage"]["max_replay_total_bytes"] > 0
     assert body["runtime"]["storage"]["replay_status"] in {"ok", "warning", "critical"}
     assert body["runtime"]["process"]["event_loop_lag_ms"] >= 0
+    assert body["runtime"]["runs"]["durable_lag_max_events"] >= 0
+    assert body["runtime"]["slo"]["durable_lag_limit_events"] > 0
+    assert isinstance(body["runtime"]["slo"]["alerts"], list)
+
+
+def test_slo_threshold_rejects_invalid_or_zero_values(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_SLO_DURABLE_LAG_EVENTS", "invalid")
+    assert diag._slo_threshold("ODYSSEUS_SLO_DURABLE_LAG_EVENTS", 50) == 50
+    monkeypatch.setenv("ODYSSEUS_SLO_DURABLE_LAG_EVENTS", "0")
+    assert diag._slo_threshold("ODYSSEUS_SLO_DURABLE_LAG_EVENTS", 50) == 1
+
+
+def test_process_slo_reports_lag_and_memory_without_chat_content(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_SLO_EVENT_LOOP_LAG_MS", "100")
+    monkeypatch.setenv("ODYSSEUS_SLO_PROCESS_RSS_MB", "100")
+    runtime = {"process": {"event_loop_lag_ms": 101, "rss_bytes": 101 * 1024 * 1024},
+               "slo": {"alerts": []}}
+    diag._attach_process_slo(runtime)
+    assert [item["code"] for item in runtime["slo"]["alerts"]] == [
+        "event_loop_lag", "process_rss_high",
+    ]
+    assert "chat" not in str(runtime).lower()

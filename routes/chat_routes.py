@@ -80,6 +80,7 @@ from src.tool_approvals import tool_approval_store
 from src.tool_approval_scopes import stamp_chat_session_grant
 from src.tool_security import delegated_credential_blocked_tools
 from src.chat_work_store import WorkConflict, WorkNotFound, store as chat_work_store
+from src.run_wait_state import CONTEXT_FAILURE_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -2562,7 +2563,26 @@ def setup_chat_routes(
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
                     if active_goal and active_goal.get("status") == "active":
-                        _max_rounds = 200
+                        try:
+                            _max_rounds = int(get_setting("goal_max_rounds", 200))
+                        except (TypeError, ValueError):
+                            _max_rounds = 200
+                        _max_rounds = max(1, min(_max_rounds, 200))
+                    try:
+                        _max_total_tokens = int(get_setting("goal_max_total_tokens", 0)) if active_goal else 0
+                    except (TypeError, ValueError):
+                        _max_total_tokens = 0
+                    _max_total_tokens = max(0, min(_max_total_tokens, 10_000_000))
+                    try:
+                        _max_model_requests = int(get_setting("goal_max_model_requests", 0)) if active_goal else 0
+                    except (TypeError, ValueError):
+                        _max_model_requests = 0
+                    _max_model_requests = max(0, min(_max_model_requests, 10_000))
+                    try:
+                        _max_wall_seconds = int(get_setting("goal_max_wall_seconds", 0)) if active_goal else 0
+                    except (TypeError, ValueError):
+                        _max_wall_seconds = 0
+                    _max_wall_seconds = max(0, min(_max_wall_seconds, 86_400))
 
                     _forced_tools = None
                     if _search_enabled:
@@ -2587,6 +2607,9 @@ def setup_chat_routes(
                         max_tokens=ctx.preset.max_tokens,
                         prompt_type=preset_id,
                         max_tool_calls=_tool_budget,
+                        max_total_tokens=_max_total_tokens,
+                        max_model_requests=_max_model_requests,
+                        max_wall_seconds=_max_wall_seconds,
                         max_rounds=_max_rounds,
                         context_length=_selected_context_length,
                         active_document=active_doc,
@@ -2651,7 +2674,7 @@ def setup_chat_routes(
                                     "plan_update",
                                     "goal_update",
                                     "context_usage", "context_checkpoint", "compacted", "context_compaction_failed", "tool_retry_blocked",
-                                    "agent_prep",
+                                    "agent_prep", "tool_inventory",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _event_round = data.get("round", 1)
@@ -2670,15 +2693,40 @@ def setup_chat_routes(
                                         )
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
+                                    elif data.get("type") in {"budget_exceeded", "rounds_exhausted"} and active_goal:
+                                        try:
+                                            _round_cap = data.get("type") == "rounds_exhausted"
+                                            active_goal = chat_work_store.wait_on_goal_budget(
+                                                _user, session,
+                                                resource=data.get("resource") or ("model_rounds" if _round_cap else "tool_calls"),
+                                                used=data.get("used", data.get("rounds") if _round_cap else None),
+                                                limit=data.get("limit", data.get("rounds") if _round_cap else None),
+                                                run_id=data.get("run_id") or agent_runs.get_run_id(session),
+                                                expected_goal_id=active_goal.get("id"),
+                                                expected_attempt=active_goal.get("attempt"),
+                                                usage_source=(
+                                                    data.get("usage_source")
+                                                    if data.get("resource") == "model_tokens"
+                                                    and data.get("usage_source") in {"real", "estimated", "mixed"}
+                                                    else None
+                                                ),
+                                            )
+                                            yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                                        except WorkConflict:
+                                            # Another client already paused/cancelled this Goal.
+                                            pass
                                     elif data.get("type") == "context_compaction_failed":
                                         # Keep the failure as a distinct replay
                                         # event; never turn it into assistant
                                         # prose that a Goal controller can
                                         # mistake for successful progress.
+                                        _context_failure_code = data.get("detail")
+                                        if _context_failure_code not in CONTEXT_FAILURE_CODES:
+                                            _context_failure_code = "context_uncompactable" if data.get("reason") == "uncompactable" else "context_policy_error"
                                         last_metrics = {
                                             **(last_metrics or {}),
                                             "context_compaction_failed": True,
-                                            "context_compaction_reason": data.get("reason") or "failed",
+                                            "context_compaction_reason": _context_failure_code,
                                         }
                                     elif data.get("type") == "compacted" and active_goal:
                                         try:
@@ -2720,6 +2768,9 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "agent_terminal":
                                     terminal_metadata = dict(data.get("data") or {})
+                                    _terminal_context_failure_code = (last_metrics or {}).get(
+                                        "context_compaction_reason"
+                                    )
                                     last_metrics = terminal_metadata
                                     failure = terminal_metadata.get("failure") or {}
                                     failure_kind = str(failure.get("kind") or "")
@@ -2731,6 +2782,10 @@ def setup_chat_routes(
                                             failure.get("message")
                                             or "Context checkpoint failed"
                                         )
+                                    elif failure_kind == "unknown_side_effect":
+                                        failure_message = "A tool outcome is unknown; inspect it before continuing."
+                                    elif failure_kind == "effect_ledger":
+                                        failure_message = "The effect ledger is unavailable; no tool action was started."
                                     elif failure_status is not None:
                                         failure_message = f"Model request failed (HTTP {failure_status})"
                                     else:
@@ -2744,13 +2799,22 @@ def setup_chat_routes(
                                     terminal_metadata["failure"] = sanitized_failure
                                     if active_goal:
                                         try:
-                                            if failure_kind == "context_compaction":
+                                            if failure_kind == "unknown_side_effect":
+                                                active_goal = chat_work_store.update_goal(
+                                                    _user, session,
+                                                    "A tool outcome is unknown; inspect the effect inbox before continuing.",
+                                                    {"reason": "unknown_side_effect", "run_failure": terminal_metadata["failure"]},
+                                                    waiting_user=True,
+                                                )
+                                            elif failure_kind == "context_compaction":
                                                 active_goal = chat_work_store.record_goal_failure(
                                                     _user,
                                                     session,
-                                                    "Context checkpoint failed; the server will retry automatically with the preserved ledger.",
-                                                    {"reason": "context_compaction", "run_failure": terminal_metadata["failure"]},
-                                                    keep_active=True,
+                                                    "Context checkpoint failed; the prior ledger is preserved.",
+                                                    {"reason": "context_compaction",
+                                                     "failure_code": _terminal_context_failure_code,
+                                                     "run_failure": terminal_metadata["failure"]},
+                                                    force_wait_user=True,
                                                 )
                                             else:
                                                 active_goal = chat_work_store.record_goal_failure(
@@ -2926,47 +2990,26 @@ def setup_chat_routes(
             # Keep Goal continuation entirely server-side. The initiating tab
             # may close immediately after this response; every later attempt
             # is another normal detached run with the same durable replay path.
-            _controller_headers = {
-                key: request.headers[key]
-                for key in ("cookie", "authorization")
-                if request.headers.get(key)
-            }
-            # Internal continuation is dispatched by the server after the
-            # browser may have gone away.  Use the same authenticated
-            # loopback channel as other in-process work so CSRF/browser-origin
-            # state cannot block autonomous Goal progress.
-            from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
-            if _user:
-                _controller_headers[INTERNAL_TOOL_HEADER] = INTERNAL_TOOL_TOKEN
-                _controller_headers["X-Odysseus-Owner"] = _user
-            _controller_headers["origin"] = str(request.base_url).rstrip("/")
-            _controller_form = {
-                "session": session,
-                "message": (
-                    "Continue the active Goal from its durable checkpoint. "
-                    "Take the next concrete safe action, change approach after a failure, "
-                    "and call complete_goal only after verified completion."
-                ),
-                "mode": "agent",
-                "goal_continuation": "true",
-                "allow_bash": "true" if str(allow_bash).lower() == "true" else "false",
-                "allow_web_search": "true" if _search_enabled else "false",
-            }
-
+            _origin_goal_id = active_goal.get("id")
+            _origin_goal_attempt = active_goal.get("attempt")
             async def _continue_goal_after_terminal(_status: str) -> None:
                 try:
                     current_goal = chat_work_store.get(_user, session).get("goal")
                 except (WorkNotFound, OperationalError):
                     return
-                if not current_goal or current_goal.get("status") != "active":
+                if (not current_goal or current_goal.get("status") != "active"
+                        or current_goal.get("id") != _origin_goal_id
+                        or current_goal.get("attempt") != _origin_goal_attempt):
                     return
                 if _status == "error":
                     try:
                         current_goal = chat_work_store.record_goal_failure(
                             _user, session, "Agent run failed before completion",
                             {"reason": "detached_run_error"},
+                            expected_goal_id=_origin_goal_id,
+                            expected_attempt=_origin_goal_attempt,
                         )
-                    except WorkNotFound:
+                    except (WorkNotFound, WorkConflict):
                         return
                     if current_goal.get("status") != "active":
                         return
@@ -2978,43 +3021,12 @@ def setup_chat_routes(
                 await asyncio.sleep(min(60.0, 0.5 * (2 ** max(0, failures - 1))))
                 if agent_runs.is_active(session):
                     return
-                lease = chat_work_store.acquire_goal_lease(_user, session, ttl_seconds=90)
-                if not lease:
-                    return
-                form = dict(_controller_form)
-                form["goal_lease_token"] = lease
-                dispatch_error = None
-                try:
-                    import httpx
-                    from src.constants import internal_api_base
-                    timeout = httpx.Timeout(20.0, read=20.0)
-                    async with httpx.AsyncClient(timeout=timeout) as client:
-                        async with client.stream(
-                            "POST", f"{internal_api_base()}/api/chat_stream",
-                            headers=_controller_headers, data=form,
-                        ) as response:
-                            if response.status_code >= 400:
-                                detail = (await response.aread())[:1000]
-                                dispatch_error = f"Goal continuation HTTP {response.status_code}"
-                                logger.error(
-                                    "Goal continuation rejected for %s: HTTP %s %r",
-                                    session, response.status_code, detail,
-                                )
-                except Exception as exc:
-                    dispatch_error = "Goal continuation connection failed"
-                    logger.error(
-                        "Goal continuation transport failed for %s: %s", session, exc,
-                    )
-                if dispatch_error:
-                    try:
-                        failed_goal = chat_work_store.record_goal_failure(
-                            _user, session, dispatch_error,
-                            {"reason": "continuation_dispatch_failed"},
-                        )
-                    except WorkNotFound:
-                        return
-                    if failed_goal.get("status") == "active":
-                        asyncio.create_task(_continue_goal_after_terminal("error"))
+                from src.goal_controller import dispatch_goal_continuation
+                await dispatch_goal_continuation(
+                    _user, session, reason=f"terminal_{_status}",
+                    expected_goal_id=_origin_goal_id,
+                    expected_attempt=_origin_goal_attempt,
+                )
 
             _goal_terminal_controller = _continue_goal_after_terminal
 

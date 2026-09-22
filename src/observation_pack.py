@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import fcntl
+import stat
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterable, Optional
@@ -27,7 +28,9 @@ FULL_SENDS = 2
 EXCERPT_BYTES = 1024
 RECALL_MAX_BYTES = 16 * 1024
 RECALL_MAX_LINES = 400
+SEARCH_MAX_BYTES = 32 * 1024 * 1024
 _ID = re.compile(r"^obs_[a-f0-9]{24}$")
+_RUN_ID = re.compile(r"^[a-f0-9]{32}$")
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
@@ -47,7 +50,11 @@ def _scope(owner: Optional[str], session_id: Optional[str]) -> Path:
 def _path(owner: Optional[str], session_id: Optional[str], observation_id: str) -> Path:
     if not _ID.fullmatch(observation_id):
         raise ValueError("Invalid observation id")
-    return _scope(owner, session_id) / "objects" / f"{observation_id}.txt"
+    scope = _scope(owner, session_id)
+    objects = scope / "objects"
+    if scope.parent.is_symlink() or scope.is_symlink() or objects.is_symlink():
+        raise OSError("Observation scope is not regular")
+    return objects / f"{observation_id}.txt"
 
 
 @contextmanager
@@ -110,13 +117,18 @@ def _journal(owner: Optional[str], session_id: Optional[str], event: str, **payl
 
 
 def archive(owner: Optional[str], session_id: Optional[str], *, tool_name: str,
-            tool_call_id: str, text: str, force: bool = False) -> Optional[dict]:
+            tool_call_id: str, text: str, force: bool = False,
+            run_id: Optional[str] = None) -> Optional[dict]:
+    if run_id is not None and not _RUN_ID.fullmatch(run_id):
+        raise ValueError("Invalid observation run id")
     data = str(text or "").encode("utf-8")
     if not force and len(data) <= THRESHOLD_BYTES:
         return None
     oid = observation_id(tool_name, tool_call_id, text)
     path = _path(owner, session_id, oid)
     with _owner_lock(owner):
+        if _scope(owner, session_id).is_symlink() or path.parent.is_symlink():
+            raise OSError("Observation scope is not regular")
         object_limit = max(1024, int(get_setting("observation_pack_object_max_bytes", 16_777_216) or 16_777_216))
         owner_limit = max(object_limit, int(get_setting("observation_pack_owner_max_bytes", 536_870_912) or 536_870_912))
         if len(data) > object_limit:
@@ -138,6 +150,40 @@ def archive(owner: Optional[str], session_id: Optional[str], *, tool_name: str,
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+        if run_id is not None:
+            run_root = _scope(owner, session_id) / "runs"
+            if run_root.is_symlink():
+                raise OSError("Observation run index is not regular")
+            run_dir = run_root / run_id
+            run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if run_root.is_symlink() or run_dir.is_symlink() or not run_dir.is_dir():
+                raise OSError("Observation run index is not a regular directory")
+            # Seal the object before making its run index visible. If a crash
+            # occurs between these writes, access fails closed until archive
+            # retries and completes the index.
+            marker = path.with_suffix(".runbound")
+            try:
+                marker_fd = os.open(marker, _CREATE_FLAGS, 0o600)
+            except FileExistsError:
+                marker_fd = os.open(marker, _READ_FLAGS)
+                if not stat.S_ISREG(os.fstat(marker_fd).st_mode):
+                    os.close(marker_fd)
+                    raise OSError("Observation run marker is not regular")
+            else:
+                os.fsync(marker_fd)
+            os.close(marker_fd)
+            index_path = run_dir / f"{oid}.json"
+            try:
+                index_fd = os.open(index_path, _CREATE_FLAGS, 0o600)
+            except FileExistsError:
+                if index_path.is_symlink() or not index_path.is_file():
+                    raise OSError("Observation run index is not regular")
+            else:
+                with os.fdopen(index_fd, "w", encoding="utf-8") as index:
+                    json.dump({"id": oid, "tool": str(tool_name)[:80],
+                               "bytes": len(data), "sha256": _hash(data)}, index)
+                    index.flush()
+                    os.fsync(index.fileno())
     return {
         "id": oid,
         "sha256": _hash(data),
@@ -145,6 +191,81 @@ def archive(owner: Optional[str], session_id: Optional[str], *, tool_name: str,
         "lines": text.count("\n") + (0 if not text or text.endswith("\n") else 1),
         "tool": tool_name,
     }
+
+
+def search(owner: Optional[str], session_id: Optional[str], run_id: str,
+           query: str, *, limit: int = 10, cursor: Optional[str] = None) -> dict:
+    """Find bounded excerpts in artifacts indexed for one exact owned run.
+
+    Legacy artifacts without a run index remain recallable by ID but are not
+    attributed to a run by guessing from their session directory.
+    """
+    if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
+        raise ValueError("Invalid observation run id")
+    if not isinstance(query, str) or not 1 <= len(query) <= 128 or not query.strip() \
+            or any(ch in query for ch in "\r\n\0"):
+        raise ValueError("Invalid observation search query")
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError("Invalid observation search limit")
+    if cursor is not None and (not isinstance(cursor, str) or not _ID.fullmatch(cursor)):
+        raise ValueError("Invalid observation search cursor")
+    scope = _scope(owner, session_id)
+    run_root = scope / "runs"
+    if scope.parent.is_symlink() or scope.is_symlink() or run_root.is_symlink():
+        raise OSError("Observation run index is not regular")
+    run_dir = run_root / run_id
+    if not run_dir.exists():
+        return {"run_id": run_id, "matches": [], "next_cursor": None, "scanned_bytes": 0}
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise OSError("Observation run index is not regular")
+    entries = sorted(path for path in run_dir.glob("obs_*.json")
+                     if _ID.fullmatch(path.stem) and (cursor is None or path.stem > cursor))
+    matches = []
+    scanned_bytes = 0
+    last_id = None
+    query_folded = query.casefold()
+    max_scan_bytes = SEARCH_MAX_BYTES
+    for path in entries:
+        if len(matches) >= limit:
+            break
+        oid = path.stem
+        budget_break = False
+        try:
+            fd = os.open(path, _READ_FLAGS)
+            with os.fdopen(fd, "rb") as meta_stream:
+                if not stat.S_ISREG(os.fstat(meta_stream.fileno()).st_mode):
+                    continue
+                meta = json.loads(meta_stream.read(1024))
+            if not isinstance(meta, dict) or meta.get("id") != oid:
+                continue
+            object_path = _path(owner, session_id, oid)
+            fd = os.open(object_path, _READ_FLAGS)
+            with os.fdopen(fd, "rb") as stream:
+                status = os.fstat(stream.fileno())
+                if not stat.S_ISREG(status.st_mode) or status.st_size > 16_777_216:
+                    continue
+                if scanned_bytes + status.st_size > max_scan_bytes:
+                    budget_break = True
+                    break
+                body = stream.read()
+            if _hash(body) != meta.get("sha256"):
+                continue
+            scanned_bytes += len(body)
+            for number, line in enumerate(body.decode("utf-8").splitlines(), 1):
+                index = line.casefold().find(query_folded)
+                if index >= 0:
+                    matches.append({"id": oid, "tool": meta.get("tool"),
+                                    "line": number, "snippet": line[max(0, index - 60):index + 100],
+                                    "bytes": len(body)})
+                    break
+        except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        finally:
+            if not budget_break:
+                last_id = oid
+    remaining = any(path.stem > last_id for path in entries) if last_id else bool(entries)
+    return {"run_id": run_id, "matches": matches, "next_cursor": last_id if remaining else None,
+            "scanned_bytes": scanned_bytes}
 
 
 def _complete_lines(text: str, budget: int, *, tail: bool) -> str:
@@ -184,7 +305,7 @@ def placeholder(meta: dict, text: str) -> str:
 
 
 def project_messages(messages: list[dict], *, owner: Optional[str],
-                     session_id: Optional[str]) -> tuple[list[dict], dict]:
+                     session_id: Optional[str], run_id: Optional[str] = None) -> tuple[list[dict], dict]:
     """Project model messages and return deterministic savings telemetry."""
     assistant_after = [0] * len(messages)
     count = 0
@@ -208,6 +329,7 @@ def project_messages(messages: list[dict], *, owner: Optional[str],
                 tool_name=str(source.get("tool_name") or "tool"),
                 tool_call_id=str(source.get("tool_call_id") or f"message-{index}"),
                 text=content,
+                run_id=run_id,
             )
             if meta and assistant_after[index] >= FULL_SENDS:
                 replacement = placeholder(meta, content)
@@ -234,10 +356,31 @@ def project_messages(messages: list[dict], *, owner: Optional[str],
 
 
 def recall(owner: Optional[str], session_id: Optional[str], observation_id_value: str,
-           offset: int = 0) -> dict:
+           offset: int = 0, *, run_id: Optional[str] = None) -> dict:
     if type(offset) is not int or offset < 0:
         raise ValueError("Invalid observation offset")
     path = _path(owner, session_id, observation_id_value)
+    marker = path.with_suffix(".runbound")
+    if marker.is_symlink():
+        raise OSError("Observation run marker is not regular")
+    if marker.exists():
+        if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
+            raise PermissionError("Observation belongs to a different run")
+        run_root = _scope(owner, session_id) / "runs"
+        run_dir = run_root / run_id
+        if run_root.is_symlink() or run_dir.is_symlink():
+            raise OSError("Observation run index is not regular")
+        index_path = run_dir / f"{observation_id_value}.json"
+        try:
+            index_fd = os.open(index_path, _READ_FLAGS)
+            with os.fdopen(index_fd, "rb") as index:
+                if not stat.S_ISREG(os.fstat(index.fileno()).st_mode):
+                    raise PermissionError("Observation belongs to a different run")
+                index_meta = json.loads(index.read(1024))
+            if not isinstance(index_meta, dict) or index_meta.get("id") != observation_id_value:
+                raise PermissionError("Observation belongs to a different run")
+        except (FileNotFoundError, ValueError, TypeError) as exc:
+            raise PermissionError("Observation belongs to a different run") from exc
     fd = os.open(path, _READ_FLAGS)
     try:
         status = os.fstat(fd)

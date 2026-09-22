@@ -23,7 +23,7 @@ def test_replay_flush_recovers_thinking_from_shared_timeline_reducer():
     finish = source.split("const finishReplayThinking = () =>", 1)[1].split(
         "const ensureReplayThread", 1
     )[0]
-    assert "timelineReducer.snapshot?.().segments" in finish
+    assert "timelineReducer.thinkingForSegment?.(replayThinkingSegmentId)" in finish
     assert "!String(inner.textContent || '').trim()" in finish
     assert "String(inner?.textContent || '').trim()" in finish
     assert "replayThinkingFinalized" in finish
@@ -35,6 +35,9 @@ def test_empty_history_thinking_is_lazy_loaded_from_durable_run():
     assert "function bindLazyHistoryThinking" in source
     assert "/reasoning/${encodeURIComponent(runId)}/${roundNumber}" in source
     assert "bindLazyHistoryThinking(body, metadata, roundNum" in source
+    assert "stats.className = 'thinking-stats'" in source
+    assert "stats.textContent = `${Number(data.duration || 0).toFixed(1)}s" in source
+    assert "bindLazyHistoryThinking(b, metadata, 1, storedThinking)" in source
 
 
 def test_preserved_history_thinking_is_not_preparsed_into_hidden_dom():

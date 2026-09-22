@@ -58,6 +58,48 @@ def setup_chat_work_routes():
     async def snapshot(session_id: str, request: Request):
         return store.get(_owner(request, session_id), session_id)
 
+    @router.get("/{session_id}/why-waiting")
+    async def why_waiting(session_id: str, request: Request):
+        """Content-free, owner-scoped diagnosis shared by every client."""
+        owner = _owner(request, session_id)
+        from src import agent_runs
+        from src.chat_effect_inbox import inbox
+        from src.run_wait_state import compose_wait_panel
+        from src.subagent_runtime import runtime
+
+        goal = store.wait_metadata(owner, session_id)
+        run = agent_runs.describe_run(session_id)
+        children = runtime.active_summary(
+            owner, session_id,
+            parent_run_id=run.get("run_id") if run else None,
+        )
+        return compose_wait_panel(
+            run=run, goal=goal, children=children,
+            unknown_effects=(
+                len(inbox.unknown(owner, session_id))
+                if goal.get("wait_reason") == "unknown_side_effect" else None
+            ),
+        )
+
+    @router.get("/{session_id}/unknown-effects")
+    async def unknown_effects(session_id: str, request: Request):
+        """Content-free durable inbox; inspection never authorizes replay."""
+        from src.chat_effect_inbox import inbox
+        return {"effects": inbox.unknown(_owner(request, session_id), session_id)}
+
+    @router.post("/{session_id}/unknown-effects/{intent_id}/no-retry")
+    async def effect_no_retry(session_id: str, intent_id: str, request: Request):
+        """Owner explicitly declines replay; this is not a verification claim."""
+        owner = _owner(request, session_id, mutation=True)
+        body = await _json(request)
+        if set(body) != {"expected_revision"}:
+            raise HTTPException(400, "Exact effect revision required")
+        from src.chat_effect_inbox import inbox
+        return inbox.no_retry(
+            owner, session_id, intent_id,
+            expected_revision=body["expected_revision"],
+        )
+
     @router.get("/{session_id}/events")
     async def events(session_id: str, request: Request, after: int = 0, limit: int = 100):
         rows = store.events(_owner(request, session_id), session_id, after=after, limit=limit)
@@ -73,6 +115,10 @@ def setup_chat_work_routes():
             raise HTTPException(400, "Invalid event cursor") from None
         if cursor < 0:
             raise HTTPException(400, "Invalid event cursor")
+        # StreamingResponse sends HTTP 200 before its generator runs. Validate
+        # the durable owner/session row first so a missing chat is a normal
+        # 404, not an exception after headers were committed (server-side 500).
+        store.get(owner, session_id)
 
         async def generate():
             nonlocal cursor
@@ -139,6 +185,10 @@ def setup_chat_work_routes():
         body = await _json(request)
         if set(body) != {"expected_revision"}:
             raise HTTPException(400, "Exact goal revision required")
+        if action == "resume":
+            from src.chat_effect_inbox import inbox
+            if inbox.unknown(owner, session_id):
+                raise HTTPException(409, "Unknown tool effect must be reconciled before Goal resumes")
         # Stop the exact detached attempt before changing durable Goal state.
         # Otherwise a slow run can publish progress after Cancel/Pause and
         # resurrect the goal on another browser.
@@ -158,7 +208,9 @@ def setup_chat_work_routes():
             raise HTTPException(409, str(exc)) from None
         if action == "resume":
             from src.goal_controller import dispatch_goal_continuation
-            await dispatch_goal_continuation(owner, session_id, reason="goal_resumed")
+            started = await dispatch_goal_continuation(owner, session_id, reason="goal_resumed")
+            if not started:
+                raise HTTPException(503, "Goal continuation did not start; inspect status before retrying")
         return goal
 
     @router.post("/{session_id}/goal-revise")
@@ -167,6 +219,9 @@ def setup_chat_work_routes():
         body = await _json(request)
         if set(body) != {"objective", "expected_revision", "run_id"}:
             raise HTTPException(400, "Exact goal objective, revision and run id required")
+        from src.chat_effect_inbox import inbox
+        if inbox.unknown(owner, session_id):
+            raise HTTPException(409, "Unknown tool effect must be reconciled before Goal revision")
         from src import agent_runs
         run = agent_runs.describe_run(session_id)
         active_id = run.get("run_id") if run and run.get("status") == "running" else None
@@ -182,7 +237,9 @@ def setup_chat_work_routes():
                 raise HTTPException(409, "The current attempt is still stopping; retry shortly")
         goal = store.revise_goal(owner, session_id, body["objective"], body["expected_revision"])
         from src.goal_controller import dispatch_goal_continuation
-        await dispatch_goal_continuation(owner, session_id, reason="goal_revised")
+        started = await dispatch_goal_continuation(owner, session_id, reason="goal_revised")
+        if not started:
+            raise HTTPException(503, "Goal continuation did not start; inspect status before retrying")
         return goal
 
     @router.post("/{session_id}/goal-guidance")
@@ -198,6 +255,9 @@ def setup_chat_work_routes():
         owner = _owner(request, session_id, mutation=True)
         if await _json(request) != {}:
             raise HTTPException(400, "Empty goal lease body required")
+        from src.chat_effect_inbox import inbox
+        if inbox.unknown(owner, session_id):
+            raise HTTPException(409, "Unknown tool effect must be reconciled before Goal resumes")
         from src import agent_runs
         if agent_runs.is_active(session_id):
             raise HTTPException(409, "The current goal attempt is still running")

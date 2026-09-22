@@ -7,7 +7,7 @@ session/owner context supplied by the server-side dispatcher.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 import hashlib
 import json
 import re
@@ -18,6 +18,7 @@ from core.database import (
     ChatGoal, ChatMessage, ChatPlan, ChatWorkEvent, Session as DbSession, SessionLocal,
     utcnow_naive,
 )
+from src.run_wait_state import CONTEXT_FAILURE_CODES
 
 
 PLAN_STATES = {"pending", "in_progress", "done", "blocked"}
@@ -135,6 +136,52 @@ class ChatWorkStore:
             cursor = db.query(ChatWorkEvent.id).filter_by(owner=stored_owner, session_id=session_id).order_by(ChatWorkEvent.id.desc()).limit(1).scalar()
             return {"plan": _public_plan(plan), "goal": _public_goal(goal), "cursor": cursor or 0}
 
+    def wait_metadata(self, owner, session_id):
+        """Return owner-scoped Goal/lease state without objective or lease token."""
+        with SessionLocal() as db:
+            _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+            ).first()
+            if row is None:
+                return {"status": None, "attempt": None, "revision": None,
+                        "lease_held": False, "lease_expires_at": None,
+                        "status_since": None}
+            lease_held = bool(
+                row.lease_token and row.lease_expires_at
+                and row.lease_expires_at > utcnow_naive()
+            )
+            return {
+                "status": row.status,
+                "attempt": row.attempt,
+                "revision": row.revision,
+                "wait_reason": (
+                    dict(row.checkpoint or {}).get("_wait_reason")
+                    if row.status == "waiting_user" else None
+                ),
+                "failure_code": (
+                    dict(row.checkpoint or {}).get("failure_code")
+                    if row.status == "waiting_user"
+                    and dict(row.checkpoint or {}).get("_wait_reason") == "context_compaction"
+                    and dict(row.checkpoint or {}).get("failure_code") in CONTEXT_FAILURE_CODES
+                    else None
+                ),
+                "budget": (
+                    dict(row.checkpoint or {}).get("budget")
+                    if row.status == "waiting_user"
+                    and dict(row.checkpoint or {}).get("_wait_reason") == "resource_budget"
+                    else None
+                ),
+                "status_since": (
+                    row.updated_at.replace(tzinfo=timezone.utc).timestamp()
+                    if row.updated_at else None
+                ),
+                "lease_held": lease_held,
+                "lease_expires_at": (
+                    row.lease_expires_at.isoformat() + "Z" if lease_held else None
+                ),
+            }
+
     def list_active_goals(self):
         """Return owner/session pairs that must be resumed by the server controller."""
         with SessionLocal() as db:
@@ -215,6 +262,11 @@ class ChatWorkStore:
                 raise ValueError("Plan step IDs must be unique")
             prior_status = "draft" if replace_terminal else (row.status if row is not None else "draft")
             status = prior_status if prior_status in {"executing", "done"} else "draft"
+            if status == "executing" and not any(
+                step.get("required", True) and step.get("status") != "done"
+                for step in normalized
+            ):
+                status = "done"
             row.title, row.steps, row.status = title, normalized, status
             row.current_step_id = next((s["id"] for s in normalized if s["status"] in {"pending", "in_progress"}), None)
             self._event(db, owner, session_id, "plan_saved", row.id, row.revision, _public_plan(row))
@@ -345,6 +397,11 @@ class ChatWorkStore:
             if row.status in {"completed", "cancelled"}:
                 raise WorkConflict("Goal is already terminal")
             row.status = statuses[action]
+            if action == "resume":
+                row.checkpoint = {
+                    key: value for key, value in dict(row.checkpoint or {}).items()
+                    if key != "_wait_reason"
+                }
             row.revision += 1
             event_kind = {"pause": "goal_paused", "resume": "goal_resumed", "cancel": "goal_cancelled"}[action]
             self._event(db, owner, session_id, event_kind, row.id, row.revision, _public_goal(row))
@@ -462,6 +519,22 @@ class ChatWorkStore:
                 # the durable model ledger, prior tool results, or approval
                 # provenance when a later event only carries one field.
                 row.checkpoint = {**dict(row.checkpoint or {}), **checkpoint}
+            if waiting_user:
+                reason = (checkpoint or {}).get("reason")
+                row.checkpoint = {
+                    **dict(row.checkpoint or {}),
+                    "_wait_reason": (
+                        "repeated_premature_stop" if reason == "repeated_premature_stop"
+                        else "unknown_side_effect" if reason == "unknown_side_effect"
+                        else "ask_user" if (checkpoint or {}).get("question_id")
+                        else "other"
+                    ),
+                }
+            else:
+                row.checkpoint = {
+                    key: value for key, value in dict(row.checkpoint or {}).items()
+                    if key != "_wait_reason"
+                }
             row.status = "waiting_user" if waiting_user else "active"
             if not waiting_user:
                 row.failure_count = 0
@@ -471,33 +544,107 @@ class ChatWorkStore:
             db.flush()
             return _public_goal(row)
 
-    def record_goal_failure(self, owner, session_id, error, checkpoint=None, *, keep_active=False):
-        """Persist bounded transport/model retry state for the server controller."""
+    def record_goal_failure(self, owner, session_id, error, checkpoint=None, *,
+                            force_wait_user=False, expected_goal_id=None,
+                            expected_attempt=None):
+        """Persist bounded transport/model/checkpoint retry state."""
         error = _clean_text(error, "goal error", 2000)
         if checkpoint is not None and not isinstance(checkpoint, dict):
             raise ValueError("Goal checkpoint must be an object")
+        if (expected_goal_id is None) != (expected_attempt is None):
+            raise ValueError("Goal ID and attempt must be supplied together")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:
                 raise WorkNotFound("Active goal not found")
-            row.failure_count = int(row.failure_count or 0) + 1 if row.last_error == error else 1
+            if expected_goal_id is not None and (
+                row.id != expected_goal_id or row.attempt != expected_attempt
+            ):
+                raise WorkConflict("Goal attempt changed before failure settlement")
+            # Count failed attempts, not identical error strings. Providers
+            # can alternate timeout/503/schema errors without any successful
+            # work; changing wording must not reset the retry budget.
+            row.failure_count = int(row.failure_count or 0) + 1
             row.last_error = error
             row.lease_token = None
             row.lease_expires_at = None
             row.progress = "Model attempt failed; the server will retry automatically."
             if checkpoint is not None:
                 row.checkpoint = {**dict(row.checkpoint or {}), **checkpoint}
-            if row.failure_count >= 3 and not keep_active:
+            if force_wait_user or row.failure_count >= 3:
                 row.status = "waiting_user"
-                row.progress = "The model endpoint failed repeatedly; user attention is required."
+                checkpoint_failed = (checkpoint or {}).get("reason") == "context_compaction"
+                dispatch_failed = (checkpoint or {}).get("reason") == "continuation_dispatch_failed"
+                dispatch_code = (checkpoint or {}).get("failure_code")
+                row.progress = (
+                    "Goal continuation did not start. Choose a model for this chat, then retry explicitly."
+                    if dispatch_failed and dispatch_code == "model_unselected" else
+                    "Goal continuation did not start. Choose an available model endpoint, then retry explicitly."
+                    if dispatch_failed and dispatch_code == "model_endpoint_unavailable" else
+                    "Goal continuation did not start; inspect the endpoint and retry explicitly."
+                    if dispatch_failed else
+                    "Context checkpoint failed repeatedly; check the summarizer or context policy before resuming."
+                    if checkpoint_failed else
+                    "The model endpoint failed repeatedly; user attention is required."
+                )
+                row.checkpoint = {
+                    **dict(row.checkpoint or {}),
+                    "_wait_reason": (
+                        "dispatch_failure" if dispatch_failed else
+                        "context_compaction" if checkpoint_failed else "provider_failure"
+                    ),
+                }
             else:
                 row.status = "active"
+                row.checkpoint = {
+                    key: value for key, value in dict(row.checkpoint or {}).items()
+                    if key != "_wait_reason"
+                }
             row.revision += 1
             self._event(
                 db, owner, session_id, "goal_attempt_failed", row.id, row.revision,
                 {"error": error, "failure_count": row.failure_count, "status": row.status},
             )
+            db.flush()
+            return _public_goal(row)
+
+    def wait_on_goal_budget(self, owner, session_id, *, resource, used, limit, run_id,
+                            expected_goal_id, expected_attempt, usage_source=None):
+        """Hard budget is a user decision point, never a silent Goal retry."""
+        if resource not in {"tool_calls", "model_rounds", "model_tokens", "model_requests", "wall_seconds", "children"} or type(used) is not int or type(limit) is not int:
+            raise ValueError("Valid run budget required")
+        if not 1 <= limit <= 10_000_000 or used < limit or used > 100_000_000:
+            raise ValueError("Budget usage is invalid")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
+            raise ValueError("Exact run ID required")
+        if not isinstance(expected_goal_id, str) or type(expected_attempt) is not int:
+            raise ValueError("Exact goal attempt required")
+        if usage_source is not None and (resource != "model_tokens" or usage_source not in {"real", "estimated", "mixed"}):
+            raise ValueError("Invalid budget usage source")
+        budget = {"resource": resource, "used": used, "limit": limit, "run_id": run_id}
+        if usage_source is not None:
+            budget["usage_source"] = usage_source
+        with SessionLocal.begin() as db:
+            _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+            ).first()
+            if (row is None or row.status != "active" or row.id != expected_goal_id
+                    or row.attempt != expected_attempt):
+                raise WorkConflict("Active goal changed before budget settlement")
+            row.status = "waiting_user"
+            label = {"tool_calls": "Tool-call", "model_rounds": "Model-round",
+                     "model_tokens": "Model-token", "model_requests": "Model-request",
+                     "wall_seconds": "Wall-time",
+                     "children": "Child-agent"}[resource]
+            row.progress = f"{label} limit reached ({used}/{limit}); review the budget before resuming."
+            row.checkpoint = {**dict(row.checkpoint or {}), "budget": budget,
+                              "_wait_reason": "resource_budget"}
+            row.lease_token = None
+            row.lease_expires_at = None
+            row.revision += 1
+            self._event(db, owner, session_id, "goal_budget_exceeded", row.id, row.revision, budget)
             db.flush()
             return _public_goal(row)
 
@@ -545,8 +692,16 @@ class ChatWorkStore:
             db.flush()
             return _public_goal(row)
 
-    def acquire_goal_lease(self, owner, session_id, ttl_seconds=90):
+    def acquire_goal_lease(self, owner, session_id, ttl_seconds=90, *,
+                           expected_goal_id=None, expected_attempt=None):
         """Fence duplicate continuation controllers after reconnect/restart."""
+        if (expected_goal_id is None) != (expected_attempt is None):
+            raise ValueError("Goal ID and attempt must be supplied together")
+        if expected_goal_id is not None and (
+            not isinstance(expected_goal_id, str) or type(expected_attempt) is not int
+            or expected_attempt < 1
+        ):
+            raise ValueError("Invalid expected goal attempt")
         now = utcnow_naive()
         token = uuid.uuid4().hex
         with SessionLocal.begin() as db:
@@ -555,12 +710,18 @@ class ChatWorkStore:
             # Conditional UPDATE makes lease acquisition a real CAS. Two web
             # workers recovering the same Goal cannot both observe an empty
             # lease and then dispatch duplicate autonomous attempts.
-            changed = db.query(ChatGoal).filter(
+            query = db.query(ChatGoal).filter(
                 ChatGoal.owner == _storage_owner(owner),
                 ChatGoal.session_id == session_id,
                 ChatGoal.status == "active",
                 or_(ChatGoal.lease_token.is_(None), ChatGoal.lease_expires_at.is_(None), ChatGoal.lease_expires_at <= now),
-            ).update({"lease_token": token, "lease_expires_at": expires}, synchronize_session=False)
+            )
+            if expected_goal_id is not None:
+                query = query.filter(
+                    ChatGoal.id == expected_goal_id,
+                    ChatGoal.attempt == expected_attempt,
+                )
+            changed = query.update({"lease_token": token, "lease_expires_at": expires}, synchronize_session=False)
             return token if changed == 1 else None
 
     def consume_goal_lease(self, owner, session_id, token):

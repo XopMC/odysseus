@@ -965,7 +965,7 @@ class Runner:
         cwd = self.safe_cwd(args.get('cwd'))
         if op == 'file.call':
             tool, content = args.get('tool'), args.get('content', {})
-            if tool not in {'read_file', 'write_file', 'edit_file', 'apply_patch', 'ls', 'glob', 'grep', 'get_workspace'}:
+            if tool not in {'read_file', 'write_file', 'edit_file', 'apply_patch', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'get_workspace'}:
                 raise ValueError('unknown file tool')
             parsed = json.loads(content) if isinstance(content, str) and content.strip().startswith('{') else content
             path_guard = None

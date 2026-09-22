@@ -18,6 +18,7 @@ import re
 import stat
 import sys
 import time
+from functools import wraps
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
@@ -802,11 +803,17 @@ async def _call_mcp_tool(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    *,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    parent_run_id: Optional[str] = None,
 ) -> Dict:
     """Route a legacy tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
     if not mcp:
-        return await _direct_fallback(tool, content, progress_cb=progress_cb) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
+        return await _direct_fallback(tool, content, progress_cb=progress_cb,
+                                      session_id=session_id, owner=owner,
+                                      parent_run_id=parent_run_id) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
 
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
@@ -815,7 +822,9 @@ async def _call_mcp_tool(
 
     # If MCP server not connected, try direct fallback
     if isinstance(result, dict) and result.get("exit_code") == 1 and "not connected" in result.get("error", ""):
-        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb,
+                                          session_id=session_id, owner=owner,
+                                          parent_run_id=parent_run_id)
         if fallback:
             return fallback
 
@@ -876,6 +885,7 @@ async def _direct_fallback(
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
     plan_recovery: bool = False,
+    parent_run_id: Optional[str] = None,
 ) -> Optional[Dict]:
     _subproc_env = {
         **os.environ,
@@ -892,6 +902,7 @@ async def _direct_fallback(
             "session_id": session_id,
             "owner": owner,
             "plan_recovery": bool(plan_recovery),
+            "parent_run_id": parent_run_id,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -955,6 +966,16 @@ async def _document_tool_dispatch(
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+def _with_structured_error(fn):
+    @wraps(fn)
+    async def wrapped(*args, **kwargs):
+        from src.tool_errors import enrich_tool_error
+        description, result = await fn(*args, **kwargs)
+        return description, enrich_tool_error(result)
+    return wrapped
+
+
+@_with_structured_error
 async def execute_tool_block(
     block: Any,
     session_id: Optional[str] = None,
@@ -1453,6 +1474,11 @@ async def _execute_tool_block_impl(
     if host_execution.enabled_for(owner) and tool in host_execution.TOOLS:
         is_background, host_content = _split_bg_marker(content) if tool == 'bash' else (False, content)
         if not (is_background and session_id and host_content):
+            if tool in {'read_file', 'run_tests', 'run_lint', 'inspect_process', 'inspect_port', 'tail_log'}:
+                archive_scope = {'run_id': parent_run_id} if tool in {'read_file', 'run_tests', 'run_lint'} else {}
+                return f'{tool} (Jetson host)', await host_execution.execute(
+                    tool, content, owner=owner, session_id=session_id,
+                    **archive_scope)
             return f'{tool} (Jetson host)', await host_execution.execute(tool, content)
         try:
             content = '#!bg\n' + host_execution.background_command(tool, host_content)
@@ -1492,7 +1518,9 @@ async def _execute_tool_block_impl(
     if tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
+        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb,
+                                      session_id=session_id, owner=owner,
+                                      parent_run_id=parent_run_id)
     elif tool in ("grep", "glob", "ls", "get_workspace"):
         # Code-navigation tools — no MCP server; run the direct implementation.
         first_line = content.split(chr(10))[0][:80]
@@ -1729,6 +1757,7 @@ async def _execute_tool_block_impl(
             session_id=session_id,
             owner=owner,
             plan_recovery=plan_recovery,
+            parent_run_id=parent_run_id,
         )
 
         if isinstance(res, tuple):

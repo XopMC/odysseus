@@ -27,6 +27,8 @@ import re
 import time
 import uuid
 from typing import AsyncGenerator, Awaitable, Callable, Dict, Optional
+from src.run_progress import ProgressTracker
+from src.run_wait_state import RunWaitTracker
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,9 @@ class _Run:
         "active_tool_call_id", "on_terminal", "context_revision", "terminal_status",
         "owner", "session_id", "continuation", "durable_seq", "ledger_hash", "terminal_at",
         "compaction_pending", "terminal_reason", "rendered_rounds", "message_saved",
+        "progress",
+        "wait",
+        "health_metrics",
     )
 
     def __init__(self) -> None:
@@ -165,6 +170,10 @@ class _Run:
         self.terminal_reason: Optional[str] = None
         self.rendered_rounds: set[int] = set()
         self.message_saved: bool = False
+        self.progress = ProgressTracker(self.started_at)
+        self.wait = RunWaitTracker(self.started_at)
+        from src.run_health_telemetry import RunHealthTelemetry
+        self.health_metrics = RunHealthTelemetry(self.started_at)
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -206,8 +215,11 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
         effective_status = status or run.terminal_status or run.status
         run.durable_seq = len(run.buffer) - 1
         with SessionLocal.begin() as db:
+            row = db.query(ChatRunState).filter(ChatRunState.run_id == run.run_id).first()
             accepted_context = dict(run.context_usage) if run.context_usage else None
-            if accepted_context:
+            if accepted_context and (
+                row is None or dict(row.context_snapshot or {}) != accepted_context
+            ):
                 # Context occupancy is a session high-water mark. A fresh Goal
                 # attempt or Pause/Stop boundary often has a shorter current
                 # request than the prior in-flight request; that is not
@@ -248,7 +260,6 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
             if accepted_context is not None:
                 run.context_usage = accepted_context
             run.ledger_hash = _ledger_hash(run)
-            row = db.query(ChatRunState).filter(ChatRunState.run_id == run.run_id).first()
             if row is None:
                 row = ChatRunState(
                     run_id=run.run_id,
@@ -262,11 +273,22 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
                 db.add(row)
             row.status = effective_status
             row.last_seq = len(run.buffer) - 1
-            row.durable_seq = run.durable_seq if durable else max(row.durable_seq or -1, run.durable_seq)
+            row.durable_seq = (
+                run.durable_seq if durable else
+                max(int(row.durable_seq) if row.durable_seq is not None else -1, run.durable_seq)
+            )
             row.context_revision = run.context_revision
             row.ledger_hash = run.ledger_hash
             row.context_snapshot = dict(run.context_usage) if run.context_usage else None
             continuation = dict(run.continuation or {})
+            health = run.progress.snapshot(effective_status)
+            continuation["progress_health"] = health
+            continuation["health_metrics"] = run.health_metrics.snapshot()
+            continuation["wait_state"] = run.wait.snapshot(
+                effective_status, durable_seq=run.durable_seq,
+                context_revision=run.context_revision, ledger_hash=run.ledger_hash,
+                stalled=health["stalled"],
+            )
             if run.terminal_reason:
                 continuation["terminal_reason"] = run.terminal_reason
             row.continuation = continuation or None
@@ -385,12 +407,15 @@ def _publish(run: _Run, ev: str) -> None:
     seq = len(run.buffer)
     ev = _annotate_event(run, ev, seq)
     event_type = None
+    observed_payload = None
     # Bind measurements to this exact run, not a session lookup: a cancelled
     # predecessor can still publish while its replacement is being started.
     try:
         payload = json.loads("\n".join(
             line[5:].lstrip() for line in ev.splitlines() if line.startswith("data:")
         ))
+        if isinstance(payload, dict):
+            observed_payload = payload
         if isinstance(payload, dict) and payload.get("type") == "context_usage":
             event_type = "context_usage"
             snapshot = normalize_context_usage(payload.get("data"))
@@ -534,8 +559,12 @@ def _publish(run: _Run, ev: str) -> None:
                     pass
     except (TypeError, ValueError):
         pass  # Other SSE events, comments and [DONE] are not measurements.
+    if observed_payload is not None:
+        run.progress.observe(observed_payload)
+        run.wait.observe(observed_payload)
+        run.health_metrics.observe(observed_payload)
     run.buffer.append(ev)
-    if event_type in {"context_usage", "context_checkpoint", "compacted", "tool_output", "agent_step", "ask_user", "goal_update", "plan_update"}:
+    if event_type in {"context_usage", "context_checkpoint", "compacted", "context_compaction_failed", "tool_start", "tool_output", "agent_terminal", "agent_step", "ask_user", "goal_update", "plan_update", "generated_image", "doc_update", "model_actual", "tool_inventory", "metrics", "budget_exceeded", "rounds_exhausted"}:
         _persist_run_state(run)
     for q in list(run.subscribers):
         try:
@@ -902,6 +931,38 @@ def get_active_run(session_id: str) -> Optional[_Run]:
     return r if r and r.status == "running" else None
 
 
+def active_run_health_summary() -> dict:
+    """Content-free process-local latency maxima for admin SLO diagnostics."""
+    snapshots = [run.health_metrics.snapshot() for run in tuple(_RUNS.values())
+                 if run.status == "running"]
+    prefill = [row["prefill_tps_last"] for row in snapshots
+               if row["prefill_tps_last"] is not None]
+    return {
+        "measured_runs": len(snapshots),
+        "max_ttft_ms": max((row["ttft_max_ms"] or 0 for row in snapshots), default=0),
+        "max_tool_latency_ms": max((row["tool_latency_max_ms"] or 0 for row in snapshots), default=0),
+        "min_prefill_tps": min(prefill) if prefill else None,
+        "compaction_failures": sum(row["compaction_failures"] for row in snapshots),
+        "max_compaction_ms": max((row["compaction_max_ms"] or 0 for row in snapshots), default=0),
+        "sse_reconnects": sum(row["sse_reconnects"] for row in snapshots),
+    }
+
+
+def _durable_progress_health(row) -> dict:
+    health = dict((row.continuation or {}).get("progress_health") or {})
+    if row.status != "running" and health:
+        health["stalled"] = False
+    return health
+
+
+def _durable_wait_state(row) -> dict:
+    state = dict((row.continuation or {}).get("wait_state") or {})
+    if row.status == "interrupted":
+        state["phase"] = "reconnect"
+        state["recovery_action"] = "reconnect"
+    return state
+
+
 def describe_run(session_id: str) -> Optional[dict]:
     """Return the owner-gated route's public snapshot of the current run."""
     run = _RUNS.get(session_id)
@@ -921,17 +982,21 @@ def describe_run(session_id: str) -> Optional[dict]:
                     "status": row.status,
                     "started_at": row.started_at.replace(tzinfo=timezone.utc).timestamp() if row.started_at else None,
                     "last_seq": row.last_seq,
-                    "next_seq": (row.last_seq or -1) + 1,
+                    "next_seq": int(row.last_seq) + 1 if row.last_seq is not None else 0,
                     "context_usage": dict(row.context_snapshot or {}) or None,
                     "context_revision": row.context_revision or 0,
                     "durable_seq": row.durable_seq,
                     "ledger_hash": row.ledger_hash,
                     "terminal_reason": (row.continuation or {}).get("terminal_reason"),
                     "live_rendered_units": 0,
+                    "progress_health": _durable_progress_health(row),
+                    "health_metrics": dict((row.continuation or {}).get("health_metrics") or {}),
+                    "wait_state": _durable_wait_state(row),
                 }
         except Exception:
             logger.debug("[agent-run] durable run-state lookup failed", exc_info=True)
             return None
+    health = run.progress.snapshot(run.status)
     return {
         "run_id": run.run_id,
         "status": run.status,
@@ -944,6 +1009,13 @@ def describe_run(session_id: str) -> Optional[dict]:
         "ledger_hash": run.ledger_hash,
         "terminal_reason": run.terminal_reason,
         "live_rendered_units": 0 if run.message_saved else len(run.rendered_rounds),
+        "progress_health": health,
+        "health_metrics": run.health_metrics.snapshot(),
+        "wait_state": run.wait.snapshot(
+            run.status, durable_seq=run.durable_seq,
+            context_revision=run.context_revision, ledger_hash=run.ledger_hash,
+            stalled=health["stalled"],
+        ),
     }
 
 
@@ -957,8 +1029,26 @@ def recover_durable_runs() -> list[dict]:
     """
     recovered = []
     try:
-        from core.database import ChatRunState, SessionLocal, utcnow_naive
+        from core.database import ChatRunState, ChatToolIntent, ChatWorkEvent, SessionLocal, utcnow_naive
         from src.chat_replay_log import ReplayLog
+        def promote_open_effects(db, row):
+            # Keep the inbox transition and cross-device notification in the
+            # same transaction as the interrupted run state. A second startup
+            # sees no open intent and cannot publish a duplicate event.
+            intents = db.query(ChatToolIntent).filter_by(
+                owner=row.owner, session_id=row.session_id,
+                run_id=row.run_id, status="intent",
+            ).all()
+            for intent in intents:
+                intent.status = "unknown"
+                intent.revision += 1
+                db.add(ChatWorkEvent(
+                    session_id=row.session_id, owner=row.owner,
+                    kind="effect_unknown", entity_id=intent.id,
+                    revision=intent.revision,
+                    payload={"intent_id": intent.id, "status": "unknown"},
+                ))
+
         with SessionLocal() as db:
             rows = [
                 {
@@ -994,6 +1084,7 @@ def recover_durable_runs() -> list[dict]:
                 with SessionLocal.begin() as db:
                     row = db.query(ChatRunState).filter(ChatRunState.run_id == state["run_id"]).first()
                     if row is not None:
+                        promote_open_effects(db, row)
                         row.status = "interrupted"
                         row.terminal_at = utcnow_naive()
                         row.last_seq = len(log) - 1
@@ -1007,6 +1098,7 @@ def recover_durable_runs() -> list[dict]:
                 with SessionLocal.begin() as db:
                     row = db.query(ChatRunState).filter(ChatRunState.run_id == state["run_id"]).first()
                     if row is not None:
+                        promote_open_effects(db, row)
                         row.status = "interrupted"
                         row.terminal_at = utcnow_naive()
                         continuation = dict(row.continuation or {})
@@ -1060,6 +1152,8 @@ def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Opt
                 "context_revision": state.context_revision or 0,
                 "durable_seq": state.durable_seq,
                 "ledger_hash": state.ledger_hash,
+                "progress_health": _durable_progress_health(state),
+                "wait_state": _durable_wait_state(state),
             }
         except (FileNotFoundError, ValueError, OSError):
             return None
@@ -1409,6 +1503,9 @@ async def subscribe(
     run = expected_run or _RUNS.get(session_id)
     if run is None:
         return
+    if run.status == "running" and type(after_seq) is int and after_seq >= 0:
+        run.health_metrics.reconnect()
+        _persist_run_state(run)
     # A queue carries only a coalesced wake-up, never duplicate token payloads.
     # Slow/disconnected clients read their own cursor from the replay artifact.
     q: asyncio.Queue = asyncio.Queue(maxsize=1)
@@ -1437,6 +1534,7 @@ async def subscribe(
                 # disconnects on llama.cpp first-token latencies of 30s+.
                 if run.status == "running":
                     heartbeat_idx += 1
+                    run.progress.heartbeat()
                     yield f": heartbeat {heartbeat_idx}\n\n"
                     continue
             while next_seq < len(run.buffer):

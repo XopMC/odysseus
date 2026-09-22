@@ -98,9 +98,29 @@ _register(
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
-    {"get_workspace", "glob", "grep", "ls", "read_file", "read_tool_artifact"},
+    {"get_workspace", "glob", "grep", "search_files", "ls", "list_tree", "file_outline", "git_status", "git_diff", "git_log", "compare_files", "verify_hashes", "read_file", "read_tool_artifact", "search_artifacts"},
     ToolEffect.READ_WORKSPACE,
     result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
+)
+_register(
+    {"run_tests", "run_lint"},
+    ToolEffect.EXECUTE_CODE,
+    result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
+)
+_register(
+    {"inspect_process", "inspect_port", "tail_log"},
+    ToolEffect.READ_PRIVATE,
+    result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
+)
+_register(
+    {"inspect_toolchain"}, ToolEffect.READ_PRIVATE, ToolEffect.BROKERED_NETWORK_READ,
+    result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
+)
+_register(
+    {"http_probe"},
+    ToolEffect.READ_PRIVATE,
+    ToolEffect.BROKERED_NETWORK_READ,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {"web_search"},
@@ -297,10 +317,54 @@ _BROWSER_MCP_READ_CAPABILITIES = _capabilities(
 _BROWSER_MCP_READ_TOOLS = frozenset(
     {
         "mcp__builtin_browser__browser_console_messages",
+        "mcp__builtin_browser__browser_find",
         "mcp__builtin_browser__browser_network_requests",
         "mcp__builtin_browser__browser_snapshot",
         "mcp__builtin_browser__browser_take_screenshot",
+        "mcp__builtin_browser__browser_wait_for",
     }
+)
+_BROWSER_MCP_NAV_TOOLS = frozenset({
+    "mcp__builtin_browser__browser_navigate",
+    "mcp__builtin_browser__browser_navigate_back",
+    "mcp__builtin_browser__browser_navigate_forward",
+    "mcp__builtin_browser__browser_reload",
+    "mcp__builtin_browser__browser_tabs",
+})
+_BROWSER_MCP_ACTION_TOOLS = frozenset({
+    "mcp__builtin_browser__browser_click",
+    "mcp__builtin_browser__browser_type",
+    "mcp__builtin_browser__browser_fill_form",
+    "mcp__builtin_browser__browser_press_key",
+    "mcp__builtin_browser__browser_select_option",
+    "mcp__builtin_browser__browser_drag",
+    "mcp__builtin_browser__browser_mouse_click_xy",
+    "mcp__builtin_browser__browser_mouse_drag_xy",
+    "mcp__builtin_browser__browser_mouse_down",
+    "mcp__builtin_browser__browser_mouse_up",
+    "mcp__builtin_browser__browser_handle_dialog",
+})
+_BROWSER_MCP_UI_TOOLS = frozenset({
+    "mcp__builtin_browser__browser_close",
+    "mcp__builtin_browser__browser_resize",
+    "mcp__builtin_browser__browser_hover",
+    "mcp__builtin_browser__browser_mouse_move_xy",
+    "mcp__builtin_browser__browser_mouse_wheel",
+})
+_BROWSER_MCP_NAV_CAPABILITIES = _capabilities(
+    ToolEffect.BROKERED_NETWORK_READ,
+    ToolEffect.NETWORK_EGRESS,
+    ToolEffect.UI_SIDE_EFFECT,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_BROWSER_MCP_ACTION_CAPABILITIES = _capabilities(
+    ToolEffect.UI_SIDE_EFFECT,
+    ToolEffect.EXTERNAL_SIDE_EFFECT,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_BROWSER_MCP_UI_CAPABILITIES = _capabilities(
+    ToolEffect.UI_SIDE_EFFECT,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 
 
@@ -318,6 +382,12 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
             return capabilities
     if tool_name in _BROWSER_MCP_READ_TOOLS:
         return _BROWSER_MCP_READ_CAPABILITIES
+    if tool_name in _BROWSER_MCP_NAV_TOOLS:
+        return _BROWSER_MCP_NAV_CAPABILITIES
+    if tool_name in _BROWSER_MCP_ACTION_TOOLS:
+        return _BROWSER_MCP_ACTION_CAPABILITIES
+    if tool_name in _BROWSER_MCP_UI_TOOLS:
+        return _BROWSER_MCP_UI_CAPABILITIES
     return _UNKNOWN_CAPABILITIES
 
 

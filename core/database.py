@@ -291,7 +291,7 @@ class ChatGoal(TimestampMixin, Base):
 
 
 class ChatWorkEvent(Base):
-    """Append-only Plan/Goal journal used by reload and second devices."""
+    """Append-only Plan/Goal/effect journal used by reload and second devices."""
     __tablename__ = "chat_work_events"
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -325,6 +325,30 @@ class ChatRunState(TimestampMixin, Base):
     context_snapshot = Column(JSON, nullable=True)
     continuation = Column(JSON, nullable=True)
     __table_args__ = (Index("ix_chat_run_states_owner_session", "owner", "session_id", "updated_at"),)
+
+
+class ChatToolIntent(TimestampMixin, Base):
+    """Content-free effect intent for one Agent tool call.
+
+    A crash or lost reply leaves the exact action in the owner-scoped inbox;
+    the action body itself is never persisted here or replayed by recovery.
+    """
+    __tablename__ = "chat_tool_intents"
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id = Column(String, nullable=False, index=True)
+    tool_call_id = Column(String, nullable=False)
+    tool_name = Column(String, nullable=False)
+    action_hash = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="intent", index=True)
+    revision = Column(Integer, nullable=False, default=1)
+    receipt_hash = Column(String, nullable=True)
+    receipt = Column(JSON, nullable=True)
+    __table_args__ = (
+        Index("ix_chat_tool_intents_identity", "owner", "session_id", "run_id", "tool_call_id", unique=True),
+        Index("ix_chat_tool_intents_inbox", "owner", "session_id", "status", "created_at"),
+    )
 
 
 class ChatContextCompaction(Base):

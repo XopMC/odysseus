@@ -22,7 +22,7 @@ from src.tool_capabilities import TOOL_CAPABILITIES, ToolCapabilities, ToolEffec
 from src.tool_security import email_tool_policy_names
 
 
-READ_TOOLS = frozenset({'read_file', 'ls', 'glob', 'grep', 'get_workspace'})
+READ_TOOLS = frozenset({'read_file', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'compare_files', 'verify_hashes', 'inspect_toolchain', 'get_workspace'})
 WRITE_TOOLS = frozenset({'write_file', 'edit_file', 'apply_patch'})
 WEB_TOOLS = frozenset({'web_search', 'web_fetch'})
 EXECUTE_TOOLS = frozenset({'bash', 'python'})

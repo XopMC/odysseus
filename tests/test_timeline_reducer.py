@@ -30,6 +30,9 @@ def test_timeline_reducer_keeps_segments_and_deduplicates_events():
       assert.deepEqual(s.segments[0].tools, ['t1']);
       assert.equal(s.tools.t1.status, 'done');
       assert.equal(s.segments[1].text, 'reply');
+      assert.equal(r.thinkingForSegment(`${run}:1`), 'thinking');
+      assert.equal(r.thinkingForSegment(`${run}:2`), '');
+      assert.equal(r.thinkingForSegment('missing'), '');
       console.log(JSON.stringify({passed:true}));
     """
     result = subprocess.run(

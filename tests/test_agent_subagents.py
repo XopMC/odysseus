@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -14,6 +15,31 @@ from src import tool_execution
 from core.database import Base
 from src.database import ChatSubagentEvent, ChatSubagentRun, Session, SessionLocal
 from src.subagent_runtime import CHILD_CORE_TOOLS, SubagentRuntime, runtime
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ensure_default_subagent_test_schema():
+    """Collection's in-memory SQLite connection can be replaced by route tests.
+
+    Global-runtime cases in this module require their own schema baseline and
+    must not depend on another test's connection or collection-time init_db.
+    """
+    Base.metadata.create_all(bind=SessionLocal.kw["bind"])
+
+
+def test_child_queue_wait_is_visible_without_assigned_context():
+    from src.subagent_runtime import _public
+
+    started = datetime(2026, 1, 1, 0, 0, 2)
+    row = SimpleNamespace(
+        id="c" * 32, parent_run_id="p" * 32, parent_session_id="s",
+        ordinal=1, name="Worker", objective="private task", model="fixture",
+        endpoint_id="ep", status="running", error="", metrics={}, revision=1,
+        started_at=started, finished_at=None, created_at=datetime(2026, 1, 1),
+    )
+    public = _public(row)
+    assert public["queue_wait_ms"] == 2000
+    assert "assigned_context" not in public
 
 
 def test_subagent_disabled_fails_before_model_dispatch(monkeypatch):
@@ -27,7 +53,7 @@ def test_subagent_disabled_fails_before_model_dispatch(monkeypatch):
 
 def test_child_runtime_has_stable_file_and_verification_tool_core():
     assert CHILD_CORE_TOOLS == {
-        "get_workspace", "ls", "glob", "grep", "read_file", "write_file",
+        "get_workspace", "ls", "glob", "grep", "search_files", "read_file", "write_file",
         "edit_file", "apply_patch", "bash", "python", "read_tool_artifact",
         "publish_subagent_evidence", "manage_auto_research_lab", "todowrite",
     }
@@ -453,7 +479,8 @@ def test_parallel_runtime_returns_immediately_and_caps_each_model_at_four(monkey
         common = dict(owner=owner, session_id=session_id, parent_run_id="parent",
                       objective="work", assigned_context="", endpoint_url="http://local",
                       headers={}, endpoint_id="ep", timeout_seconds=60,
-                      workspace=None, access_mode="ask_important")
+                      workspace=None, access_mode="ask_important",
+                      max_children_per_run=5)
         children = [await runtime.spawn(model="worker-a", **common) for _ in range(4)]
         await asyncio.wait_for(four_entered.wait(), timeout=2)
         assert len(entered) == 4
@@ -463,6 +490,10 @@ def test_parallel_runtime_returns_immediately_and_caps_each_model_at_four(monkey
         assert fifth["policy"] == "model_capacity_exhausted"
         other = await runtime.spawn(model="worker-b", **common)
         assert other["exit_code"] == 0
+        sixth = await runtime.spawn(model="worker-c", **common)
+        assert sixth["policy"] == "run_child_budget_exhausted"
+        assert sixth["resource"] == "children"
+        assert sixth["used"] == sixth["limit"] == 5
         for _ in range(20):
             if len(entered) == 5:
                 break

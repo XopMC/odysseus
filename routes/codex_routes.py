@@ -16,7 +16,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from core.middleware import require_admin
-from src.auth_helpers import require_authenticated_request, require_user
+from src.auth_helpers import require_authenticated_request, require_chat_api_token_scope, require_user
 from src.tool_implementations import do_manage_notes
 from src.constants import COOKBOOK_STATE_FILE
 from routes._validators import validate_remote_host, validate_ssh_port
@@ -214,6 +214,12 @@ def setup_codex_routes(
                 "destructive_actions_should_confirm": True,
             },
         }
+
+    @router.get("/inventory")
+    def capability_inventory(request: Request):
+        owner = require_chat_api_token_scope(request)
+        from src.capability_inventory import build_inventory
+        return build_inventory(owner)
 
     @router.get("/plugin.zip")
     def plugin_zip(request: Request):

@@ -62,3 +62,38 @@ def test_find_info_online_forces_web_search_tools():
     tools = ti.get_tools_for_query("find info online about crow box designs")
     assert "web_search" in tools
     assert "web_fetch" in tools
+
+
+def test_explicit_tree_and_outline_requests_load_specialized_schemas():
+    ti = _index()
+    assert "list_tree" in ti.get_tools_for_query("show the directory tree")
+    assert "file_outline" in ti.get_tools_for_query("show the file outline")
+    assert "list_tree" in ti.get_tools_for_query("call list_tree now")
+    assert "file_outline" in ti.get_tools_for_query("call file_outline now")
+    assert "file_outline" not in ti.get_tools_for_query(
+        "Use bash if needed.", always_include={"bash"})
+
+
+def test_explicit_git_status_request_loads_typed_tool():
+    ti = _index()
+    assert "git_status" in ti.get_tools_for_query("show git status")
+    assert "git_status" not in ti.get_tools_for_query(
+        "check the deadline", always_include={"bash"})
+
+
+def test_verification_profiles_are_deferred_until_requested():
+    ti = _index()
+    assert "run_tests" in ti.get_tools_for_query("run_tests now")
+    assert "run_lint" in ti.get_tools_for_query("run_lint now")
+    assert "run_tests" not in ti.get_tools_for_query(
+        "Use bash if needed.", always_include={"bash"})
+    assert "run_lint" not in ti.get_tools_for_query(
+        "Use bash if needed.", always_include={"bash"})
+
+
+def test_explicit_artifact_search_is_selected_without_vector_index():
+    ti = _index()
+    assert "search_artifacts" in ti.get_tools_for_query(
+        "call search_artifacts to find the earlier tool output")
+    assert "search_artifacts" not in ti.get_tools_for_query(
+        "search files in the repository", always_include={"read_file"})

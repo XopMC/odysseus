@@ -1,9 +1,14 @@
 import asyncio
+import ast
+import hashlib
+import heapq
 import json
 import os
 import re
+import stat
 import difflib
 import shutil
+import subprocess
 import time
 from typing import Optional, Dict, Any, Tuple, List
 
@@ -18,6 +23,23 @@ _CODENAV_MAX_HITS = 200
 _CODENAV_MAX_LINE = 400
 _GREP_TIMEOUT_SECONDS = 20
 _GREP_STDERR_PREFIX = 20_000
+
+
+def _git_ignored_paths(root: str, paths: list[str]) -> set[str]:
+    """Ask Git's own ignore engine; failures leave the fixed safety skips intact."""
+    if not paths or not shutil.which("git"):
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "check-ignore", "-z", "--stdin"],
+            input=("\0".join(paths) + "\0").encode(),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode not in (0, 1):
+        return set()
+    return {item for item in result.stdout.decode("utf-8", "replace").split("\0") if item}
 
 
 def _glob_to_regex(pat: str) -> "re.Pattern":
@@ -69,6 +91,7 @@ def _python_grep_worker(payload: dict, output_queue) -> None:
         skip_dirs = set(payload["skip_dirs"])
         sensitive = {name.casefold() for name in payload["sensitive_names"]}
         max_hits = payload["max_hits"]
+        files_only = bool(payload.get("files_only"))
         hits = 0
 
         def within(path: str, root: str) -> bool:
@@ -112,7 +135,8 @@ def _python_grep_worker(payload: dict, output_queue) -> None:
                             and name.casefold() not in sensitive
                             and not os.path.islink(os.path.join(directory, name))
                         ]
-                        for name in filenames:
+                        dirnames.sort()
+                        for name in sorted(filenames):
                             yield os.path.join(directory, name)
 
                 file_iter = walk_files()
@@ -138,7 +162,7 @@ def _python_grep_worker(payload: dict, output_queue) -> None:
                                     line.rstrip()[:_CODENAV_MAX_LINE],
                                 ))
                                 hits += 1
-                                if hits >= max_hits:
+                                if files_only or hits >= max_hits:
                                     break
                 except (UnicodeDecodeError, OSError):
                     continue
@@ -241,8 +265,9 @@ class EditFileTool:
 
 class ReadFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
         raw_path, offset, limit = content.split("\n", 1)[0].strip(), 0, 0
+        byte_offset, byte_limit, line_numbers = None, None, False
         _stripped = content.strip()
         if _stripped.startswith("{"):
             try:
@@ -250,44 +275,132 @@ class ReadFileTool:
                 raw_path = str(_a.get("path", "")).strip()
                 offset = int(_a.get("offset") or 0)
                 limit = int(_a.get("limit") or 0)
+                byte_offset = _a.get("byte_offset")
+                byte_limit = _a.get("byte_limit")
+                line_numbers = _a.get("line_numbers", False)
             except (json.JSONDecodeError, TypeError, ValueError):
-                pass
+                return {"error": "read_file: invalid arguments", "exit_code": 1}
+        if (offset < 0 or limit < 0 or type(line_numbers) is not bool
+                or (byte_offset is not None and (type(byte_offset) is not int or byte_offset < 0))
+                or (byte_limit is not None and (type(byte_limit) is not int or byte_limit < 1))
+                or ((byte_offset is not None or byte_limit is not None) and (offset or limit or line_numbers))):
+            return {"error": "read_file: invalid or conflicting range arguments", "exit_code": 1}
         try:
             path = _resolve_tool_path(raw_path)
         except ValueError as e:
             return {"error": f"read_file: {e}", "exit_code": 1}
         try:
             def _read():
-                if offset > 0 or limit > 0:
-                    start = max(offset, 1)
-                    out, n, budget = [], 0, MAX_READ_CHARS
-                    with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        for i, line in enumerate(f, 1):
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+                with os.fdopen(fd, "rb") as stream:
+                    info = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode):
+                        raise ValueError("only regular files can be read")
+                    digest = hashlib.sha256()
+                    while chunk := stream.read(1024 * 1024):
+                        digest.update(chunk)
+                    after = os.fstat(stream.fileno())
+                    if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
+                            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                        raise ValueError("file changed during read; retry")
+                    stream.seek(0)
+                    head = stream.read(8192)
+                    stream.seek(0)
+                    binary = b"\x00" in head
+                    if byte_offset is not None or byte_limit is not None:
+                        start = min(byte_offset or 0, info.st_size)
+                        end = min(info.st_size, start + min(byte_limit or MAX_READ_CHARS, MAX_READ_CHARS))
+                        stream.seek(start)
+                        data = stream.read(max(0, end - start))
+                        byte_range = [start, end]
+                        truncated = end < info.st_size
+                        budget_truncated = (byte_limit or MAX_READ_CHARS) > MAX_READ_CHARS and truncated
+                    elif offset or limit or line_numbers:
+                        start, out, size = max(offset, 1), [], 0
+                        for i, line in enumerate(stream, 1):
                             if i < start:
                                 continue
-                            if limit > 0 and n >= limit:
+                            if limit and i >= start + limit:
                                 break
+                            line = (f"{i}: ".encode() + line) if line_numbers else line
                             out.append(line)
-                            n += 1
-                            budget -= len(line)
-                            if budget <= 0:
-                                out.append(f"\n... [truncated at {MAX_READ_CHARS} chars]")
+                            size += len(line)
+                            if size > MAX_READ_CHARS:
                                 break
-                    return "".join(out)
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    return f.read(MAX_READ_CHARS + 1)
-            data = await asyncio.to_thread(_read)
+                        data = b"".join(out)[:MAX_READ_CHARS]
+                        byte_range = None
+                        truncated = size > MAX_READ_CHARS
+                        budget_truncated = truncated
+                    else:
+                        data = stream.read(MAX_READ_CHARS + 1)
+                        byte_range = None
+                        truncated = len(data) > MAX_READ_CHARS
+                        budget_truncated = truncated
+                        data = data[:MAX_READ_CHARS]
+                    binary = binary or b"\x00" in data
+                    try:
+                        output = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        binary = True
+                        output = ""
+                    if binary:
+                        output = f"[Binary file: {info.st_size} bytes; content omitted]"
+                    elif budget_truncated:
+                        output += f"\n... [truncated at {MAX_READ_CHARS} bytes]"
+                    result = {"output": output, "exit_code": 0, "sha256": digest.hexdigest(),
+                              "size_bytes": info.st_size, "encoding": "binary" if binary else "utf-8",
+                              "is_binary": binary, "truncated": truncated}
+                    # Keep the prompt bounded while allowing exact, owner-scoped
+                    # recall of a larger text file.  A failed/quota-limited archive
+                    # never changes the bytes returned by read_file.
+                    if truncated and not binary and ctx.get("session_id"):
+                        from src.observation_pack import archive
+                        from src.settings import get_setting
+                        artifact_limit = max(1024, int(get_setting(
+                            "observation_pack_object_max_bytes", 16_777_216) or 16_777_216))
+                        if info.st_size <= artifact_limit:
+                            stream.seek(0)
+                            try:
+                                complete_bytes = stream.read()
+                                archive_info = os.fstat(stream.fileno())
+                                if (len(complete_bytes) != info.st_size
+                                        or hashlib.sha256(complete_bytes).hexdigest() != digest.hexdigest()
+                                        or (archive_info.st_dev, archive_info.st_ino, archive_info.st_mtime_ns)
+                                        != (info.st_dev, info.st_ino, info.st_mtime_ns)):
+                                    raise ValueError("file changed before artifact creation")
+                                complete_text = complete_bytes.decode("utf-8")
+                                artifact = archive(
+                                    ctx.get("owner"), ctx["session_id"], tool_name="read_file",
+                                    tool_call_id=f"{path}:{digest.hexdigest()}",
+                                    text=complete_text, force=True,
+                                    run_id=ctx.get("parent_run_id"))
+                                if artifact:
+                                    result["artifact_id"] = artifact["id"]
+                                    result["output"] = output[:2000] + (
+                                        f"\n[Preview limited to 2000 characters. Full file: call read_tool_artifact with "
+                                        f"id={artifact['id']} and offset=0]"
+                                    )
+                            except (OSError, UnicodeDecodeError, ValueError):
+                                result["artifact_unavailable"] = True
+                        else:
+                            result["artifact_unavailable"] = True
+                    if byte_range is not None:
+                        result["byte_range"] = byte_range
+                    return result
+            return await asyncio.to_thread(_read)
         except FileNotFoundError:
-            return {"error": f"read_file: {path}: not found", "exit_code": 1}
+            return {"error": "read_file: file not found", "code": "not_found", "exit_code": 1}
         except PermissionError:
-            return {"error": f"read_file: {path}: permission denied", "exit_code": 1}
+            return {"error": "read_file: permission denied", "code": "permission_denied", "exit_code": 1}
         except IsADirectoryError:
-            return {"error": f"read_file: {path}: is a directory (use ls)", "exit_code": 1}
-        except OSError as e:
-            return {"error": f"read_file: {path}: {e}", "exit_code": 1}
-        if not (offset > 0 or limit > 0) and len(data) > MAX_READ_CHARS:
-            data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
-        return {"output": data, "exit_code": 0}
+            return {"error": "read_file: target is a directory (use ls)",
+                    "code": "invalid_arguments", "exit_code": 1}
+        except ValueError as e:
+            code = "stale_revision" if "changed during read" in str(e) else "invalid_arguments"
+            return {"error": "read_file: file changed during read" if code == "stale_revision"
+                    else "read_file: invalid file or range", "code": code, "exit_code": 1}
+        except OSError:
+            return {"error": "read_file: file is unavailable", "code": "transport_unavailable", "exit_code": 1}
 
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
@@ -569,6 +682,141 @@ class LsTool:
             return {"error": err, "exit_code": 1}
         return {"output": _truncate(out), "exit_code": 0}
 
+
+class ListTreeTool:
+    async def execute(self, content: str, ctx: dict) -> dict:
+        from src.tool_execution import (
+            _can_traverse_tool_path, _is_denied_tool_path,
+            _resolve_search_root, _truncate,
+        )
+        try:
+            args = json.loads(content) if (content or "").strip().startswith("{") else {"path": content or ""}
+            if not isinstance(args, dict):
+                raise ValueError
+            depth = args.get("max_depth", 2)
+            limit = args.get("max_entries", 100)
+            if type(depth) is not int or not 1 <= depth <= 6 or type(limit) is not int or not 1 <= limit <= 200:
+                raise ValueError
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {"error": "list_tree: invalid arguments", "exit_code": 1}
+        try:
+            root = _resolve_search_root(str(args.get("path") or ""))
+        except ValueError as exc:
+            return {"error": f"list_tree: {exc}", "exit_code": 1}
+
+        def _walk():
+            if not os.path.isdir(root):
+                return None, False, "list_tree: path is not a directory"
+            rows, pending, truncated = [], [(root, 0)], False
+            while pending and len(rows) < limit:
+                current, level = pending.pop()
+                if level >= depth:
+                    continue
+                if not _can_traverse_tool_path(os.path.realpath(current)):
+                    continue
+                try:
+                    with os.scandir(current) as children:
+                        candidates = []
+                        for index, entry in enumerate(children):
+                            if index >= 10_000:
+                                truncated = True
+                                break
+                            if (entry.name.startswith(".") or entry.name in _CODENAV_SKIP_DIRS
+                                    or entry.is_symlink() or _is_denied_tool_path(os.path.realpath(entry.path))):
+                                continue
+                            candidates.append(entry)
+                        ignored = _git_ignored_paths(root, [entry.path for entry in candidates])
+                        ordered = heapq.nsmallest(limit + 1,
+                                                  (entry for entry in candidates if entry.path not in ignored),
+                                                  key=lambda entry: entry.name.casefold())
+                except OSError:
+                    return None, False, "list_tree: unable to enumerate requested directory"
+                if len(ordered) > limit:
+                    truncated = True
+                descend = []
+                for entry in ordered[:limit]:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    is_dir = stat.S_ISDIR(info.st_mode)
+                    if not is_dir and not stat.S_ISREG(info.st_mode):
+                        continue
+                    relative = os.path.relpath(entry.path, root).replace(os.sep, "/")
+                    rows.append({"path": relative, "kind": "directory" if is_dir else "file",
+                                 "size_bytes": 0 if is_dir else info.st_size})
+                    if is_dir:
+                        descend.append((entry.path, level + 1))
+                    if len(rows) >= limit:
+                        truncated = True
+                        break
+                pending.extend(reversed(descend))
+            if pending:
+                truncated = True
+            return rows, truncated, None
+
+        rows, truncated, error = await asyncio.to_thread(_walk)
+        if error:
+            return {"error": error, "exit_code": 1}
+        lines = [f"{row['path']}/" if row["kind"] == "directory"
+                 else f"{row['path']} ({row['size_bytes']} B)" for row in rows]
+        return {"output": _truncate("\n".join(lines) or "(empty)"),
+                "entries": rows, "truncated": truncated, "exit_code": 0}
+
+
+class FileOutlineTool:
+    async def execute(self, content: str, ctx: dict) -> dict:
+        from src.tool_execution import _resolve_tool_path, _truncate
+        try:
+            args = json.loads(content) if (content or "").strip().startswith("{") else {"path": content or ""}
+            if not isinstance(args, dict):
+                raise ValueError
+            maximum = args.get("max_symbols", 100)
+            if type(maximum) is not int or not 1 <= maximum <= 200:
+                raise ValueError
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {"error": "file_outline: invalid arguments", "exit_code": 1}
+        try:
+            path = _resolve_tool_path(str(args.get("path") or ""))
+        except ValueError as exc:
+            return {"error": f"file_outline: {exc}", "exit_code": 1}
+        if not path.endswith((".py", ".pyi")):
+            return {"error": "file_outline: unavailable for this file type",
+                    "code": "unsupported_language", "exit_code": 1}
+
+        def _outline():
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 2 * 1024 * 1024:
+                    raise ValueError("regular Python file of at most 2 MiB required")
+                source = stream.read(2 * 1024 * 1024 + 1).decode("utf-8")
+            tree = ast.parse(source, filename=path)
+            symbols = []
+            def visit(body, prefix=""):
+                for node in body:
+                    if isinstance(node, ast.ClassDef):
+                        name = prefix + node.name
+                        symbols.append({"kind": "class", "name": name, "line": node.lineno,
+                                        "end_line": node.end_lineno})
+                        visit(node.body, name + ".")
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        symbols.append({"kind": "method" if prefix else (
+                            "async_function" if isinstance(node, ast.AsyncFunctionDef) else "function"),
+                            "name": prefix + node.name, "line": node.lineno,
+                            "end_line": node.end_lineno})
+            visit(tree.body)
+            return symbols
+
+        try:
+            symbols = await asyncio.to_thread(_outline)
+        except (OSError, UnicodeError, ValueError, SyntaxError):
+            return {"error": "file_outline: unable to parse requested Python file", "exit_code": 1}
+        selected = symbols[:maximum]
+        output = "\n".join(f"{item['line']}: {item['kind']} {item['name']}" for item in selected)
+        return {"output": _truncate(output or "(no symbols)"), "symbols": selected,
+                "truncated": len(symbols) > maximum, "parser": "python_ast", "exit_code": 0}
+
 class GlobTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import (
@@ -708,11 +956,22 @@ class GrepTool:
             return {"error": "grep: pattern is required", "exit_code": 1}
         ignore_case = bool(args.get("ignore_case"))
         glob_pat = str(args.get("glob", "") or "").strip()
-        try:
-            max_hits = int(args.get("max_results") or _CODENAV_MAX_HITS)
-        except (TypeError, ValueError):
-            max_hits = _CODENAV_MAX_HITS
-        max_hits = max(1, min(max_hits, _CODENAV_MAX_HITS))
+        search_v2 = bool(args.get("_search_v2"))
+        files_only = search_v2 and args.get("mode", "files") == "files"
+        if search_v2 and args.get("mode", "files") not in ("files", "matches"):
+            return {"error": "search_files: mode must be files or matches", "exit_code": 1}
+        if search_v2:
+            cursor, page_size = args.get("cursor", 0), args.get("page_size", 25)
+            if (type(cursor) is not int or cursor < 0 or cursor >= 1000
+                    or type(page_size) is not int or not 1 <= page_size <= 50):
+                return {"error": "search_files: invalid cursor or page_size", "exit_code": 1}
+            max_hits = min(1000, cursor + page_size + 1)
+        else:
+            try:
+                max_hits = int(args.get("max_results") or _CODENAV_MAX_HITS)
+            except (TypeError, ValueError):
+                max_hits = _CODENAV_MAX_HITS
+            max_hits = max(1, min(max_hits, _CODENAV_MAX_HITS))
         try:
             root = _resolve_search_root(str(args.get("path", "")))
         except ValueError as e:
@@ -813,6 +1072,8 @@ class GrepTool:
                 canonical = os.path.realpath(absolute)
                 if not _path_within(canonical, real_root) or _is_denied_tool_path(canonical):
                     return None
+                if files_only:
+                    return os.path.abspath(absolute)
                 return f"{os.path.abspath(absolute)}:{number}:{text_value.rstrip()[:_CODENAV_MAX_LINE]}"
 
             def run_rg(cmd: list[str]) -> Optional[str]:
@@ -918,7 +1179,8 @@ class GrepTool:
                         break
                     cmd = [
                         rg, "--json", "--no-config", "--no-follow",
-                        "--max-count", str(max_hits - len(lines)),
+                        "--sort", "path",
+                        "--max-count", str(1 if files_only else max_hits - len(lines)),
                         "--max-columns", str(_CODENAV_MAX_LINE),
                         "--max-columns-preview",
                     ]
@@ -946,6 +1208,7 @@ class GrepTool:
                 "ignore_case": ignore_case,
                 "glob": glob_pat,
                 "max_hits": max_hits,
+                "files_only": files_only,
                 "skip_dirs": tuple(_CODENAV_SKIP_DIRS),
                 "sensitive_names": tuple(
                     set(_SENSITIVE_BASENAMES) | set(_SENSITIVE_FILE_PATTERNS)
@@ -1002,7 +1265,7 @@ class GrepTool:
                     canonical = os.path.realpath(path)
                     if not _path_within(canonical, real_root) or _is_denied_tool_path(canonical):
                         continue
-                    rendered = f"{path}:{number}:{text_value}"
+                    rendered = path if files_only else f"{path}:{number}:{text_value}"
                     if rendered not in lines:
                         lines.append(rendered)
             finally:
@@ -1024,12 +1287,38 @@ class GrepTool:
         lines, err = await asyncio.to_thread(_grep)
         if err:
             return {"error": err, "exit_code": 1}
+        if search_v2:
+            selected = lines[cursor:cursor + page_size]
+            has_more = len(lines) > cursor + page_size
+            next_cursor = cursor + page_size if has_more else None
+            result = {
+                "output": _truncate("\n".join(selected) or f"No matches for {pattern!r} under {root}"),
+                "exit_code": 0,
+                "mode": "files" if files_only else "matches",
+                "next_cursor": next_cursor,
+                "result_limit": 1000,
+                "truncated": len(lines) >= 1000,
+            }
+            result["files" if files_only else "matches"] = selected
+            return result
         if not lines:
             return {"output": f"No matches for {pattern!r} under {root}", "exit_code": 0}
         out = "\n".join(ln[:_CODENAV_MAX_LINE] for ln in lines)
         if len(lines) >= max_hits:
             out += f"\n... [capped at {max_hits} matches]"
         return {"output": _truncate(out), "exit_code": 0}
+
+
+class SearchFilesTool:
+    async def execute(self, content: str, ctx: dict) -> dict:
+        try:
+            args = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            return {"error": "search_files: arguments must be a JSON object", "exit_code": 1}
+        if not isinstance(args, dict):
+            return {"error": "search_files: arguments must be a JSON object", "exit_code": 1}
+        args["_search_v2"] = True
+        return await GrepTool().execute(json.dumps(args), ctx)
 
 class GetWorkspaceTool:
     """Report the active workspace folder (no args). File tools are confined to

@@ -1,0 +1,152 @@
+"""Unknown Agent effects require owner-scoped, explicit reconciliation."""
+
+import hashlib
+import json
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from core.database import Base, Session
+from src.chat_work_store import WorkConflict, WorkNotFound
+from src.chat_effect_inbox import needs_effect_intent
+
+
+@pytest.fixture
+def inbox(tmp_path, monkeypatch):
+    from core.database import ChatToolIntent, ChatWorkEvent
+    from src import chat_effect_inbox
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'effects.db'}")
+    Base.metadata.create_all(bind=engine, tables=[Session.__table__, ChatToolIntent.__table__, ChatWorkEvent.__table__])
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    monkeypatch.setattr(chat_effect_inbox, "SessionLocal", factory)
+    with factory.begin() as db:
+        db.add(Session(id="owned-chat", name="Safe fixture", owner="alice",
+                       endpoint_url="http://fixture.invalid/v1", model="fixture"))
+    yield chat_effect_inbox.ChatEffectInbox(), factory
+    engine.dispose()
+
+
+def test_unknown_effect_is_durable_redacted_and_owner_scoped(inbox):
+    store, factory = inbox
+    secret_action = '{"command":"echo private-marker"}'
+    intent = store.record_intent("alice", "owned-chat", "a" * 32, "call-1", "bash", secret_action)
+    assert intent["created"] is True
+    assert intent["status"] == "intent"
+    assert intent["action_hash"] == hashlib.sha256(secret_action.encode()).hexdigest()
+    assert "private-marker" not in json.dumps(intent)
+    assert store.record_intent("alice", "owned-chat", "a" * 32, "call-1", "bash", secret_action)["created"] is False
+    with pytest.raises(WorkConflict):
+        store.record_intent("alice", "owned-chat", "a" * 32, "call-1", "bash", "different")
+    store.mark_unknown("alice", "owned-chat", intent["id"])
+    assert store.unresolved("alice", "owned-chat")[0]["status"] == "unknown"
+    with pytest.raises(WorkNotFound):
+        store.unresolved("bob", "owned-chat")
+    with pytest.raises(WorkNotFound):
+        store.mark_unknown("bob", "owned-chat", intent["id"])
+    from core.database import ChatToolIntent
+    with factory() as db:
+        row = db.query(ChatToolIntent).filter_by(id=intent["id"]).one()
+        assert "private-marker" not in json.dumps({"action_hash": row.action_hash, "receipt": row.receipt})
+
+
+def test_reconciliation_is_cas_fenced_and_never_dispatches(inbox):
+    store, _factory = inbox
+    intent = store.record_intent("alice", "owned-chat", "b" * 32, "call-2", "write_file", "path+body")
+    store.mark_unknown("alice", "owned-chat", intent["id"])
+    current = store.unresolved("alice", "owned-chat")[0]
+    with pytest.raises(WorkConflict):
+        store.no_retry("alice", "owned-chat", intent["id"],
+                       expected_revision=current["revision"] + 1)
+    resolved = store.no_retry("alice", "owned-chat", intent["id"],
+                              expected_revision=current["revision"])
+    assert resolved["status"] == "no_retry"
+    assert store.unresolved("alice", "owned-chat") == []
+    with pytest.raises(WorkConflict):
+        store.no_retry("alice", "owned-chat", intent["id"],
+                       expected_revision=resolved["revision"])
+
+
+def test_interrupted_run_promotes_open_intents_without_replaying(inbox):
+    store, _factory = inbox
+    open_intent = store.record_intent("alice", "owned-chat", "d" * 32, "call-open", "bash", "effect")
+    done_intent = store.record_intent("alice", "owned-chat", "d" * 32, "call-done", "write_file", "known")
+    done = store.record_result("alice", "owned-chat", done_intent["id"], {"exit_code": 0, "output": "ok"})
+    assert done["status"] == "done"
+    assert store.mark_interrupted_run_unknown("alice", "owned-chat", "d" * 32) == 1
+    assert store.mark_interrupted_run_unknown("alice", "owned-chat", "d" * 32) == 0
+    assert [item["id"] for item in store.unresolved("alice", "owned-chat")] == [open_intent["id"]]
+    assert store.unresolved("alice", "owned-chat")[0]["status"] == "unknown"
+
+
+def test_unknown_tool_result_is_not_recorded_as_success(inbox):
+    store, _factory = inbox
+    intent = store.record_intent("alice", "owned-chat", "e" * 32, "call-unknown", "bash", "effect")
+    result = store.record_result("alice", "owned-chat", intent["id"], {
+        "exit_code": 1, "outcome_unknown": True, "error": "reply lost",
+    })
+    assert result["status"] == "unknown"
+    assert result["receipt_hash"] is not None
+    assert "reply lost" not in json.dumps(result)
+
+
+def test_no_retry_preserves_prior_unknown_result_digest(inbox):
+    store, factory = inbox
+    item = store.record_intent("alice", "owned-chat", "e" * 32, "call-preserve", "bash", "effect")
+    unknown = store.record_result("alice", "owned-chat", item["id"], {
+        "exit_code": 1, "outcome_unknown": True, "error": "reply lost",
+    })
+    prior_digest = unknown["receipt_hash"]
+    store.no_retry("alice", "owned-chat", item["id"], expected_revision=unknown["revision"])
+    from core.database import ChatToolIntent
+    with factory() as db:
+        row = db.query(ChatToolIntent).filter_by(id=item["id"]).one()
+        assert row.receipt["result_sha256"] == prior_digest
+        assert row.receipt["decision"]["kind"] == "user_no_retry"
+
+
+def test_no_retry_requires_exact_revision_and_generates_server_receipt(inbox):
+    store, factory = inbox
+    item = store.record_intent("alice", "owned-chat", "f" * 32, "call-no-retry", "bash", "private command")
+    unknown = store.mark_unknown("alice", "owned-chat", item["id"])
+    with pytest.raises(WorkConflict):
+        store.no_retry("alice", "owned-chat", item["id"], expected_revision=unknown["revision"] + 1)
+    settled = store.no_retry("alice", "owned-chat", item["id"], expected_revision=unknown["revision"])
+    assert settled["status"] == "no_retry"
+    assert len(settled["receipt_hash"]) == 64
+    assert store.unknown("alice", "owned-chat") == []
+    with pytest.raises(WorkConflict):
+        store.no_retry("alice", "owned-chat", item["id"], expected_revision=unknown["revision"])
+    from core.database import ChatToolIntent, ChatWorkEvent
+    with factory() as db:
+        row = db.query(ChatToolIntent).filter_by(id=item["id"]).one()
+        assert row.receipt["decision"]["kind"] == "user_no_retry"
+        assert "private command" not in json.dumps(row.receipt)
+        event = db.query(ChatWorkEvent).filter_by(entity_id=item["id"], kind="effect_reconciled").one()
+        assert event.payload == {"intent_id": item["id"], "status": "no_retry"}
+
+
+def test_unknown_fence_is_not_hidden_behind_200_open_intents(inbox):
+    store, factory = inbox
+    from core.database import ChatToolIntent
+    with factory.begin() as db:
+        for index in range(201):
+            db.add(ChatToolIntent(
+                id=f"intent-{index:03}", owner="alice", session_id="owned-chat",
+                run_id="a" * 32, tool_call_id=f"call-{index}", tool_name="bash",
+                action_hash="b" * 64, status="intent", revision=1,
+            ))
+        db.add(ChatToolIntent(
+            id="unknown-last", owner="alice", session_id="owned-chat",
+            run_id="a" * 32, tool_call_id="call-unknown", tool_name="bash",
+            action_hash="c" * 64, status="unknown", revision=2,
+        ))
+    assert [row["id"] for row in store.unknown("alice", "owned-chat")] == ["unknown-last"]
+
+
+def test_effect_classification_fails_closed_for_unknown_tool():
+    assert needs_effect_intent("bash", "echo safe") is True
+    assert needs_effect_intent("write_file", "{}") is True
+    assert needs_effect_intent("unknown_extension_tool", "{}") is True
+    assert needs_effect_intent("read_file", "{}") is False

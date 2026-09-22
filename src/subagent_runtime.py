@@ -16,10 +16,11 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional
 
-from src.database import ChatSubagentEvent, ChatSubagentRun, SessionLocal
+from src.database import ChatSubagentEvent, ChatSubagentRun, Session, SessionLocal
 from src.harness_efficiency import CORE_AGENT_TOOLS
 from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 from sqlalchemy import or_
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ def _public(row: ChatSubagentRun, *, include_result: bool = False) -> dict:
         "started_at": row.started_at.isoformat() + "Z" if row.started_at else None,
         "finished_at": row.finished_at.isoformat() + "Z" if row.finished_at else None,
         "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "queue_wait_ms": max(0, int(((row.started_at or _utcnow()) - row.created_at).total_seconds() * 1000))
+        if row.created_at and row.status in {"queued", "running"} else None,
     }
     if include_result:
         result["result"] = row.result or ""
@@ -177,10 +180,18 @@ class SubagentRuntime:
                     allowed_tools: Optional[set] = None,
                     external_untrusted_context_seen: bool = False,
                     delegated_credential: bool = False,
-                    max_active_for_model: int = MAX_ACTIVE_PER_MODEL) -> dict:
+                    max_active_for_model: int = MAX_ACTIVE_PER_MODEL,
+                    max_children_per_run: int = 0) -> dict:
         self._recover_stale()
         owner_key = owner or ""
         model_capacity = max(1, min(int(max_active_for_model), MAX_ACTIVE_PER_MODEL))
+        try:
+            run_capacity = max(0, min(int(max_children_per_run), 256))
+        except (TypeError, ValueError):
+            run_capacity = 0
+        if run_capacity and not parent_run_id:
+            return {"error": "Exact parent run is required for the child budget",
+                    "exit_code": 1, "policy": "stale_revision"}
         async with self._lock:
             route_id = self._route_id(endpoint_url, endpoint_id)
             child_id = uuid.uuid4().hex
@@ -190,6 +201,27 @@ class SubagentRuntime:
             for _attempt in range(model_capacity + 1):
                 db = SessionLocal()
                 try:
+                    if run_capacity:
+                        # SQLite needs an immediate write reservation; on other
+                        # engines lock the parent row. The count and insert must
+                        # be one transaction across concurrent web workers.
+                        if db.get_bind().dialect.name == "sqlite":
+                            db.execute(text("BEGIN IMMEDIATE"))
+                        else:
+                            db.query(Session.id).filter(
+                                Session.id == session_id,
+                                Session.owner == owner_key,
+                            ).with_for_update().one_or_none()
+                        run_children = db.query(ChatSubagentRun.id).filter(
+                            ChatSubagentRun.owner == owner_key,
+                            ChatSubagentRun.parent_session_id == session_id,
+                            ChatSubagentRun.parent_run_id == parent_run_id,
+                        ).count()
+                        if run_children >= run_capacity:
+                            return {"error": f"Run child limit reached ({run_children}/{run_capacity})",
+                                    "exit_code": 1, "policy": "run_child_budget_exhausted",
+                                    "resource": "children", "used": run_children,
+                                    "limit": run_capacity, "run_id": parent_run_id}
                     used = {int(value[0]) for value in db.query(ChatSubagentRun.slot).filter(
                         ChatSubagentRun.owner == owner_key,
                         ChatSubagentRun.model == model,
@@ -552,6 +584,43 @@ class SubagentRuntime:
             if not include_removed:
                 q = q.filter(ChatSubagentRun.removed.is_(False))
             return [_public(row) for row in q.order_by(ChatSubagentRun.created_at.asc()).all()]
+        finally:
+            db.close()
+
+    def active_summary(
+        self, owner: Optional[str], session_id: str, *,
+        parent_run_id: Optional[str] = None, limit: int = 32,
+    ) -> list[dict]:
+        """Bounded read-only child diagnostics, without objective or context."""
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("Invalid child summary limit")
+        if parent_run_id is not None and (
+            not isinstance(parent_run_id, str) or not 1 <= len(parent_run_id) <= 200
+        ):
+            raise ValueError("Invalid parent run id")
+        db = SessionLocal()
+        try:
+            q = db.query(
+                ChatSubagentRun.id, ChatSubagentRun.parent_run_id,
+                ChatSubagentRun.status, ChatSubagentRun.model,
+                ChatSubagentRun.endpoint_id, ChatSubagentRun.started_at,
+            ).filter(
+                ChatSubagentRun.owner == (owner or ""),
+                ChatSubagentRun.parent_session_id == session_id,
+                ChatSubagentRun.removed.is_(False),
+                ChatSubagentRun.status.in_(ACTIVE_STATUSES),
+            )
+            if parent_run_id is not None:
+                q = q.filter(ChatSubagentRun.parent_run_id == parent_run_id)
+            rows = q.order_by(ChatSubagentRun.created_at.desc()).limit(limit).all()
+            return [{
+                "child_id": row.id,
+                "parent_run_id": row.parent_run_id,
+                "status": row.status,
+                "model": row.model,
+                "endpoint_id": row.endpoint_id,
+                "started_at": row.started_at.isoformat() + "Z" if row.started_at else None,
+            } for row in rows]
         finally:
             db.close()
 

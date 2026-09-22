@@ -21,7 +21,13 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, SearchFilesTool, ListTreeTool, FileOutlineTool, GetWorkspaceTool
+from .git_tools import GitStatusTool, GitDiffTool, GitLogTool
+from .file_comparison_tools import CompareFilesTool, VerifyHashesTool
+from .verification_tools import RunVerificationTool
+from .host_diagnostic_tools import HostDiagnosticTool
+from .http_probe_tool import HttpProbeTool
+from .toolchain_diagnostics import InspectToolchainTool
 from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import (
@@ -30,7 +36,7 @@ from .interaction_tools import (
 )
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, DelegateSubagentTool, ManageSubagentsTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
-from .efficiency_tools import ManageAutoResearchLabTool, PublishSubagentEvidenceTool, ReadToolArtifactTool
+from .efficiency_tools import ManageAutoResearchLabTool, PublishSubagentEvidenceTool, ReadToolArtifactTool, SearchArtifactsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -51,6 +57,21 @@ TOOL_HANDLERS = {
     "ls": LsTool().execute,
     "glob": GlobTool().execute,
     "grep": GrepTool().execute,
+    "search_files": SearchFilesTool().execute,
+    "list_tree": ListTreeTool().execute,
+    "file_outline": FileOutlineTool().execute,
+    "git_status": GitStatusTool().execute,
+    "git_diff": GitDiffTool().execute,
+    "git_log": GitLogTool().execute,
+    "compare_files": CompareFilesTool().execute,
+    "verify_hashes": VerifyHashesTool().execute,
+    "run_tests": RunVerificationTool("test").execute,
+    "run_lint": RunVerificationTool("lint").execute,
+    "inspect_process": HostDiagnosticTool("inspect_process").execute,
+    "inspect_port": HostDiagnosticTool("inspect_port").execute,
+    "tail_log": HostDiagnosticTool("tail_log").execute,
+    "http_probe": HttpProbeTool().execute,
+    "inspect_toolchain": InspectToolchainTool().execute,
     "create_document": CreateDocumentTool().execute,
     "update_document": UpdateDocumentTool().execute,
     "edit_document": EditDocumentTool().execute,
@@ -71,6 +92,7 @@ TOOL_HANDLERS = {
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
     "read_tool_artifact": ReadToolArtifactTool().execute,
+    "search_artifacts": SearchArtifactsTool().execute,
     "publish_subagent_evidence": PublishSubagentEvidenceTool().execute,
     "manage_auto_research_lab": ManageAutoResearchLabTool().execute,
     "create_session": CreateSessionTool().execute,
@@ -92,7 +114,7 @@ PYTHON_TIMEOUT = 30
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
              "apply_patch", "todowrite",
-             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "read_tool_artifact", "publish_subagent_evidence", "manage_auto_research_lab",
+             "grep", "search_files", "glob", "ls", "list_tree", "file_outline", "git_status", "git_diff", "git_log", "compare_files", "verify_hashes", "run_tests", "run_lint", "inspect_process", "inspect_port", "tail_log", "http_probe", "inspect_toolchain", "get_workspace", "manage_bg_jobs", "read_tool_artifact", "search_artifacts", "publish_subagent_evidence", "manage_auto_research_lab",
              "create_document", "update_document", "edit_document",
              "search_chats",
              "chat_with_model", "delegate_subagent", "manage_subagents", "create_session", "list_sessions",

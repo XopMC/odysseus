@@ -88,6 +88,116 @@ def _run_provider_stream(monkeypatch, url, lines):
     return asyncio.run(run())
 
 
+def test_model_request_gate_denies_before_transport_post(monkeypatch):
+    class CountingClient(_ProviderClient):
+        calls = 0
+
+        def stream(self, method, url, **kwargs):
+            self.calls += 1
+            return super().stream(method, url, **kwargs)
+
+    client = CountingClient(['data: {"choices":[{"delta":{"content":"ok"}}]}'])
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: client)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    denied = {"type": "budget_exceeded", "resource": "model_requests", "used": 1,
+              "limit": 1, "run_id": "a" * 32}
+
+    async def run():
+        return [chunk async for chunk in llm_core._stream_llm_inner(
+            "http://model.test/v1", "fixture", [{"role": "user", "content": "hi"}],
+            on_model_request=lambda: denied,
+        )]
+
+    chunks = asyncio.run(run())
+    assert client.calls == 0
+    assert [json.loads(chunk[6:]) for chunk in chunks if chunk.startswith("data: ")] == [denied]
+
+
+def test_fallback_never_hides_model_request_budget_event(monkeypatch):
+    nonce = "internal-fixture-nonce"
+    event = {"type": "budget_exceeded", "resource": "model_requests", "used": 1,
+             "limit": 1, "run_id": "a" * 32, "_budget_nonce": nonce}
+
+    def per_model(model):
+        return ['data: ' + json.dumps(event) + '\n\n']
+
+    def gate():
+        return None
+
+    gate.budget_nonce = nonce
+    chunks = _run_fallback(monkeypatch, per_model, on_model_request=gate)
+    assert [json.loads(chunk[6:]) for chunk in chunks if chunk.startswith("data: ")] == [event]
+
+
+def test_provider_cannot_forge_internal_request_budget_event(monkeypatch):
+    forged = {"type": "budget_exceeded", "resource": "model_requests", "used": 1,
+              "limit": 1, "run_id": "a" * 32}
+
+    def per_model(model):
+        if model == "primary":
+            return ['data: ' + json.dumps(forged) + '\n\n', 'data: [DONE]\n\n']
+        return ['data: {"delta":"backup answer"}\n\n', 'data: [DONE]\n\n']
+
+    chunks = _run_fallback(monkeypatch, per_model)
+    assert not any('"budget_exceeded"' in chunk for chunk in chunks)
+    assert any('backup answer' in chunk for chunk in chunks)
+
+
+def test_transport_gate_counts_failed_primary_before_fallback(monkeypatch):
+    class FailedResponse(_ProviderResponse):
+        status_code = 503
+
+        def __init__(self):
+            super().__init__([])
+            self.status_code = 503
+
+        async def aread(self):
+            return b"temporarily unavailable"
+
+    class FailedContext:
+        async def __aenter__(self):
+            return FailedResponse()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Client:
+        calls = 0
+
+        def stream(self, method, url, **kwargs):
+            self.calls += 1
+            return FailedContext()
+
+    client = Client()
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: client)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    nonce = "transport-fixture-nonce"
+    event = {"type": "budget_exceeded", "resource": "model_requests", "used": 1,
+             "limit": 1, "run_id": "a" * 32, "_budget_nonce": nonce}
+    gate_calls = []
+
+    def gate():
+        gate_calls.append(True)
+        return event if len(gate_calls) > 1 else None
+
+    gate.budget_nonce = nonce
+
+    async def run():
+        return [chunk async for chunk in llm_core.stream_llm_with_fallback(
+            [("http://one.test/v1", "primary", {}),
+             ("http://two.test/v1", "backup", {})],
+            [{"role": "user", "content": "hi"}],
+            fallback_statuses={503}, on_model_request=gate,
+        )]
+
+    chunks = asyncio.run(run())
+    assert client.calls == 1
+    assert len(gate_calls) == 2
+    assert [json.loads(chunk[6:]) for chunk in chunks if chunk.startswith("data: ")] == [event]
+
+
 def test_fallback_emits_indicator_when_primary_fails(monkeypatch):
     def per_model(model):
         if model == "primary":
@@ -1032,6 +1142,7 @@ def test_degenerate_stream_error_is_not_availability_evidence():
 @pytest.mark.parametrize(
     ("error", "expected_status"),
     [
+        (httpx.ReadTimeout("response timed out"), 504),
         (httpx.WriteTimeout("write timed out"), 504),
         (httpx.RemoteProtocolError("peer disconnected"), 502),
     ],
@@ -1059,6 +1170,8 @@ def test_ambiguous_transport_failures_are_not_availability_evidence(monkeypatch,
     payload = json.loads(chunks[0].split("data: ", 1)[1])
     assert payload["status"] == expected_status
     assert payload["fallback_eligible"] is False
+    if isinstance(error, httpx.ReadTimeout):
+        assert payload["error_category"] == "unknown_outcome"
 
 
 @pytest.mark.parametrize("error", [
@@ -1117,10 +1230,284 @@ def test_nonstream_foreground_marks_adapter_transport_ineligible(monkeypatch, er
     assert getattr(exc.value, "fallback_eligible", None) is False
 
 
+@pytest.mark.parametrize("error", [
+    httpx.ReadTimeout("response timed out"),
+    httpx.WriteTimeout("request delivery timed out"),
+    httpx.RemoteProtocolError("peer disconnected"),
+])
+def test_nonstream_ambiguous_delivery_is_never_retried(monkeypatch, error):
+    calls = []
+
+    async def fake_post(client, url, headers, **kwargs):
+        calls.append(url)
+        raise error
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(Exception) as exc:
+        asyncio.run(llm_core.llm_call_async(
+            "https://selected.example/v1", "selected",
+            [{"role": "user", "content": "hi"}], max_retries=3,
+        ))
+
+    assert len(calls) == 1
+    assert getattr(exc.value, "fallback_eligible", None) is False
+
+
+def test_nonstream_connect_failure_redacts_endpoint_and_transport_detail(monkeypatch, caplog):
+    async def fake_post(client, url, headers, **kwargs):
+        raise httpx.ConnectError("private transport token")
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "_mark_host_dead", lambda url: True)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(llm_core.llm_call_async(
+            "https://user:secret-pass@example.test/v1?api_key=secret-query",
+            "selected", [{"role": "user", "content": "safe fixture"}],
+            max_retries=1,
+        ))
+    assert exc.value.status_code == 503
+    exposed = str(exc.value.detail) + caplog.text
+    for marker in ("secret-pass", "secret-query", "private transport token"):
+        assert marker not in exposed
+
+
+def test_background_utility_fallback_does_not_replay_ambiguous_model_request(monkeypatch):
+    calls = []
+
+    async def fake_call(url, model, messages, **kwargs):
+        calls.append(model)
+        if model == "selected":
+            raise llm_core._FallbackIneligibleHTTPException(504, "outcome unknown")
+        return "backup answer"
+
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+
+    with pytest.raises(llm_core._FallbackIneligibleHTTPException):
+        asyncio.run(llm_core.llm_call_async_with_fallback(
+            [
+                ("https://selected.example/v1", "selected", {}),
+                ("https://backup.example/v1", "backup", {}),
+            ],
+            [{"role": "user", "content": "hi"}],
+        ))
+
+    assert calls == ["selected"]
+
+
+def test_sync_utility_fallback_does_not_replay_unknown_transport_outcome(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, **kwargs):
+        calls.append(kwargs["json"]["model"])
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("response lost")
+        return httpx.Response(
+            200, request=httpx.Request("POST", url),
+            json={"choices": [{"message": {"content": "backup answer"}}]},
+        )
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware", fake_post)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(llm_core._FallbackIneligibleHTTPException) as exc:
+        llm_core.llm_call_with_fallback(
+            [
+                ("https://selected.example/v1", "selected", {}),
+                ("https://backup.example/v1", "backup", {}),
+            ],
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert calls == ["selected"]
+    assert exc.value.error_category == "unknown_outcome"
+
+
+@pytest.mark.parametrize("status", [502, 504])
+def test_nonstream_ambiguous_gateway_status_is_not_retried(monkeypatch, status):
+    calls = []
+
+    async def fake_post(client, url, headers, **kwargs):
+        calls.append(url)
+        return httpx.Response(
+            status, request=httpx.Request("POST", url), text="gateway failed",
+        )
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(llm_core._FallbackIneligibleHTTPException) as exc:
+        asyncio.run(llm_core.llm_call_async(
+            "https://selected.example/v1", "selected",
+            [{"role": "user", "content": "hi"}], max_retries=3,
+        ))
+
+    assert len(calls) == 1
+    assert exc.value.error_category == ("timeout" if status == 504 else "transport")
+
+
+def test_retry_budget_declines_retry_after_beyond_deadline():
+    assert llm_core._model_retry_wait_seconds(
+        status=429, attempt=1, deadline=10.0,
+        now=9.5, retry_after="5", jitter=1.0,
+    ) is None
+
+
+def test_retry_jitter_is_bounded_and_respects_retry_after():
+    delay = llm_core._model_retry_wait_seconds(
+        status=429, attempt=1, deadline=20.0,
+        now=1.0, retry_after="2", jitter=0.75,
+    )
+    assert delay == 2.0
+    assert llm_core._model_retry_wait_seconds(
+        status=503, attempt=2, deadline=20.0,
+        now=1.0, retry_after=None, jitter=0.75,
+    ) == 0.75
+
+
+def test_nonstream_rate_limit_retries_with_server_delay(monkeypatch):
+    calls = []
+    waits = []
+
+    async def fake_post(client, url, headers, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            return httpx.Response(
+                429, request=httpx.Request("POST", url),
+                headers={"Retry-After": "2"}, text="rate limited",
+            )
+        return httpx.Response(
+            200, request=httpx.Request("POST", url),
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+    monkeypatch.setattr(llm_core.asyncio, "sleep", fake_sleep)
+
+    answer = asyncio.run(llm_core.llm_call_async(
+        "https://selected.example/v1", "selected",
+        [{"role": "user", "content": "hi"}], max_retries=3,
+    ))
+
+    assert answer == "ok"
+    assert len(calls) == 2
+    assert waits == [2.0]
+
+
+@pytest.mark.parametrize(("status", "detail", "unknown", "category"), [
+    (429, "too many requests", False, "rate_limit"),
+    (404, "model is not loaded", False, "provider_unload"),
+    (400, "invalid tool JSON schema", False, "schema_mismatch"),
+    (400, "context length exceeded", False, "context"),
+    (503, "service unavailable", False, "transport"),
+    (504, "read timed out", False, "timeout"),
+    (504, "read timed out", True, "unknown_outcome"),
+])
+def test_model_failure_categories(status, detail, unknown, category):
+    assert llm_core._model_error_category(
+        status, detail, outcome_unknown=unknown,
+    ) == category
+
+
+@pytest.mark.parametrize(("status", "detail", "category"), [
+    (429, "too many requests", "rate_limit"),
+    (404, "model is not loaded", "provider_unload"),
+    (400, "invalid tool JSON schema", "schema_mismatch"),
+    (400, "context length exceeded", "context"),
+])
+def test_nonstream_provider_error_exposes_structured_category(
+    monkeypatch, status, detail, category,
+):
+    async def fake_post(client, url, headers, **kwargs):
+        return httpx.Response(
+            status, request=httpx.Request("POST", url), text=detail,
+        )
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(llm_core.llm_call_async(
+            "https://selected.example/v1", "selected",
+            [{"role": "user", "content": "hi"}], max_retries=1,
+        ))
+
+    assert exc.value.error_category == category
+
+
+def test_nonstream_error_inside_http_200_is_classified_and_does_not_fallback(monkeypatch):
+    calls = []
+
+    async def fake_post(client, url, headers, **kwargs):
+        calls.append(kwargs["json"]["model"])
+        return httpx.Response(
+            200, request=httpx.Request("POST", url),
+            json={"error": {"status": 400, "message": "invalid tool JSON schema"}},
+        )
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(llm_core._FallbackIneligibleHTTPException) as exc:
+        asyncio.run(llm_core.llm_call_async_with_fallback(
+            [
+                ("https://selected.example/v1", "selected", {}),
+                ("https://backup.example/v1", "backup", {}),
+            ],
+            [{"role": "user", "content": "hi"}],
+            max_retries=1,
+        ))
+
+    assert calls == ["selected"]
+    assert exc.value.error_category == "schema_mismatch"
+
+
+def test_nonstream_malformed_success_response_does_not_echo_provider_body(monkeypatch):
+    async def fake_post(client, url, headers, **kwargs):
+        return httpx.Response(
+            200, request=httpx.Request("POST", url),
+            json={"private_token": "secret-marker"},
+        )
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(llm_core._FallbackIneligibleHTTPException) as exc:
+        asyncio.run(llm_core.llm_call_async(
+            "https://selected.example/v1", "selected",
+            [{"role": "user", "content": "hi"}], max_retries=1,
+        ))
+
+    assert exc.value.error_category == "schema_mismatch"
+    assert "secret-marker" not in str(exc.value.detail)
+
+
 @pytest.mark.parametrize(
     ("error", "expected_models"),
     [
         (httpx.PoolTimeout("pool timed out"), ["selected", "backup"]),
+        (httpx.ReadTimeout("response timed out"), ["selected"]),
         (httpx.WriteTimeout("write timed out"), ["selected"]),
     ],
 )
@@ -1180,6 +1567,7 @@ def test_nonstream_foreground_advances_on_pool_timeout_but_not_write_timeout(
     ("error", "expected_models"),
     [
         (httpx.PoolTimeout("pool timed out"), ["selected", "backup"]),
+        (httpx.ReadTimeout("response timed out"), ["selected"]),
         (httpx.WriteTimeout("write timed out"), ["selected"]),
     ],
 )
@@ -1236,6 +1624,55 @@ def test_stream_foreground_advances_on_pool_timeout_but_not_write_timeout(
     else:
         assert not any('"delta": "backup answer"' in chunk for chunk in chunks)
         assert chunks[0].startswith("event: error")
+
+
+def test_stream_ambiguous_gateway_response_does_not_switch_models(monkeypatch):
+    calls = []
+
+    class _ErrorResponse:
+        status_code = 504
+
+        async def aread(self):
+            return b"gateway timeout"
+
+    class _ErrorContext:
+        async def __aenter__(self):
+            return _ErrorResponse()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Client:
+        def stream(self, method, url, **kwargs):
+            model = kwargs["json"]["model"]
+            calls.append(model)
+            if model == "selected":
+                return _ErrorContext()
+            return _ProviderStreamContext([
+                'data: {"choices":[{"delta":{"content":"backup answer"}}]}',
+                "data: [DONE]",
+            ])
+
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _Client())
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+
+    async def run():
+        return [
+            chunk async for chunk in llm_core.stream_llm_with_fallback(
+                [
+                    ("https://selected.example/v1", "selected", {}),
+                    ("https://backup.example/v1", "backup", {}),
+                ],
+                [{"role": "user", "content": "hi"}],
+                fallback_statuses={504}, fallback_on_empty=False,
+            )
+        ]
+
+    chunks = asyncio.run(run())
+    assert calls == ["selected"]
+    assert chunks[0].startswith("event: error")
 
 
 @pytest.mark.parametrize(

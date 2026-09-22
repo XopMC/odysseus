@@ -1,4 +1,5 @@
 import { bindUiText, t, unbindUiText } from './i18n.js';
+import { describeProgressHealth, createUiLongTaskMonitor } from './runHealth.js?v=20260922batch1';
 
 const api = window.location.origin;
 let snapshot = { plan: null, goal: null, cursor: 0 };
@@ -10,12 +11,22 @@ let eventSourceSession = '';
 let eventReconnectTimer = null;
 let collapseTimer = null;
 let refreshGeneration = 0;
+let runHealthSnapshot = null;
+let healthTimer = null;
+let waitSnapshot = null;
+let effectInbox = [];
+let effectInboxLoaded = false;
+const uiLongTasks = createUiLongTaskMonitor();
 
 const el = id => document.getElementById(id);
 const json = async (url, options = {}) => {
   const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(data.detail || data.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
   return data;
 };
 const post = (url, body) => json(url, {
@@ -68,6 +79,30 @@ function renderGoal() {
   if (!node) return;
   const draftEnabled = !!window.__odysseusGoalModeActive?.();
   const goal = snapshot.goal;
+  const warning = describeProgressHealth(goal, runHealthSnapshot);
+  if (goal?.status === 'active' && document.visibilityState !== 'hidden') uiLongTasks.start();
+  else uiLongTasks.stop();
+  const uiLag = uiLongTasks.snapshot();
+  const uiLagNode = el('goal-work-ui-lag');
+  if (uiLagNode) {
+    uiLagNode.hidden = goal?.status !== 'active' || !uiLag.supported || uiLag.count < 3 || uiLag.max_duration_ms < 200;
+    if (!uiLagNode.hidden) {
+      const label = `${t('UI long tasks')}: ${uiLag.count}, ${t('maximum')} ${uiLag.max_duration_ms} ms`;
+      uiLagNode.title = label;
+      uiLagNode.setAttribute('aria-label', label);
+    }
+  }
+  const indicator = el('goal-work-health-indicator');
+  const detail = el('goal-work-health-detail');
+  const message = warning
+    ? `${t('No verified progress for')} ${warning.minutes} ${t('minutes')}. ${t(warning.heartbeatAlive ? 'Connection alive; this is not task progress.' : 'No recent connection heartbeat.')}`
+    : '';
+  if (indicator) {
+    indicator.hidden = !warning;
+    indicator.title = message;
+    indicator.setAttribute('aria-label', message || t('No verified progress'));
+  }
+  if (detail) { detail.hidden = !warning; detail.textContent = message; }
   const live = goal && !['completed', 'cancelled'].includes(goal.status);
   // A cancelled goal remains in the durable audit log, but it is no longer
   // active UI state and must disappear after cancel, reload, or reconnect.
@@ -104,17 +139,147 @@ function renderGoal() {
   el('goal-work-state').textContent = `${t(goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
   el('goal-work-objective').value = goal.objective || '';
   el('goal-work-progress').textContent = goal.progress || '';
+  const effectFence = goal.status === 'waiting_user'
+    && goal.checkpoint?._wait_reason === 'unknown_side_effect'
+    && (!effectInboxLoaded || effectInbox.length > 0);
   el('goal-work-pause').hidden = goal.status !== 'active';
-  el('goal-work-resume').hidden = !['paused', 'waiting_user'].includes(goal.status);
+  el('goal-work-resume').hidden = effectFence || !['paused', 'waiting_user'].includes(goal.status);
   el('goal-work-cancel').hidden = !live;
   el('goal-work-quick-pause').hidden = goal.status !== 'active';
-  el('goal-work-quick-resume').hidden = !['paused', 'waiting_user'].includes(goal.status);
+  el('goal-work-quick-resume').hidden = effectFence || !['paused', 'waiting_user'].includes(goal.status);
   el('goal-work-quick-cancel').hidden = !live;
   el('goal-mode-status-toggle').hidden = true;
   if (goal.status === 'completed') window.__odysseusSetGoalMode?.(false);
 }
 
-function render() { renderPlan(); renderGoal(); }
+function renderEffectInbox() {
+  const node = el('wait-unknown-effects');
+  if (!node) return;
+  node.hidden = waitSnapshot?.wait_reason !== 'unknown_side_effect' && !effectInbox.length;
+  node.replaceChildren();
+  if (node.hidden) return;
+  const heading = document.createElement('strong');
+  heading.textContent = t('Unknown tool effects');
+  node.appendChild(heading);
+  if (!effectInboxLoaded) {
+    const note = document.createElement('span');
+    note.textContent = t('Effect inbox unavailable; refresh before continuing.');
+    node.appendChild(note);
+    return;
+  }
+  if (!effectInbox.length) {
+    const note = document.createElement('span');
+    note.textContent = t('No unresolved effects. You may resume the goal explicitly.');
+    node.appendChild(note);
+    return;
+  }
+  for (const effect of effectInbox) {
+    const row = document.createElement('div'); row.className = 'wait-effect-entry';
+    const label = document.createElement('span');
+    label.textContent = `${effect.tool_name || 'tool'} · ${effect.run_id || '—'} · ${effect.tool_call_id || '—'}`;
+    label.title = `${effect.action_hash || ''}`;
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = t('Do not retry');
+    button.dataset.intentId = effect.id;
+    row.append(label, button); node.appendChild(row);
+  }
+}
+
+function renderWait() {
+  const node = el('wait-mode-status');
+  if (!node) return;
+  const state = waitSnapshot || {};
+  const activeGoal = state?.goal_status && !['completed', 'cancelled'].includes(state.goal_status);
+  const activeRun = state?.run_id && ['running', 'interrupted', 'stopping'].includes(state.run_status);
+  node.hidden = !sessionId || !(activeRun || state?.current_child || activeGoal || state?.error || effectInbox.length);
+  if (node.hidden) {
+    node.classList?.remove('expanded');
+    node.querySelector?.('.chat-work-card-toggle')?.setAttribute('aria-expanded', 'false');
+    return;
+  }
+  const put = (id, value) => { const target = el(id); if (target) target.textContent = value == null || value === '' ? '—' : String(value); };
+  put('wait-phase', t(state.phase || 'unavailable'));
+  put('wait-duration', `${Math.max(0, Math.round(Number(state.phase_seconds) || 0))} ${t('seconds')}`);
+  put('wait-run-id', state.run_id);
+  put('wait-child-id', state.current_child?.child_id);
+  put('wait-model', state.current_child?.model || state.model);
+  put('wait-endpoint', state.current_child?.endpoint_id || state.endpoint_label || state.endpoint_id);
+  put('wait-tool', state.tool);
+  put('wait-lease', state.lease?.held ? `${t('Held until')} ${state.lease.expires_at || '—'}` : t('No active lease'));
+  const checkpoint = state.checkpoint || {};
+  put('wait-checkpoint', `seq ${Number.isInteger(checkpoint.durable_seq) ? checkpoint.durable_seq : '—'} · rev ${Number.isInteger(checkpoint.context_revision) ? checkpoint.context_revision : '—'} · ${checkpoint.ledger_hash || '—'}`);
+  put('wait-recovery', state.wait_reason === 'repeated_premature_stop'
+    ? t('Goal stalled after repeated responses; review and resume.')
+    : state.wait_reason === 'provider_failure'
+      ? t('Model endpoint failed repeatedly; check it before resuming the goal.')
+      : state.wait_reason === 'context_compaction'
+        ? `${t('Context checkpoint failed; check the summarizer or policy before resuming.')} ${state.failure_code ? `[${state.failure_code}]` : ''}`.trim()
+      : state.wait_reason === 'dispatch_failure'
+        ? t('Goal continuation did not start; check the endpoint and retry explicitly.')
+      : state.wait_reason === 'resource_budget'
+        ? `${t(state.budget?.resource === 'model_rounds' ? 'Model-round budget reached:' : state.budget?.resource === 'model_tokens' ? 'Model-token budget reached:' : state.budget?.resource === 'model_requests' ? 'Model-request budget reached:' : state.budget?.resource === 'wall_seconds' ? 'Wall-time budget reached:' : state.budget?.resource === 'children' ? 'Child-agent budget reached:' : 'Tool-call budget reached:')} ${Number(state.budget?.used) || 0}/${Number(state.budget?.limit) || 0}. ${state.budget?.resource === 'model_tokens' && state.budget?.usage_source && state.budget.usage_source !== 'real' ? `${t('Estimated usage')}. ` : ''}${t('Review the limit before resuming.')}`
+      : state.wait_reason === 'unknown_side_effect'
+        ? t(state.unknown_effect_count === 0
+          ? 'No unresolved effects. You may resume the goal explicitly.'
+          : 'A tool outcome is unknown. Inspect the effect and choose whether to forbid a repeat.')
+      : t(`Recovery: ${state.recovery_action || 'none'}`));
+  renderEffectInbox();
+  const action = el('wait-action');
+  if (action) {
+    action.hidden = !['answer', 'resume_goal', 'reconnect', 'inspect', 'inspect_effect', 'inspect_context'].includes(state.recovery_action);
+    action.textContent = t(`Action: ${state.recovery_action || 'none'}`);
+  }
+}
+
+function render() { renderPlan(); renderGoal(); renderWait(); }
+
+async function refreshWait(targetSession = sessionId) {
+  if (!targetSession) { waitSnapshot = null; renderWait(); return; }
+  const generation = refreshGeneration;
+  try {
+    const state = await json(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/why-waiting`);
+    if (sessionId !== targetSession || generation !== refreshGeneration) return;
+    waitSnapshot = state;
+  } catch (_) {
+    if (sessionId !== targetSession || generation !== refreshGeneration) return;
+    waitSnapshot = { phase: 'unavailable', recovery_action: 'none', error: true,
+      goal_status: snapshot.goal?.status || null };
+  }
+  renderWait();
+}
+
+async function refreshEffects(targetSession = sessionId) {
+  if (!targetSession) { effectInbox = []; effectInboxLoaded = false; render(); return; }
+  const generation = refreshGeneration;
+  try {
+    const data = await json(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/unknown-effects`);
+    if (sessionId !== targetSession || generation !== refreshGeneration) return;
+    effectInbox = Array.isArray(data.effects) ? data.effects : [];
+    effectInboxLoaded = true;
+  } catch (_) {
+    if (sessionId !== targetSession || generation !== refreshGeneration) return;
+    effectInbox = []; effectInboxLoaded = false;
+  }
+  render();
+}
+
+async function refreshRunHealth(targetSession = sessionId) {
+  if (!targetSession || snapshot.goal?.status !== 'active') {
+    runHealthSnapshot = null;
+    renderGoal();
+    return;
+  }
+  const generation = refreshGeneration;
+  try {
+    const run = await json(`${api}/api/chat/run/${encodeURIComponent(targetSession)}`);
+    if (sessionId !== targetSession || generation !== refreshGeneration) return;
+    runHealthSnapshot = run;
+  } catch (_) {
+    if (sessionId !== targetSession || generation !== refreshGeneration) return;
+    runHealthSnapshot = null;
+  }
+  renderGoal();
+}
 
 async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   const targetSession = id || '';
@@ -124,6 +289,9 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   if (switched) {
     closeEventStream();
     snapshot = { plan: null, goal: null, cursor: 0 };
+    runHealthSnapshot = null;
+    waitSnapshot = null;
+    effectInbox = []; effectInboxLoaded = false;
     render();
   }
   if (!targetSession) return snapshot;
@@ -138,12 +306,18 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
   render();
   connectEventStream();
+  void refreshRunHealth(targetSession);
+  void refreshWait(targetSession);
+  void refreshEffects(targetSession);
   return snapshot;
 }
 
 function handleEvent(event) {
+  if (event?.type === 'effect_unknown' || event?.type === 'effect_reconciled') {
+    void refreshEffects(sessionId); void refreshWait(sessionId); return;
+  }
   if (event?.type === 'plan_update') { snapshot.plan = event.data || null; render(); return; }
-  if (event?.type === 'goal_update') { snapshot.goal = event.data || null; render(); return; }
+  if (event?.type === 'goal_update') { snapshot.goal = event.data || null; runHealthSnapshot = null; render(); void refreshRunHealth(sessionId); void refreshWait(sessionId); void refreshEffects(sessionId); return; }
   if (event?.type === 'goal_guidance') {
     if (event.data?.goal) snapshot.goal = event.data.goal;
     window.chatModule?.appendGoalGuidance?.(event.data?.guidance);
@@ -159,6 +333,8 @@ function beginGoal(objective) {
   // Show the submitted objective immediately. The durable goal_update from
   // the server replaces this provisional record as soon as the run starts.
   snapshot.goal = { objective: text, status: 'starting', attempt: 1, progress: '' };
+  runHealthSnapshot = null;
+  waitSnapshot = null;
   render();
 }
 
@@ -180,6 +356,7 @@ async function mutate(kind, action) {
   if (!sessionId || !record) return;
   try {
     snapshot[kind] = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/${kind}/${action}`, { expected_revision: record.revision });
+    if (kind === 'goal') { runHealthSnapshot = null; void refreshWait(sessionId); }
     if (kind === 'plan' && action === 'cancel') { snapshot.plan = null; window.__odysseusSetPlanMode?.(false); }
     if (kind === 'goal' && action === 'cancel') { snapshot.goal = null; window.__odysseusSetGoalMode?.(false); }
     render();
@@ -189,7 +366,14 @@ async function mutate(kind, action) {
       const input = el('message');
       if (input) { input.value = t('Execute the approved plan and update each step after verification.'); input.dispatchEvent(new Event('input', { bubbles: true })); el('chat-form')?.requestSubmit?.(); }
     }
-  } catch (error) { toast(error.message, true); await refresh(sessionId); }
+  } catch (error) {
+    await refresh(sessionId);
+    const desiredStatus = { pause: 'paused', resume: 'active', cancel: 'cancelled' }[action];
+    const current = snapshot[kind];
+    if (kind === 'goal' && error.status === 409 && desiredStatus
+        && current?.id === record.id && current.status === desiredStatus) return;
+    toast(error.message, true);
+  }
 }
 
 async function continueGoal() {
@@ -317,6 +501,66 @@ async function reviseGoal() {
   } catch (error) { toast(error.message, true); await refresh(sessionId); }
 }
 
+async function runWaitAction() {
+  const action = waitSnapshot?.recovery_action;
+  if (!sessionId || !action) return;
+  if (action === 'resume_goal') {
+    if (['paused', 'waiting_user'].includes(snapshot.goal?.status)) await mutate('goal', 'resume');
+    return;
+  }
+  if (action === 'reconnect') {
+    const attached = await window.chatModule?.resumeStream?.(sessionId);
+    if (!attached) window.location.reload?.();
+    await refreshWait(sessionId);
+    return;
+  }
+  if (action === 'inspect_effect') {
+    const node = el('wait-mode-status');
+    node?.classList.add('expanded');
+    node?.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded', 'true');
+    await refreshEffects(sessionId);
+    el('wait-unknown-effects')?.querySelector('button')?.focus?.();
+    return;
+  }
+  if (action === 'inspect_context') {
+    const pill = el('chat-context-pill');
+    if (pill && !pill.hidden) pill.click?.();
+    else {
+      const label = el('wait-recovery');
+      if (label) label.textContent = t('Context settings unavailable; reload chat.');
+    }
+    return;
+  }
+  const selector = action === 'answer' ? '.ask-user-card' : action === 'inspect' ? '.agent-thread-node' : null;
+  if (!selector) return;
+  const cards = document.querySelectorAll?.(selector) || [];
+  const target = cards[cards.length - 1];
+  if (target) target.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+  else {
+    const message = action === 'answer' ? 'Question card unavailable; reload chat.' : 'Latest event unavailable; reload chat.';
+    const label = el('wait-recovery');
+    if (label) label.textContent = t(message);
+  }
+}
+
+async function chooseNoRetry(effect) {
+  if (!effect?.id || !sessionId) return;
+  if (!window.confirm(t('Do not retry this tool action? This does not verify whether it already happened.'))) return;
+  const targetSession = sessionId;
+  try {
+    await post(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/unknown-effects/${encodeURIComponent(effect.id)}/no-retry`, {
+      expected_revision: effect.revision,
+    });
+    if (targetSession !== sessionId) return;
+    toast('Effect marked no-retry. Goal was not resumed automatically.');
+    await refreshEffects(targetSession);
+    await refreshWait(targetSession);
+  } catch (error) {
+    toast(error.message, true);
+    await refreshEffects(targetSession);
+  }
+}
+
 function bind() {
   el('plan-work-execute')?.addEventListener('click', () => mutate('plan', 'execute'));
   el('plan-work-cancel')?.addEventListener('click', () => mutate('plan', 'cancel'));
@@ -334,7 +578,15 @@ function bind() {
   el('goal-work-quick-resume')?.addEventListener('click', () => mutate('goal', 'resume'));
   el('goal-work-quick-cancel')?.addEventListener('click', () => mutate('goal', 'cancel'));
   el('goal-work-save')?.addEventListener('click', reviseGoal);
-  document.querySelectorAll('#plan-mode-status, #goal-mode-status').forEach(node => {
+  el('wait-refresh')?.addEventListener('click', () => refreshWait());
+  el('wait-action')?.addEventListener('click', runWaitAction);
+  el('wait-unknown-effects')?.addEventListener('click', event => {
+    const id = event.target?.closest?.('button[data-intent-id]')?.dataset.intentId;
+    if (!id) return;
+    const effect = effectInbox.find(item => item.id === id);
+    if (effect) void chooseNoRetry(effect);
+  });
+  document.querySelectorAll('#plan-mode-status, #goal-mode-status, #wait-mode-status').forEach(node => {
     const toggle = node.querySelector('.chat-work-card-toggle');
     toggle?.addEventListener('click', () => {
       const open = node.classList.toggle('expanded');
@@ -344,6 +596,10 @@ function bind() {
         const subagents = document.getElementById('subagents-status');
         subagents?.classList.remove('expanded');
         subagents?.querySelector('#subagents-toggle')?.setAttribute('aria-expanded', 'false');
+        const other = el(node.id === 'wait-mode-status' ? 'plan-mode-status' : 'wait-mode-status');
+        other?.classList.remove('expanded');
+        other?.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded', 'false');
+        if (node.id === 'wait-mode-status') subagents?.style.removeProperty('top');
         armCollapse(node);
       }
     });
@@ -351,23 +607,35 @@ function bind() {
       if (node.classList.contains('expanded')) armCollapse(node);
     }));
   });
-  document.querySelectorAll('#plan-mode-status strong, #plan-mode-status summary, #plan-mode-status button, #goal-mode-status strong, #goal-mode-status summary, #goal-mode-status button').forEach(node => {
+  document.querySelectorAll('#plan-mode-status strong, #plan-mode-status summary, #plan-mode-status button, #goal-mode-status strong, #goal-mode-status summary, #goal-mode-status button, #wait-mode-status strong, #wait-mode-status button, #wait-mode-status .wait-grid > span:nth-child(odd)').forEach(node => {
     const source = node.textContent.trim();
     if (source) bindUiText(node, source);
   });
   for (const [id, label] of [['goal-work-quick-pause', 'Pause goal'], ['goal-work-quick-resume', 'Resume goal'], ['goal-work-quick-cancel', 'Delete goal']]) {
     bindUiText(el(id), label, 'aria-label'); bindUiText(el(id), label, 'title');
   }
+  bindUiText(el('wait-toggle'), 'Why is the agent waiting?', 'aria-label');
+  bindUiText(el('wait-toggle'), 'Why is the agent waiting?', 'title');
   if (typeof EventSource === 'undefined' && !eventTimer) eventTimer = setInterval(pollEvents, 1200);
-  ['focus', 'online', 'pageshow'].forEach(type => window.addEventListener(type, () => { pollEvents(); connectEventStream(); }));
+  if (!healthTimer) healthTimer = setInterval(() => {
+    if (document.visibilityState !== 'hidden') {
+      void refreshRunHealth();
+      if (snapshot.goal?.status === 'active' || ['running', 'interrupted'].includes(waitSnapshot?.run_status) || window.chatModule?.hasActiveStream?.(sessionId)) void refreshWait();
+      if (waitSnapshot?.wait_reason === 'unknown_side_effect') void refreshEffects();
+    }
+  }, 15000);
+  ['focus', 'online', 'pageshow'].forEach(type => window.addEventListener(type, () => { pollEvents(); connectEventStream(); void refreshRunHealth(); void refreshWait(); void refreshEffects(); }));
+  window.addEventListener('odysseus:chat-busy-change', () => { void refreshWait(); });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') closeEventStream();
-    else { pollEvents(); connectEventStream(); }
+    if (document.visibilityState === 'hidden') { closeEventStream(); uiLongTasks.stop(); }
+    else { renderGoal(); pollEvents(); connectEventStream(); void refreshRunHealth(); void refreshWait(); void refreshEffects(); }
   });
 }
 
 const chatWork = {
   bind, refresh, render, handleEvent, beginGoal, prepareNewPlan, prepareNewGoal,
-  onRunEnded, pauseActiveGoal, addGuidance, continueGoal, getSnapshot: () => snapshot,
+  onRunEnded, pauseActiveGoal, addGuidance, continueGoal, refreshRunHealth,
+  refreshWait, refreshEffects, runWaitAction, chooseNoRetry, mutate,
+  getSnapshot: () => snapshot,
 };
 export default chatWork;

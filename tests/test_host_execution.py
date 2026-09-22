@@ -37,6 +37,39 @@ class HostExecutionTests(unittest.TestCase):
         with patch.dict(os.environ, {'ODYSSEUS_HOST_ENABLED': '0', 'ODYSSEUS_HOST_OWNER': 'xopmc'}):
             self.assertFalse(self.host.enabled_for('xopmc'))
 
+    def test_registered_host_diagnostics_are_fixed_read_only_tools(self):
+        for tool in ('inspect_process', 'inspect_port', 'tail_log'):
+            self.assertIn(tool, self.host.TOOLS)
+            request = self.host.request_for(tool, '{}')
+            self.assertEqual(request['tool'], tool)
+            self.assertEqual(request['content'], '{}')
+
+    def test_host_toolchain_inventory_is_fixed_and_does_not_probe_arbitrary_network(self):
+        self.assertIn('inspect_toolchain', self.host.TOOLS)
+        request = self.host.request_for('inspect_toolchain', '{}')
+        self.assertEqual(request['tool'], 'inspect_toolchain')
+        result = self.helper('inspect_toolchain', '{}')
+        self.assertEqual(result['exit_code'], 0)
+        self.assertIn('python', result['tools'])
+        self.assertEqual(result['network']['status'], 'not_checked')
+        self.assertEqual(self.helper('inspect_toolchain', '{"endpoint_id":"registered"}')['code'],
+                         'not_supported_by_route')
+        with self.assertRaises(ValueError):
+            self.host.request_for('inspect_toolchain', '{"url":"http://127.0.0.1"}')
+
+    def test_lost_host_reply_is_unknown_outcome_and_never_replayed(self):
+        calls = []
+        def lost(request):
+            calls.append(request['tool'])
+            raise subprocess.TimeoutExpired('ssh private detail', 1)
+        with patch.object(self.host, 'run_request', side_effect=lost):
+            result = asyncio.run(self.host.execute('write_file', 'safe.txt\ncontent'))
+        self.assertEqual(calls, ['write_file'])
+        self.assertEqual(result['code'], 'unknown_outcome')
+        self.assertTrue(result['outcome_unknown'])
+        self.assertFalse(result['retryable'])
+        self.assertNotIn('private detail', result['error'])
+
     def test_host_schema_scope_is_truthful_and_not_global(self):
         schemas = [{'type': 'function', 'function': {'name': 'get_workspace', 'description': 'File tools are confined to it', 'parameters': {}}}]
         with patch.dict(os.environ, {'ODYSSEUS_HOST_ENABLED': '1', 'ODYSSEUS_HOST_OWNER': 'xopmc'}):
@@ -79,6 +112,116 @@ class HostExecutionTests(unittest.TestCase):
         self.assertEqual((Path(self.tmp.name) / 'a').read_text(), 'host data')
         self.assertEqual(self.helper('read_file', {'path': 'a'})['output'], 'host data')
         self.assertEqual(self.helper('bash', 'exit 9')['exit_code'], 9)
+        self.assertEqual(self.helper('search_files', {'pattern': 'host data',
+                                                      'path': str(Path(self.tmp.name) / 'a')})['files'],
+                         [str(Path(self.tmp.name) / 'a')])
+        self.assertEqual(self.helper('list_tree', {'path': self.tmp.name})['entries'][0]['path'], 'a')
+
+    def test_real_host_helper_typed_git_round_trip(self):
+        root = Path(self.tmp.name)
+        subprocess.run(['git', 'init', '-q', str(root)], check=True)
+        (root / 'sample.txt').write_text('before\n')
+        subprocess.run(['git', '-C', str(root), 'add', 'sample.txt'], check=True)
+        subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'initial'], check=True)
+        (root / 'sample.txt').write_text('after\n')
+        status = self.helper('git_status', {'path': str(root)})
+        self.assertEqual(status['exit_code'], 0)
+        self.assertEqual(status['files'][0]['unstaged'], 'modified')
+        diff = self.helper('git_diff', {'path': str(root), 'file': 'sample.txt'})
+        self.assertEqual(diff['exit_code'], 0)
+        self.assertIn('+after', diff['patch'])
+        log = self.helper('git_log', {'path': str(root), 'limit': 1})
+        self.assertEqual(log['exit_code'], 0)
+        self.assertEqual(log['commits'][0]['subject'], 'initial')
+
+    def test_real_host_verification_profiles_and_timeout(self):
+        root = Path(self.tmp.name)
+        (root / 'package.json').write_text(json.dumps({'scripts': {
+            'test': 'node -e "console.log(\'failed test\'); process.exit(7)"',
+            'lint': 'node -e "console.log(\'lint ok\')"',
+            'other': 'node -e "process.exit(99)"',
+        }}))
+        bad = self.helper('run_tests', json.dumps({'profile': 'other'}))
+        self.assertEqual(bad['code'], 'not_found')
+        failed = self.helper('run_tests', json.dumps({'profile': 'npm_test'}))
+        self.assertEqual(failed['exit_code'], 7)
+        self.assertEqual(failed['code'], 'failed')
+        self.assertIn('failed test', failed['full_output'])
+        passed = self.helper('run_lint', '{}')
+        self.assertEqual(passed['exit_code'], 0)
+        self.assertEqual(passed['code'], 'ok')
+        (root / 'package.json').write_text(json.dumps({'scripts': {
+            'test': 'node -e "setTimeout(() => {}, 10000)"'}}))
+        timed = self.helper('run_tests', json.dumps({'timeout_seconds': 1}), timeout=3)
+        self.assertEqual(timed['exit_code'], 124)
+        self.assertTrue(timed['timed_out'])
+        self.assertEqual(timed['code'], 'timeout')
+
+    def test_host_failed_verification_is_owner_scoped_artifact(self):
+        from src import observation_pack
+        root = Path(self.tmp.name)
+        (root / 'package.json').write_text(json.dumps({'scripts': {
+            'test': 'node -e "console.log(\'host failure\'); process.exit(2)"'}}))
+        def local_transport(request):
+            return self.helper(request['tool'], request['content'])
+        with patch.object(self.host, 'run_request', side_effect=local_transport), \
+             patch.object(observation_pack, 'DATA_DIR', self.tmp.name):
+            run_id = 'a' * 32
+            result = asyncio.run(self.host.execute('run_tests', '{}', owner='alice', session_id='one', run_id=run_id))
+            self.assertEqual(result['exit_code'], 2)
+            self.assertIn('artifact', result)
+            self.assertNotIn('full_output', result)
+            artifact_id = result['artifact']['id']
+            self.assertIn('host failure', observation_pack.recall('alice', 'one', artifact_id, 0, run_id=run_id)['text'])
+            with self.assertRaises(PermissionError):
+                observation_pack.recall('alice', 'one', artifact_id, 0, run_id='b' * 32)
+            with self.assertRaises(FileNotFoundError):
+                observation_pack.recall('bob', 'one', artifact_id, 0)
+
+    def test_large_host_read_archives_without_sending_whole_file_to_model(self):
+        from src import observation_pack
+        path = Path(self.tmp.name) / 'large.txt'
+        content = 'host line\n' * 12_000
+        path.write_text(content)
+        def local_transport(request):
+            return self.helper(request['tool'], request['content'])
+        with patch.object(self.host, 'run_request', side_effect=local_transport), \
+             patch.object(observation_pack, 'DATA_DIR', self.tmp.name):
+            run_id = 'a' * 32
+            result = asyncio.run(self.host.execute('read_file', json.dumps({'path': str(path)}),
+                                                   owner='alice', session_id='one', run_id=run_id))
+            self.assertEqual(result['exit_code'], 0)
+            self.assertTrue(result['truncated'])
+            self.assertLess(len(result['output']), 3000)
+            self.assertIn('read_tool_artifact', result['output'])
+            self.assertIn('artifact_id', result)
+            self.assertIn('host line', observation_pack.recall('alice', 'one', result['artifact_id'], 0, run_id=run_id)['text'])
+            with self.assertRaises(PermissionError):
+                observation_pack.recall('alice', 'one', result['artifact_id'], 0, run_id='b' * 32)
+            with self.assertRaises(FileNotFoundError):
+                observation_pack.recall('bob', 'one', result['artifact_id'], 0)
+
+    def test_host_artifact_rejects_changed_file_and_anonymous_scope(self):
+        from scripts import host_files
+        path = Path(self.tmp.name) / 'large.txt'
+        path.write_text('a' * 90_000)
+        calls = []
+        def changed_transport(request):
+            calls.append(request['tool'])
+            result = host_files.handle(request['tool'], request['content'], request['cwd'])
+            if request['tool'] == 'read_file_chunk':
+                result['sha256'] = '0' * 64
+            return result
+        with patch.object(self.host, 'run_request', side_effect=changed_transport):
+            result = asyncio.run(self.host.execute('read_file', str(path), owner='alice', session_id='one'))
+            self.assertEqual(result['exit_code'], 0)
+            self.assertTrue(result['artifact_unavailable'])
+            self.assertNotIn('artifact_id', result)
+            calls.clear()
+            anonymous = asyncio.run(self.host.execute('read_file', str(path)))
+            self.assertNotIn('artifact_id', anonymous)
+            self.assertEqual(calls, ['read_file'])
 
     def test_real_output_cap_and_timeout(self):
         output = self.helper('python', 'print("x" * 100000)')

@@ -87,6 +87,16 @@ class RegistryCoreTests(unittest.TestCase):
                 with self.subTest(role=role, name=name), self.assertRaises(PermissionError):
                     self.registry.require(name, access)
 
+    def test_team_readonly_roles_can_compare_and_verify_without_write_authority(self):
+        registry = ToolRegistry.from_schemas([
+            schema('compare_files'), schema('verify_hashes'), schema('inspect_toolchain'), schema('write_file')])
+        for role in ('reviewer', 'researcher'):
+            access = self.team(role)
+            self.assertEqual({item['function']['name'] for item in registry.schemas(access)},
+                             {'compare_files', 'verify_hashes', 'inspect_toolchain'})
+            with self.assertRaises(PermissionError):
+                registry.require('write_file', access)
+
     def test_web_and_host_flags_are_independent_and_fail_closed(self):
         self.assertEqual({s['function']['name'] for s in self.registry.schemas(
             ToolAccess.team('executor', {'web': True}))}, {'web_search', 'web_fetch'})
@@ -136,6 +146,25 @@ class RegistryCoreTests(unittest.TestCase):
         self.assertFalse(record['known_effects'])
         self.assertFalse(record['available'])
         self.assertIn('execute_code', record['effects'])
+
+    def test_reviewed_browser_navigation_and_interaction_have_known_effects(self):
+        names = (
+            'mcp__builtin_browser__browser_snapshot',
+            'mcp__builtin_browser__browser_navigate',
+            'mcp__builtin_browser__browser_click',
+            'mcp__builtin_browser__browser_type',
+        )
+        registry = ToolRegistry.from_schemas([], mcp_schemas=[schema(name) for name in names])
+        access = ToolAccess(mode='agent', role='agent', config={'mcp': True},
+                            adapters=frozenset({'mcp'}),
+                            enabled_mcp_servers=frozenset({'builtin_browser'}),
+                            allowed_tools=frozenset(names))
+        for name in names:
+            self.assertEqual(registry.require(name, access).id, name)
+        self.assertIn(ToolEffect.NETWORK_EGRESS,
+                      registry.require('mcp__builtin_browser__browser_navigate', access).effects)
+        self.assertIn(ToolEffect.EXTERNAL_SIDE_EFFECT,
+                      registry.require('mcp__builtin_browser__browser_click', access).effects)
 
     def test_explicit_mcp_metadata_does_not_invent_a_team_dispatcher(self):
         name = 'mcp__docs__read'
@@ -482,3 +511,41 @@ class AgentRegistryDispatchTests(unittest.IsolatedAsyncioTestCase):
                 db.commit()
             with self.assertRaises(PermissionError):
                 registry.require_current('mcp__email__read_email', current)
+
+    async def test_browser_permission_is_checked_before_each_call(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from core.database import McpServer
+        from src import tool_execution
+        engine = create_engine('sqlite:///:memory:')
+        self.addCleanup(engine.dispose)
+        McpServer.__table__.create(engine)
+        sessions = sessionmaker(bind=engine)
+        manager = SimpleNamespace(
+            get_all_tools=lambda: [
+                {'server_id': 'builtin_browser', 'name': name, 'description': 'Fixture',
+                 'input_schema': {}, 'is_disabled': name == 'browser_run_code_unsafe'}
+                for name in ('browser_snapshot', 'browser_navigate', 'browser_click',
+                             'browser_run_code_unsafe')],
+            is_builtin=lambda server: server == 'builtin_browser',
+            get_server_status=lambda server: {'status': 'connected'})
+        registry = tool_execution.agent_registry_inventory([], manager)
+        privileges = {'can_use_agent': True, 'can_use_browser': False}
+        with patch.dict(os.environ, {'ODYSSEUS_ENGINEERING_ENABLED': '1'}), \
+             patch('core.database.SessionLocal', sessions), \
+             patch('src.settings.get_setting', side_effect=lambda key, default=None: default), \
+             patch.object(tool_execution, '_owner_is_admin', return_value=True), \
+             patch.object(tool_execution, '_current_agent_privileges', side_effect=lambda owner: privileges):
+            def current():
+                return tool_execution.current_agent_registry_access(registry, owner='owner',
+                    disabled_tools=set(), tool_policy=None, mcp_manager=manager)
+            for name in ('browser_snapshot', 'browser_navigate', 'browser_click',
+                         'browser_run_code_unsafe'):
+                with self.subTest(name=name), self.assertRaises(PermissionError):
+                    registry.require_current(f'mcp__builtin_browser__{name}', current)
+            privileges['can_use_browser'] = True
+            for name in ('browser_snapshot', 'browser_navigate', 'browser_click'):
+                self.assertEqual(registry.require_current(f'mcp__builtin_browser__{name}', current).id,
+                                 f'mcp__builtin_browser__{name}')
+            with self.assertRaises(PermissionError):
+                registry.require_current('mcp__builtin_browser__browser_run_code_unsafe', current)

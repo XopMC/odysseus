@@ -17,7 +17,7 @@ PROFILE_FEATURES = {
 }
 
 CORE_AGENT_TOOLS = frozenset({
-    "get_workspace", "ls", "glob", "grep", "read_file",
+    "get_workspace", "ls", "glob", "grep", "search_files", "read_file",
     "write_file", "edit_file", "apply_patch", "bash", "python", "todowrite",
     "read_tool_artifact",
     "manage_auto_research_lab",

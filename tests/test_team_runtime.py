@@ -89,6 +89,16 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_tool_intents('owner', self.task['id'])[0]['status'], 'done')
         self.assertEqual(self.store.get_task('owner', self.task['id'])['status'], 'running')
 
+    async def test_tool_error_category_and_next_action_are_durable(self):
+        worker = self.worker()
+        self.host_result = {'error': 'Fixture missing', 'code': 'not_found', 'exit_code': 1}
+        self.responses = [answer('', [tool()]), answer()]
+        await self.execute(worker)
+        record = self.store.list_tool_intents('owner', self.task['id'])[0]
+        self.assertEqual(record['result']['error_category'], 'not_found')
+        self.assertIn('next_action', record['result'])
+        self.assertFalse(record['result']['retryable'])
+
     async def test_basic_pool_becomes_planner_assignments_without_implicit_host_access(self):
         pool = [{'endpoint_id': f'local-{i}', 'model': 'same-name', 'role': 'executor'} for i in range(6)]
         with patch.object(self.runtime, 'start'):

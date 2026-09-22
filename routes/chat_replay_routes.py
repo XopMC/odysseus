@@ -1,14 +1,29 @@
 """Read-only owner-gated access to bounded detached-run replay artifacts."""
 import os
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from routes.session_routes import _verify_session_owner
 from src import agent_runs
+from src.auth_helpers import effective_user, require_chat_api_token_scope
 from src.chat_replay_log import ReplayLog
+from src.incident_export import build_incident_archive
 
 
 def setup_chat_replay_routes():
     router = APIRouter()
+
+    @router.get('/api/chat/incident/{session_id}', dependencies=[Depends(require_chat_api_token_scope)])
+    def incident_export(request: Request, session_id: str):
+        _verify_session_owner(request, session_id)
+        archive = build_incident_archive(session_id, effective_user(request))
+        return Response(
+            archive, media_type='application/zip',
+            headers={
+                'Cache-Control': 'private, no-store',
+                'Content-Disposition': 'attachment; filename="odysseus-incident.zip"',
+                'X-Content-Type-Options': 'nosniff',
+            },
+        )
 
     @router.get('/api/chat/replay/{session_id}')
     async def replay(request: Request, session_id: str, run_id: str,

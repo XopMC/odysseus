@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260921livefix29';
-import chatRenderer from './chatRenderer.js?v=20260921livefix29';
+import sessionModule from './sessions.js?v=20260922approval1';
+import chatRenderer from './chatRenderer.js?v=20260922batch1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -5514,6 +5514,7 @@ import { bindUiText, t } from './i18n.js';
     let replayThread = null;
     let nextDeltaStartsRound = false;
     let replayThinking = '';
+    let replayThinkingSegmentId = '';
     let replayThinkingThrottle = null;
     let replayThinkingStartedAt = 0;
     let replayThinkingTimer = null;
@@ -5605,9 +5606,9 @@ import { bindUiText, t } from './i18n.js';
       // throttled render can be interrupted by the next tool/round boundary
       // before its local accumulator commits; recover that segment here so a
       // second device never shows an empty historical thinking card.
-      if (!String(thinkingText || '').trim() && inner && !String(inner.textContent || '').trim()) {
-        const segments = timelineReducer.snapshot?.().segments || [];
-        thinkingText = [...segments].reverse().find(segment => String(segment?.thinking || '').trim())?.thinking || '';
+      if (!String(thinkingText || '').trim() && inner && !String(inner.textContent || '').trim()
+          && replayThinkingSegmentId) {
+        thinkingText = timelineReducer.thinkingForSegment?.(replayThinkingSegmentId) || '';
       }
       if (inner) {
         inner.style.whiteSpace = '';
@@ -5746,11 +5747,13 @@ import { bindUiText, t } from './i18n.js';
                 replayThread = null;
                 nextDeltaStartsRound = false;
                 replayThinking = '';
+                replayThinkingSegmentId = '';
                 replayThinkingStartedAt = 0;
               }
               if (!replayThinkingStartedAt) {
                 replayThinkingStartedAt = Number(json._replay?.created_at || 0) * 1000 || Date.now();
               }
+              replayThinkingSegmentId = String(json._replay?.segment_id || json.segment_id || timelineReducer.state?.segmentId || '');
               replayThinking += json.delta;
               rich = true;
               renderReplayThinking();
@@ -5772,6 +5775,7 @@ import { bindUiText, t } from './i18n.js';
               replayThread = null;
               nextDeltaStartsRound = false;
               replayThinking = '';
+              replayThinkingSegmentId = '';
               replayThinkingStartedAt = 0;
             }
             roundText += json.delta;
@@ -5872,6 +5876,7 @@ import { bindUiText, t } from './i18n.js';
             nextDeltaStartsRound = Boolean(roundText.trim() || replayTool || gotDelta);
             docFenceOpened = false;
             replayThinking = '';
+            replayThinkingSegmentId = '';
             replayThinkingStartedAt = 0;
           } else if (json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress') {
             rich = true;

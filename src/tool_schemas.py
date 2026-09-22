@@ -94,13 +94,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file from disk. Optionally read a line range with offset/limit for large files.",
+            "description": "Read a bounded text file window. Returns SHA-256, size and encoding metadata; binary data is not placed in the prompt. Use offset/limit for lines or byte_offset/byte_limit for bytes. Large UTF-8 files return a short preview plus a read_tool_artifact handle when an owner-scoped archive is available.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path to read"},
                     "offset": {"type": "integer", "description": "1-based line to start reading from (optional)"},
-                    "limit": {"type": "integer", "description": "Max number of lines to read from offset (optional)"}
+                    "limit": {"type": "integer", "description": "Max number of lines to read from offset (optional)"},
+                    "byte_offset": {"type": "integer", "minimum": 0, "description": "0-based byte offset (mutually exclusive with line range)"},
+                    "byte_limit": {"type": "integer", "minimum": 1, "description": "Maximum bytes to read from byte_offset"},
+                    "line_numbers": {"type": "boolean", "description": "Prefix returned lines with their source line numbers"}
                 },
                 "required": ["path"]
             }
@@ -119,6 +122,26 @@ FUNCTION_TOOL_SCHEMAS = [
                     "glob": {"type": "string", "description": "Only search files matching this glob, e.g. '*.py' (optional)"},
                     "ignore_case": {"type": "boolean", "description": "Case-insensitive match (optional)"},
                     "max_results": {"type": "integer", "description": "Max matches to return (optional)"}
+                },
+                "required": ["pattern"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "Search a project with ripgrep semantics. Defaults to a concise, paged list of matching file paths; use mode=matches to request exact matching lines. Both modes honor the same path and sensitive-file policy as grep.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression to search for"},
+                    "path": {"type": "string", "description": "Allowed project directory or a specific file"},
+                    "mode": {"type": "string", "enum": ["files", "matches"]},
+                    "glob": {"type": "string", "description": "Optional file glob"},
+                    "ignore_case": {"type": "boolean"},
+                    "cursor": {"type": "integer", "minimum": 0},
+                    "page_size": {"type": "integer", "minimum": 1, "maximum": 50}
                 },
                 "required": ["pattern"]
             }
@@ -156,6 +179,176 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_tree",
+            "description": "Read a bounded directory hierarchy with file sizes, without opening file bodies. Skips hidden, generated and sensitive paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to inspect; defaults to active workspace"},
+                    "max_depth": {"type": "integer", "minimum": 1, "maximum": 6},
+                    "max_entries": {"type": "integer", "minimum": 1, "maximum": 200}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_outline",
+            "description": "Return Python classes, functions and methods with exact line numbers via AST; unsupported languages report unavailable rather than guessing. Does not return source body.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Python source file to inspect"},
+                    "max_symbols": {"type": "integer", "minimum": 1, "maximum": 200}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Read a bounded, structured Git status for the allowed local workspace. Returns staged, unstaged and untracked file records plus HEAD hash. No repository mutation; sensitive paths are omitted.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Repository or directory inside it; defaults to the active workspace"}
+            }, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Read a bounded file-level Git diff and exact before/after blob hashes without modifying the repository. A concrete relative file path is required; sensitive paths are rejected.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Allowed repository or directory inside it"},
+                "file": {"type": "string", "description": "Repository-relative file path"},
+                "staged": {"type": "boolean", "description": "Show staged diff when true; working-tree diff by default"}
+            }, "required": ["file"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Read up to 20 recent commits as structured hash, parent, date and subject records in an allowed repository. Optionally restrict to one relative file.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Allowed repository or directory inside it"},
+                "file": {"type": "string", "description": "Optional repository-relative file path"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20}
+            }, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_files",
+            "description": "Read two allowed files and report exact SHA-256 hashes, byte equality, normalized-newline equality and a bounded unified diff. Does not modify files; large or binary content is not sent to the model.",
+            "parameters": {"type": "object", "properties": {
+                "before": {"type": "string", "description": "Allowed path to the before snapshot"},
+                "after": {"type": "string", "description": "Allowed path to the after snapshot"}
+            }, "required": ["before", "after"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_hashes",
+            "description": "Verify up to 16 exact SHA-256 file assertions within the allowed workspace. Reports mismatches and measured hashes without sending file contents.",
+            "parameters": {"type": "object", "properties": {
+                "files": {"type": "array", "minItems": 1, "maxItems": 16,
+                          "items": {"type": "object", "properties": {
+                              "path": {"type": "string"},
+                              "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+                          }, "required": ["path", "sha256"]}}
+            }, "required": ["files"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": "Run a discovered, bounded test profile in the allowed workspace. Supported profiles: pytest and npm_test. Executes project code; never accepts arbitrary commands. Returns exact exit code and timeout status.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Project root inside the allowed workspace"},
+                "profile": {"type": "string", "enum": ["pytest", "npm_test"]},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
+            }, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_lint",
+            "description": "Run a discovered, bounded npm lint profile in the allowed workspace. Executes project code; never accepts arbitrary commands. Returns exact exit code and timeout status.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Project root inside the allowed workspace"},
+                "profile": {"type": "string", "enum": ["npm_lint"]},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
+            }, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_process",
+            "description": "Read bounded status for one process owned by the registered host user. Returns exact start_ticks; pass them to later diagnostics to reject PID reuse. Does not expose argv, environment or other users' processes.",
+            "parameters": {"type": "object", "properties": {
+                "pid": {"type": "integer", "minimum": 1},
+                "start_ticks": {"type": "integer", "minimum": 1, "description": "Optional previously observed process identity fence"}
+            }, "required": ["pid"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_port",
+            "description": "Check if a fenced process owned by the registered host user owns a TCP LISTEN socket on one port. No network request is sent.",
+            "parameters": {"type": "object", "properties": {
+                "pid": {"type": "integer", "minimum": 1},
+                "start_ticks": {"type": "integer", "minimum": 1},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+            }, "required": ["pid", "start_ticks", "port"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tail_log",
+            "description": "Read a bounded tail of an owned regular log inside the registered host workspace, fenced to an unchanged process identity. Maximum 200 lines and 16 KiB.",
+            "parameters": {"type": "object", "properties": {
+                "pid": {"type": "integer", "minimum": 1},
+                "start_ticks": {"type": "integer", "minimum": 1},
+                "path": {"type": "string"},
+                "lines": {"type": "integer", "minimum": 1, "maximum": 200}
+            }, "required": ["pid", "start_ticks", "path"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "http_probe",
+            "description": "Read-only HEAD probe of one enabled, owner-visible registered model endpoint. Reports pinned DNS IP, verified TLS, HTTP status, safe headers and latency. No arbitrary URL, method, body, auth header or redirect.",
+            "parameters": {"type": "object", "properties": {
+                "endpoint_id": {"type": "string", "description": "ID from the configured model endpoint inventory"}
+            }, "required": ["endpoint_id"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_toolchain",
+            "description": "Read-only fixed inventory of Python, Node, Git, compilers, LSP CLIs, container CLIs and selected package versions. Does not execute project PATH shims. Optionally checks one registered model endpoint via bounded HEAD probe.",
+            "parameters": {"type": "object", "properties": {
+                "endpoint_id": {"type": "string", "description": "Optional owner-visible registered endpoint ID; omitted means no network request"}
+            }, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_workspace",
             "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments.",
             "parameters": {"type": "object", "properties": {}, "required": []}
@@ -174,6 +367,18 @@ FUNCTION_TOOL_SCHEMAS = [
                 },
                 "required": ["id"]
             }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_artifacts",
+            "description": "Search bounded snippets of full archived tool outputs from the current owned run. Returns opaque IDs for read_tool_artifact, not entire outputs.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 128},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "cursor": {"type": "string", "pattern": "^obs_[a-f0-9]{24}$"}
+            }, "required": ["query"]}
         }
     },
     {
@@ -1617,18 +1822,20 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         if content and isinstance(tf, str) and tf in ("day", "week", "month", "year"):
             content = json.dumps({"query": content, "time_filter": tf})
     elif tool_type == "read_file":
-        # Plain path (back-compat) unless a line range is requested → JSON.
-        if args.get("offset") or args.get("limit"):
+        # Preserve all structured v2 options.  The old truthiness check lost
+        # byte ranges and line_numbers in native function-calling mode.
+        if any(key in args for key in (
+                "offset", "limit", "byte_offset", "byte_limit", "line_numbers")):
             content = json.dumps(args)
         else:
             content = args.get("path", "")
-    elif tool_type == "read_tool_artifact":
+    elif tool_type in ("read_tool_artifact", "search_artifacts"):
         content = json.dumps(args)
     elif tool_type == "publish_subagent_evidence":
         content = json.dumps(args, ensure_ascii=False)
     elif tool_type == "manage_auto_research_lab":
         content = json.dumps(args, ensure_ascii=False)
-    elif tool_type in ("grep", "glob", "ls"):
+    elif tool_type in ("grep", "search_files", "glob", "ls", "list_tree", "file_outline", "git_status", "git_diff", "git_log", "compare_files", "verify_hashes", "run_tests", "run_lint", "inspect_process", "inspect_port", "tail_log", "http_probe", "inspect_toolchain"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""

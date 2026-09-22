@@ -16,6 +16,7 @@ import time
 import logging
 import os
 import uuid
+import httpx
 from typing import Any, AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
@@ -33,6 +34,7 @@ from src.agent_context import (
     FailedReadGuard, call_signature, compact_working_context,
     context_snapshot, input_limit, schema_token_estimate,
 )
+from src.agent_loop_detector import LoopDetector
 from src.context_compactor import (
     apply_compaction_state,
     apply_compaction_state_for_session,
@@ -534,7 +536,7 @@ _DOMAIN_RULES = {
     "files": """\
 ## File rules
 - Use file tools for real disk files. Use document tools only for editor documents.
-- Prefer `grep`, `glob`, and `ls` over shell equivalents when available.
+- Prefer `list_tree`/`file_outline` to orient without reading bodies, then `search_files` for a short file list and `grep` or `search_files` matches for exact lines.
 - Use `edit_file`/`write_file` for writes; avoid shell redirection/heredocs for editing files.""",
     "settings": """\
 ## Settings/API rules
@@ -560,7 +562,7 @@ _DOMAIN_TOOL_MAP = {
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
-    "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
+    "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "search_files", "glob", "ls", "get_workspace", "manage_bg_jobs"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
@@ -2314,6 +2316,56 @@ def _checkpoint_generation_budgets(policy) -> List[int]:
     return list(dict.fromkeys((max(1, first), retry)))
 
 
+def _checkpoint_summarizer_error_code(exc: Exception) -> str:
+    """Return a fixed diagnostic code; never expose provider response bodies."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException)):
+        return "summarizer_timeout"
+    detail = str(getattr(exc, "detail", exc)).lower()
+    if "no answer content" in detail or "no usable answer" in detail:
+        return "summarizer_no_answer"
+    status = _normalize_http_status(getattr(exc, "status_code", None))
+    if status in {502, 503, 504} and (
+        detail.startswith("cannot reach ")
+        or detail.startswith("model network transport failed")
+        or "could not acquire an upstream connection" in detail
+    ):
+        return "summarizer_transport_unavailable"
+    if status == 504 and (
+        detail.startswith("model response timed out")
+        or detail.startswith("model request delivery timed out")
+    ):
+        return "summarizer_timeout"
+    if status == 429:
+        return "summarizer_rate_limited"
+    if status in {404, 410}:
+        return "summarizer_model_unavailable"
+    if status is not None and 500 <= status <= 599:
+        return "summarizer_provider_error"
+    if status is not None:
+        return "summarizer_request_rejected"
+    if isinstance(exc, (ConnectionError, OSError, httpx.ConnectError, httpx.NetworkError)):
+        return "summarizer_transport_unavailable"
+    return "summarizer_error"
+
+
+def _checkpoint_shape_error_code(exc: Exception) -> str:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException,
+                        ConnectionError, OSError, httpx.NetworkError)):
+        return "context_window_unavailable"
+    detail = str(exc).lower()
+    if "policy changed" in detail:
+        return "context_policy_changed"
+    if "automatic compaction is disabled" in detail:
+        return "auto_compact_disabled"
+    if "no reduction" in detail:
+        return "context_no_reduction"
+    if "input budget" in detail:
+        return "context_input_budget_exceeded"
+    if "required history" in detail:
+        return "context_uncompactable"
+    return "context_policy_error"
+
+
 def _durable_model_checkpoint(messages: List[Dict], max_chars: int = 1_500_000) -> List[Dict]:
     """Copy the model-visible user/assistant/tool ledger without runtime policy.
 
@@ -3647,6 +3699,9 @@ async def stream_agent_loop(
     prompt_type: Optional[str] = None,
     max_rounds: int = MAX_AGENT_ROUNDS,
     max_tool_calls: int = 0,
+    max_total_tokens: int = 0,
+    max_model_requests: int = 0,
+    max_wall_seconds: int = 0,
     context_length: int = 0,
     active_document=None,
     active_email: Optional[Dict[str, str]] = None,
@@ -3688,6 +3743,8 @@ async def stream_agent_loop(
       - data: {"type": "metrics", "data": {...}}            (final metrics)
       - data: [DONE]                                        (end)
     """
+
+    wall_started = time.monotonic()
 
     run_security = ToolRunSecurityContext(
         external_untrusted_context_seen=(
@@ -3774,6 +3831,7 @@ async def stream_agent_loop(
     _registry_initial_host_bound = _trusted_host_enabled(owner)
     _direct_low_signal = (
         _low_signal_turn
+        and not active_goal
         and not _trusted_host_enabled(owner)
         and not _existing_conversation
         and not bool(_intent.get("continuation"))
@@ -3868,8 +3926,6 @@ async def stream_agent_loop(
 
         def _direct_terminal_event(terminal_status, failure_message):
             """Build truthful partial-history metadata for direct-path failure."""
-            if not (direct_response.strip() or direct_reasoning.strip()):
-                return None
             direct_usage = _usage_bucket(
                 round_num=1,
                 model=direct_actual_model,
@@ -3912,7 +3968,10 @@ async def stream_agent_loop(
                 "round_models": [direct_actual_model],
                 "round_endpoint_ids": [direct_actual_endpoint_id],
                 "round_endpoint_labels": [direct_actual_endpoint_label],
-                **_usage_bucket_summary([direct_usage]),
+                **_usage_bucket_summary(
+                    [direct_usage] if (direct_response.strip() or direct_reasoning.strip() or direct_has_real_usage)
+                    else []
+                ),
             }
             if direct_reasoning.strip():
                 terminal_metadata["thinking"] = direct_reasoning.strip()
@@ -4123,6 +4182,15 @@ async def stream_agent_loop(
             from src.harness_efficiency import CORE_AGENT_TOOLS
             _relevant_tools.difference_update(CORE_AGENT_TOOLS - PLAN_MODE_READONLY_TOOLS)
             _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
+            # A short explicit verification request is not a vague browse
+            # request. Keep only the specifically named execute profile, not
+            # every test/lint schema in the always-on workspace toolset.
+            from src.tool_index import ToolIndex
+            _ql = (_retrieval_query or _last_user or "").lower()
+            for _keywords, _tools in ToolIndex._KEYWORD_HINTS.items():
+                _specialized = _tools & {"run_tests", "run_lint", "inspect_process", "inspect_port", "tail_log", "http_probe", "inspect_toolchain", "search_artifacts", "compare_files", "verify_hashes"}
+                if _specialized and any(re.search(rf"\b{re.escape(_kw)}\b", _ql) for _kw in _keywords):
+                    _relevant_tools.update(_specialized)
             logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
         else:
             # Don't short-circuit: fall through to RAG retrieval below.
@@ -4143,7 +4211,9 @@ async def stream_agent_loop(
                     _TOOL_SELECTION_TIMEOUT_SECONDS,
                 )
                 tool_idx = None
-                _relevant_tools = set(ALWAYS_AVAILABLE)
+                # Keep this unset: the deterministic keyword fallback below
+                # must still run when the index cannot be initialized.
+                _relevant_tools = None
             if tool_idx:
                 if mcp_mgr:
                     try:
@@ -4186,7 +4256,7 @@ async def stream_agent_loop(
         _relevant_tools = set(ALWAYS_AVAILABLE)
         ql = _retrieval_query.lower()
         for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
-            if any(kw in ql for kw in keywords):
+            if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
                 _relevant_tools.update(tools)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
@@ -4230,7 +4300,15 @@ async def stream_agent_loop(
             and not _active_document_relevant
             and not active_email
         ):
-            _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
+            # The Terminus route is a bounded default, not a reason to erase
+            # explicitly discovered read-only file capabilities.  In
+            # particular list_tree/file_outline (and artifact recall) must
+            # survive this route switch without admitting unrelated tools.
+            from src.tool_registry import READ_TOOLS as _registry_read_tools
+            _selected_specialized_tools = set(_relevant_tools) & (
+                set(_registry_read_tools) | {"read_tool_artifact", "search_artifacts", "compare_files", "verify_hashes", "run_tests", "run_lint", "inspect_process", "inspect_port", "tail_log", "http_probe", "inspect_toolchain"}
+            )
+            _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS) | _selected_specialized_tools
             logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
 
     # If this turn targets the open document, keep editing tools available
@@ -4260,7 +4338,7 @@ async def stream_agent_loop(
         if _relevant_tools is None:
             from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
-        _relevant_tools.update({"read_file", "grep", "ls", "manage_documents"})
+        _relevant_tools.update({"read_file", "grep", "search_files", "ls", "list_tree", "file_outline", "manage_documents"})
 
     # Per-request forced tools are stronger than retrieval. Explicit search
     # settings make web tools visible even when tool RAG misses them;
@@ -4321,7 +4399,11 @@ async def stream_agent_loop(
     if not guide_only and _relevant_tools is not None:
         from src.host_execution import enabled_for as _host_enabled, TOOLS as _host_tools
         if _host_enabled(owner):
-            _relevant_tools.update(_host_tools)
+            # Diagnostics and test profiles are discoverable on explicit
+            # request, not permanent schema overhead on every host Goal round.
+            _relevant_tools.update(_host_tools - {
+                "run_tests", "run_lint", "inspect_process", "inspect_port", "tail_log",
+            })
 
     # A Goal is a durable execution contract. Tool RAG may optimize ordinary
     # one-shot turns, but it must not silently make bash/file tools disappear
@@ -4383,6 +4465,8 @@ async def stream_agent_loop(
             and not notes_mode
             and not guide_only
             and not active_goal
+            and not plan_mode
+            and not approved_plan
         )
         return (
             is_ody,
@@ -4418,6 +4502,8 @@ async def stream_agent_loop(
             route_tools = set()
         if route_tools is not None and plan_mode:
             route_tools |= {"ask_user", "create_plan", "update_plan"}
+        if route_tools is not None and approved_plan:
+            route_tools |= {"ask_user", "update_plan", "update_plan_step"}
         if route_tools is not None and active_goal:
             route_tools |= {"ask_user", "get_goal", "update_goal_progress", "complete_goal"}
         return route_tools
@@ -4459,8 +4545,13 @@ async def stream_agent_loop(
             "edit_file",
             "glob",
             "grep",
+            "search_files",
+            "list_tree",
+            "file_outline",
             "ls",
             "read_file",
+            "run_tests",
+            "run_lint",
             "replace_file",
             "run_shell",
             "write_file",
@@ -4596,9 +4687,8 @@ async def stream_agent_loop(
             if isinstance(e, ProtectedContextTooLarge):
                 raise
             logger.warning(
-                "[agent] Soft context trim skipped for route model=%s: %s",
-                candidate_model,
-                e,
+                "[agent] Soft context trim skipped for route model=%s (%s)",
+                candidate_model, type(e).__name__,
             )
             return _without_protection(route_messages)
 
@@ -4788,6 +4878,31 @@ async def stream_agent_loop(
     actual_endpoint_cost_tracked = requested_endpoint_cost_tracked
     usage_buckets = []
     total_tool_calls = 0  # for budget enforcement
+    model_request_count = 0
+    _request_budget_nonce = uuid.uuid4().hex
+
+    def _on_model_request():
+        """Fence each actual transport POST, including fallback candidates."""
+        nonlocal model_request_count
+        if max_wall_seconds > 0 and time.monotonic() - wall_started >= max_wall_seconds:
+            from src import agent_runs as _request_runs
+            _request_run_id = _request_runs.get_run_id(session_id) if session_id else None
+            return {"type": "budget_exceeded", "resource": "wall_seconds",
+                    "used": max(max_wall_seconds, int(time.monotonic() - wall_started)),
+                    "limit": max_wall_seconds,
+                    "run_id": _request_run_id or run_security.run_id,
+                    "_budget_nonce": _request_budget_nonce}
+        if max_model_requests > 0 and model_request_count >= max_model_requests:
+            from src import agent_runs as _request_runs
+            _request_run_id = _request_runs.get_run_id(session_id) if session_id else None
+            return {"type": "budget_exceeded", "resource": "model_requests",
+                    "used": model_request_count, "limit": max_model_requests,
+                    "run_id": _request_run_id or run_security.run_id,
+                    "_budget_nonce": _request_budget_nonce}
+        model_request_count += 1
+        return None
+
+    _on_model_request.budget_nonce = _request_budget_nonce
     _ody_notes_tool_completed = False
     _pinned_fallback_candidate = None
     _pinned_fallback_route = None
@@ -4875,6 +4990,7 @@ async def stream_agent_loop(
     # all 20 rounds, looks like the chat "died". Track recent call
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
+    _evidence_loop = LoopDetector()
     _stuck_rounds = 0
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
@@ -5238,6 +5354,17 @@ async def stream_agent_loop(
             ],
         )
         _approved_result_injected = True
+        if tool_result_is_successful(approved_result):
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The exact action approved by the user has already executed successfully. "
+                    "Its tool result is immediately above. Do not issue the same tool call "
+                    "again in this continuation; use that result to answer or continue "
+                    "with a different necessary action."
+                ),
+                "_agent_approved_action_receipt": True,
+            })
 
     _goal_stall_signature = None
     _goal_stall_count = 0
@@ -5250,6 +5377,24 @@ async def stream_agent_loop(
         if isinstance(item, dict) and item.get("id")
     }
     for round_num in range(1, max_rounds + 1):
+        # All usage from the prior round is finalized before this boundary.
+        # Fence the next model request, never an in-flight tool or model call.
+        if max_wall_seconds > 0 and time.monotonic() - wall_started >= max_wall_seconds:
+            from src import agent_runs as _budget_runs
+            _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
+            yield f'data: {json.dumps({"type": "budget_exceeded", "resource": "wall_seconds", "limit": max_wall_seconds, "used": max(max_wall_seconds, int(time.monotonic() - wall_started)), "run_id": _budget_run_id or run_security.run_id})}\n\n'
+            break
+        if max_total_tokens > 0 and usage_buckets:
+            used_tokens = sum(
+                int(bucket.get("input_tokens") or 0) + int(bucket.get("output_tokens") or 0)
+                for bucket in usage_buckets
+            )
+            if used_tokens >= max_total_tokens:
+                from src import agent_runs as _budget_runs
+                _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
+                _usage_source = _usage_bucket_summary(usage_buckets)["usage_source"]
+                yield f'data: {json.dumps({"type": "budget_exceeded", "resource": "model_tokens", "limit": max_total_tokens, "used": used_tokens, "usage_source": _usage_source, "run_id": _budget_run_id or run_security.run_id})}\n\n'
+                break
         round_started_at = time.time()
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -5470,29 +5615,53 @@ async def stream_agent_loop(
             logger.warning("Context summarizer route resolution failed; using selected route")
             _summary_routes = [(endpoint_url, model, headers)]
 
+        _summary_failure_code = None
+
         async def _summarize_working_context(prompt):
+            nonlocal _summary_failure_code
             from src.llm_core import llm_call_async
             if _context_profile and owner_policy(owner) != _context_profile:
                 raise ValueError('Context policy changed before summarization')
             last_error = None
-            for summary_url, summary_model, summary_headers in _summary_routes:
+            summary_timeout = (
+                _configured_policy.summary_timeout_seconds if _configured_policy else 120
+            )
+            # compact_working_context has one outer deadline. A stalled Utility
+            # call must not consume that entire deadline before the selected
+            # chat model gets its fallback opportunity.
+            summary_deadline = asyncio.get_running_loop().time() + summary_timeout
+            for route_index, (summary_url, summary_model, summary_headers) in enumerate(_summary_routes):
                 summary_prompt = _checkpoint_summary_prompt(prompt)
                 budgets = _checkpoint_generation_budgets(_configured_policy)
+                route_started = asyncio.get_running_loop().time()
+                routes_left = len(_summary_routes) - route_index
+                route_deadline = route_started + max(
+                    0, summary_deadline - route_started - .1,
+                ) / max(1, routes_left)
                 for attempt_index, generation_budget in enumerate(budgets):
                     try:
-                        return await llm_call_async(
-                            summary_url, summary_model, summary_prompt,
-                            temperature=.2, max_tokens=generation_budget,
-                            headers=summary_headers,
-                            timeout=(
-                                _configured_policy.summary_timeout_seconds
-                                if _configured_policy else 120
+                        remaining = route_deadline - asyncio.get_running_loop().time()
+                        if remaining <= .1:
+                            raise asyncio.TimeoutError("Summary deadline exhausted")
+                        # Preserve most of a route's share for the normal
+                        # completion; reserve a smaller tail only for the
+                        # reasoning-only retry.
+                        attempt_timeout = max(
+                            .05, (remaining - .05) * (.75 if attempt_index == 0 and len(budgets) > 1 else 1),
+                        )
+                        return await asyncio.wait_for(
+                            llm_call_async(
+                                summary_url, summary_model, summary_prompt,
+                                temperature=.2, max_tokens=generation_budget,
+                                headers=summary_headers, timeout=attempt_timeout,
+                                max_retries=1, session_id=session_id,
+                                require_answer_content=True,
                             ),
-                            max_retries=1, session_id=session_id,
-                            require_answer_content=True,
+                            timeout=attempt_timeout,
                         )
                     except Exception as exc:
                         last_error = exc
+                        _summary_failure_code = _checkpoint_summarizer_error_code(exc)
                         no_answer = "no answer content" in str(
                             getattr(exc, "detail", exc)
                         ).lower()
@@ -5512,6 +5681,7 @@ async def stream_agent_loop(
             raise RuntimeError("No context summarizer route is available")
 
         _before_context = estimate_tokens(messages)
+        _compaction_boundary_started = time.monotonic()
         _compacted_messages, _compact_status = messages, "unchanged"
         _compact_failure_detail = None
         _configured_telemetry = None
@@ -5567,6 +5737,18 @@ async def stream_agent_loop(
                     max(1, int(_economic_decision.target_tokens / max(_context_calibration, .01))),
                     _summarize_working_context,
                 )
+                if _compact_status == "unchanged":
+                    # Do not re-run the same summarizer at every boundary.
+                    # A no-op below the safety trigger is deferred; above it
+                    # we must stop safely instead of dispatching an oversized
+                    # unchanged checkpoint or trying a second compactor.
+                    _economic_boundary_pending = False
+                    if _before_context * _context_calibration >= _working_limit:
+                        _compact_status = "uncompactable"
+                    else:
+                        _economic_decision = _replace_dataclass(
+                            _economic_decision, compact=False, reason="native_no_reduction",
+                        )
         if _context_profile and _compact_status != "compacted":
             try:
                 from src.model_context import budget_context_for_model
@@ -5580,14 +5762,14 @@ async def stream_agent_loop(
                 _working_limit = _configured_telemetry['trigger_messages']
                 _last_route_context_length = _configured_telemetry['window']
                 _route_context_lengths[(endpoint_url, model)] = _last_route_context_length
-            except ValueError as exc:
-                _compact_failure_detail = str(exc)[:500]
+            except Exception as exc:
+                _compact_failure_detail = _summary_failure_code or _checkpoint_shape_error_code(exc)
                 logger.warning(
                     "Configured context shaping failed: %s",
                     _compact_failure_detail,
                 )
                 _compact_status = 'failed'
-        elif not _context_profile and _compact_status != "compacted" and _before_context * _context_calibration >= _working_limit:
+        elif not _context_profile and _compact_status == "unchanged" and _before_context * _context_calibration >= _working_limit:
             _compacted_messages, _compact_status = await compact_working_context(
                 messages, int(_working_limit / _context_calibration), _summarize_working_context,
             )
@@ -5648,14 +5830,15 @@ async def stream_agent_loop(
                 except Exception:
                     logger.exception("Failed to persist compaction settlement marker")
                     _pending_compaction_settlement = None
-            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "checkpoint": checkpoint, "economic_decision": (_economic_decision.to_dict() if _economic_decision else None), "settlement": _pending_compaction_settlement})}\n\n'
+            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "duration_ms": round(max(0.0, time.monotonic() - _compaction_boundary_started) * 1000, 1), "checkpoint": checkpoint, "economic_decision": (_economic_decision.to_dict() if _economic_decision else None), "settlement": _pending_compaction_settlement})}\n\n'
         elif _compact_status in {"failed", "uncompactable"}:
             # Do not silently drop evidence and continue an audit as if the
             # summary succeeded. The user can retry after the provider recovers.
             _checkpoint_failure_event = {
                 "type": "context_compaction_failed",
                 "reason": _compact_status,
-                "detail": _compact_failure_detail,
+                "detail": _compact_failure_detail or _summary_failure_code or "context_uncompactable",
+                "duration_ms": round(max(0.0, time.monotonic() - _compaction_boundary_started) * 1000, 1),
                 "message": "Context checkpoint failed; stopping safely without discarding the conversation.",
             }
             yield f'data: {json.dumps(_checkpoint_failure_event)}\n\n'
@@ -5811,6 +5994,7 @@ async def stream_agent_loop(
                         from src.observation_pack import project_messages as _project_observations
                         _provider_messages, _observation_stats = _project_observations(
                             state["messages"], owner=owner, session_id=session_id,
+                            run_id=run_security.run_id,
                         )
                         state["observation_pack"] = _observation_stats
                 except Exception:
@@ -5882,6 +6066,7 @@ async def stream_agent_loop(
         _round_real_output_tokens = 0
         _round_has_real_usage = False
         _round_usage_finalized = False
+        _request_budget_hit = False
         candidate_index = 0
 
         def _finalize_round_usage(*, include_empty: bool = True):
@@ -5952,6 +6137,7 @@ async def stream_agent_loop(
             fallback_on_empty=fallback_on_empty,
             candidate_request_factory=_candidate_request,
             candidate_route_descriptors=_candidate_route_descriptors,
+            on_model_request=_on_model_request if max_model_requests > 0 or max_wall_seconds > 0 else None,
         ):
             if not _round_first_event_logged:
                 _round_first_event_logged = True
@@ -6000,47 +6186,47 @@ async def stream_agent_loop(
                 }
                 if full_response.strip() or round_reasoning.strip() or tool_events or round_texts:
                     _finalize_round_usage(include_empty=False)
-                    partial_round = strip_tool_blocks(
-                        round_response,
-                        skip_fenced=(
-                            _is_api_model
-                            and not native_tool_calls
-                            and not guide_only
-                        ),
-                    ).strip()
-                    if _ody_qwen_finetune_model:
-                        partial_round = _strip_doc_model_artifacts(partial_round).strip()
-                    failure_note = f"[Agent stopped: {terminal_error['message']}]"
-                    terminal_round = (
-                        f"{partial_round}\n\n{failure_note}"
-                        if partial_round
-                        else failure_note
+                partial_round = strip_tool_blocks(
+                    round_response,
+                    skip_fenced=(
+                        _is_api_model
+                        and not native_tool_calls
+                        and not guide_only
+                    ),
+                ).strip()
+                if _ody_qwen_finetune_model:
+                    partial_round = _strip_doc_model_artifacts(partial_round).strip()
+                failure_note = f"[Agent stopped: {terminal_error['message']}]"
+                terminal_round = (
+                    f"{partial_round}\n\n{failure_note}"
+                    if partial_round
+                    else failure_note
+                )
+                terminal_metadata = {
+                    "failed": True,
+                    "failure": terminal_error,
+                    "model": actual_model,
+                    "requested_model": requested_model,
+                    "endpoint_id": actual_endpoint_id,
+                    "endpoint_label": actual_endpoint_label,
+                    "requested_endpoint_id": requested_endpoint_id,
+                    "requested_endpoint_label": requested_endpoint_label,
+                    "tool_events": tool_events,
+                    "round_texts": [*round_texts, terminal_round],
+                    "round_reasonings": [*round_reasonings, round_reasoning.strip()],
+                    "round_timestamps": [*round_timestamps, round_started_at],
+                    "round_models": [*round_models, _round_actual_model],
+                    "round_endpoint_ids": [*round_endpoint_ids, _round_actual_endpoint_id],
+                    "round_endpoint_labels": [*round_endpoint_labels, _round_actual_endpoint_label],
+                    **_usage_bucket_summary(usage_buckets),
+                }
+                if round_reasoning.strip():
+                    terminal_metadata["thinking"] = round_reasoning.strip()
+                if isinstance(actual_endpoint_cost_tracked, bool):
+                    terminal_metadata["endpoint_cost_tracked"] = (
+                        actual_endpoint_cost_tracked
                     )
-                    terminal_metadata = {
-                        "failed": True,
-                        "failure": terminal_error,
-                        "model": actual_model,
-                        "requested_model": requested_model,
-                        "endpoint_id": actual_endpoint_id,
-                        "endpoint_label": actual_endpoint_label,
-                        "requested_endpoint_id": requested_endpoint_id,
-                        "requested_endpoint_label": requested_endpoint_label,
-                        "tool_events": tool_events,
-                        "round_texts": [*round_texts, terminal_round],
-                        "round_reasonings": [*round_reasonings, round_reasoning.strip()],
-                        "round_timestamps": [*round_timestamps, round_started_at],
-                        "round_models": [*round_models, _round_actual_model],
-                        "round_endpoint_ids": [*round_endpoint_ids, _round_actual_endpoint_id],
-                        "round_endpoint_labels": [*round_endpoint_labels, _round_actual_endpoint_label],
-                        **_usage_bucket_summary(usage_buckets),
-                    }
-                    if round_reasoning.strip():
-                        terminal_metadata["thinking"] = round_reasoning.strip()
-                    if isinstance(actual_endpoint_cost_tracked, bool):
-                        terminal_metadata["endpoint_cost_tracked"] = (
-                            actual_endpoint_cost_tracked
-                        )
-                    yield f'data: {json.dumps({"type": "agent_terminal", "data": terminal_metadata})}\n\n'
+                yield f'data: {json.dumps({"type": "agent_terminal", "data": terminal_metadata})}\n\n'
                 yield chunk
                 # A terminal provider/request failure is not a completed Agent
                 # round.  Stop before empty-response synthesis, metrics,
@@ -6056,6 +6242,13 @@ async def stream_agent_loop(
                         # authorization decision.  Document UI events are built
                         # from the parsed ToolBlock only after successful dispatch.
                         continue
+                    elif (data.get("type") == "budget_exceeded"
+                          and data.get("resource") == "model_requests"
+                          and data.get("_budget_nonce") == _request_budget_nonce):
+                        _request_budget_hit = True
+                        data.pop("_budget_nonce", None)
+                        yield f"data: {json.dumps(data)}\n\n"
+                        break
                     elif data.get("type") == "tool_calls":
                         if _apply_candidate_compaction(candidate_index):
                             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
@@ -6252,7 +6445,10 @@ async def stream_agent_loop(
             _round_first_event_logged,
             _round_first_token_logged,
         )
-        _finalize_round_usage()
+        _finalize_round_usage(include_empty=not _request_budget_hit)
+        if _request_budget_hit:
+            full_response += "\n\n[Agent paused: model request limit reached.]"
+            break
         _normalized_doc_round = (
             _normalize_stream_document_fences(
                 round_response,
@@ -6757,6 +6953,7 @@ async def stream_agent_loop(
                     else:
                         _goal_stall_signature, _goal_stall_count = _goal_signature, 1
                     if _goal_stall_count >= 6:
+                        yield f'data: {json.dumps({"type": "loop_breaker_triggered", "reason": "repeated_premature_stop", "round": round_num, "message": "Goal repeated the same response without a tool action; the current attempt stopped for review."})}\n\n'
                         active_goal = _chat_work_store.update_goal(
                             owner, session_id,
                             "No new safe progress after repeated continuation attempts.",
@@ -6881,13 +7078,53 @@ async def stream_agent_loop(
         tool_result_records = []  # aligned structured provenance for next round
         budget_hit = False
         for i, block in enumerate(tool_blocks):
+            # Do not begin another potentially effectful tool after the
+            # attempt's wall-time budget. Never interrupt one mid-effect.
+            if max_wall_seconds > 0 and time.monotonic() - wall_started >= max_wall_seconds:
+                from src import agent_runs as _budget_runs
+                _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
+                yield f'data: {json.dumps({"type": "budget_exceeded", "resource": "wall_seconds", "limit": max_wall_seconds, "used": max(max_wall_seconds, int(time.monotonic() - wall_started)), "run_id": _budget_run_id or run_security.run_id})}\n\n'
+                budget_hit = True
+                break
             # --- Tool budget check ---
             if max_tool_calls > 0 and total_tool_calls >= max_tool_calls:
-                yield f'data: {json.dumps({"type": "budget_exceeded", "limit": max_tool_calls, "used": total_tool_calls})}\n\n'
+                from src import agent_runs as _budget_runs
+                _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
+                yield f'data: {json.dumps({"type": "budget_exceeded", "resource": "tool_calls", "limit": max_tool_calls, "used": total_tool_calls, "run_id": _budget_run_id or run_security.run_id})}\n\n'
                 budget_hit = True
                 break
 
             total_tool_calls += 1
+            if (
+                exact_approval is not None
+                and _approved_result_injected
+                and tool_result_is_successful(approved_result)
+                and block.tool_type == approved.tool_name
+                and block.content == approved.content
+            ):
+                # Satisfy a provider's repeated native function call from the
+                # already-verified receipt without invoking the effect again or
+                # creating a misleading second tool card in live/replay UI.
+                _duplicate_result = {
+                    **approved_result,
+                    "duplicate_suppressed": True,
+                }
+                _duplicate_text = (
+                    "This exact approved action already executed successfully. "
+                    "Use its earlier result: " + format_tool_result(
+                        f"{block.tool_type}: prior approved result", approved_result,
+                    )
+                )
+                tool_results.append(_duplicate_text)
+                tool_result_texts.append(_duplicate_text)
+                tool_result_records.append({
+                    "tool_name": block.tool_type,
+                    "content": block.content,
+                    "result": _duplicate_result,
+                    "text": _duplicate_text,
+                })
+                yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "approved_action_already_executed", "round": round_num})}\n\n'
+                continue
             # Build a short display string for the frontend tool bubble.
             # Document tools show a brief summary instead of dumping full content.
             is_doc_tool = block.tool_type in ("create_document", "update_document", "edit_document", "suggest_document")
@@ -7027,8 +7264,36 @@ async def stream_agent_loop(
                         block.tool_type,
                     )
             else:
+                _effect_intent = None
+                if session_id:
+                    from src.chat_effect_inbox import inbox as _effect_inbox, needs_effect_intent
+                    if needs_effect_intent(block.tool_type, block.content):
+                        # The committed intent precedes both the visible start
+                        # event and any host/network side effect. A repeated
+                        # call after a lost reply is never silently replayed.
+                        _unknown_effects = _effect_inbox.unknown(owner, session_id)
+                        if _unknown_effects:
+                            yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "An earlier tool outcome is unknown; inspect the effect inbox before continuing."}}})}\n\n'
+                            return
+                        from src import agent_runs as _effect_runs
+                        _effect_run_id = (
+                            _effect_runs.get_run_id(session_id) or run_security.run_id
+                        )
+                        _effect_call_id = f"round-{round_num}-tool-{i}"
+                        try:
+                            _effect_intent = _effect_inbox.record_intent(
+                                owner, session_id, _effect_run_id, _effect_call_id,
+                                block.tool_type, block.content,
+                            )
+                            if not _effect_intent["created"]:
+                                yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "This exact effect intent already exists; it will not be dispatched twice."}}})}\n\n'
+                                return
+                        except Exception:
+                            logger.exception("Unable to persist effect intent before dispatch")
+                            yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "effect_ledger", "message": "Could not durably record the tool intent; action was not started."}}})}\n\n'
+                            return
                 yield (
-                    f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'
+                    f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num, **({"tool_call_id": _effect_call_id} if _effect_intent else {})})}\n\n'
                 )
 
                 # Streaming progress for long-running tools (bash, python).
@@ -7089,6 +7354,25 @@ async def stream_agent_loop(
                             await _tool_task
                         except (asyncio.CancelledError, Exception):
                             pass
+                    if _effect_intent and (not _tool_task.done() or _tool_task.cancelled() or _tool_task.exception()):
+                        _effect_inbox.mark_unknown(owner, session_id, _effect_intent["id"])
+
+                if _effect_intent:
+                    try:
+                        _effect_receipt = _effect_inbox.record_result(
+                            owner, session_id, _effect_intent["id"], result,
+                        )
+                    except Exception:
+                        logger.exception("Unable to settle effect receipt")
+                        try:
+                            _effect_inbox.mark_unknown(owner, session_id, _effect_intent["id"])
+                        except Exception:
+                            logger.exception("Unable to mark effect intent unknown")
+                        yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "The tool effect could not be durably settled; inspect before continuing."}}})}\n\n'
+                        return
+                    if _effect_receipt["status"] == "unknown":
+                        yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "The tool reply was lost; inspect the effect inbox before continuing."}}})}\n\n'
+                        return
 
             run_security.observe_tool_result(block.tool_type, result, block.content)
             _failed_reads.observe(block.tool_type, block.content, result)
@@ -7653,6 +7937,16 @@ async def stream_agent_loop(
                     "text": formatted,
                 }
             )
+            if block.tool_type == "delegate_subagent" and result.get("policy") == "run_child_budget_exhausted":
+                _child_used = result.get("used")
+                _child_limit = result.get("limit")
+                if (type(_child_used) is int and type(_child_limit) is int
+                        and result.get("run_id") == run_security.run_id):
+                    from src import agent_runs as _child_budget_runs
+                    _child_run_id = _child_budget_runs.get_run_id(session_id) if session_id else None
+                    yield f'data: {json.dumps({"type": "budget_exceeded", "resource": "children", "used": _child_used, "limit": _child_limit, "run_id": _child_run_id or run_security.run_id})}\n\n'
+                    budget_hit = True
+                    break
             if (
                 _ody_doc_stream_create_mode
                 and block.tool_type == "create_document"
@@ -7672,6 +7966,18 @@ async def stream_agent_loop(
 
         # If budget was hit, stop the loop
         if budget_hit:
+            if tool_result_records:
+                _append_tool_results(
+                    messages, round_response, converted_calls[:len(tool_result_texts)],
+                    tool_results, tool_result_texts, used_native, round_num,
+                    round_reasoning=round_reasoning,
+                    tool_result_records=tool_result_records,
+                )
+                _checkpoint_messages = _durable_model_checkpoint(messages)
+                _checkpoint_encoded = json.dumps(
+                    _checkpoint_messages, ensure_ascii=False, separators=(",", ":"), default=str,
+                )
+                yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _checkpoint_messages, "ledger_hash": hashlib.sha256(_checkpoint_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions}, ensure_ascii=False)}\n\n'
             break
 
         # ask_user posed a question — stop here and wait for the user's choice.
@@ -7719,6 +8025,27 @@ async def stream_agent_loop(
         )
         yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _checkpoint_messages, "ledger_hash": hashlib.sha256(_checkpoint_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions}, ensure_ascii=False)}\n\n'
 
+        _loop_decision = _evidence_loop.observe([
+            (record["tool_name"], record["content"], record["result"])
+            for record in tool_result_records
+        ])
+        if _loop_decision == "nudge":
+            messages.append({"role": "system", "content": (
+                "Diagnostic guard: recent tool actions returned the same evidence "
+                "again. Do not repeat those actions unchanged. Check the actual "
+                "failure, change approach, or state the blocker. Do not retry an "
+                "effectful action whose outcome is uncertain."
+            )})
+            yield f'data: {json.dumps({"type": "loop_diagnostic_nudge", "round": round_num, "reason": "repeated_action_observation"})}\n\n'
+        elif _loop_decision == "escalate":
+            _force_answer = True
+            messages.append({"role": "system", "content": (
+                "Repeated tool evidence persisted after a diagnostic warning. "
+                "Stop using tools for this turn and state the verified blocker "
+                "and the next safe step. Do not claim completion."
+            )})
+            yield f'data: {json.dumps({"type": "loop_breaker_triggered", "round": round_num, "reason": "repeated_action_observation"})}\n\n'
+
         # Emit agent_step event
         yield (
             f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
@@ -7739,7 +8066,9 @@ async def stream_agent_loop(
     # can show a "Continue" affordance instead of the turn just stopping.
     if _exhausted_rounds:
         logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
-        yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
+        from src import agent_runs as _round_runs
+        _round_run_id = _round_runs.get_run_id(session_id) if session_id else None
+        yield f'data: {json.dumps({"type": "rounds_exhausted", "resource": "model_rounds", "rounds": max_rounds, "used": max_rounds, "limit": max_rounds, "run_id": _round_run_id or run_security.run_id})}\n\n'
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.

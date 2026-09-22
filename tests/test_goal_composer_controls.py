@@ -42,7 +42,9 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert 'if active_goal:' in routes
     assert 'if active_goal and _user:' not in routes
     assert '"context_usage", "context_checkpoint", "compacted"' in routes
-    assert 'f"{internal_api_base()}/api/chat_stream"' in routes
+    controller = (root / "src" / "goal_controller.py").read_text()
+    assert 'dispatch_goal_continuation(' in routes
+    assert 'f"{internal_api_base()}/api/chat_stream"' in controller
     assert 'nonlocal active_goal' in routes
     assert 'active_goal.get("status") == "waiting_user"' in routes
     assert 'chat_work_store.goal_action(\n                        owner, session, "resume"' in routes

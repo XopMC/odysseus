@@ -1,4 +1,5 @@
 import copy
+import asyncio
 import json
 import os
 import tempfile
@@ -8,8 +9,30 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 
+import httpx
+from fastapi import HTTPException
+
 from src.context_policy_store import ContextPolicyStore
 from src.team_store import TeamStore
+
+
+def test_checkpoint_summarizer_error_codes_are_stable_and_redacted():
+    from src.agent_loop import _checkpoint_summarizer_error_code
+
+    assert _checkpoint_summarizer_error_code(
+        HTTPException(429, "private quota response")) == "summarizer_rate_limited"
+    assert _checkpoint_summarizer_error_code(
+        HTTPException(404, "private model name")) == "summarizer_model_unavailable"
+    assert _checkpoint_summarizer_error_code(
+        HTTPException(502, "Model returned reasoning but no answer content")) == "summarizer_no_answer"
+    assert _checkpoint_summarizer_error_code(
+        HTTPException(503, "Cannot reach 192.168.50.4:1234: No route to host")) == "summarizer_transport_unavailable"
+    assert _checkpoint_summarizer_error_code(
+        HTTPException(503, "Provider maintenance")) == "summarizer_provider_error"
+    assert _checkpoint_summarizer_error_code(
+        httpx.ConnectError("private internal host")) == "summarizer_transport_unavailable"
+    assert _checkpoint_summarizer_error_code(
+        httpx.ReadTimeout("private internal host")) == "summarizer_timeout"
 
 
 class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
@@ -23,7 +46,8 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         return self.store.save('owner', overrides=values,
             expected_revisions=self.store.get('owner')['revisions'])
 
-    async def run_agent(self, messages=None, *, window=65536, fallback=False, change_before_dispatch=False, session_id=None):
+    async def run_agent(self, messages=None, *, window=65536, fallback=False, change_before_dispatch=False, session_id=None,
+                        summary_impl=None, utility_route=None, window_error=None):
         from src import agent_loop, tool_execution, team_runtime
         sent, summaries = [], []
         async def summary(*args, **kwargs):
@@ -50,8 +74,13 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(tool_execution, '_current_agent_privileges', return_value={'can_use_agent': True}))
             stack.enter_context(patch('src.settings.get_setting', side_effect=lambda key, default=None: default))
             stack.enter_context(patch('src.host_execution.enabled_for', return_value=False))
-            stack.enter_context(patch('src.model_context.budget_context_for_model', return_value=window))
-            stack.enter_context(patch('src.llm_core.llm_call_async', side_effect=summary))
+            stack.enter_context(patch('src.model_context.budget_context_for_model',
+                                      side_effect=window_error if window_error else None,
+                                      return_value=window))
+            stack.enter_context(patch('src.llm_core.llm_call_async', side_effect=summary_impl or summary))
+            if utility_route is not None:
+                stack.enter_context(patch('src.endpoint_resolver.resolve_endpoint', return_value=utility_route))
+                stack.enter_context(patch('src.endpoint_resolver.resolve_utility_fallback_candidates', return_value=[]))
             chunks = [chunk async for chunk in agent_loop.stream_agent_loop(
                 'http://fixture.invalid/v1', 'fixture-model', messages or [{'role':'user','content':'Reply briefly with your status'}],
                 owner='owner', session_id=session_id, relevant_tools={'read_file'}, context_length=65536,
@@ -106,6 +135,17 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(summaries)
         self.assertIn('context_compaction_failed', chunks)
 
+    async def test_context_window_probe_timeout_fails_closed_with_diagnostic(self):
+        self.save({'output_reserve': 1024})
+        sent, _summaries, chunks = await self.run_agent(window_error=TimeoutError('private endpoint'))
+        events = [json.loads(line[6:]) for line in chunks.splitlines()
+                  if line.startswith('data: {')]
+        failed = [event for event in events if event.get('type') == 'context_compaction_failed']
+        self.assertFalse(sent)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]['detail'], 'context_window_unavailable')
+        self.assertNotIn('private endpoint', chunks)
+
     async def test_large_context_uses_configured_summary_then_reduced_request(self):
         self.save({'trigger_percent': 60, 'target_percent': 45, 'recent_groups': 1,
                    'recent_tokens': 0, 'summary_tokens': 256, 'output_reserve': 1024})
@@ -123,6 +163,92 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Continue verification', str(sent[0]['messages']))
         self.assertLess(len(str(sent[0]['messages'])), len(str(history)))
         self.assertIn('"compacted"', chunks)
+
+    async def test_stalled_utility_summary_leaves_time_for_selected_model(self):
+        self.save({'trigger_percent': 60, 'target_percent': 45,
+                   'recent_groups': 1, 'recent_tokens': 0,
+                   'summary_tokens': 256, 'summary_timeout_seconds': 5,
+                   'output_reserve': 1024})
+        history = [{'role': 'user', 'content': 'Preserve a harmless goal'}] + [
+            {'role': 'assistant', 'content': 'Measured harmless evidence. ' * 1000}
+            for _ in range(10)
+        ] + [{'role': 'user', 'content': 'Continue harmless verification'}]
+        attempted = []
+
+        async def summary(url, *_args, **_kwargs):
+            attempted.append(url)
+            if url == 'http://stalled.invalid/v1':
+                await asyncio.sleep(30)
+            return 'Preserve the harmless goal and measured evidence.'
+
+        sent, _summaries, chunks = await self.run_agent(
+            history, summary_impl=summary,
+            utility_route=('http://stalled.invalid/v1', 'stalled-model', {}),
+        )
+        self.assertIn('http://stalled.invalid/v1', attempted)
+        self.assertIn('http://fixture.invalid/v1', attempted)
+        self.assertEqual(len(sent), 1)
+        self.assertIn('"compacted"', chunks)
+
+    async def test_single_slow_summary_keeps_most_of_its_deadline(self):
+        self.save({'trigger_percent': 60, 'target_percent': 45,
+                   'recent_groups': 1, 'recent_tokens': 0,
+                   'summary_tokens': 256, 'summary_timeout_seconds': 5,
+                   'output_reserve': 1024})
+        history = [{'role': 'user', 'content': 'Preserve a harmless goal'}] + [
+            {'role': 'assistant', 'content': 'Measured harmless evidence. ' * 1000}
+            for _ in range(10)
+        ] + [{'role': 'user', 'content': 'Continue harmless verification'}]
+
+        async def summary(_url, *_args, **_kwargs):
+            await asyncio.sleep(3)
+            return 'Preserve the harmless goal and measured evidence.'
+
+        sent, _summaries, chunks = await self.run_agent(history, summary_impl=summary)
+        self.assertEqual(len(sent), 1)
+        self.assertIn('"compacted"', chunks)
+
+    async def test_summary_failure_emits_safe_diagnostic_code_not_provider_body(self):
+        self.save({'trigger_percent': 60, 'target_percent': 45,
+                   'recent_groups': 1, 'recent_tokens': 0,
+                   'summary_tokens': 256, 'output_reserve': 1024})
+        history = [{'role': 'user', 'content': 'Preserve a harmless goal'}] + [
+            {'role': 'assistant', 'content': 'Measured harmless evidence. ' * 1000}
+            for _ in range(10)
+        ] + [{'role': 'user', 'content': 'Continue harmless verification'}]
+
+        async def failed_summary(*_args, **_kwargs):
+            raise RuntimeError('private provider body token: never echo')
+
+        sent, _summaries, chunks = await self.run_agent(history, summary_impl=failed_summary)
+        events = [json.loads(line[6:]) for line in chunks.splitlines()
+                  if line.startswith('data: {')]
+        failed = [event for event in events if event.get('type') == 'context_compaction_failed']
+        self.assertFalse(sent)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]['detail'], 'summarizer_error')
+        self.assertNotIn('private provider body', chunks)
+
+        async def reasoning_only(*_args, **_kwargs):
+            raise HTTPException(502, 'Model returned reasoning but no answer content')
+
+        sent, _summaries, chunks = await self.run_agent(history, summary_impl=reasoning_only)
+        events = [json.loads(line[6:]) for line in chunks.splitlines()
+                  if line.startswith('data: {')]
+        failed = [event for event in events if event.get('type') == 'context_compaction_failed']
+        self.assertFalse(sent)
+        self.assertEqual(failed[0]['detail'], 'summarizer_no_answer')
+
+        async def unreachable(*_args, **_kwargs):
+            raise HTTPException(503, 'Cannot reach private-host: No route to host')
+
+        sent, _summaries, chunks = await self.run_agent(history, summary_impl=unreachable)
+        events = [json.loads(line[6:]) for line in chunks.splitlines()
+                  if line.startswith('data: {')]
+        failed = [event for event in events if event.get('type') == 'context_compaction_failed']
+        self.assertFalse(sent)
+        self.assertEqual(failed[0]['detail'], 'summarizer_transport_unavailable')
+        self.assertNotIn('private-host', chunks)
 
     async def test_aggressive_target_relaxes_below_trigger_when_pins_do_not_fit(self):
         from src.context_policy import ContextPolicy
@@ -169,6 +295,73 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(shaped, compacted)
         self.assertEqual(summarize.await_count, 1)
+
+    async def test_triggered_noop_compaction_does_not_dispatch_or_retry_forever(self):
+        from src.context_policy import ContextPolicy
+        from src.context_policy_runtime import shape_request
+        messages = [{'role': 'user', 'content': 'evidence ' * 21000}]
+        record = {'effective': ContextPolicy().to_dict(), 'revisions': {'owner': 1}}
+        summarize = AsyncMock(return_value='summary')
+        with patch(
+            'src.context_policy_runtime.compact_working_context',
+            new=AsyncMock(return_value=(messages, 'unchanged')),
+        ) as compact:
+            with self.assertRaisesRegex(ValueError, 'no reduction'):
+                await shape_request(messages, [], record, 65536, summarize)
+        self.assertEqual(compact.await_count, 1)
+        self.assertEqual(summarize.await_count, 0)
+
+    async def test_agent_reports_noop_compaction_without_model_dispatch(self):
+        self.save({'trigger_percent': 75, 'target_percent': 50})
+        history = [{'role': 'user', 'content': 'evidence ' * 21000}]
+        with patch(
+            'src.context_policy_runtime.compact_working_context',
+            new=AsyncMock(return_value=(history, 'unchanged')),
+        ):
+            sent, summaries, chunks = await self.run_agent(history)
+        self.assertFalse(sent)
+        self.assertFalse(summaries)
+        self.assertIn('context_compaction_failed', chunks)
+        self.assertNotIn('"type": "compacted"', chunks)
+
+    async def test_economic_noop_at_safety_limit_is_not_retried(self):
+        from dataclasses import replace
+        from src.context_compaction_economics import decide
+        from src import agent_loop
+        decision = replace(decide(
+            at_boundary=True, used_tokens=60000, input_budget=65536,
+            completed_boundaries=4, tokens_since_boundary=20000,
+            cache_write_read_ratio=1,
+        ), compact=True, target_tokens=10000)
+        history = [{'role': 'user', 'content': 'evidence ' * 26000}]
+        with patch.object(agent_loop, '_efficiency_enabled', side_effect=lambda key: key == 'online_context_compact'), \
+             patch('src.context_compaction_economics.decide', return_value=decision), \
+             patch('src.agent_context.working_context_compactable', return_value=True), \
+             patch.object(agent_loop, 'compact_working_context', new=AsyncMock(return_value=(history, 'unchanged'))) as compact:
+            sent, _, chunks = await self.run_agent(history)
+        self.assertEqual(compact.await_count, 1)
+        self.assertFalse(sent)
+        self.assertIn('context_compaction_failed', chunks)
+
+    async def test_economic_noop_below_safety_limit_defers_without_failure(self):
+        from dataclasses import replace
+        from src.context_compaction_economics import decide
+        from src import agent_loop
+        decision = replace(decide(
+            at_boundary=True, used_tokens=12000, input_budget=65536,
+            completed_boundaries=4, tokens_since_boundary=20000,
+            cache_write_read_ratio=1,
+        ), compact=True, target_tokens=2000)
+        history = [{'role': 'user', 'content': 'evidence ' * 5000}]
+        with patch.object(agent_loop, '_efficiency_enabled', side_effect=lambda key: key == 'online_context_compact'), \
+             patch('src.context_compaction_economics.decide', return_value=decision), \
+             patch('src.agent_context.working_context_compactable', return_value=True), \
+             patch.object(agent_loop, 'compact_working_context', new=AsyncMock(return_value=(history, 'unchanged'))) as compact:
+            sent, _, chunks = await self.run_agent(history)
+        self.assertEqual(compact.await_count, 1)
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn('context_compaction_failed', chunks)
+        self.assertIn('native_no_reduction', chunks)
 
     def test_explicit_policy_skips_the_parallel_economic_compactor(self):
         from pathlib import Path

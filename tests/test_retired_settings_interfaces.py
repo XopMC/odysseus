@@ -110,6 +110,43 @@ async def test_subagent_model_limits_settings_validate_and_round_trip(monkeypatc
         assert getattr(caught.value, "status_code", None) == 400
 
 
+@pytest.mark.asyncio
+async def test_goal_round_budget_settings_validate_and_round_trip(monkeypatch):
+    store = dict(settings_mod.DEFAULT_SETTINGS)
+    monkeypatch.setattr(auth_routes, "migrate_from_settings", lambda: None)
+    monkeypatch.setattr(auth_routes, "_load_settings", lambda: dict(store))
+
+    def save_settings(updated):
+        store.clear(); store.update(updated)
+
+    monkeypatch.setattr(auth_routes, "_save_settings", save_settings)
+    router = auth_routes.setup_auth_routes(_AuthManager())
+    set_settings = _route(router, "/api/auth/settings", "POST")
+    response = await set_settings(_Request({"goal_max_rounds": 4}, admin=True))
+    assert response["goal_max_rounds"] == store["goal_max_rounds"] == 4
+    response = await set_settings(_Request({"goal_max_total_tokens": 1000}, admin=True))
+    assert response["goal_max_total_tokens"] == store["goal_max_total_tokens"] == 1000
+    response = await set_settings(_Request({"goal_max_model_requests": 2}, admin=True))
+    assert response["goal_max_model_requests"] == store["goal_max_model_requests"] == 2
+    response = await set_settings(_Request({"goal_max_wall_seconds": 30}, admin=True))
+    assert response["goal_max_wall_seconds"] == store["goal_max_wall_seconds"] == 30
+    response = await set_settings(_Request({"agent_max_children_per_run": 5}, admin=True))
+    assert response["agent_max_children_per_run"] == store["agent_max_children_per_run"] == 5
+    assert store["agent_max_rounds"] == settings_mod.DEFAULT_SETTINGS["agent_max_rounds"]
+    with pytest.raises(Exception) as caught:
+        await set_settings(_Request({"goal_max_rounds": "not-a-number"}, admin=True))
+    assert getattr(caught.value, "status_code", None) == 400
+    with pytest.raises(Exception) as caught:
+        await set_settings(_Request({"goal_max_total_tokens": "not-a-number"}, admin=True))
+    assert getattr(caught.value, "status_code", None) == 400
+    with pytest.raises(Exception) as caught:
+        await set_settings(_Request({"goal_max_model_requests": "not-a-number"}, admin=True))
+    assert getattr(caught.value, "status_code", None) == 400
+    with pytest.raises(Exception) as caught:
+        await set_settings(_Request({"goal_max_wall_seconds": "not-a-number"}, admin=True))
+    assert getattr(caught.value, "status_code", None) == 400
+
+
 def test_manage_settings_tombstones_legacy_fallback_key(monkeypatch):
     store = {
         **settings_mod.DEFAULT_SETTINGS,

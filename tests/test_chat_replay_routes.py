@@ -1,4 +1,6 @@
 import pytest
+import io
+import zipfile
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -9,18 +11,21 @@ from routes import session_routes
 from routes.chat_replay_routes import setup_chat_replay_routes
 from src.chat_replay_log import ReplayLog
 from src import agent_runs
+from src import incident_export
 
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine, tables=[DbSession.__table__])
+    from core.database import ChatRunState, ChatToolIntent
+    Base.metadata.create_all(engine, tables=[DbSession.__table__, ChatRunState.__table__, ChatToolIntent.__table__])
     factory = sessionmaker(bind=engine)
     with factory() as db:
         db.add(DbSession(id='chat-a', name='A', model='local', endpoint_url='http://local/v1', owner='alice'))
         db.add(DbSession(id='chat-b', name='B', model='local', endpoint_url='http://local/v1', owner='bob'))
         db.commit()
     monkeypatch.setattr(session_routes, 'SessionLocal', factory)
+    monkeypatch.setattr(incident_export, 'SessionLocal', factory)
     monkeypatch.setattr(agent_runs, 'replay_root', lambda: tmp_path)
     monkeypatch.setenv('ODYSSEUS_DURABLE_CHAT_REPLAY', '1')
     log = ReplayLog(tmp_path, 'a' * 32, 'chat-a', create=True)
@@ -59,3 +64,14 @@ def test_off_flag_and_cursor_bounds(client, monkeypatch):
     assert client.get('/api/chat/replay/chat-a?run_id=../secret').status_code == 400
     monkeypatch.delenv('ODYSSEUS_DURABLE_CHAT_REPLAY')
     assert client.get(path).status_code == 404
+
+
+def test_incident_export_is_owner_gated_and_content_free(client):
+    allowed = client.get('/api/chat/incident/chat-a')
+    assert allowed.status_code == 200
+    assert allowed.headers['cache-control'] == 'private, no-store'
+    with zipfile.ZipFile(io.BytesIO(allowed.content)) as archive:
+        assert 'manifest.json' in archive.namelist()
+        assert b'private result' not in archive.read('runs.json')
+    forbidden = client.get('/api/chat/incident/chat-a', headers={'X-Test-User': 'bob'})
+    assert forbidden.status_code == 404

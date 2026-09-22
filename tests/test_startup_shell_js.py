@@ -123,6 +123,53 @@ cases.reveal_is_idempotent = async () => {
   return { waveStops: w.waveStops, snapshot: loaderSnapshot(loader) };
 };
 
+cases.session_hash_shows_loading_without_false_new_chat = async () => {
+  const w = makeWorld();
+  w.addElement('app-loader');
+  const status = w.addElement('session-restore-loading');
+  status.hidden = true;
+  const busy = w.addElement('chat-container');
+  const classes = new Set();
+  globalThis.document.body = {classList:{add:value=>classes.add(value),remove:value=>classes.delete(value),contains:value=>classes.has(value)}};
+  globalThis.window.location = {hash:'#d0cb45f4-e586-4662-84b9-a8ebc37829e6'};
+  const shell = await loadModule();
+  shell.revealApplicationShellAfterPaint();
+  const during = {pending:classes.has('session-target-hydrating'),statusVisible:!status.hidden,busy:busy.attrs['aria-busy']};
+  let complete;
+  const hydrated = shell.settleSessionHydration(()=>new Promise(resolve=>{complete=resolve}));
+  complete(true);
+  await hydrated;
+  return {during,after:{pending:classes.has('session-target-hydrating'),statusVisible:!status.hidden,busy:busy.attrs['aria-busy']}};
+};
+
+cases.entity_hash_keeps_normal_welcome = async () => {
+  const w = makeWorld();
+  w.addElement('app-loader');
+  const status = w.addElement('session-restore-loading');
+  status.hidden = true;
+  const classes = new Set();
+  globalThis.document.body = {classList:{add:value=>classes.add(value),remove:value=>classes.delete(value),contains:value=>classes.has(value)}};
+  globalThis.window.location = {hash:'#note-123'};
+  const shell = await loadModule();
+  shell.revealApplicationShellAfterPaint();
+  return {pending:classes.has('session-target-hydrating'),statusVisible:!status.hidden};
+};
+
+cases.session_hash_failure_clears_busy_state = async () => {
+  const w = makeWorld();
+  w.addElement('app-loader');
+  const status = w.addElement('session-restore-loading');
+  status.hidden = true;
+  const busy = w.addElement('chat-container');
+  const classes = new Set();
+  globalThis.document.body = {classList:{add:value=>classes.add(value),remove:value=>classes.delete(value),contains:value=>classes.has(value)}};
+  globalThis.window.location = {hash:'#d0cb45f4-e586-4662-84b9-a8ebc37829e6'};
+  const shell = await loadModule();
+  shell.revealApplicationShellAfterPaint();
+  await shell.settleSessionHydration(()=>Promise.resolve(false));
+  return {pending:classes.has('session-target-hydrating'),statusVisible:!status.hidden,busy:busy.attrs['aria-busy']};
+};
+
 cases.remove_retires_the_loader_node = async () => {
   const w = makeWorld();
   const loader = w.addElement('app-loader');
@@ -307,6 +354,32 @@ def test_reveal_is_idempotent(results):
     r = results["reveal_is_idempotent"]
     assert r["waveStops"] == 1, "reveal ran its side effects more than once"
     assert r["snapshot"]["revealed"] is True
+
+
+def test_session_hash_has_loading_state_until_authoritative_hydration(results):
+    assert results["session_hash_shows_loading_without_false_new_chat"] == {
+        "during": {"pending": True, "statusVisible": True, "busy": "true"},
+        "after": {"pending": False, "statusVisible": False, "busy": "false"},
+    }
+    assert results["entity_hash_keeps_normal_welcome"] == {
+        "pending": False, "statusVisible": False,
+    }
+    assert results["session_hash_failure_clears_busy_state"] == {
+        "pending": False, "statusVisible": False, "busy": "false",
+    }
+
+
+def test_session_restore_markup_and_asset_versions_are_present():
+    html = (_REPO / "static/index.html").read_text(encoding="utf-8")
+    css = (_REPO / "static/style.css").read_text(encoding="utf-8")
+    sw = (_REPO / "static/sw.js").read_text(encoding="utf-8")
+    assert 'id="session-restore-loading"' in html
+    assert 'role="status" aria-live="polite" hidden>Loading chat…' in html
+    assert 'body.session-target-hydrating #welcome-screen { display:none; }' in css
+    assert 'body.session-target-hydrating #chat-context-pill { visibility:hidden; }' in css
+    assert "/static/style.css?v=20260922batch1" in html
+    assert "/static/style.css?v=20260922batch1" in sw
+    assert "/static/js/startupShell.js?v=20260922restore1" in sw
 
 
 def test_loader_node_is_retired_after_the_fade(results):

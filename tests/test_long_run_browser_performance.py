@@ -206,7 +206,8 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = "20260921livefix29"
+    expected = {"chat": "20260922batch1", "sessions": "20260922approval1",
+                "models": "20260922approval1", "chatRenderer": "20260922batch1"}
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"
@@ -223,14 +224,15 @@ def test_stateful_chat_modules_have_one_browser_identity():
 
     for name, refs in references.items():
         assert refs, f"no references found for {name}.js"
-        assert all(version == expected for _, version in refs), refs
+        assert all(version == expected[name] for _, version in refs), refs
 
     # The outer entrypoint must move with stateful module revisions. Otherwise
     # Safari can reuse an older app.js which imports a second, older sessions.js
     # identity even though index.html also preloads the new one.
     index = (ROOT / "static/index.html").read_text(encoding="utf-8")
     worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
-    for asset in ("app.js", "js/init.js"):
-        versioned = f"/{'static/'}{asset}?v={expected}"
-        assert versioned in index
-        assert versioned in worker
+    init_url = f"/static/js/init.js?v={expected['sessions']}"
+    assert init_url in index and init_url in worker
+    app_versions = set(re.findall(r"/static/app\.js\?v=([A-Za-z0-9_-]+)", index))
+    assert len(app_versions) == 1, "preload and script must use the same app.js URL"
+    assert f"/static/app.js?v={app_versions.pop()}" in worker

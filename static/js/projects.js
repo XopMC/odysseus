@@ -153,6 +153,12 @@ function render() {
 
 async function refresh() {
   try {
+    const capability = await request(`${api}/api/team/engineering/capabilities`);
+    if (!capability.enabled || !capability.features?.projects) {
+      projects = [];
+      render();
+      return;
+    }
     const data = await request(`${api}/api/projects?limit=200`);
     projects = data.projects || [];
     render();

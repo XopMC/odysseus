@@ -87,7 +87,15 @@ export function createTimelineReducer() {
     };
   }
 
-  return { apply, snapshot, state };
+  function thinkingForSegment(segmentId) {
+    if (!segmentId) return '';
+    for (let index = state.segments.length - 1; index >= 0; index--) {
+      if (state.segments[index].id === segmentId) return state.segments[index].thinking;
+    }
+    return '';
+  }
+
+  return { apply, snapshot, thinkingForSegment, state };
 }
 
 export default { createTimelineReducer };

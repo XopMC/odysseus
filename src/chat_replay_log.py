@@ -71,12 +71,11 @@ class ReplayLog:
         if meta.get('session_hash') != self.session_hash:
             raise FileNotFoundError('Replay not found')
         self.metadata = meta
-        # Keep an O(1) running total for append-time quota checks.  The old
-        # implementation walked every artifact on every SSE event, which made
-        # long runs progressively slower as the replay directory grew.
-        self._total_bytes = sum(
-            p.stat().st_size for p in self.root.iterdir() if p.is_file()
-        )
+        # Replay readers must not enumerate the entire artifact directory.
+        # Only a writer needs the global quota baseline; cache it after the
+        # first append and increment it thereafter. A new writer process
+        # recalculates once, including data written by the previous process.
+        self._total_bytes = None
 
     def path(self, suffix):
         return self.base.with_suffix(suffix)
@@ -118,6 +117,10 @@ class ReplayLog:
         offset = self.path('.events').stat().st_size
         if offset + len(raw) + 8 > MAX_RUN_BYTES:
             raise ReplayLimitError('Replay run exceeds storage limit')
+        if self._total_bytes is None:
+            self._total_bytes = sum(
+                p.stat().st_size for p in self.root.iterdir() if p.is_file()
+            )
         # Enforce a global ceiling including abandoned/crashed artifacts. These
         # are not silently discarded; an operator can inspect them first.
         if self._total_bytes + len(raw) + 16 > MAX_TOTAL_BYTES:

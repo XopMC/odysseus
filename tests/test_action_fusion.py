@@ -7,7 +7,7 @@ import pytest
 from src.tool_capabilities import ToolEffect, capabilities_for_action
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 from src.tool_schemas import function_call_to_tool_block
-from src.action_fusion import remote_fingerprint_command, remote_fenced_verify_command
+from src.action_fusion import mutation_paths, remote_fingerprint_command, remote_fenced_verify_command
 import subprocess
 
 
@@ -116,6 +116,30 @@ async def test_ordinary_write_cannot_interleave_before_fused_verification(tmp_pa
     first, second = await asyncio.gather(
         execute_tool_block(fused, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
         execute_tool_block(ordinary, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
+    )
+    assert first[1]["exit_code"] == 0
+    assert second[1]["exit_code"] == 0
+    assert path.read_text() == "second"
+
+
+def test_legacy_mutation_payloads_use_the_same_path_keys(tmp_path):
+    path = str(tmp_path / "sample.txt")
+    assert mutation_paths("write_file", f"{path}\nnew bytes") == [path]
+    patch = f"*** Begin Patch\n*** Update File: {path}\n@@\n-old\n+new\n*** End Patch"
+    assert mutation_paths("apply_patch", patch) == [path]
+    assert mutation_paths("write_file", '{"unusual":"path"}\nbody') == ['{"unusual":"path"}']
+
+
+@pytest.mark.asyncio
+async def test_legacy_write_cannot_interleave_before_fused_verification(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.harness_efficiency.get_setting", lambda *a: "performance")
+    monkeypatch.setattr("src.tool_execution._owner_is_admin", lambda owner: True)
+    path = tmp_path / "sample.txt"
+    fused = _write(path, "first", "sleep 0.05; grep -qx first sample.txt")
+    legacy = SimpleNamespace(tool_type="write_file", content=f"{path}\nsecond")
+    first, second = await asyncio.gather(
+        execute_tool_block(fused, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
+        execute_tool_block(legacy, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
     )
     assert first[1]["exit_code"] == 0
     assert second[1]["exit_code"] == 0

@@ -41,6 +41,14 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, fallbackReasoning 
   const header = section?.querySelector?.('.thinking-header');
   const inner = section?.querySelector?.('.thinking-content-inner');
   if (!header || !inner) return;
+  let stats = section.querySelector('.thinking-stats');
+  if (!stats) {
+    stats = document.createElement('span');
+    stats.className = 'thinking-stats';
+    stats.style.cssText = 'font-size:11px;opacity:.55;font-variant-numeric:tabular-nums;margin-left:auto;white-space:nowrap';
+    const controls = header.lastElementChild;
+    controls?.insertBefore(stats, controls.querySelector('.thinking-toggle'));
+  }
   const fallback = String(fallbackReasoning || '').trim();
   inner.textContent = t('Thinking saved — open to load');
   section.dataset.lazyThinking = 'true';
@@ -58,12 +66,12 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, fallbackReasoning 
       const preserved = String(data.thinking || '').trim() || fallback;
       if (!preserved) throw new Error('thinking unavailable');
       inner.innerHTML = markdownModule.mdToHtml(preserved);
-      const stats = section.querySelector('.thinking-stats');
       if (stats) stats.textContent = `${Number(data.duration || 0).toFixed(1)}s · ${Number(data.token_count || 0)} tok`;
       section.dataset.loaded = 'true';
     } catch (_) {
       if (fallback) {
         inner.innerHTML = markdownModule.mdToHtml(fallback);
+        if (stats) stats.textContent = `≈${Math.max(1, Math.ceil(fallback.length / 4))} tok`;
         section.dataset.loaded = 'true';
       } else {
         inner.textContent = t('Preserved thinking is unavailable.');
@@ -1528,7 +1536,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260921livefix29').then(mod => {
+    import('./sessions.js?v=20260922approval1').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -2793,6 +2801,11 @@ export function addMessage(role, content, modelName, metadata) {
 
       const toolsByRound = {};
       for (const ev of toolEvents) {
+        // The proposal is not a completed tool call. Once an approval is
+        // accepted, the resumed run has its own real tool event; rendering
+        // both as "done" fabricates a duplicate execution on reload.
+        if (ev?.ask_user?.kind === 'tool_approval'
+            && ['approve', 'approve_task'].includes(ev.ask_user.resolved)) continue;
         const r = ev.round ?? 1;
         if (!toolsByRound[r]) toolsByRound[r] = [];
         toolsByRound[r].push(ev);
@@ -2916,7 +2929,8 @@ export function addMessage(role, content, modelName, metadata) {
           }
           for (const ev of roundTools) {
             if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
-            const ok = (ev.exit_code === 0 || ev.exit_code == null);
+            const ok = ev.ask_user?.resolved === 'deny'
+              ? false : (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
               outHtml = _historyToolOutputMarkup(ev);
@@ -3152,18 +3166,21 @@ export function addMessage(role, content, modelName, metadata) {
     const storedThinking = role === 'assistant'
       ? String(metadata?.thinking || historyRoundReasonings(metadata, 1).filter(Boolean).join('\n\n') || '')
       : '';
-    if (role === 'assistant' && storedThinking) {
+    if (role === 'assistant' && storedThinking && canLazyHistoryThinking(metadata)) {
+      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
+      bindLazyHistoryThinking(b, metadata, 1, storedThinking);
+    } else if (role === 'assistant' && storedThinking) {
       const thinkTime = metadata.thinking_time || null;
       const thinkHtml = markdownModule.processWithThinking(
         '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + storedThinking + '</think>\n\n' + text,
         { thinkingKey: `${metadata?._db_id || metadata?.timeline_v2?.run_id || metadata?.timestamp || 'history'}:single` },
       );
       b.innerHTML = sourcesPrefix + thinkHtml + findingsSuffix;
-	    } else {
-	      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
-	    }
-	    bindThinkingLabels(b);
-	    b.dataset.raw = text;
+    } else {
+      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
+    }
+    bindThinkingLabels(b);
+    b.dataset.raw = text;
 
     // The vision/OCR caption is stripped from the displayed text above (so the
     // bubble doesn't show the raw model output) but no longer rendered as an

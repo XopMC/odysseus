@@ -2440,6 +2440,11 @@ def test_agent_terminal_first_round_error_has_no_success_completion(monkeypatch,
 
     assert calls == 1
     assert any(chunk.startswith("event: error") for chunk in chunks)
+    terminal = json.loads(next(
+        chunk for chunk in chunks if '"type": "agent_terminal"' in chunk
+    )[6:])["data"]
+    assert terminal["failed"] is True
+    assert terminal["failure"]["status"] == status
     assert not any('"type": "metrics"' in chunk for chunk in chunks), chunks
     assert "data: [DONE]\n\n" not in chunks
     assert not any("empty response" in chunk.lower() for chunk in chunks)
@@ -2742,9 +2747,12 @@ def test_direct_low_signal_configuration_error_surfaces_without_fake_success(mon
         _is_teacher_run=True,
     ))
 
-    assert len(chunks) == 1
-    assert chunks[0].startswith("event: error")
-    payload = json.loads(chunks[0].split("data: ", 1)[1])
+    assert len(chunks) == 2
+    terminal = json.loads(chunks[0][6:])["data"]
+    assert terminal["failed"] is True
+    assert terminal["failure"]["message"] == "Model request failed"
+    assert chunks[1].startswith("event: error")
+    payload = json.loads(chunks[1].split("data: ", 1)[1])
     assert payload == {
         "error": "Model request failed",
         "status": 500,
@@ -2784,8 +2792,11 @@ def test_direct_low_signal_empty_completion_surfaces_without_fake_success(monkey
         _is_teacher_run=True,
     ))
 
-    assert len(chunks) == 1
-    payload = json.loads(chunks[0].split("data: ", 1)[1])
+    assert len(chunks) == 2
+    terminal = json.loads(chunks[0][6:])["data"]
+    assert terminal["failed"] is True
+    assert terminal["failure"]["message"] == "Model returned an empty response"
+    payload = json.loads(chunks[1].split("data: ", 1)[1])
     assert payload["error"] == "Model returned an empty response"
     assert payload["fallback_eligible"] is False
     assert not any('"delta": "Hey."' in chunk for chunk in chunks)
@@ -3277,6 +3288,127 @@ def test_agent_builds_backup_prompt_and_tool_transport_before_attempt(monkeypatc
     assert "route prompt for backup-model" in backup_contents
     assert "route prompt for selected-model" not in backup_contents
     assert any('"delta": "backup answer"' in chunk for chunk in chunks)
+
+
+def test_workspace_route_keeps_explicit_read_only_file_tools(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
+    monkeypatch.setattr(agent_loop, "_looks_like_workspace_coding_request", lambda query: True)
+    monkeypatch.setattr(agent_loop, "_agent_route_tool_mode",
+                        lambda url, model, owner=None, headers=None: (True, False, False))
+    monkeypatch.setattr(agent_loop, "_build_system_prompt",
+                        lambda messages, model, *args, **kwargs: (list(messages), []))
+
+    async def fake_stream(candidates, messages, **kwargs):
+        request = await kwargs["candidate_request_factory"](0, *candidates[0])
+        seen.extend(schema["function"]["name"] for schema in request["kwargs"]["tools"])
+        yield 'data: {"delta": "done"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Call list_tree and file_outline."}],
+        relevant_tools={"list_tree", "file_outline", "read_tool_artifact"},
+        workspace=str(tmp_path), context_length=131072,
+        max_rounds=1, _is_teacher_run=True,
+    ))
+    assert {"list_tree", "file_outline", "read_tool_artifact"} <= set(seen)
+
+
+@pytest.mark.parametrize(('name', 'query'), [
+    ('run_tests', 'Call run_tests with the npm_test profile for this project.'),
+    ('inspect_process', 'Call inspect_process for PID 1234.'),
+    ('inspect_port', 'Call inspect_port for PID 1234 and port 5130.'),
+    ('tail_log', 'Call tail_log for the registered host process log.'),
+    ('http_probe', 'Call http_probe for a registered endpoint.'),
+    ('search_artifacts', 'Call search_artifacts for this run output.'),
+    ('compare_files', 'Call compare_files for two workspace snapshots.'),
+    ('verify_hashes', 'Call verify_hashes on the workspace file.'),
+    ('inspect_toolchain', 'Call inspect_toolchain to check installed tools.'),
+])
+def test_explicit_specialized_tool_survives_unavailable_index_and_workspace_terminus(
+    monkeypatch, tmp_path, name, query,
+):
+    from src import tool_index
+    seen = []
+    monkeypatch.setattr(tool_index, "get_tool_index", lambda: None)
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
+    monkeypatch.setattr(agent_loop, "_agent_route_tool_mode",
+                        lambda url, model, owner=None, headers=None: (True, False, False))
+    monkeypatch.setattr(agent_loop, "_build_system_prompt",
+                        lambda messages, model, *args, **kwargs: (list(messages), []))
+
+    async def fake_stream(candidates, messages, **kwargs):
+        request = await kwargs["candidate_request_factory"](0, *candidates[0])
+        seen.extend(schema["function"]["name"] for schema in request["kwargs"]["tools"])
+        yield 'data: {"delta": "done"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": query}],
+        workspace=str(tmp_path), context_length=131072,
+        max_rounds=1, _is_teacher_run=True,
+    ))
+    assert name in seen
+    assert not ({"run_tests", "run_lint", "inspect_process", "inspect_port", "tail_log", "http_probe", "inspect_toolchain", "search_artifacts", "compare_files", "verify_hashes"} - {name}) & set(seen)
+
+
+def test_approved_exact_action_cannot_execute_twice_when_model_repeats(monkeypatch, tmp_path):
+    from src.tool_approvals import ToolApprovalStore
+    from src.tool_capabilities import capabilities_for_action
+    content = json.dumps({"path": str(tmp_path), "profile": "npm_test"})
+    store = ToolApprovalStore()
+    pending = store.create(
+        owner=None, session_id=None, origin_run_id="prior-run",
+        tool_name="run_tests", content=content, workspace=str(tmp_path),
+        external_untrusted_context_seen=False,
+        capabilities=capabilities_for_action("run_tests", content),
+    )
+    approval = store.consume(pending.approval_id, decision="approve_task",
+                             owner=None, session_id=None)
+    executions = []
+    rounds = 0
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
+    monkeypatch.setattr(agent_loop, "_agent_route_tool_mode", lambda *args, **kwargs: (True, False, False))
+    monkeypatch.setattr(agent_loop, "_build_system_prompt",
+                        lambda messages, model, *args, **kwargs: (list(messages), []))
+
+    async def fake_execute(block, *args, **kwargs):
+        executions.append((block.tool_type, block.content))
+        return block.tool_type, {"output": "fixture passed", "exit_code": 0}
+
+    async def fake_stream(candidates, messages, **kwargs):
+        nonlocal rounds
+        rounds += 1
+        if rounds == 1:
+            yield f'data: {json.dumps({"type": "tool_calls", "calls": [{"name": "run_tests", "arguments": content}]})}\n\n'
+        else:
+            yield 'data: {"delta": "The first result passed."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Call run_tests once."}],
+        relevant_tools={"run_tests"}, workspace=str(tmp_path), context_length=131072,
+        exact_approval=approval, max_rounds=2, _is_teacher_run=True,
+    ))
+    assert executions == [("run_tests", content)]
+    assert any('"reason": "approved_action_already_executed"' in chunk for chunk in chunks)
+    assert sum('"type": "tool_output"' in chunk for chunk in chunks) == 1
 
 
 @pytest.mark.parametrize(

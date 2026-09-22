@@ -23,18 +23,25 @@ def mutation_paths(tool: str, content: str) -> list[str]:
     """Extract every file target from an ordinary or fused mutation."""
     if tool not in FUSIBLE_TOOLS:
         return []
+    raw = str(content or "")
     try:
-        args = json.loads(str(content or "{}"))
+        args = json.loads(raw)
     except (TypeError, ValueError):
-        return []
-    if not isinstance(args, dict):
-        return []
+        args = None
     if tool == "apply_patch":
-        patch = str(args.get("patch_text") or args.get("patchText") or args.get("patch") or "")
+        patch = (
+            str(args.get("patch_text") or args.get("patchText") or args.get("patch") or "")
+            if isinstance(args, dict) else raw
+        )
         return [path.strip() for path in re.findall(
             r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.MULTILINE,
         ) if path.strip()]
-    path = str(args.get("path") or "").strip()
+    if tool == "write_file" and not (isinstance(args, dict) and "path" in args):
+        # Native calls without a fused verify use the legacy path\nbody form.
+        # The executor accepts it, so it must acquire the same path lock.
+        path = raw.split("\n", 1)[0].strip()
+    else:
+        path = str(args.get("path", "")).strip() if isinstance(args, dict) else ""
     return [path] if path else []
 
 

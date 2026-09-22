@@ -114,6 +114,40 @@ def _login_endpoint(auth_manager):
     raise AssertionError("login route not found")
 
 
+def _csrf_endpoint(auth_manager):
+    sys.modules.pop("routes.auth_routes", None)
+    _real_core_package()
+    from routes.auth_routes import setup_auth_routes
+
+    router = setup_auth_routes(auth_manager)
+    for route in router.routes:
+        if getattr(route, "path", None) == "/api/auth/csrf":
+            return route.endpoint
+    raise AssertionError("csrf route not found")
+
+
+def test_csrf_endpoint_is_noop_only_with_auth_explicitly_disabled(monkeypatch):
+    auth = MagicMock()
+    auth.get_username_for_token.return_value = None
+    endpoint = _csrf_endpoint(auth)
+    request = SimpleNamespace(
+        cookies={}, url=SimpleNamespace(scheme="http"), headers={},
+    )
+    response = MagicMock()
+
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    assert asyncio.run(endpoint(request=request, response=response)) == {
+        "csrf_token": "", "scheme": "http",
+    }
+    response.set_cookie.assert_not_called()
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint(request=request, response=response))
+    assert exc.value.status_code == 401
+    response.set_cookie.assert_not_called()
+
+
 def test_login_route_does_not_set_cookie_when_trusted_session_rejects_stale_user(monkeypatch):
     auth = MagicMock()
     auth.verify_password.return_value = True
