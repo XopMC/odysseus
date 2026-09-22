@@ -379,6 +379,46 @@ async def test_chat_stream_denial_returns_control_resolution(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_denied_approval_dispatches_the_resumed_goal_instead_of_stranding_it(monkeypatch):
+    from src.tool_capabilities import capabilities_for_action
+    import src.goal_controller as goal_controller
+
+    captured = {}
+    endpoint = _chat_stream_endpoint(monkeypatch, "agent", captured)
+    pending = chat_routes.tool_approval_store.create(
+        owner="alice", session_id="session-1", origin_run_id="run-1",
+        tool_name="python", content="print(2 + 2)", workspace=None,
+        external_untrusted_context_seen=False,
+        capabilities=capabilities_for_action("python", "print(2 + 2)"),
+    )
+    goal = {"id": "goal-1", "status": "waiting_user", "revision": 7, "attempt": 3}
+    monkeypatch.setattr(chat_routes.chat_work_store, "get", lambda owner, session: {"goal": goal})
+    monkeypatch.setattr(chat_routes.chat_work_store, "goal_action", lambda owner, session, action, revision: {
+        **goal, "status": "active", "revision": revision + 1,
+    })
+    monkeypatch.setattr(chat_routes.chat_work_store, "add_goal_guidance", lambda owner, session, text:
+                        captured.setdefault("guidance", []).append(text))
+    monkeypatch.setattr(chat_routes, "_mark_tool_approval_resolved", lambda *args: True)
+
+    async def dispatch(owner, session, **kwargs):
+        captured["dispatch"] = (owner, session, kwargs)
+        return True
+
+    monkeypatch.setattr(goal_controller, "dispatch_goal_continuation", dispatch)
+    request = _RouteRequest("agent")
+    request._form.update({"tool_approval_id": pending.approval_id, "tool_approval_decision": "deny"})
+    response = await endpoint(request)
+    chunks = [chunk async for chunk in response.body_iterator]
+    assert any('"goal_update"' in chunk for chunk in chunks)
+    assert captured["dispatch"] == ("alice", "session-1", {
+        "reason": "tool_approval_denied", "expected_goal_id": "goal-1", "expected_attempt": 3,
+    })
+    assert len(captured["guidance"]) == 1
+    assert "Do not retry" in captured["guidance"][0]
+    assert "agent" not in captured
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_normal_reply_retires_pending_action_but_keeps_taint(
     monkeypatch,
 ):

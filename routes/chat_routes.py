@@ -1296,6 +1296,27 @@ def setup_chat_routes(
                     # this chat has no Goal.  A concurrent Pause/Cancel wins.
                     resumed_goal = None
                 if decision == "deny":
+                    if resumed_goal and resumed_goal.get("status") == "active":
+                        # Denial resolves the approval card and resumes the
+                        # durable Goal, but this route returns before creating
+                        # an ordinary chat run. Without a server dispatch the
+                        # Goal remains active with no lease forever. Record
+                        # the denial as bounded guidance so the next attempt
+                        # cannot mistake it for permission to retry.
+                        try:
+                            chat_work_store.add_goal_guidance(
+                                owner, session,
+                                "The pending tool action was denied. Do not retry that exact action; "
+                                "continue with allowed alternatives or ask the user for a different choice.",
+                            )
+                        except (WorkNotFound, WorkConflict, OperationalError):
+                            pass
+                        from src.goal_controller import dispatch_goal_continuation
+                        await dispatch_goal_continuation(
+                            owner, session, reason="tool_approval_denied",
+                            expected_goal_id=resumed_goal.get("id"),
+                            expected_attempt=resumed_goal.get("attempt"),
+                        )
                     return StreamingResponse(
                         _tool_approval_resolution_stream(decision, resumed_goal),
                         media_type="text/event-stream",

@@ -10,6 +10,22 @@
 Каждый чекбокс ниже остаётся открытым до проверки всех частей требования на
 реальном runtime. Локальные тесты сами по себе не закрывают пункт.
 
+- 2026-09-23 04:46–04:49 +05: isolated Jetson candidate `031ab98`, safe chat
+  `9dc6295f-fe51-4af9-a275-4a8334107d99`. Goal создала draft Plan
+  `0/2` и вызвала `ask_user` уже в попытке 1; второй клиент видел тот же
+  waiting_user/7.5%, ответ `A` оставил ту же Goal active без ложной
+  UI-плашки новой цели. До Execute оба `update_plan_step` и legacy
+  `update_plan` получили отказ, Plan остался `0/2 draft`. После точного
+  Execute сервер атомарно установил первый шаг `in_progress`, второй —
+  `pending` (revision 2). Модель предложила ненужный `python`; approval gate
+  заблокировал действие, я нажал Deny. После Deny Goal стала active без
+  lease, последний run был done, но why-waiting оставался `queue/wait` более
+  90 секунд — реальная потеря продолжения. Причина: deny-ветка возвращала
+  control SSE сразу после `goal_action(resume)` и не вызывала серверный
+  dispatch. Локально добавлен bounded denial guidance и dispatch того же
+  goal_id/attempt; адресный route regression зелёный. Повторный live smoke
+  исправленной ветки и полный pytest ещё нужны. №03/04/46/51 не закрыты.
+
 - 2026-09-23 04:33–04:35 +05: production safe chat
   `820e1405-1f54-4cd3-a353-46e933acc1d1` проверил Goal/Plan/question на
   реальной qwen3.6. Цель стартовала, но модель задала A/B обычным текстом;
