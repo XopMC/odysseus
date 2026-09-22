@@ -8,10 +8,10 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js?v=20260922approval1';
-import chatRenderer from './chatRenderer.js?v=20260923lazy2';
+import chatRenderer from './chatRenderer.js?v=20260923toolprogress1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
-import markdownModule from './markdown.js';
+import markdownModule from './markdown.js?v=20260923toolprogress1';
 import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
 import fileHandlerModule from './fileHandler.js';
@@ -29,7 +29,7 @@ import {
   createLiveThinkingThrottle,
   createThinkingAnalysisGate,
   stripLiveThinkingTags,
-} from './liveThinkingThrottle.js';
+} from './liveThinkingThrottle.js?v=20260923toolprogress1';
 import {
   applyModelMetricsState,
   applyModelRouteEventState,
@@ -2994,6 +2994,13 @@ import { bindUiText, t } from './i18n.js';
         _cancelIncrementalStreamRender(content);
         content.style.minHeight = '';
         content.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(dt));
+        if (!content.textContent?.trim()
+            && !content.querySelector('img, video, audio, canvas, iframe, .thinking-section')) {
+          terminalHolder.style.display = 'none';
+          roundFinalized = true;
+          roundFinalization = { rendered: true, holder: terminalHolder, hasContent: false };
+          return roundFinalization;
+        }
         if (window.hljs) terminalHolder.querySelectorAll('pre code').forEach((block) => window.hljs.highlightElement(block));
         roundFinalized = true;
         lastContentRoundHolder = terminalHolder;
@@ -3264,7 +3271,7 @@ import { bindUiText, t } from './i18n.js';
                 if (spinner && spinner.element) spinner.destroy();
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_approval_resolved' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_call_progress' || json.type === 'tool_approval_resolved' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -3279,6 +3286,13 @@ import { bindUiText, t } from './i18n.js';
                   _cancelThinkingTimer();
                   _replaceThinkingSpinner('Preparing agent');
                   scheduleFirstTokenWaitMessages();
+                }
+                continue;
+              }
+              if (json.type === 'tool_call_progress') {
+                if (!_isBg && spinner?.element) {
+                  const name = String(json.name || '').slice(0, 64);
+                  spinner.updateMessage(`${t('Tool call:')} ${name || '…'}`);
                 }
                 continue;
               }
@@ -5886,6 +5900,9 @@ import { bindUiText, t } from './i18n.js';
             replayThinking = '';
             replayThinkingSegmentId = '';
             replayThinkingStartedAt = 0;
+          } else if (json.type === 'tool_call_progress') {
+            rich = true;
+            try { spinner.updateMessage(`${t('Tool call:')} ${String(json.name || '').slice(0, 64) || '…'}`); } catch (_) {}
           } else if (json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress') {
             rich = true;
             try { spinner.destroy(); } catch (_) {}

@@ -34,11 +34,7 @@ const REPLY_PREFIX_SOURCE = "(?:Hey|Hi |Hi!|Hello|Sure|Yes|No |No,|Yo|OK|Here|Ab
 const REPLY_LINE_RE = new RegExp('(?:^|\\n)\\s*' + REPLY_PREFIX_SOURCE, 'gi');
 const REPLY_INLINE_RE = new RegExp('[.!?]\\s*' + REPLY_PREFIX_SOURCE, 'gi');
 const REASONING_PREFIX_CANDIDATES = [
-  'thinking:', 'thinking process:', 'the user ', 'user wants', 'we need ',
-  'i need ', 'i should ', 'i will ', "i'll ", 'i am going ', 'let me think',
-  'let me look', 'let me see', 'let me check', 'let me read', 'let me review',
-  'let me analyze', 'let me parse', 'let me figure', 'let me draft', 'let me write',
-  'they are ', 'the question ', 'i can ',
+  'thinking:', 'thinking process:',
 ];
 
 const DISPLAY_FILTER_BOUNDARY_RE = /\[\/?TOOL_CALL\]|```(?:create_document|documen(?:t)?)(?:\s|$)|```[\w-]+[ \t]*[\[{]|<(?:[\w]+:)?(?:tool_call|function_call)>|<invoke\b|<\s*\/?\s*[｜|]+\s*DSML\s*[｜|]+|(?:\[\s*)?\{\s*"function"\s*:|<\/?\|(?:assistant|assistan|user|system|tool|end)\|?>|(?:^|[\r\n])\s*(?:stdout|stderr|exit_code):/i;

@@ -149,6 +149,24 @@ def test_process_with_thinking_handles_gemma4_thought_channel(node_available):
     assert "<|channel>" not in html
 
 
+@pytest.mark.parametrize("opening", [
+    "I need to check the result.",
+    "Let me check the file and report back.",
+    "I will explain the answer now.",
+])
+def test_plain_model_answer_is_not_misclassified_as_thinking(node_available, opening):
+    html = _run_markdown_case(opening, "mod.processWithThinking(input)")
+    assert "thinking-section" not in html
+    assert opening in html
+
+
+def test_explicit_label_still_opens_thinking_section(node_available):
+    html = _run_markdown_case("Thinking: check evidence\n\nHello, done.",
+                              "mod.processWithThinking(input)")
+    assert "thinking-section" in html
+    assert "Hello, done." in html
+
+
 def test_thinking_dom_ids_are_unique_and_stable_per_round_identity(node_available):
     rendered = _run_markdown_case(
         "<think>same text</think>",

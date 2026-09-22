@@ -9,7 +9,7 @@
 import uiModule from './ui.js';
 import sessionModule from './sessions.js?v=20260922approval1';
 import emojiPicker from './emojiPicker.js';
-import markdownModule from './markdown.js';
+import markdownModule from './markdown.js?v=20260923toolprogress1';
 import codeRunnerModule from './codeRunner.js';
 import { langIcon } from './langIcons.js';
 import spinnerModule from './spinner.js';

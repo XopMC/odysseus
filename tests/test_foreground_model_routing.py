@@ -2841,6 +2841,7 @@ def test_agent_emits_live_context_growth_during_generation(monkeypatch):
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
 
     async def fake_stream(candidates, messages, **kwargs):
+        yield 'data: {"type": "tool_call_progress", "index": 0, "name": "lookup_status", "argument_chars": 300}\n\n'
         yield "data: " + json.dumps({"delta": "a" * 1024, "thinking": True}) + "\n\n"
         yield "data: " + json.dumps({"delta": "Final answer."}) + "\n\n"
         yield "data: [DONE]\n\n"
@@ -2857,6 +2858,7 @@ def test_agent_emits_live_context_growth_during_generation(monkeypatch):
               if chunk.startswith("data: ") and '"type": "context_usage"' in chunk]
     assert len(usages) >= 2
     assert any(item["used_tokens"] > usages[0]["used_tokens"] for item in usages[1:])
+    assert any('"tool_call_progress"' in chunk for chunk in chunks)
 
 
 def test_toolless_multi_round_agent_persists_round_route_provenance(monkeypatch):

@@ -286,7 +286,11 @@ export function hasUnclosedThinkTag(text) {
 }
 
 export function startsWithReasoningPrefix(text) {
-  return /^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |i need |i should |i will |i'll |i am going |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|they are |the question |i can )/i.test(text || '');
+  // Ordinary answers often begin "I need to…" or "Let me check…". Inferring
+  // hidden reasoning from prose discards real answer text for non-thinking
+  // models. Only an explicit channel/markup (handled elsewhere) or a labelled
+  // Thinking prefix is evidence for a thinking block.
+  return /^\s*thinking(?:\s+process)?\s*:/i.test(text || '');
 }
 
 export function normalizeThinkingMarkup(text) {
@@ -357,7 +361,7 @@ function normalizePlainThinking(text) {
     }
   }
 
-  if (/^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|i need to |i should |i will |i'll |i am going )/i.test(trimmed)) {
+  if (/^\s*thinking(?:\s+process)?\s*:/i.test(trimmed)) {
     const thinkBlock = withoutPrefix.trim();
     if (thinkBlock) return `<think>${thinkBlock}</think>`;
   }

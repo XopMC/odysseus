@@ -5,7 +5,7 @@
 import uiModule from './ui.js';
 import Storage from './storage.js';
 import themeModule from './theme.js?v=20260921livefix20';
-import markdownModule from './markdown.js';
+import markdownModule from './markdown.js?v=20260923toolprogress1';
 import sessionModule from './sessions.js?v=20260922approval1';
 import documentModule from './document.js?v=20260815approvalsave1';
 

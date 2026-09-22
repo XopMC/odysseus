@@ -2,8 +2,8 @@
 // Extracted from chat.js — message rendering, sources, images, metrics
 
 import uiModule from './ui.js';
-import markdownModule from './markdown.js';
-import { svgifyEmoji } from './markdown.js';
+import markdownModule from './markdown.js?v=20260923toolprogress1';
+import { svgifyEmoji } from './markdown.js?v=20260923toolprogress1';
 import { addAITTSButton } from './tts-ai.js';
 import { providerLogo, providerLabel } from './providers.js';
 import settingsModule from './settings.js';
@@ -18,6 +18,11 @@ function bindThinkingLabels(root) {
   root?.querySelectorAll?.('.thinking-header-left span').forEach(
     node => bindUiText(node, 'View thinking process')
   );
+}
+
+export function terminalFallbackText(metadata, hadVisibleAnswer, content) {
+  return metadata?.failed && !hadVisibleAnswer && typeof content === 'string'
+    ? content.trim() : '';
 }
 
 function canLazyHistoryThinking(metadata) {
@@ -2796,6 +2801,7 @@ export function addMessage(role, content, modelName, metadata) {
       let lastWrap = null;
       let firstMsgAi = null;
       let lastMsgAi = null;
+      let hadVisibleAnswer = false;
 
       const toolsByRound = {};
       for (const ev of toolEvents) {
@@ -2903,13 +2909,19 @@ export function addMessage(role, content, modelName, metadata) {
           ) + agentFindingsSuffix;
           bindThinkingLabels(body);
           bindLazyHistoryThinking(body, metadata, roundNum, preservedReasoning);
+          const renderedContent = Boolean(body.textContent?.trim()
+            || body.querySelector('img, video, audio, canvas, iframe'));
+          if (!renderedContent) wrap.style.display = 'none';
+          if (txt && renderedContent) hadVisibleAnswer = true;
           wrap.appendChild(body);
           wrap.dataset.raw = renderSource || txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
           box.appendChild(wrap);
           lastWrap = wrap;
-          if (!firstMsgAi) firstMsgAi = wrap;
-          lastMsgAi = wrap;
+          if (renderedContent) {
+            if (!firstMsgAi) firstMsgAi = wrap;
+            lastMsgAi = wrap;
+          }
         }
 
         const roundTools = toolsByRound[roundNum] || [];
@@ -2980,6 +2992,32 @@ export function addMessage(role, content, modelName, metadata) {
             }
           }
         }
+      }
+
+      // A failed tool/reasoning-only run may persist its safe terminal note in
+      // the canonical assistant content, while round_texts contains only the
+      // reasoning block. The multi-round renderer must not hide that note.
+      const terminalNote = terminalFallbackText(metadata, hadVisibleAnswer, textRaw);
+      if (terminalNote) {
+        let target = lastMsgAi;
+        if (!target) {
+          target = document.createElement('div');
+          target.className = 'msg msg-ai msg-continuation';
+          const roleEl = document.createElement('div');
+          roleEl.className = 'role';
+          roleEl.textContent = modelName || 'Odysseus';
+          target.appendChild(roleEl);
+          const body = document.createElement('div');
+          body.className = 'body';
+          target.appendChild(body);
+          box.appendChild(target);
+          lastMsgAi = target;
+          lastWrap = target;
+        }
+        const note = document.createElement('div');
+        note.className = 'agent-terminal-note';
+        note.textContent = terminalNote;
+        target.querySelector('.body')?.appendChild(note);
       }
 
       const firstWrap = lastMsgAi || lastWrap;

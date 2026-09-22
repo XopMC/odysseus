@@ -4,7 +4,7 @@
 
 import uiModule from './ui.js';
 import { bindUiText } from './i18n.js';
-import markdownModule from './markdown.js';
+import markdownModule from './markdown.js?v=20260923toolprogress1';
 import * as spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { topPortalZ } from './toolWindowZOrder.js';

@@ -6244,6 +6244,9 @@ async def stream_agent_loop(
                         # authorization decision.  Document UI events are built
                         # from the parsed ToolBlock only after successful dispatch.
                         continue
+                    elif data.get("type") == "tool_call_progress":
+                        yield chunk
+                        continue
                     elif (data.get("type") == "budget_exceeded"
                           and data.get("resource") == "model_requests"
                           and data.get("_budget_nonce") == _request_budget_nonce):

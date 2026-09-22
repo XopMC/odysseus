@@ -121,6 +121,22 @@ def test_single_call_chunked_arguments_still_accumulate(monkeypatch):
     assert calls[0]["arguments"] == '{"q":"cats"}'
 
 
+def test_tool_only_stream_reports_safe_progress_before_complete_call(monkeypatch):
+    secret_argument = "private-value-" * 30
+    events = _drive(monkeypatch, [
+        _sse({"tool_calls": [{"index": 0, "id": "c", "function": {
+            "name": "lookup_status", "arguments": secret_argument}}]}),
+        "data: [DONE]",
+    ], model="gpt-4o-test")
+    progress = [event for event in events if event.get("type") == "tool_call_progress"]
+    assert progress
+    assert events.index(progress[0]) < next(i for i, event in enumerate(events)
+                                        if event.get("type") == "tool_calls")
+    assert progress[-1]["argument_chars"] >= 256
+    assert all(set(event) == {"type", "index", "name", "argument_chars"} for event in progress)
+    assert secret_argument not in json.dumps(progress)
+
+
 def test_null_index_chunked_arguments_attach_to_last_call(monkeypatch):
     # index=None where the name arrives first, then an arg-only continuation:
     # the continuation must attach to the just-started call, not open a new one.

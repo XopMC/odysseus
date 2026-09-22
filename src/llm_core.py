@@ -3230,6 +3230,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     # ── OpenAI-compatible streaming ──
     # Accumulate native tool_calls across streaming chunks
     _tc_acc: Dict[int, Dict] = {}  # index -> {id, name, arguments}
+    _tc_progress_bytes: Dict[int, int] = {}
     _tc_last_idx = [-1]  # most-recently-touched slot, for providers that omit `index`
     # For thinking models: prepend <think> to first content delta so frontend
     # can detect thinking-in-progress (some models output </think> but no <think>)
@@ -3497,6 +3498,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                                 # tool names before anything
                                                 # downstream sees them.
                                                 _tc_acc[idx]["name"] = _unalias_harmony_tool_name(func["name"], model)
+                                                # Native tool-only turns may spend a long time
+                                                # generating JSON with no answer delta. Report
+                                                # progress without exposing unvalidated arguments
+                                                # or claiming the tool has executed.
+                                                yield f'data: {json.dumps({"type": "tool_call_progress", "index": idx, "name": str(_tc_acc[idx]["name"])[:64], "argument_chars": len(_tc_acc[idx]["arguments"])})}\n\n'
                                             if "arguments" in func:
                                                 # Guard against a null arguments delta: `func` can be
                                                 # {"arguments": None} (JSON null), and a raw `+= None`
@@ -3504,6 +3510,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                                 # silently dropping the rest of the chunk. Matches the
                                                 # Anthropic accumulator (`partial = ... or ""`) above.
                                                 _tc_acc[idx]["arguments"] += func["arguments"] or ""
+                                                arg_chars = len(_tc_acc[idx]["arguments"])
+                                                if arg_chars >= _tc_progress_bytes.get(idx, 0) + 256:
+                                                    _tc_progress_bytes[idx] = arg_chars
+                                                    yield f'data: {json.dumps({"type": "tool_call_progress", "index": idx, "name": str(_tc_acc[idx]["name"])[:64], "argument_chars": arg_chars})}\n\n'
                                                 # Stream tool arg deltas for doc tools
                                                 if func["arguments"] and _tc_acc[idx].get("name") in ("create_document", "update_document", "edit_document"):
                                                     yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
@@ -3830,6 +3840,11 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
 
                 delta = event_data.get("delta")
                 event_type = event_data.get("type")
+                if event_type == "tool_call_progress" and not emitted:
+                    # Speculative UI-only status: do not commit a fallback
+                    # candidate until a complete tool call or text arrives.
+                    yield chunk
+                    continue
                 if event_type == "budget_exceeded":
                     if (isinstance(request_budget_nonce, str) and request_budget_nonce
                             and event_data.get("_budget_nonce") == request_budget_nonce):

@@ -378,8 +378,23 @@ def test_incomplete_tool_call_delta_is_discarded_before_eligible_fallback(monkey
     chunks = asyncio.run(run())
     assert calls == ["primary", "backup"]
     assert tool_delta not in chunks
+
+
+def test_speculative_tool_progress_does_not_commit_failed_candidate(monkeypatch):
+    progress = 'data: {"type": "tool_call_progress", "index": 0, "name": "lookup_status", "argument_chars": 300}\n\n'
+    terminal = 'event: error\ndata: {"status": 503, "error": "unavailable"}\n\n'
+    calls = []
+
+    def per_model(model):
+        calls.append(model)
+        return [progress, terminal] if model == "primary" else [
+            'data: {"delta": "backup answer"}\n\n', "data: [DONE]\n\n"]
+
+    chunks = _run_fallback(monkeypatch, per_model, fallback_statuses={503})
+    assert calls == ["primary", "backup"]
+    assert progress in chunks
     assert any('"type": "fallback"' in chunk for chunk in chunks)
-    assert any("backup answer" in chunk for chunk in chunks)
+    assert any('backup answer' in chunk for chunk in chunks)
 
 
 def test_empty_final_candidate_surfaces_terminal_error(monkeypatch):
