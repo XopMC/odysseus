@@ -327,9 +327,13 @@ function handleEvent(event) {
   if (event?.type?.startsWith('plan_') || event?.type?.startsWith('goal_')) void refresh(sessionId);
 }
 
+export function mayPreviewNewGoal(goal) {
+  return !goal || ['completed', 'cancelled'].includes(goal.status);
+}
+
 function beginGoal(objective) {
   const text = String(objective || '').trim();
-  if (!text) return;
+  if (!text || !mayPreviewNewGoal(snapshot.goal)) return;
   // Show the submitted objective immediately. The durable goal_update from
   // the server replaces this provisional record as soon as the run starts.
   snapshot.goal = { objective: text, status: 'starting', attempt: 1, progress: '' };

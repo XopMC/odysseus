@@ -2,6 +2,9 @@
 from pathlib import Path
 import os
 import subprocess
+import shutil
+
+import pytest
 
 
 def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible():
@@ -21,6 +24,8 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     renderer = (root / "static" / "js" / "chatRenderer.js").read_text()
     assert "beginGoal" in work
     assert "function prepareNewGoal()" in work
+
+
     assert "['completed', 'cancelled'].includes(snapshot.goal?.status)" in work
     assert "function prepareNewPlan()" in work
     assert "action === 'cancel') { snapshot.goal = null; window.__odysseusSetGoalMode?.(false); }" in work
@@ -100,4 +105,41 @@ try { for (const viewport of [{width:1280,height:900},{width:390,height:844}]) {
 '''
     result = subprocess.run(['node', '-e', script, str(root)], capture_output=True, text=True,
                             timeout=45, env=os.environ.copy())
+    assert result.returncode == 0, result.stderr
+
+
+def test_waiting_goal_reply_does_not_preview_a_new_objective():
+    if not shutil.which("node"):
+        pytest.skip("node is unavailable")
+    source = Path(__file__).resolve().parents[1] / "static/js/chat-work.js"
+    script = r"""
+      (async()=>{
+        const fs=require('node:fs'), vm=require('node:vm'), assert=require('node:assert/strict');
+        const context=vm.createContext({window:{location:{origin:'http://localhost'}},
+          document:{getElementById:()=>null}, console, setTimeout, clearTimeout, setInterval, clearInterval});
+        const work=new vm.SourceTextModule(fs.readFileSync(process.argv[1],'utf8'),{context});
+        await work.link(spec=>new vm.SyntheticModule(
+          spec.includes('runHealth') ? ['describeProgressHealth','createUiLongTaskMonitor']
+            : ['bindUiText','t','unbindUiText'], function(){
+              if(spec.includes('runHealth')){
+                this.setExport('describeProgressHealth',()=>null);
+                this.setExport('createUiLongTaskMonitor',()=>({start(){},stop(){}}));
+              }else{
+                this.setExport('bindUiText',()=>{});this.setExport('t',x=>x);
+                this.setExport('unbindUiText',()=>{});
+              }
+            },{context}));
+        await work.evaluate();
+        const allowed=work.namespace.mayPreviewNewGoal;
+        assert.equal(allowed(null),true);
+        assert.equal(allowed({status:'completed'}),true);
+        assert.equal(allowed({status:'cancelled'}),true);
+        for(const status of ['starting','active','waiting_user','paused'])
+          assert.equal(allowed({status}),false,status);
+      })().catch(error=>{console.error(error);process.exitCode=1});
+    """
+    result = subprocess.run(
+        ["node", "--experimental-vm-modules", "-e", script, str(source)],
+        capture_output=True, text=True, timeout=10,
+    )
     assert result.returncode == 0, result.stderr

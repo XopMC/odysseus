@@ -77,8 +77,8 @@ def test_goal_health_is_owner_snapshot_driven_and_hidden_without_active_goal():
     assert "goal-work-health-detail" in html
     assert "./runHealth.js?v=20260922batch1" in work
     assert "/static/js/runHealth.js?v=20260922batch1" in sw
-    assert "./js/chat-work.js?v=20260922batch1" in app
-    assert "/static/js/chat-work.js?v=20260922batch1" in sw
+    assert "./js/chat-work.js?v=20260923goalpreview1" in app
+    assert "/static/js/chat-work.js?v=20260923goalpreview1" in sw
 
 
 def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():

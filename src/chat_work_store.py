@@ -261,6 +261,10 @@ class ChatWorkStore:
             if len(step_ids) != len(set(step_ids)):
                 raise ValueError("Plan step IDs must be unique")
             prior_status = "draft" if replace_terminal else (row.status if row is not None else "draft")
+            if prior_status in {"draft", "approved"} and any(
+                step["status"] != "pending" for step in normalized
+            ):
+                raise WorkConflict("Execute the plan before updating step progress")
             status = prior_status if prior_status in {"executing", "done"} else "draft"
             if status == "executing" and not any(
                 step.get("required", True) and step.get("status") != "done"

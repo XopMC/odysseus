@@ -24,7 +24,7 @@ import {
 import markdownModule from './js/markdown.js?v=20260923toolprogress1';
 import chatRenderer from './js/chatRenderer.js?v=20260923toolprogress1';
 import sessionModule from './js/sessions.js?v=20260922approval1';
-import chatWork from './js/chat-work.js?v=20260922batch1';
+import chatWork from './js/chat-work.js?v=20260923goalpreview1';
 import chatSubagents from './js/chat-subagents.js?v=20260923childresult1';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';
 import projectsModule from './js/projects.js?v=20260922projects2';

@@ -216,11 +216,45 @@ def test_draft_plan_stays_pending_and_duplicate_text_keeps_distinct_ids(owned_ch
     assert [step["status"] for step in plan["steps"]] == ["pending", "pending"]
     original_ids = [step["id"] for step in plan["steps"]]
     assert len(set(original_ids)) == 2
-    updated = work.save_plan(
-        "alice", owned_chat, "Release", "- [x] Verify\n- [ ] Verify",
-        expected_revision=plan["revision"],
-    )
-    assert [step["id"] for step in updated["steps"]] == original_ids
+    with pytest.raises(WorkConflict, match="Execute the plan"):
+        work.save_plan(
+            "alice", owned_chat, "Release", "- [x] Verify\n- [ ] Verify",
+            expected_revision=plan["revision"],
+        )
+    unchanged = work.get("alice", owned_chat)["plan"]
+    assert [step["id"] for step in unchanged["steps"]] == original_ids
+    assert [step["status"] for step in unchanged["steps"]] == ["pending", "pending"]
+
+
+def test_new_draft_cannot_claim_completed_steps(owned_chat):
+    work = ChatWorkStore()
+    with pytest.raises(WorkConflict, match="Execute the plan"):
+        work.save_plan("alice", owned_chat, "False progress", "- [x] No verified work")
+    assert work.get("alice", owned_chat)["plan"] is None
+
+
+def test_legacy_update_plan_tool_cannot_complete_a_draft(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Arithmetic", "- [ ] Ask user\n- [ ] Verify")
+    _description, result = asyncio.run(execute_tool_block(
+        ToolBlock("update_plan", json.dumps({"plan": "- [x] Ask user\n- [x] Verify"})),
+        owner="alice", session_id=owned_chat, security_context=NO_TOOL_SECURITY_CONTEXT,
+    ))
+    assert result["exit_code"] == 1
+    assert "Execute the plan" in result["error"]
+    current = work.get("alice", owned_chat)["plan"]
+    assert current["revision"] == plan["revision"]
+    assert [step["status"] for step in current["steps"]] == ["pending", "pending"]
+
+
+def test_active_goal_prompt_requires_durable_question_not_prose():
+    note = agent_loop.build_active_goal_note({
+        "status": "active", "objective": "Harmless arithmetic",
+        "checkpoint": {}, "attempt": 1,
+    })
+    assert "call `ask_user`" in note
+    assert "a prose question is not a wait state" in note
+    assert "no choice is received until a new user answer exists" in note
 
 
 def test_goal_revision_preserves_audit_and_advances_attempt(owned_chat):
