@@ -1074,9 +1074,23 @@ def setup_session_routes(
 
         # Keep a small recent tail verbatim. The prior half-chat/20-message
         # tail made manual compaction look like it did nothing on normal chats.
-        recent_keep = min(8, max(4, len(history) // 4))
-        older = history[:-recent_keep]
-        recent = history[-recent_keep:]
+        # Summarize the model-visible ledger, not the entire saved transcript.
+        # Earlier messages are already represented by its durable checkpoint.
+        working_history = list(session.get_context_messages())
+        recent_keep = min(8, max(4, len(history) // 4), max(1, len(working_history) - 1))
+        # The checkpoint cut is a raw-history index, whereas working_history
+        # excludes slash UI chatter. Locate the cut by visible messages so a
+        # hidden slash entry cannot silently discard an unsummarized turn.
+        recent_start = len(history)
+        visible_tail = 0
+        for index in range(len(history) - 1, -1, -1):
+            if _message_metadata(history[index]).get("source") != "slash":
+                visible_tail += 1
+            if visible_tail >= recent_keep:
+                recent_start = index
+                break
+        older = working_history[:-recent_keep]
+        recent = working_history[-recent_keep:]
         if not older:
             raise HTTPException(400, "Nothing old enough to compact")
 
@@ -1113,6 +1127,9 @@ def setup_session_routes(
             f"{_message_role(m).upper()}: {_message_text(m)[:2000]}"
             for m in older
         )
+        summary_window = int(get_context_length(url, model) or 0)
+        if summary_window and estimate_tokens([{"role": "user", "content": convo_text}]) > int(summary_window * 0.7):
+            raise HTTPException(413, "Working context exceeds the summarizer input budget")
         context_length = int(get_context_length(session.endpoint_url, session.model) or 0)
         before_tokens = int(estimate_tokens(session.get_context_messages()))
         try:
@@ -1123,7 +1140,7 @@ def setup_session_routes(
                 temperature=0.2,
                 max_tokens=1024,
                 headers=headers,
-                timeout=60,
+                timeout=600,
             )
         except Exception as e:
             logger.error("Manual compaction failed: %s", e)
@@ -1131,6 +1148,7 @@ def setup_session_routes(
         summary = normalize_compaction_summary(summary)
 
         previous = getattr(session, "context_checkpoint", None)
+        previous_count = getattr(session, "context_checkpoint_count", 0)
         previous_meta = getattr(previous, "metadata", None) or {}
         compaction_revision = max(0, int(previous_meta.get("compaction_revision") or 0)) + 1
         from src.agent_runs import get_context_usage
@@ -1152,7 +1170,7 @@ def setup_session_routes(
                 "compacted": True,
                 "hidden": True,
                 "context_checkpoint": True,
-                "summarized_count": len(older),
+                "summarized_count": recent_start,
                 "timestamp": compacted_at,
                 "compaction_revision": compaction_revision,
                 "context_revision": context_revision,
@@ -1167,9 +1185,17 @@ def setup_session_routes(
         # future model requests in this process. After a restart the complete
         # transcript is re-compacted when needed; nothing is lost.
         session.context_checkpoint = summary_msg
-        session.context_checkpoint_count = len(older)
+        session.context_checkpoint_count = recent_start
         after_messages = session.get_context_messages()
         after_tokens = int(estimate_tokens(after_messages))
+        if before_tokens >= 1024 and after_tokens >= before_tokens:
+            session.context_checkpoint = previous
+            session.context_checkpoint_count = int(previous_count or 0)
+            return {
+                "ok": False, "status": "unchanged", "reason": "no_reduction",
+                "message": "The summary did not reduce the working context",
+                "before_tokens": before_tokens, "after_tokens": after_tokens,
+            }
         ledger_hash = hashlib.sha256(
             json.dumps(after_messages, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest()
@@ -1180,6 +1206,7 @@ def setup_session_routes(
             # fails. A summarizer success without a persisted checkpoint must
             # never be reported as a completed compaction.
             session.context_checkpoint = previous
+            session.context_checkpoint_count = int(previous_count or 0)
             raise HTTPException(503, "Context checkpoint could not be persisted")
         session_manager.save_sessions()
 
@@ -1189,7 +1216,7 @@ def setup_session_routes(
         return {
             "ok": True,
             "status": "compacted",
-            "summarized": len(older),
+            "summarized": recent_start,
             "kept": len(recent),
             "message_count": len(history),
             "transcript_preserved": True,

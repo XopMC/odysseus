@@ -87,6 +87,17 @@ def test_context_ledger_rejects_lower_measurement_without_compaction(monkeypatch
     assert current["context_reason"] == "compaction"
 
 
+def test_context_window_change_is_new_measurement_route_not_stale_highwater(monkeypatch):
+    run = agent_runs._Run()
+    monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})
+    _publish(run, _snapshot(used_tokens=49567, context_length=65024))
+    _publish(run, _snapshot(used_tokens=40100, context_length=131840))
+    current = agent_runs.get_context_usage("a")
+    assert current["used_tokens"] == 40100
+    assert current["context_length"] == 131840
+    assert current["context_revision"] == 2
+
+
 def test_context_ledger_reconciles_reset_compaction_counter_on_new_attempt(monkeypatch):
     """A replacement loop must not freeze telemetry at the prior high-water."""
     import core.database as database
@@ -320,6 +331,35 @@ def test_completed_snapshot_is_explicitly_last_request(monkeypatch):
     assert data["context_status"] == "last_request"
     assert data["source"] == "backend"
     assert data["can_compact"] is True
+
+
+def test_idle_context_uses_current_loaded_window_after_model_reload(monkeypatch):
+    client = _client(monkeypatch, _history())
+    monkeypatch.setattr(model_context, "get_context_length", lambda *_args: 131840)
+    data = client.get("/api/session/chat/context").json()
+    assert data["context_length"] == 131840
+    assert data["used_tokens"] == 82000
+    assert data["context_percent"] == round(82000 / 131840 * 100, 1)
+
+
+def test_effective_trigger_uses_usable_budget_not_full_window(monkeypatch):
+    from src import context_policy_runtime
+    from src.context_policy import ContextPolicy
+    policy = ContextPolicy(trigger_percent=75)
+    monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: {
+        'effective': policy.to_dict(), 'revisions': {'owner': 1}})
+    data = _client(monkeypatch, _history(snapshot=False)).get('/api/session/chat/context').json()
+    expected = policy.budget(262144).trigger_messages
+    assert data['effective_auto_compact_trigger_tokens'] == expected
+    assert data['effective_auto_compact_threshold'] == round(100 * expected / 262144, 1)
+    assert data['should_compact'] is False
+
+
+def test_legacy_short_compaction_timeout_is_raised_to_ten_minutes():
+    from src.context_policy import ContextPolicy
+    assert ContextPolicy().effective_summary_timeout_seconds == 600
+    assert ContextPolicy(summary_timeout_seconds=45).effective_summary_timeout_seconds == 600
+    assert ContextPolicy(summary_timeout_seconds=900).effective_summary_timeout_seconds == 900
 
 
 def test_newer_manual_checkpoint_replaces_stale_terminal_measurement(monkeypatch):

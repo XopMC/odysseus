@@ -427,10 +427,16 @@ def _publish(run: _Run, ev: str) -> None:
                 same_route = bool(
                     previous
                     and previous.get("model") == snapshot.get("model")
+                    and previous.get("context_length") == snapshot.get("context_length")
                     and (
                         not previous.get("endpoint_key")
                         or not snapshot.get("endpoint_key")
                         or previous.get("endpoint_key") == snapshot.get("endpoint_key")
+                    )
+                    and (
+                        not previous.get("route_revision")
+                        or not snapshot.get("route_revision")
+                        or previous.get("route_revision") == snapshot.get("route_revision")
                     )
                 )
                 # A replacement attempt starts a fresh in-memory agent loop,
@@ -1276,6 +1282,16 @@ def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Opt
                     contexts.append(run_context)
                 if contexts:
                     latest = contexts[0]
+                    # A loaded local model can change serving window without
+                    # changing its model id. High-water belongs to a route
+                    # *and window*, not every historical run in the chat.
+                    contexts = [value for value in contexts if (
+                        value.get("model") == latest.get("model")
+                        and value.get("endpoint_key") == latest.get("endpoint_key")
+                        and value.get("context_length") == latest.get("context_length")
+                        and (not latest.get("route_revision") or not value.get("route_revision")
+                             or value.get("route_revision") == latest.get("route_revision"))
+                    )]
                     max_compactions = max(int(value.get("compactions", 0) or 0) for value in contexts)
                     latest_compactions = int(latest.get("compactions", 0) or 0)
                     if latest.get("context_reason") == "compaction" or latest_compactions >= max_compactions:

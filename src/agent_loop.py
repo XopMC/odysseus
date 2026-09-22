@@ -5624,7 +5624,7 @@ async def stream_agent_loop(
                 raise ValueError('Context policy changed before summarization')
             last_error = None
             summary_timeout = (
-                _configured_policy.summary_timeout_seconds if _configured_policy else 120
+                _configured_policy.effective_summary_timeout_seconds if _configured_policy else 600
             )
             # compact_working_context has one outer deadline. A stalled Utility
             # call must not consume that entire deadline before the selected
@@ -5975,7 +5975,7 @@ async def stream_agent_loop(
                         raise ValueError('Context policy changed before fallback summary')
                     return await llm_call_async(candidate_url, candidate_model, prompt,
                         temperature=.2, max_tokens=min(_configured_policy.summary_tokens, _configured_policy.output_reserve),
-                        headers=candidate_headers, timeout=_configured_policy.summary_timeout_seconds,
+                        headers=candidate_headers, timeout=_configured_policy.effective_summary_timeout_seconds,
                         max_retries=1, session_id=session_id, require_answer_content=True)
                 candidate_window = await asyncio.to_thread(budget_context_for_model, candidate_url, candidate_model, fallback=0)
                 candidate_messages, info = await shape_request(state['messages'], _tool_schemas_for_route(state),
@@ -6065,6 +6065,8 @@ async def stream_agent_loop(
         _round_real_input_tokens = 0
         _round_real_output_tokens = 0
         _round_has_real_usage = False
+        _live_context_last_emit = 0.0
+        _live_context_last_tokens = 0
         _round_usage_finalized = False
         _request_budget_hit = False
         candidate_index = 0
@@ -6424,6 +6426,29 @@ async def stream_agent_loop(
                             data["delta"] = _delta_text
                         if not _ody_qwen_finetune_model or data.get("thinking"):
                             yield f"data: {json.dumps(data)}\n\n"
+                        # Prompt occupancy is fixed at dispatch, but the
+                        # generated reasoning/answer occupies the same model
+                        # window. Emit a conservative, throttled live estimate
+                        # so every connected client sees progress before the
+                        # backend's final usage frame arrives.
+                        _live_output = (len(round_reasoning) + len(round_response)) // 8
+                        _now = time.monotonic()
+                        _prompt = int((_working_context or {}).get("prompt_tokens") or 0)
+                        _window = int((_working_context or {}).get("context_length") or 0)
+                        _live_percent = min(100, round(100 * (_prompt + _live_output) / _window, 1)) if _window else 0
+                        if (_working_context and not _round_has_real_usage
+                                and _live_output >= _live_context_last_tokens + 64
+                                and _live_percent > float(_working_context.get("context_percent") or 0)
+                                and _now - _live_context_last_emit >= 2.0):
+                            _live_context_last_tokens = _live_output
+                            _live_context_last_emit = _now
+                            _working_context = {
+                                **_working_context,
+                                "used_tokens": _prompt + _live_output,
+                                "context_percent": _live_percent,
+                                "source": "estimated",
+                            }
+                            yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
                     elif data.get("error"):
                         err_msg = data.get("error", "unknown")
                         logger.error(f"Agent round {round_num}: stream error: {err_msg}")

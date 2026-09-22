@@ -2835,6 +2835,30 @@ def test_reasoning_only_agent_error_emits_terminal_history(monkeypatch):
     assert "data: [DONE]\n\n" not in chunks
 
 
+def test_agent_emits_live_context_growth_during_generation(monkeypatch):
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+
+    async def fake_stream(candidates, messages, **kwargs):
+        yield "data: " + json.dumps({"delta": "a" * 1024, "thinking": True}) + "\n\n"
+        yield "data: " + json.dumps({"delta": "Final answer."}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Explain this harmless test."}],
+        context_length=131840, max_rounds=1, relevant_tools={"bash"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False, _is_teacher_run=True,
+    ))
+    usages = [json.loads(chunk[6:])["data"] for chunk in chunks
+              if chunk.startswith("data: ") and '"type": "context_usage"' in chunk]
+    assert len(usages) >= 2
+    assert any(item["used_tokens"] > usages[0]["used_tokens"] for item in usages[1:])
+
+
 def test_toolless_multi_round_agent_persists_round_route_provenance(monkeypatch):
     calls = 0
     primary = ("https://selected.example/v1", "selected-model", {})

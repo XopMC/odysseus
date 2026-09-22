@@ -17,7 +17,7 @@ const CONTEXT_FIELDS = [
   ['recent_groups', 'Recent message groups to retain', 4, 0, 100, true],
   ['recent_tokens', 'Recent tokens to retain', 2048, 0, 131072, true],
   ['summary_tokens', 'Summary token limit', 1200, 128, 32768, true],
-  ['summary_timeout_seconds', 'Summary timeout in seconds', 150, 5, 600, true],
+  ['summary_timeout_seconds', 'Summary timeout in seconds', 600, 600, 1800, true],
 ];
 let mountSequence = 0;
 

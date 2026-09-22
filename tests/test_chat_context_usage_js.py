@@ -53,7 +53,7 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
       const pending = mod.namespace.refreshChatContextHeader('initial');
       await Promise.resolve();
       assert.equal(apply(snapshot, 'chat-a'), true);
-      assert.match(pill.innerHTML, /31%/); // header keeps its existing whole-percent style
+      assert.match(pill.innerHTML, /31\.3%/);
       assert.match(pill.title, /Live request.*backend tokens/);
       assert.equal(pill.hidden, false);
       const correctTitle = pill.title;
@@ -75,12 +75,23 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
       assert.equal(apply({...snapshot,endpoint_key:'b'.repeat(64),used_tokens:1},'chat-a'),false);
       assert.equal(apply({...snapshot,endpoint_key:'malformed'},'chat-a'),false);
       assert.equal(pill.title,endpointTitle);
+      assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),
+        used_tokens:40000,context_length:131840},'chat-a'),true,
+        'same model reloaded with a new window must accept a new measurement');
+      assert.match(pill.title,/40,000 \/ 131,840/);
+      await mod.namespace.refreshChatContextHeader('restore-old-window');
       selected.endpoint_url='http://jetson.test/v1';
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:1},'chat-a'),false,'switch invalidates cached route identity');
       await Promise.resolve();await Promise.resolve();
+      selected.model='larger-model';
+      assert.equal(apply({...snapshot,model:'larger-model',used_tokens:40000,
+        context_length:524288,context_revision:1},'chat-a'),true,
+        'new model route must not inherit old monotonic usage guard');
+      assert.match(pill.title,/40,000 \/ 524,288/);
+      const switchedTitle=pill.title;
       currentSession = 'chat-b';
       assert.equal(apply({...snapshot, used_tokens: 90000}, 'chat-a'), false);
-      assert.equal(pill.title, endpointTitle);
+      assert.equal(pill.title, switchedTitle);
       console.log(JSON.stringify({passed: true}));
     """
     result = subprocess.run(

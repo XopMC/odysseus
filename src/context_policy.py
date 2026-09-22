@@ -19,7 +19,13 @@ class ContextPolicy:
     recent_groups: int = 4
     recent_tokens: int = 2048
     summary_tokens: int = 1200
-    summary_timeout_seconds: int = 150
+    summary_timeout_seconds: int = 600
+
+    @property
+    def effective_summary_timeout_seconds(self):
+        # Existing profiles may retain a shorter value from older releases.
+        # Local model prefill can take minutes; never abort compaction early.
+        return max(600, self.summary_timeout_seconds)
 
     def __post_init__(self):
         if type(self.auto_compact) is not bool:
@@ -29,7 +35,7 @@ class ContextPolicy:
             'safety_tokens': (0, 131072), 'safety_percent': (0, 50),
             'trigger_percent': (10, 95), 'target_percent': (5, 90),
             'recent_groups': (0, 100), 'recent_tokens': (0, 131072),
-            'summary_tokens': (128, 32768), 'summary_timeout_seconds': (5, 600),
+            'summary_tokens': (128, 32768), 'summary_timeout_seconds': (5, 1800),
         }
         for name, (low, high) in ranges.items():
             value = getattr(self, name)

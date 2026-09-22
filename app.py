@@ -202,11 +202,16 @@ class _RequestTimeoutMiddleware(_BaseHTTPMiddleware):
         path = request.url.path or ""
         if any(path.startswith(p) for p in _TIMEOUT_EXEMPT_PREFIXES):
             return await call_next(request)
+        # Manual compaction performs a local-model prefill and summarization.
+        # Its LLM read timeout is 600s; allow a little room for persistence.
+        manual_compact = (request.method == "POST" and path.startswith("/api/session/")
+                          and (path.endswith("/compact") or path.endswith("/context/compact")))
+        deadline = max(REQUEST_HARD_TIMEOUT, 630) if manual_compact else REQUEST_HARD_TIMEOUT
         try:
-            return await _asyncio.wait_for(call_next(request), timeout=REQUEST_HARD_TIMEOUT)
+            return await _asyncio.wait_for(call_next(request), timeout=deadline)
         except _asyncio.TimeoutError:
             return _JSONResponse(
-                {"detail": f"Request exceeded {REQUEST_HARD_TIMEOUT:.0f}s timeout"},
+                {"detail": f"Request exceeded {deadline:.0f}s timeout"},
                 status_code=504,
             )
 

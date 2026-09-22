@@ -127,7 +127,7 @@ import { bindUiText, t } from './i18n.js';
     const stroke = 1.5;
     const circ = 2 * Math.PI * r;
     const fill = circ * (value / 100);
-    const label = value.toFixed(value >= 10 ? 0 : 1);
+    const label = value.toFixed(1);
     const idAttr = labelId ? ` id="${labelId}"` : '';
     return `<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
         <circle cx="7" cy="7" r="${r}" fill="none" stroke="var(--border, #333)" stroke-width="${stroke}" opacity="0.3"/>
@@ -395,6 +395,11 @@ import { bindUiText, t } from './i18n.js';
     const selected = sm.getSessions && sm.getSessions().find(s => s.id === sessionId);
     if (selected && selected.model && selected.model !== data.model) return false;
     const previous = _contextHeaderData && _contextHeaderData.session_id === sessionId ? _contextHeaderData : {};
+    const sameRoute = previous.model === data.model
+      && Number(previous.context_length) === Number(data.context_length)
+      && (!previous.route_revision || !data.route_revision || previous.route_revision === data.route_revision)
+      && (!previous.endpoint_url || !selected?.endpoint_url || previous.endpoint_url === selected.endpoint_url)
+      && (!data.endpoint_key || !previous.current_endpoint_key || data.endpoint_key === previous.current_endpoint_key);
     const incomingRevision = Number(data.context_revision || 0);
     const previousRevision = Number(previous.context_revision || 0);
     // A replay page can legitimately carry the same revision more than once
@@ -402,9 +407,9 @@ import { bindUiText, t } from './i18n.js';
     // ledger). Reject only an older revision: an equal-revision measurement
     // with a larger used_tokens value is still useful live progress and must
     // not leave the header frozen at its first value.
-    if (incomingRevision > 0 && previousRevision > 0 && incomingRevision < previousRevision
+    if (sameRoute && incomingRevision > 0 && previousRevision > 0 && incomingRevision < previousRevision
         && Number(data.compactions || 0) <= Number(previous.compactions || 0)) return false;
-    if (Number(previous.compactions || 0) === Number(data.compactions || 0)
+    if (sameRoute && Number(previous.compactions || 0) === Number(data.compactions || 0)
         && Number(previous.used_tokens || 0) > Number(data.used_tokens || 0)) return false;
     if (data.endpoint_key !== undefined) {
       if (typeof data.endpoint_key !== 'string' || !/^[a-f0-9]{64}$/.test(data.endpoint_key)) return false;

@@ -172,8 +172,13 @@ async def test_finalizer_uses_same_real_model_budget(ctx):
 
 
 @pytest.mark.asyncio
-async def test_summary_timeout_fails_closed_without_main_dispatch(ctx):
+async def test_summary_timeout_fails_closed_without_main_dispatch(ctx, monkeypatch):
     compact_profile(ctx)
+    from src.context_policy import ContextPolicy
+    # Keep this timeout-path unit test short without changing the production
+    # minimum of ten minutes for slow local model summarization.
+    monkeypatch.setattr(ContextPolicy, 'effective_summary_timeout_seconds',
+                        property(lambda policy: policy.summary_timeout_seconds))
     save(ctx, {'summary_timeout_seconds': 5}, task_id=ctx[2], worker_id=ctx[3]['id'])
     async def slow_summary():
         await asyncio.sleep(20)

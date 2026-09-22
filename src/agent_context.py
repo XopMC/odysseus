@@ -172,7 +172,7 @@ async def compact_working_context(messages, limit, summarize, *, policy=None, ta
         {"role": "user", "content": evidence},
     ]
     try:
-        summary = await asyncio.wait_for(summarize(prompt), timeout=policy.summary_timeout_seconds if policy else 150)
+        summary = await asyncio.wait_for(summarize(prompt), timeout=policy.effective_summary_timeout_seconds if policy else 600)
         summary = re.sub(r"<think>.*?</think>", "", summary or "", flags=re.S).strip()
         if not summary or summary.startswith("<think>"):
             raise ValueError("Summarizer returned no usable answer")

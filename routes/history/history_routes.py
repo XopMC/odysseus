@@ -1075,7 +1075,11 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             elif snapshot is None and checkpoint is not None:
                 status = "working_checkpoint"
             used = snapshot["used_tokens"] if snapshot else working_used
-            ctx_len = snapshot["context_length"] if snapshot else int(get_context_length(session.endpoint_url, session.model) or 0)
+            # A completed request's window is historical. The selected local
+            # model may have been reloaded with a different serving window,
+            # even while retaining the same model id.
+            current_window = int(get_context_length(session.endpoint_url, session.model) or 0)
+            ctx_len = snapshot["context_length"] if active and snapshot else current_window
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
             pct = max(0.0, min(100.0, pct))
             visible_messages = sum(
@@ -1128,6 +1132,18 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 display_threshold = ContextPolicy().trigger_percent
             if display_enabled is None:
                 display_enabled = True
+            effective_trigger_tokens = None
+            effective_trigger_percent = None
+            if effective_policy and ctx_len:
+                try:
+                    budget = ContextPolicy.from_dict(effective_policy).budget(ctx_len)
+                    effective_trigger_tokens = budget.trigger_messages
+                    effective_trigger_percent = round(100 * effective_trigger_tokens / ctx_len, 1)
+                except ValueError:
+                    policy_error = True
+            if effective_trigger_tokens is None and ctx_len:
+                effective_trigger_tokens = int(ctx_len * float(display_threshold) / 100)
+                effective_trigger_percent = float(display_threshold)
             return {
                 "session_id": session_id,
                 "model": session.model,
@@ -1175,7 +1191,8 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "context_messages": len(messages),
                 "compacted_messages": compacted_messages,
                 "can_compact": can_compact,
-                "should_compact": bool(display_enabled and pct >= float(display_threshold)),
+                "should_compact": bool(display_enabled and effective_trigger_tokens is not None
+                                       and used >= effective_trigger_tokens),
                 # While idle, show the policy that will shape the *next*
                 # request. Preserve the last observed request separately so a
                 # settings edit never rewrites historical telemetry.
@@ -1184,8 +1201,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     effective_policy.get("trigger_percent") if effective_policy else display_threshold
                 ),
                 "effective_auto_compact_threshold": (
-                    observed_threshold if observed_threshold is not None else display_threshold
+                    effective_trigger_percent if effective_trigger_percent is not None else display_threshold
                 ),
+                "effective_auto_compact_trigger_tokens": effective_trigger_tokens,
                 "threshold_basis": "usable_input" if effective_policy else "model_window",
                 "auto_compact_enabled": display_enabled,
                 "observed_auto_compact_threshold": observed_threshold,

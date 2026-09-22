@@ -97,6 +97,7 @@ def _compact_prompt_for(monkeypatch, history):
 
     async def fake_llm_call_async(endpoint_url, model, messages, **kwargs):
         captured["messages"] = messages
+        captured["timeout"] = kwargs.get("timeout")
         return "Summary text"
 
     monkeypatch.setattr(
@@ -135,11 +136,12 @@ def _compact_prompt_for(monkeypatch, history):
     return captured["messages"][1]["content"]
 
 
-def _registered_compact_response(monkeypatch, history, active_run=False):
+def _registered_compact_response(monkeypatch, history, active_run=False, working_messages=None):
     captured = {}
 
     async def fake_llm_call_async(endpoint_url, model, messages, **kwargs):
         captured["messages"] = messages
+        captured["timeout"] = kwargs.get("timeout")
         return "Summary text"
 
     monkeypatch.setattr(
@@ -164,6 +166,8 @@ def _registered_compact_response(monkeypatch, history, active_run=False):
     monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call_async)
 
     session = _FakeSession(history)
+    if working_messages is not None:
+        session.get_context_messages = lambda: list(working_messages)
     manager = _FakeSessionManager(session)
     app = FastAPI()
     app.include_router(session_routes.setup_session_routes(manager, {}))
@@ -248,6 +252,33 @@ def test_registered_manual_compact_route_uses_session_owner(monkeypatch):
     assert manager.replaced_messages is None
     assert manager.session.message_count == 6
     assert ("utility", "session-owner") in captured["resolve_calls"]
+    assert captured["timeout"] == 600
+    assert captured["messages"][1]["content"].startswith("USER: start")
+
+
+def test_manual_compaction_uses_working_checkpoint_not_full_transcript(monkeypatch):
+    history = [ChatMessage(role="user", content=f"old secret {i}") for i in range(100)]
+    working = [{"role": "system", "content": "[Conversation summary] prior evidence"}]
+    working += [{"role": "user", "content": f"recent {i}"} for i in range(10)]
+    response, captured, manager = _registered_compact_response(
+        monkeypatch, history, working_messages=working)
+    assert response.status_code == 200
+    prompt = captured["messages"][1]["content"]
+    assert "prior evidence" in prompt
+    assert "old secret" not in prompt
+    assert manager.session.context_checkpoint_count == 92
+
+
+def test_manual_compaction_does_not_claim_success_without_reduction(monkeypatch):
+    from src import model_context
+    monkeypatch.setattr(model_context, "estimate_tokens", lambda messages: 2000)
+    history = [ChatMessage(role="user", content=f"entry {i}") for i in range(6)]
+    response, _captured, manager = _registered_compact_response(monkeypatch, history)
+    assert response.status_code == 200
+    assert response.json()["status"] == "unchanged"
+    assert response.json()["reason"] == "no_reduction"
+    assert manager.session.context_checkpoint is None
+    assert manager.saved is False
 
 
 def test_registered_manual_compact_route_rejects_active_agent_run(monkeypatch):

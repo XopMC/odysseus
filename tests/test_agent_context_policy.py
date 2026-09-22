@@ -181,10 +181,15 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(30)
             return 'Preserve the harmless goal and measured evidence.'
 
-        sent, _summaries, chunks = await self.run_agent(
-            history, summary_impl=summary,
-            utility_route=('http://stalled.invalid/v1', 'stalled-model', {}),
-        )
+        from src.context_policy import ContextPolicy
+        # Exercise the fallback deadline without waiting for the production
+        # minimum ten-minute compaction timeout.
+        with patch.object(ContextPolicy, 'effective_summary_timeout_seconds',
+                          property(lambda policy: policy.summary_timeout_seconds)):
+            sent, _summaries, chunks = await self.run_agent(
+                history, summary_impl=summary,
+                utility_route=('http://stalled.invalid/v1', 'stalled-model', {}),
+            )
         self.assertIn('http://stalled.invalid/v1', attempted)
         self.assertIn('http://fixture.invalid/v1', attempted)
         self.assertEqual(len(sent), 1)

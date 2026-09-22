@@ -198,7 +198,7 @@ async def _shape_plain_chat_with_saved_policy(
             temperature=0.2,
             max_tokens=min(policy.summary_tokens, policy.output_reserve),
             headers=request_headers,
-            timeout=policy.summary_timeout_seconds,
+            timeout=policy.effective_summary_timeout_seconds,
             max_retries=1,
             session_id=session_id,
             require_answer_content=True,
