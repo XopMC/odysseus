@@ -350,6 +350,27 @@ def trim_for_context(
         convo_msgs[-1] = _truncate_message_to_token_budget(convo_msgs[-1], available_for_current)
 
     result = _sanitize_tool_messages(essential_system + protected_msgs + convo_msgs)
+    # Legacy synthetic routes can advertise a window smaller than the fixed
+    # response reserve. Preserve their prior latest-message behavior; real
+    # model routes have a positive usable input budget.
+    if total_budget == 0:
+        return result
+    # PROTECT_RECENT is a preference, not permission to send an oversized
+    # request. A few large tool results can exceed the entire budget even
+    # after all older turns have been removed. Keep the newest turn, then
+    # release the oldest recent turns until the selected route actually fits.
+    while len(convo_msgs) > 1 and estimate_tokens(result) > total_budget:
+        convo_msgs.pop(0)
+        result = _sanitize_tool_messages(essential_system + protected_msgs + convo_msgs)
+    if convo_msgs and estimate_tokens(result) > total_budget:
+        prefix = essential_system + protected_msgs + convo_msgs[:-1]
+        available = max(0, total_budget - estimate_tokens(prefix))
+        convo_msgs[-1] = _truncate_message_to_token_budget(convo_msgs[-1], available)
+        result = _sanitize_tool_messages(essential_system + protected_msgs + convo_msgs)
+    if estimate_tokens(result) > total_budget:
+        raise ProtectedContextTooLarge(
+            "Essential context exceeds this route's input budget; compact the conversation or choose a larger budget."
+        )
     logger.info(f"Trimmed to {estimate_tokens(result)} tokens ({len(result)} messages)")
     return result
 

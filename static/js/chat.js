@@ -1916,8 +1916,10 @@ import { bindUiText, t } from './i18n.js';
         [120000, 'Still working - no tokens yet from the model'],
       ];
       firstTokenWaitTimers = steps.map(([ms, text]) => setTimeout(() => {
-        if (!accumulated && spinner && spinner.element && !(abortCtrl && abortCtrl.signal.aborted)) {
-          spinner.updateMessage(text);
+        if (!accumulated && !(abortCtrl && abortCtrl.signal.aborted)) {
+          if (spinner && spinner.element) spinner.updateMessage(text);
+          const thinkingSpinner = document.querySelector('.agent-thinking-dots')?._spinner;
+          if (thinkingSpinner) thinkingSpinner.updateMessage(text);
         }
       }, ms));
     };
@@ -3271,6 +3273,7 @@ import { bindUiText, t } from './i18n.js';
                 if (!_isBg) {
                   _cancelThinkingTimer();
                   _replaceThinkingSpinner('Preparing agent');
+                  scheduleFirstTokenWaitMessages();
                 }
                 continue;
               }

@@ -18,6 +18,7 @@ for mod in [
         sys.modules[mod] = MagicMock()
 
 import src.context_compactor as cc
+from src.model_context import estimate_tokens
 from src.context_compactor import (
     COMPACT_THRESHOLD,
     SELF_SUMMARY_SYSTEM_PROMPT,
@@ -64,6 +65,22 @@ class TestSelfSummaryPrompt:
 
 
 class TestTrimForContext:
+    def test_large_recent_rounds_do_not_escape_the_route_budget(self):
+        messages = [{"role": "system", "content": "Agent instructions"}]
+        messages.extend(
+            {"role": "assistant", "content": f"round-{number} " + "x" * 30000}
+            for number in range(12)
+        )
+        messages.append({"role": "user", "content": "latest instruction"})
+
+        trimmed = trim_for_context(
+            messages, context_length=65536, reserve_tokens=1024,
+            strict_protected=True,
+        )
+
+        assert estimate_tokens(trimmed) <= 65536 - 1024
+        assert trimmed[-1]["content"] == "latest instruction"
+
     def test_system_truncation_preserves_internal_route_metadata(self):
         messages = [
             {
