@@ -84,11 +84,9 @@ function bindLazyHistoryThinking(root, metadata, roundNumber, fallbackReasoning 
     // a historical card must not start an unnecessary artifact request.
     setTimeout(() => { if (section.querySelector('.thinking-content')?.classList.contains('expanded')) void load(); }, 0);
   });
-  // A persisted disclosure can expand the card when its DOM is inserted,
-  // without a click in this document. Hydrate it after that reconciliation.
-  requestAnimationFrame(() => {
-    if (section.querySelector('.thinking-content')?.classList.contains('expanded')) void load();
-  });
+  // Historical thinking is fetched only after an explicit click. Restoring
+  // hundreds of expanded cards from localStorage must not start hundreds of
+  // replay scans while the newest messages are still loading.
 }
 
 // Older saved assistant rows kept one combined `thinking` field and the

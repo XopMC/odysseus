@@ -108,6 +108,24 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(artifact['round'], 3)
         self.assertEqual(artifact['created_at'], 10.0)
 
+    def test_terminal_reasoning_round_uses_durable_sequence_index(self):
+        for seq in range(120):
+            event = {
+                'delta': f'thought-{seq}', 'thinking': True,
+                '_replay': {'round': 2 if seq % 3 == 0 else 3, 'created_at': float(seq)},
+            }
+            self.log.append('data: ' + json.dumps(event) + '\n\n')
+        self.log.checkpoint('done')
+        reopened = ReplayLog(self.temp.name, 'a' * 32, 'alice-chat')
+        expected = list(range(0, 120, 3))
+        self.assertEqual(reopened.reasoning_sequences(2), expected)
+        self.assertEqual(reopened.reasoning_sequences(3), [seq for seq in range(120) if seq % 3])
+        self.assertTrue(reopened.path('.reasoning-index').exists())
+        with patch.dict('os.environ', {'ODYSSEUS_DURABLE_CHAT_REPLAY': '1'}), \
+             patch.object(agent_runs, 'replay_root', return_value=self.temp.name):
+            artifact = agent_runs.reasoning_artifact('alice-chat', 'a' * 32, 2)
+        self.assertEqual(artifact['thinking'], ''.join(f'thought-{seq}' for seq in expected))
+
 
 class DetachedReplayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

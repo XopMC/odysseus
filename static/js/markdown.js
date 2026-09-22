@@ -1114,6 +1114,9 @@ document.addEventListener('click', function(e) {
     const collapsed = _loadThinkingSet(THINK_COLLAPSED_KEY);
     if (!expanded.size && !collapsed.size) return;
     for (const sec of sections) {
+      // Lazy historical cards stay collapsed after reload. Their persisted
+      // expanded state would otherwise trigger every artifact fetch at once.
+      if (sec.dataset.lazyThinking === 'true') continue;
       const content = sec.querySelector('.thinking-content');
       if (!content) continue;
       const keys = _thinkingPersistenceKeys(content);

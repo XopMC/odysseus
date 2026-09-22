@@ -3163,7 +3163,9 @@ def setup_chat_routes(
         """Load a historical reasoning round without embedding it in history."""
         _verify_session_owner(request, session_id)
         try:
-            artifact = agent_runs.reasoning_artifact(session_id, run_id, round_number)
+            artifact = await asyncio.to_thread(
+                agent_runs.reasoning_artifact, session_id, run_id, round_number,
+            )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         except (FileNotFoundError, OSError):

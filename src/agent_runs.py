@@ -52,7 +52,7 @@ def delete_replays_for_session(session_id: str) -> int:
                 run_id = sidecar.stem
                 if not re.fullmatch(r"[0-9a-f]{32}", run_id):
                     continue
-                for suffix in (".events", ".index", ".json"):
+                for suffix in (".events", ".index", ".json", ".reasoning-index"):
                     sidecar.with_suffix(suffix).unlink(missing_ok=True)
                     removed += 1
             except (OSError, TypeError, ValueError):
@@ -82,7 +82,8 @@ def reasoning_artifact(session_id: str, run_id: str, round_number: int) -> Optio
     last_at = None
     truncated = False
     max_chars = 2 * 1024 * 1024
-    for seq in range(len(buffer)):
+    sequences = buffer.reasoning_sequences(round_number) if hasattr(buffer, 'reasoning_sequences') else range(len(buffer))
+    for seq in sequences:
         frame = buffer[seq]
         raw = "\n".join(
             line[5:].lstrip() for line in frame.splitlines() if line.startswith("data:")

@@ -40,6 +40,17 @@ def test_empty_history_thinking_is_lazy_loaded_from_durable_run():
     assert "bindLazyHistoryThinking(b, metadata, 1, storedThinking)" in source
 
 
+def test_reload_does_not_eagerly_fetch_every_saved_thinking_card():
+    renderer = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    markdown = (ROOT / "static/js/markdown.js").read_text(encoding="utf-8")
+    lazy = renderer.split("function bindLazyHistoryThinking", 1)[1].split(
+        "// Older saved assistant rows", 1,
+    )[0]
+    assert "requestAnimationFrame" not in lazy
+    assert "header.addEventListener('click'" in lazy
+    assert "if (sec.dataset.lazyThinking === 'true') continue;" in markdown
+
+
 def test_preserved_history_thinking_is_not_preparsed_into_hidden_dom():
     source = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
     lazy = source.split("function bindLazyHistoryThinking", 1)[1].split(

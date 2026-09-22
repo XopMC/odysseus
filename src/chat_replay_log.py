@@ -7,12 +7,15 @@ power loss may discard the last uncheckpointed events. A process restart can
 read complete frames but must report an unfinished run as interrupted.
 """
 import hashlib
+from functools import lru_cache
 import json
 import logging
 import os
 from pathlib import Path
 import re
 import struct
+import tempfile
+import threading
 import time
 
 _WORD = struct.Struct('!Q')
@@ -38,6 +41,7 @@ MAX_TOTAL_BYTES = max(MAX_RUN_BYTES, _storage_limit(
     minimum=64 * 1024 * 1024, maximum=512 * 1024 * 1024 * 1024,
 ))
 logger = logging.getLogger(__name__)
+_reasoning_index_lock = threading.Lock()
 
 
 class ReplayLimitError(OSError):
@@ -46,6 +50,70 @@ class ReplayLimitError(OSError):
 
 def _key(value):
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+@lru_cache(maxsize=32)
+def _reasoning_index(base: str, event_size: int, event_count: int) -> dict:
+    """Map reasoning rounds to frame numbers with one sequential disk pass."""
+    sidecar = Path(base + '.reasoning-index')
+    try:
+        saved = json.loads(sidecar.read_text(encoding='utf-8'))
+        if saved.get('event_size') == event_size and saved.get('event_count') == event_count:
+            rounds = saved.get('rounds')
+            if isinstance(rounds, dict) and all(
+                isinstance(value, list) and all(type(seq) is int and 0 <= seq < event_count for seq in value)
+                for value in rounds.values()
+            ):
+                return rounds
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        pass
+
+    rounds = {}
+    with Path(base + '.events').open('rb') as source:
+        for seq in range(event_count):
+            header = source.read(_WORD.size)
+            if len(header) != _WORD.size:
+                raise ValueError('Incomplete reasoning replay index')
+            length = _WORD.unpack(header)[0]
+            if length > MAX_EVENT_BYTES:
+                raise ValueError('Invalid reasoning replay frame')
+            frame = source.read(length)
+            if len(frame) != length:
+                raise ValueError('Incomplete reasoning replay frame')
+            raw = '\n'.join(
+                line[5:].lstrip() for line in frame.decode('utf-8').splitlines()
+                if line.startswith('data:')
+            )
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict) or payload.get('delta') is None:
+                continue
+            if payload.get('thinking') is not True and payload.get('channel') not in {'thinking', 'thought'}:
+                continue
+            replay = payload.get('_replay') if isinstance(payload.get('_replay'), dict) else {}
+            try:
+                round_number = max(1, int(payload.get('round') or replay.get('round') or 1))
+            except (TypeError, ValueError):
+                round_number = 1
+            rounds.setdefault(str(round_number), []).append(seq)
+
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=sidecar.parent,
+            prefix=f'.{sidecar.name}.', delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            os.chmod(output.name, 0o600)
+            json.dump({'event_size': event_size, 'event_count': event_count, 'rounds': rounds}, output)
+        os.replace(temporary, sidecar)
+    except OSError:
+        logger.warning('Reasoning replay index could not be persisted', exc_info=False)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return rounds
 
 
 class ReplayLog:
@@ -93,6 +161,15 @@ class ReplayLog:
 
     def __len__(self):
         return self.path('.index').stat().st_size // _WORD.size
+
+    def reasoning_sequences(self, round_number: int):
+        """Return indexed thinking frames for a terminal run, without replaying every frame."""
+        count = len(self)
+        if self.metadata.get('status') == 'running':
+            return range(count)
+        event_size = self.path('.events').stat().st_size
+        with _reasoning_index_lock:
+            return _reasoning_index(str(self.base), event_size, count).get(str(round_number), [])
 
     def __getitem__(self, seq):
         if type(seq) is not int or seq < 0 or seq >= len(self):

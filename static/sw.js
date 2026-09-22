@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v448-modeltrim1';
+const CACHE_NAME = 'odysseus-v449-lazy2';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -42,7 +42,7 @@ const PRECACHE = [
   '/static/style.css?v=20260922batch1',
   '/static/css/team-workspace.css?v=20260921livefix18',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
-  '/static/app.js?v=20260923modeltrim1',
+  '/static/app.js?v=20260923lazy2',
   '/static/js/startupShell.js?v=20260922restore1',
   '/static/js/i18n.js',
   '/static/js/storage.js',
@@ -64,10 +64,10 @@ const PRECACHE = [
   '/static/js/tts-ai.js',
   '/static/js/document.js?v=20260815approvalsave1',
   '/static/js/gallery.js?v=20260708match1',
-  '/static/js/chatRenderer.js?v=20260922batch1',
+  '/static/js/chatRenderer.js?v=20260923lazy2',
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js?v=20260819approvalcontrol1',
-  '/static/js/chat.js?v=20260923modeltrim1',
+  '/static/js/chat.js?v=20260923lazy2',
   '/static/js/timelineReducer.js',
   '/static/js/chat-work.js?v=20260922batch1',
   '/static/js/runHealth.js?v=20260922batch1',
