@@ -1,5 +1,5 @@
 // Team has its own request lifecycle. It never delegates Start to chat_stream.
-import { mountEngineeringWorkspace } from './engineering-workspace.js';
+import { mountEngineeringWorkspace } from './engineering-workspace.js?v=20260923context1';
 import { bindUiText, uiTextSource, t } from './i18n.js';
 const encode = encodeURIComponent;
 const TABS = ['Tasks', 'Team', 'Terminals', 'Files & Changes', 'Resources'];

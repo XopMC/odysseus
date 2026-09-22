@@ -1,4 +1,4 @@
-import { mountEngineeringWorkspace } from './engineering-workspace.js';
+import { mountEngineeringWorkspace } from './engineering-workspace.js?v=20260923context1';
 import { bindUiText } from './i18n.js';
 
 let closeCurrent = null;

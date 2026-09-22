@@ -258,7 +258,7 @@ import { bindUiText, t } from './i18n.js';
     settingsBtn.addEventListener('click', async event => {
       event.stopPropagation(); _closeContextHeaderPopup();
       try {
-        const { openContextSettings } = await import('./context-settings-dialog.js');
+        const { openContextSettings } = await import('./context-settings-dialog.js?v=20260923context1');
         openContextSettings({ getSessionId: () => sessionModule.getCurrentSessionId(),
           onSaved: () => void refreshChatContextHeader('policy-saved') });
       } catch (err) {
