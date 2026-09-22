@@ -16,9 +16,15 @@
   назначенную модель, но завершился с пустым `result` при наличии только
   thinking. Parent ошибочно трактовал `completed` как независимое подтверждение.
   Локальный runtime теперь переводит такой child в `failed`, а parent prompt
-  требует непустой результат или явное evidence. Regression для thinking-only
+  требует непустой результат или явное evidence. Child system prompt отдельно
+  требует видимый итог, а не только thinking/tool call. Regression для thinking-only
   stream прошёл. Повторный live smoke после релиза и остальная шестичасовая
   проверка открыты.
+  В 04:17 Safari reload восстановил те же 7 видимых сообщений и 10.1% контекста.
+  Второй уже авторизованный браузер открыл этот же safe chat без копирования
+  cookies: 7 сообщений и 10.1% совпали; раскрытие первого старого thinking
+  загрузило текст и 1.0s/100 tok. Это smoke старого production image, не
+  доказательство исправления пустого child result после релиза.
 
 - 2026-09-23: продолжение №03/42 (error/retry contract). `timeout` больше
   не наследует транспортный `retryable=true`: исход effectful действия

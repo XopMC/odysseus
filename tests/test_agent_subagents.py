@@ -51,6 +51,7 @@ def test_legacy_completed_child_without_result_is_marked_unverified():
         started_at=None, finished_at=None, created_at=None, guidance=[],
     )
     assert _public(row)["result_missing"] is True
+    assert "no visible final result" in _public(row)["error"]
     assert _public(row, include_result=True)["result"] == "  "
 
 
@@ -584,6 +585,7 @@ def test_child_loop_inherits_parent_policy_and_persists_stream(monkeypatch):
 
     async def fake_loop(*args, **kwargs):
         captured.update(kwargs)
+        assert "visible final result" in args[2][0]["content"]
         yield 'data: {"type":"context_usage","data":{"model":"worker","context_percent":74,"auto_compact_enabled":true,"compactions":0}}\n\n'
         yield 'data: {"delta":"reason ","thinking":true,"round":1}\n\n'
         yield 'data: {"type":"tool_start","tool":"read_file","round":1}\n\n'
