@@ -77,7 +77,8 @@ function render() {
     item.querySelector('.subagent-name').textContent = row.name || `Subagent ${row.ordinal || ''}`;
     item.querySelector('.subagent-model').textContent = row.model || '';
     item.querySelector('.subagent-objective').textContent = row.objective || '';
-    const status = item.querySelector('.subagent-status'); status.className = `subagent-status ${row.status}`; status.textContent = t(`Subagent ${row.status}`);
+    const status = item.querySelector('.subagent-status'); status.className = `subagent-status ${row.result_missing ? 'failed' : row.status}`;
+    status.textContent = t(row.result_missing ? 'Subagent missing result' : `Subagent ${row.status}`);
     status.title = Number.isFinite(Number(row.queue_wait_ms)) && row.queue_wait_ms != null
       ? `${t('Queue wait')}: ${Math.max(0, Math.round(Number(row.queue_wait_ms) / 1000))} ${t('seconds')}` : '';
     const view = item.querySelector('button[data-action="view"]'); view.textContent = t('View');
@@ -101,7 +102,7 @@ async function showDetail(childId) {
   const detail = await json(`${api}/api/chat/subagents/${encodeURIComponent(expectedSession)}/${encodeURIComponent(childId)}`);
   if (myGeneration !== detailGeneration || sessionId !== expectedSession || selectedId !== childId) return;
   el('subagent-detail').hidden = false;
-  el('subagent-detail-title').textContent = `${detail.name} · ${detail.status}`;
+  el('subagent-detail-title').textContent = `${detail.name} · ${t(detail.result_missing ? 'Subagent missing result' : `Subagent ${detail.status}`)}`;
   const events = await json(
     `${api}/api/chat/subagents/${encodeURIComponent(expectedSession)}/events?after=${detailCursor}`
     + `&limit=${reset ? 1000 : 200}&tail=${reset ? 'true' : 'false'}&child_id=${encodeURIComponent(childId)}`

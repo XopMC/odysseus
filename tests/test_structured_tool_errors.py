@@ -25,6 +25,16 @@ def test_structured_tool_errors_cover_required_categories_without_replaying():
         "approval_required": True, "exit_code": None}
 
 
+def test_timeout_transport_retry_hint_never_authorizes_effectful_replay():
+    result = enrich_tool_error({
+        "error": "host command timed out", "exit_code": 124,
+        "timed_out": True, "retryable": True,
+    })
+    assert result["error_category"] == "timeout"
+    assert result["retryable"] is False
+    assert "completed" in result["next_action"]
+
+
 def test_dispatch_enriches_early_policy_denial(monkeypatch):
     from src import tool_execution
     from src.tool_capabilities import ToolRunSecurityContext

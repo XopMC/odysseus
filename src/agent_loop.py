@@ -716,7 +716,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "delegate_subagent": f"- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {{\"objective\":\"...\",\"context\":\"only needed excerpt\",\"model\":\"auto|exact configured model\"}}. Selected models are filled breadth-first. Maximum {MAX_ACTIVE_PER_MODEL} children per exact model, or 3 on the active chat model.",
-    "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or wait for several child_ids after all of them have been started.",
+    "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or wait for several child_ids after all of them have been started. A terminal status alone is not a verdict: require a non-empty result or inspect explicit evidence; an empty result never verifies a claim.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
@@ -4785,6 +4785,7 @@ async def stream_agent_loop(
                 "Never use create_session for subagents; create_session only creates a separate user-visible chat. "
                 "Give each child only the context excerpt it needs, never secrets or the full transcript. "
                 "Children receive ordinary Agent tools within the current user policy; verify their claims before acting. "
+                "Never infer a child's finding from completed status or thinking alone: read its non-empty result or explicit evidence. "
                 f"At most {MAX_ACTIVE_PER_MODEL} children may be active on one exact model; the active chat model is limited to 3 children. "
                 + _subagent_scope
             ))

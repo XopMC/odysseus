@@ -42,6 +42,18 @@ def test_child_queue_wait_is_visible_without_assigned_context():
     assert "assigned_context" not in public
 
 
+def test_legacy_completed_child_without_result_is_marked_unverified():
+    from src.subagent_runtime import _public
+    row = SimpleNamespace(
+        id="c" * 32, parent_run_id="p" * 32, parent_session_id="s",
+        ordinal=1, name="Worker", objective="safe test", model="fixture",
+        endpoint_id="ep", status="completed", result="  ", error="", metrics={}, revision=1,
+        started_at=None, finished_at=None, created_at=None, guidance=[],
+    )
+    assert _public(row)["result_missing"] is True
+    assert _public(row, include_result=True)["result"] == "  "
+
+
 def test_subagent_disabled_fails_before_model_dispatch(monkeypatch):
     monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: "off" if key == "agent_subagents_mode" else default)
     result = asyncio.run(tools.delegate_subagent(json.dumps({"objective": "Review this"}), {
@@ -799,6 +811,48 @@ def test_child_terminal_failure_is_not_published_as_completed(monkeypatch):
         assert "context_compaction_failed" in kinds
         assert "agent_terminal" in kinds
         assert "transport_retry" not in kinds
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
+def test_thinking_only_child_cannot_claim_completed_without_result(monkeypatch):
+    owner = "empty-result-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="empty result test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+
+    async def fake_loop(*args, **kwargs):
+        yield 'data: {"delta":"2 + 2 = 4", "thinking":true,"round":1}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="verify arithmetic", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        row = runtime.get(owner, session_id, child["child_id"])
+        assert row["status"] == "failed"
+        assert row["result"] == ""
+        assert "no visible final result" in row["error"]
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        assert not any(e["kind"] == "status" and e["payload"].get("status") == "completed"
+                       for e in events)
 
     try:
         asyncio.run(scenario())

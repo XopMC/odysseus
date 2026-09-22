@@ -50,5 +50,11 @@ def enrich_tool_error(result: dict) -> dict:
         category = _CODE_MAP.get(code, "failed")
     enriched["error_category"] = category
     enriched["next_action"] = _ACTIONS[category]
-    enriched["retryable"] = False if category == "unknown_outcome" else result.get("retryable") is True
+    # A timeout does not prove that an effectful action failed.  Transport
+    # hints must not turn it into an automatic replay, even when the provider
+    # marked the raw error retryable.
+    enriched["retryable"] = (
+        category not in {"unknown_outcome", "timeout"}
+        and result.get("retryable") is True
+    )
     return enriched

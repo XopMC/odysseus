@@ -43,6 +43,7 @@ def _public(row: ChatSubagentRun, *, include_result: bool = False) -> dict:
         "model": row.model,
         "endpoint_id": row.endpoint_id,
         "status": row.status,
+        "result_missing": row.status == "completed" and not (row.result or "").strip(),
         "error": row.error or "",
         "metrics": row.metrics or {},
         "revision": row.revision,
@@ -522,6 +523,11 @@ class SubagentRuntime:
                     "status": "waiting_user", "ask_user": waiting_payload,
                 })
                 return
+            if not final:
+                # Thinking and successful transport completion are not a
+                # deliverable.  Never let a parent treat an empty child result
+                # as independent verification of the assigned objective.
+                raise RuntimeError("Subagent produced no visible final result")
             self._update(child_id, owner, status="completed", result=final,
                          finished_at=_utcnow(), error="", slot=None)
             self._event(child_id, owner, session_id, "status", {
