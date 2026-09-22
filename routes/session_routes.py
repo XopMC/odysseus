@@ -1094,7 +1094,7 @@ def setup_session_routes(
         if not older:
             raise HTTPException(400, "Nothing old enough to compact")
 
-        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary
+        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary, is_compaction_prompt_echo
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
         from src.model_context import estimate_tokens, get_context_length
@@ -1146,6 +1146,8 @@ def setup_session_routes(
             logger.error("Manual compaction failed: %s", e)
             raise HTTPException(500, "Compaction failed")
         summary = normalize_compaction_summary(summary)
+        if is_compaction_prompt_echo(summary):
+            raise HTTPException(502, "Compaction returned an internal context envelope; checkpoint unchanged")
 
         previous = getattr(session, "context_checkpoint", None)
         previous_count = getattr(session, "context_checkpoint_count", 0)

@@ -90,6 +90,23 @@ def normalize_compaction_summary(summary: str) -> str:
     return text.lstrip()
 
 
+def is_compaction_prompt_echo(summary: str) -> bool:
+    """Reject a summarizer echo of our internal untrusted-message envelope.
+
+    This is deliberately narrower than filtering JSON from normal model output:
+    legitimate JSON summaries and visible assistant replies must remain intact.
+    """
+    text = (summary or "").lstrip()
+    if text.startswith("UNTRUSTED SOURCE DATA\n") or text.startswith("<<<UNTRUSTED_SOURCE_DATA>>>"):
+        return True
+    prefix = text[:4096]
+    if not prefix.startswith(("{", "[")) or not re.search(
+        r'"role"\s*:\s*"(?:user|assistant|system|tool)"', prefix
+    ) or not re.search(r'"content"\s*:', prefix):
+        return False
+    return "UNTRUSTED SOURCE DATA" in prefix or "<<<UNTRUSTED_SOURCE_DATA>>>" in prefix
+
+
 def _sanitize_tool_messages(msgs: List[Dict]) -> List[Dict]:
     """Drop orphaned `tool` messages and dangling assistant `tool_calls`.
 
@@ -481,6 +498,9 @@ async def maybe_compact(
         # caller nothing was summarized; trim_for_context handles length.
         return messages, context_length, False
     summary = normalize_compaction_summary(summary)
+    if not summary or is_compaction_prompt_echo(summary):
+        logger.warning("Compaction returned an invalid summary; checkpoint unchanged")
+        return messages, context_length, False
 
     summary_msg = {
         "role": "system",
@@ -583,6 +603,9 @@ def _update_session_history(session, split_point: int, summary: str,
     if covered_count <= 0:
         return
     summary = normalize_compaction_summary(summary)
+    if not summary or is_compaction_prompt_echo(summary):
+        logger.warning("Refusing to persist an invalid context checkpoint")
+        return
     summary_msg = ChatMessage(
         role="system",
         content=f"[Conversation summary]\n{summary}",

@@ -94,6 +94,33 @@ def test_empty_or_failed_summary_never_discards_evidence():
         assert out == msgs and status == "failed"
 
 
+def test_internal_envelope_echo_never_replaces_checkpoint():
+    msgs = history()
+    echo = json.dumps({"role": "user", "content": "UNTRUSTED SOURCE DATA\\n<<<UNTRUSTED_SOURCE_DATA>>>"})
+    async def summarize(_):
+        return "<think>Internal reasoning</think>\n" + echo
+    out, status = asyncio.run(ac.compact_working_context(msgs, 5000, summarize))
+    assert status == "failed"
+    assert out is msgs
+
+
+def test_legitimate_json_summary_remains_usable():
+    msgs = history()
+    async def summarize(_):
+        return '{"status":"verified", "next":"continue audit"}'
+    out, status = asyncio.run(ac.compact_working_context(msgs, 5000, summarize))
+    assert status == "compacted"
+    assert '"status":"verified"' in next(m for m in out if m.get("_agent_working_summary"))["content"]
+
+
+def test_prompt_echo_classifier_is_narrow():
+    from src.context_compactor import is_compaction_prompt_echo
+    assert is_compaction_prompt_echo('{\n  "role": "user",\n  "content": "UNTRUSTED SOURCE DATA\\nbody"\n}')
+    assert is_compaction_prompt_echo("UNTRUSTED SOURCE DATA\n<<<UNTRUSTED_SOURCE_DATA>>>")
+    assert not is_compaction_prompt_echo('{"role":"user","content":"ordinary quoted example"}')
+    assert not is_compaction_prompt_echo('{"finding":"UNTRUSTED SOURCE DATA appears in logs"}')
+
+
 def test_oversized_summary_is_bounded_with_explicit_durable_log_marker():
     from src.context_policy import ContextPolicy
     msgs = history()

@@ -7,6 +7,7 @@ import re
 
 from src.model_context import estimate_tokens
 from src.prompt_security import untrusted_context_message
+from src.context_compactor import is_compaction_prompt_echo
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,8 @@ async def compact_working_context(messages, limit, summarize, *, policy=None, ta
         summary = re.sub(r"<think>.*?</think>", "", summary or "", flags=re.S).strip()
         if not summary or summary.startswith("<think>"):
             raise ValueError("Summarizer returned no usable answer")
+        if is_compaction_prompt_echo(summary):
+            raise ValueError("Summarizer echoed internal context envelope")
         if policy is not None and estimate_tokens([{'role': 'assistant', 'content': summary}]) > policy.summary_tokens:
             marker = (
                 "\n[Checkpoint summary exceeded its configured budget; middle omitted. "
