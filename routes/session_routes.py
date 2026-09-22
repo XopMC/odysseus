@@ -1146,8 +1146,8 @@ def setup_session_routes(
             logger.error("Manual compaction failed: %s", e)
             raise HTTPException(500, "Compaction failed")
         summary = normalize_compaction_summary(summary)
-        if is_compaction_prompt_echo(summary):
-            raise HTTPException(502, "Compaction returned an internal context envelope; checkpoint unchanged")
+        if not summary or is_compaction_prompt_echo(summary):
+            raise HTTPException(502, "Compaction returned no usable summary; checkpoint unchanged")
 
         previous = getattr(session, "context_checkpoint", None)
         previous_count = getattr(session, "context_checkpoint_count", 0)

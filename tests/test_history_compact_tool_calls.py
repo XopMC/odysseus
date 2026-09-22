@@ -136,13 +136,14 @@ def _compact_prompt_for(monkeypatch, history):
     return captured["messages"][1]["content"]
 
 
-def _registered_compact_response(monkeypatch, history, active_run=False, working_messages=None):
+def _registered_compact_response(monkeypatch, history, active_run=False, working_messages=None,
+                                 summary_text="Summary text"):
     captured = {}
 
     async def fake_llm_call_async(endpoint_url, model, messages, **kwargs):
         captured["messages"] = messages
         captured["timeout"] = kwargs.get("timeout")
-        return "Summary text"
+        return summary_text
 
     monkeypatch.setattr(
         session_routes,
@@ -279,6 +280,16 @@ def test_manual_compaction_does_not_claim_success_without_reduction(monkeypatch)
     assert response.json()["reason"] == "no_reduction"
     assert manager.session.context_checkpoint is None
     assert manager.saved is False
+
+
+def test_manual_compaction_rejects_empty_or_internal_echo_without_checkpoint(monkeypatch):
+    history = [ChatMessage(role="user", content=f"entry {i}") for i in range(6)]
+    for summary in ("  ", '{"role":"user","content":"UNTRUSTED SOURCE DATA\\nbody"}'):
+        response, _captured, manager = _registered_compact_response(
+            monkeypatch, history, summary_text=summary)
+        assert response.status_code == 502
+        assert getattr(manager.session, "context_checkpoint", None) is None
+        assert manager.saved is False
 
 
 def test_registered_manual_compact_route_rejects_active_agent_run(monkeypatch):
