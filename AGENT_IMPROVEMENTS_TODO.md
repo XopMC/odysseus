@@ -10,6 +10,20 @@
 Каждый чекбокс ниже остаётся открытым до проверки всех частей требования на
 реальном runtime. Локальные тесты сами по себе не закрывают пункт.
 
+- 2026-09-23 05:22–05:27 +05: после релиза `c0f36f5` обнаружено расхождение
+  approval-карточки: при gated `python print(2+2)` live-клиент не создавал
+  tool node, хотя reload показывал `PYTHON failed`. Причина: approval branch
+  намеренно не посылает `tool_start`, а frontend создавал node только на
+  `tool_start` и терял approval-only `tool_output`. Кандидат `205f991` на
+  изолированном Jetson `:7131` с отдельной SQLite и реальной qwen3.6
+  проверен в safe chat `cf85a63c-8a4c-47c5-a21f-b1f2d863cede`: до Deny
+  live DOM имел `approval-pending`/`waiting` с точным approval_id; после
+  Deny — `error`/`failed` с тем же ID; reload и вторая вкладка дали тот же
+  результат. Команда не выполнялась. Полный локальный pytest: 7103 passed,
+  20 skipped, 109 subtests; JS syntax/diff check зелёные. Кандидат остановлен,
+  production healthy на `c0f36f5`. Пункт №50 и шестичасовой gate пока не
+  закрыты: это адресный сценарий, не вся матрица live/replay.
+
 - 2026-09-23 04:46–04:49 +05: isolated Jetson candidate `031ab98`, safe chat
   `9dc6295f-fe51-4af9-a275-4a8334107d99`. Goal создала draft Plan
   `0/2` и вызвала `ask_user` уже в попытке 1; второй клиент видел тот же
