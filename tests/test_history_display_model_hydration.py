@@ -391,6 +391,85 @@ def test_active_checkpoint_archive_stays_compact_but_full_history_and_rewrite_pr
     engine.dispose()
 
 
+def test_truncate_before_checkpoint_restores_kept_metadata_and_clears_summary(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=5)
+    with db_factory.begin() as db:
+        row = db.query(DbSession).filter_by(id="session-1").one()
+        row.context_checkpoint = {"role": "system", "content": "old summary", "metadata": {}}
+        row.context_checkpoint_count = 3
+        db.query(DbChatMessage).filter_by(id="message-0").one().meta_data = json.dumps({
+            "timeline_v2": {"events": [{"type": "delta", "text": "kept old thinking"}]},
+        })
+    manager = _manager(db_factory, monkeypatch)
+    session = manager.get_session("session-1")
+    packed = session.history[0]._archived_metadata_zlib
+    session.history[0]._archived_metadata_zlib = b"corrupt"
+    assert manager.truncate_messages("session-1", 2) is False
+    with db_factory() as db:
+        assert db.query(DbChatMessage).filter_by(session_id="session-1").count() == 5
+        assert db.query(DbSession).filter_by(id="session-1").one().context_checkpoint_count == 3
+    session.history[0]._archived_metadata_zlib = packed
+    assert manager.truncate_messages("session-1", 2) is True
+    assert session.context_checkpoint is None and session.context_checkpoint_count == 0
+    assert session.message_count == len(session.history) == 2
+    assert session.history[0].metadata["timeline_v2"]["events"][0]["text"] == "kept old thinking"
+    assert not hasattr(session.history[0], "_archived_metadata_zlib")
+    assert [msg["content"] for msg in session.get_context_messages()] == ["content-0", "content-1"]
+    with db_factory() as db:
+        row = db.query(DbSession).filter_by(id="session-1").one()
+        assert row.context_checkpoint is None and row.context_checkpoint_count == 0
+        assert db.query(DbChatMessage).filter_by(session_id="session-1").count() == 2
+    engine.dispose()
+
+
+@pytest.mark.parametrize("action", ["edit", "delete", "delete_index"])
+def test_mutating_checkpoint_covered_message_invalidates_summary(monkeypatch, action):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=5)
+    with db_factory.begin() as db:
+        row = db.query(DbSession).filter_by(id="session-1").one()
+        row.context_checkpoint = {"role": "system", "content": "obsolete summary", "metadata": {}}
+        row.context_checkpoint_count = 3
+        db.query(DbChatMessage).filter_by(id="message-0").one().meta_data = json.dumps({
+            "timeline_v2": {"events": [{"type": "delta", "text": "old reasoning"}]},
+        })
+    manager = _manager(db_factory, monkeypatch)
+    assert hasattr(manager.get_session("session-1").history[0], "_archived_metadata_zlib")
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    active = {"value": True}
+    monkeypatch.setattr("src.agent_runs.is_active", lambda *_args: active["value"])
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(manager))
+    client = TestClient(app)
+    path = "/api/session/session-1/edit-message" if action == "edit" else "/api/session/session-1/delete-messages"
+    payload = ({"msg_id": "message-0", "content": "corrected old message"}
+               if action == "edit" else {"indices": [0]} if action == "delete_index"
+               else {"msg_ids": ["message-0"]})
+    blocked = client.post(path, json=payload)
+    assert blocked.status_code == 409
+    with db_factory() as db:
+        assert db.query(DbChatMessage).filter_by(session_id="session-1").count() == 5
+        assert db.query(DbSession).filter_by(id="session-1").one().context_checkpoint_count == 3
+    active["value"] = False
+    result = client.post(path, json=payload)
+    assert result.status_code == 200, result.text
+    with db_factory() as db:
+        row = db.query(DbSession).filter_by(id="session-1").one()
+        assert row.context_checkpoint is None and row.context_checkpoint_count == 0
+    reloaded = manager.get_session("session-1")
+    assert reloaded.context_checkpoint is None
+    assert all(not hasattr(message, "_archived_metadata_zlib") for message in reloaded.history)
+    if action == "edit":
+        assert reloaded.history[0].content == "corrected old message"
+        assert reloaded.history[0].metadata["timeline_v2"]["events"][0]["text"] == "old reasoning"
+    else:
+        assert len(reloaded.history) == 4
+        assert reloaded.history[0].content == "content-1"
+    engine.dispose()
+
+
 def test_stale_checkpoint_offset_falls_back_to_full_session(monkeypatch):
     engine, db_factory = _database()
     _seed_session(db_factory, message_count=2)

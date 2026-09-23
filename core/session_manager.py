@@ -372,9 +372,18 @@ class SessionManager:
 
         db = SessionLocal()
         try:
+            actual_keep = min(keep_count, len(session.history))
+            reset_checkpoint = bool(
+                session.context_checkpoint is not None
+                and actual_keep < int(session.context_checkpoint_count or 0)
+            )
+            restored_metadata = (
+                [_full_message_metadata(message) for message in session.history[:actual_keep]]
+                if reset_checkpoint else None
+            )
             db_messages = db.query(DbChatMessage).filter(
                 DbChatMessage.session_id == session_id
-            ).order_by(DbChatMessage.timestamp).all()
+            ).order_by(DbChatMessage.timestamp, DbChatMessage.id).all()
 
             deleted = 0
             for msg in db_messages[keep_count:]:
@@ -388,12 +397,23 @@ class SessionManager:
                 # track the rows that actually remain, not the requested cap.
                 db_session.message_count = min(keep_count, len(db_messages))
                 db_session.updated_at = datetime.now(timezone.utc)
+                if reset_checkpoint:
+                    db_session.context_checkpoint = None
+                    db_session.context_checkpoint_count = 0
 
             db.commit()
 
             # Update in-memory
             session.history = session.history[:keep_count]
             session._history = session.history
+            session.message_count = len(session.history)
+            if reset_checkpoint:
+                for message, metadata in zip(session.history, restored_metadata):
+                    message.metadata = metadata
+                    if hasattr(message, "_archived_metadata_zlib"):
+                        delattr(message, "_archived_metadata_zlib")
+                session.context_checkpoint = None
+                session.context_checkpoint_count = 0
 
             logger.info(f"Truncated session {session_id} to {keep_count} messages")
             return True

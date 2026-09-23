@@ -722,6 +722,19 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             indices = body.get("indices")  # legacy fallback
 
             session = session_manager.get_session(session_id)
+            covered = int(getattr(session, "context_checkpoint_count", 0) or 0)
+            archived_ids = {
+                (getattr(message, "metadata", None) or {}).get("_db_id")
+                for message in session.history[:covered]
+            } if covered else set()
+            invalidates_checkpoint = bool(
+                (msg_ids and archived_ids.intersection(msg_ids))
+                or (indices and any(type(index) is int and 0 <= index < covered for index in indices))
+            )
+            if invalidates_checkpoint:
+                from src import agent_runs
+                if agent_runs.is_active(session_id):
+                    raise HTTPException(409, "Stop the active run before editing checkpoint-covered history")
             db = SessionLocal()
             try:
                 if msg_ids:
@@ -746,7 +759,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     indices = sorted(indices, reverse=True)
                     db_messages = db.query(DbChatMessage).filter(
                         DbChatMessage.session_id == session_id
-                    ).order_by(DbChatMessage.timestamp).all()
+                    ).order_by(DbChatMessage.timestamp, DbChatMessage.id).all()
 
                     deleted = 0
                     for idx in indices:
@@ -764,13 +777,20 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     db_session.message_count = len(session.history)
                     from datetime import datetime, timezone
                     db_session.updated_at = datetime.now(timezone.utc)
+                    if invalidates_checkpoint:
+                        db_session.context_checkpoint = None
+                        db_session.context_checkpoint_count = 0
 
                 db.commit()
+                if invalidates_checkpoint:
+                    session_manager.sessions.pop(session_id, None)
                 return {"status": "ok", "deleted": deleted}
             finally:
                 db.close()
         except KeyError:
             raise HTTPException(404, "Session not found")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Delete messages error {session_id}: {e}")
             raise HTTPException(500, "Message deletion failed")
@@ -789,6 +809,16 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             _reserve_message_uploads(request, content)
 
             session = session_manager.get_session(session_id)
+            covered = int(getattr(session, "context_checkpoint_count", 0) or 0)
+            archived_ids = {
+                (getattr(message, "metadata", None) or {}).get("_db_id")
+                for message in session.history[:covered]
+            } if covered else set()
+            invalidates_checkpoint = msg_id in archived_ids
+            if invalidates_checkpoint:
+                from src import agent_runs
+                if agent_runs.is_active(session_id):
+                    raise HTTPException(409, "Stop the active run before editing checkpoint-covered history")
             db = SessionLocal()
             try:
                 db_msg = db.query(DbChatMessage).filter(
@@ -805,20 +835,28 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     except (json.JSONDecodeError, ValueError): pass
                 meta['edited'] = True
                 db_msg.meta_data = json.dumps(meta)
-
-                # Update in-memory history by matching _db_id
-                for hmsg in session.history:
-                    hmeta = hmsg.metadata if isinstance(hmsg, ChatMessage) else hmsg.get('metadata')
-                    if isinstance(hmeta, dict) and hmeta.get('_db_id') == msg_id:
-                        if isinstance(hmsg, ChatMessage):
-                            hmsg.content = content
-                            hmsg.metadata['edited'] = True
-                        elif isinstance(hmsg, dict):
-                            hmsg['content'] = content
-                            hmsg['metadata']['edited'] = True
-                        break
+                if invalidates_checkpoint:
+                    row = db.query(DbSession).filter(DbSession.id == session_id).first()
+                    if row is not None:
+                        row.context_checkpoint = None
+                        row.context_checkpoint_count = 0
+                        row.updated_at = datetime.now(timezone.utc)
 
                 db.commit()
+                if invalidates_checkpoint:
+                    session_manager.sessions.pop(session_id, None)
+                else:
+                    # Update the hot tail only after the durable edit commits.
+                    for hmsg in session.history:
+                        hmeta = hmsg.metadata if isinstance(hmsg, ChatMessage) else hmsg.get('metadata')
+                        if isinstance(hmeta, dict) and hmeta.get('_db_id') == msg_id:
+                            if isinstance(hmsg, ChatMessage):
+                                hmsg.content = content
+                                hmsg.metadata['edited'] = True
+                            elif isinstance(hmsg, dict):
+                                hmsg['content'] = content
+                                hmsg['metadata']['edited'] = True
+                            break
                 return {"status": "ok"}
             finally:
                 db.close()
