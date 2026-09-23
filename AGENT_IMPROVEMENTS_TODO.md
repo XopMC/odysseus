@@ -501,6 +501,16 @@
   109 subtests; JS syntax и diff-check clean. Team phase, unknown
   effect и все recovery пути не закрыты, поэтому пункт открыт.
 
+- 2026-09-23: №01 дополнен regression для stalled model request: два
+  owner-клиента видят одинаковую фазу, длительность, lease, модель, endpoint,
+  child ID, durable checkpoint и безопасное действие `inspect`; чужой owner
+  получает 403, assigned context отсутствует в ответе. Отдельный opt-in
+  localhost Playwright/Chromium smoke (desktop 1280×800 и mobile 390×844)
+  раскрыл панель в двух независимых клиентах, сверил поля после reload,
+  отсутствие page/console ошибок и отсутствие обрезания на мобильной ширине.
+  Реальный зависший provider request и Team-specific phase ещё не проверены;
+  пункт остаётся открытым.
+
 - 2026-09-22 ~08:40 +05: №04 начат. `ProgressTracker` отделяет транспортный
   heartbeat и обычные SSE tokens/round/tool_progress от доказанных изменений.
   Только уникальная revision рабочего Plan, nonempty diff, artifact ID/version

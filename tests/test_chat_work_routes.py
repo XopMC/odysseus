@@ -100,6 +100,55 @@ def test_why_waiting_is_same_for_two_owner_clients_and_denies_foreign_owner(monk
     engine.dispose()
 
 
+def test_stalled_model_request_has_same_safe_recovery_on_two_clients(monkeypatch):
+    from src import agent_runs, subagent_runtime, run_wait_state
+
+    class WaitStore:
+        def wait_metadata(self, owner, session_id):
+            assert (owner, session_id) == ("alice", "chat-1")
+            return {"status": "active", "attempt": 3, "lease_held": True,
+                    "lease_expires_at": "2026-09-23T10:00:00"}
+
+    def verify(request, session_id):
+        if request.headers.get("X-Test-Owner") != "alice":
+            raise HTTPException(403, "Not your chat")
+
+    monkeypatch.setattr(chat_work_routes, "store", WaitStore())
+    monkeypatch.setattr(chat_work_routes, "_verify_session_owner", verify)
+    monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: request.headers.get("X-Test-Owner"))
+    monkeypatch.setattr(run_wait_state.time, "time", lambda: 1000)
+    monkeypatch.setattr(agent_runs, "describe_run", lambda session_id: {
+        "run_id": "a" * 32, "status": "running", "started_at": 100,
+        "durable_seq": 51, "context_revision": 7, "ledger_hash": "b" * 64,
+        "wait_state": {"phase": "model", "phase_since": 300,
+                       "model": "worker-model", "endpoint_id": "endpoint-1",
+                       "endpoint_label": "GPU worker"},
+        "progress_health": {"revision": 5, "stalled": True},
+    })
+    monkeypatch.setattr(subagent_runtime.runtime, "active_summary", lambda owner, session_id, **kwargs: [
+        {"child_id": "child-1", "parent_run_id": "a" * 32, "status": "queued",
+         "model": "child-model", "endpoint_id": "endpoint-2",
+         "assigned_context": "PRIVATE_CHILD_CONTEXT"},
+    ])
+    app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
+    with TestClient(app) as client:
+        desktop = client.get("/api/chat/work/chat-1/why-waiting", headers={"X-Test-Owner": "alice"})
+        mobile = client.get("/api/chat/work/chat-1/why-waiting", headers={
+            "X-Test-Owner": "alice", "X-Device": "mobile",
+        })
+        foreign = client.get("/api/chat/work/chat-1/why-waiting", headers={"X-Test-Owner": "bob"})
+    assert desktop.status_code == mobile.status_code == 200
+    assert desktop.json() == mobile.json()
+    state = desktop.json()
+    assert (state["phase"], state["phase_seconds"], state["recovery_action"]) == ("model", 700, "inspect")
+    assert state["run_id"] == "a" * 32
+    assert state["checkpoint"] == {"durable_seq": 51, "context_revision": 7, "ledger_hash": "b" * 64}
+    assert state["current_child"]["child_id"] == "child-1"
+    assert state["lease"]["held"] is True
+    assert "PRIVATE_CHILD_CONTEXT" not in desktop.text
+    assert foreign.status_code == 403
+
+
 def test_unknown_effect_inbox_is_identical_across_clients_and_owner_scoped(monkeypatch):
     from src.chat_effect_inbox import inbox
 
