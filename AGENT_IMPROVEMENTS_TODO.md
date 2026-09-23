@@ -10,6 +10,18 @@
 Каждый чекбокс ниже остаётся открытым до проверки всех частей требования на
 реальном runtime. Локальные тесты сами по себе не закрывают пункт.
 
+- 2026-09-23 11:58 +05: пункт №30 подтверждён отдельно от шестичасового gate.
+  `tests/fixtures/long_replay_corpus_manifest.json` фиксирует SHA-256 corpus
+  1K/10K/100K; `test_long_replay_corpus.py` проверяет durable cursor,
+  reasoning index, reducer, повторные cursor и исключение 100K архивных
+  событий из model-visible context. `test_cross_device_chat_sync_js.py`
+  проверяет 1K/10K/100K UI replay; opt-in
+  `test_live_replay_browser_qa.py` прошёл в реальном Chromium на 10K и 100K:
+  окно DOM ≤360 live-карточек, ручная прокрутка, старые события и reload.
+  Production Safari на отдельном 6,002-строчном обезличенном чате сохранил
+  последний диапазон после reload. Пункт №30 закрыт, но это не доказывает
+  все шесть часов и не закрывает №50 или другие пункты.
+
 - 2026-09-23 05:58–06:05 +05: production log на `80364b0` зафиксировал
   `Server-side post-compaction plan recovery failed`: `save_plan` отклонил
   fallback, потому что он создавал draft с первым шагом `done` до Execute.
@@ -1138,7 +1150,7 @@
 - [ ] **27. Dynamic model routing.** Раздельные профили planner/editor/reviewer/reducer; переключать только на границе round, пересчитывая окно и budget; показывать фактически выбранную модель и причину.
 - [ ] **28. Model capability probes.** Проверять native tool calls, JSON schema, vision, context window, parallel requests, cancellation и streaming на каждом endpoint; результаты с TTL и ручным refresh.
 - [ ] **29. Cache экономии в терминах time-to-success.** A/B измерять не только токены и tok/s, но число исправных tool calls, повторных действий, качество результата, длительность и вероятность завершения.
-- [ ] **30. Long-run replay corpus.** Сохранять обезличенные эталонные траектории 1K/10K/100K событий; регрессии контекста, reducer и UI проверять детерминированным replay.
+- [x] **30. Long-run replay corpus.** Сохранять обезличенные эталонные траектории 1K/10K/100K событий; регрессии контекста, reducer и UI проверять детерминированным replay.
 
 ## P1 — инструменты, которыми пользуется модель
 
