@@ -51,7 +51,7 @@ def test_sanitized_clone_has_no_source_text_goal_or_workspace(monkeypatch):
     engine.dispose()
 
 
-def test_existing_empty_destination_is_populated_but_never_overwritten(monkeypatch):
+def test_existing_seeded_destination_is_populated_but_never_overwritten(monkeypatch):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=[Session.__table__, ChatMessage.__table__])
     factory = sessionmaker(bind=engine)
@@ -60,25 +60,26 @@ def test_existing_empty_destination_is_populated_but_never_overwritten(monkeypat
         db.add(Session(id="source", owner="alice", name="source", model="old", endpoint_url="http://old"))
         db.add(Session(id="safe-empty", owner="alice", name="empty", model="safe", endpoint_url="http://safe"))
         db.add(ChatMessage(id="m1", session_id="source", role="user", content="private objective"))
+        db.add(ChatMessage(id="seed", session_id="safe-empty", role="user", content="SAFE STRUCTURAL SOAK FIXTURE SEED"))
 
     preview = soak.create_clone(source_session_id="source", owner="alice", model="safe-model",
                                 endpoint_url="http://safe", dry_run=True)
     assert preview["dry_run"] is True and preview["clone_id"] is None
     with factory() as db:
         assert db.query(Session).count() == 2
-        assert db.query(ChatMessage).count() == 1
+        assert db.query(ChatMessage).count() == 2
 
     result = soak.create_clone(source_session_id="source", owner="alice", model="safe-model",
-                               endpoint_url="http://safe", destination_session_id="safe-empty")
+                               endpoint_url="http://safe", destination_session_id="safe-empty", target_rows=5)
     assert result["clone_id"] == "safe-empty"
     with factory() as db:
         rows = db.query(ChatMessage).filter_by(session_id="safe-empty").all()
-        assert len(rows) == 1 and "private" not in rows[0].content
+        assert len(rows) == 6 and all("private" not in row.content for row in rows)
     try:
         soak.create_clone(source_session_id="source", owner="alice", model="safe-model",
                           endpoint_url="http://safe", destination_session_id="safe-empty")
     except ValueError as exc:
-        assert "empty" in str(exc)
+        assert "exactly" in str(exc)
     else:
         raise AssertionError("a populated destination must not be overwritten")
     engine.dispose()

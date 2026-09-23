@@ -95,7 +95,8 @@ def sanitize_metadata(raw: Any) -> dict[str, Any]:
 def create_clone(*, source_session_id: str, owner: str, model: str,
                  endpoint_url: str, name: str = "SAFE structural long-chat soak",
                  destination_session_id: str | None = None,
-                 dry_run: bool = False, max_source_rows: int = 10000) -> dict[str, Any]:
+                 dry_run: bool = False, max_source_rows: int = 10000,
+                 target_rows: int | None = None) -> dict[str, Any]:
     if not source_session_id or not owner or not model or not endpoint_url:
         raise ValueError("source session, owner, model and endpoint are required")
     new_id = destination_session_id or str(uuid.uuid4())
@@ -111,14 +112,23 @@ def create_clone(*, source_session_id: str, owner: str, model: str,
         if source is None:
             raise ValueError("source chat not found for owner")
         total = db.query(ChatMessage).filter_by(session_id=source_session_id).count()
-        if total > max_source_rows:
+        if total > max_source_rows or total == 0:
             raise ValueError("source chat exceeds the explicitly bounded fixture size")
+        generated = target_rows or total
+        if generated < total or generated > 10000:
+            raise ValueError("target rows must be between source size and 10000")
         if dry_run:
             clone = None
         elif destination_session_id:
             clone = db.query(Session).filter_by(id=new_id, owner=owner).first()
-            if clone is None or db.query(ChatMessage).filter_by(session_id=new_id).first() is not None:
-                raise ValueError("destination chat must exist, belong to owner and be empty")
+            if clone is None:
+                raise ValueError("destination chat must exist and belong to owner")
+            existing = db.query(ChatMessage).filter_by(session_id=new_id).all()
+            existing.sort(key=lambda row: (row.timestamp, row.id))
+            if not (1 <= len(existing) <= 2 and existing[0].role == "user"
+                    and existing[0].content == "SAFE STRUCTURAL SOAK FIXTURE SEED"
+                    and (len(existing) == 1 or (existing[1].role == "assistant" and not existing[1].content))):
+                raise ValueError("destination must contain exactly the safe fixture seed and optional empty stopped reply")
             if clone.project_id is not None:
                 raise ValueError("destination chat must not bind a project workspace")
         else:
@@ -134,7 +144,7 @@ def create_clone(*, source_session_id: str, owner: str, model: str,
             clone.folder = "Safe soak"
             clone.project_id = None
             clone.headers = {}
-            clone.message_count = total
+            clone.message_count = generated + (len(existing) if destination_session_id else 0)
             clone.context_checkpoint = None
             clone.last_message_at = now
             clone.updated_at = now
@@ -145,29 +155,33 @@ def create_clone(*, source_session_id: str, owner: str, model: str,
             .order_by(ChatMessage.timestamp, ChatMessage.id)
             .yield_per(100)
         )
-        for index, row in enumerate(rows):
+        templates = []
+        for row in rows:
             metadata = sanitize_metadata(row.meta_data)
-            original_chars += len(row.content or "")
             content = _filler(row.content, row.role, 8192)
+            templates.append((row.role if row.role in {"user", "assistant", "system", "tool"} else "assistant", content, metadata, not metadata.get("hidden")))
+            original_chars += len(row.content or "")
+        for index in range(generated):
+            role, content, metadata, is_visible = templates[index % total]
             synthetic_chars += len(content)
-            if not metadata.get("hidden"):
+            if is_visible:
                 visible += 1
             if not dry_run:
+                metadata_json = json.dumps(metadata if index < total else sanitize_metadata(metadata))
                 db.add(ChatMessage(
                     id=uuid.uuid4().hex, session_id=new_id,
-                    role=row.role if row.role in {"user", "assistant", "system", "tool"} else "assistant",
-                    content=content, meta_data=json.dumps(metadata),
-                    timestamp=now - timedelta(seconds=total - index),
+                    role=role, content=content, meta_data=metadata_json,
+                    timestamp=now - timedelta(seconds=generated - index),
                 ))
             if not dry_run and index % 100 == 99:
                 db.flush()
         if clone is not None:
-            clone.message_count = total
+            clone.message_count = generated + (len(existing) if destination_session_id else 0)
     return {
         "clone_id": None if dry_run else new_id,
         "dry_run": dry_run,
         "source_rows": total,
-        "synthetic_rows": total,
+        "synthetic_rows": generated,
         "visible_rows": visible,
         "source_chars": original_chars,
         "synthetic_chars": synthetic_chars,
@@ -184,12 +198,14 @@ def main() -> None:
     parser.add_argument("--destination-session-id", help="Existing empty safe chat; keeps the UI session registered")
     parser.add_argument("--dry-run", action="store_true", help="Only report safe counts and generated sizes; make no writes")
     parser.add_argument("--max-source-rows", type=int, default=10000)
+    parser.add_argument("--target-rows", type=int, help="Expand sanitized shapes to a bounded larger synthetic history")
     args = parser.parse_args()
     print(json.dumps(create_clone(
         source_session_id=args.source_session_id, owner=args.owner,
         model=args.model, endpoint_url=args.endpoint_url, name=args.name,
         destination_session_id=args.destination_session_id,
         dry_run=args.dry_run, max_source_rows=args.max_source_rows,
+        target_rows=args.target_rows,
     ), sort_keys=True))
 
 
