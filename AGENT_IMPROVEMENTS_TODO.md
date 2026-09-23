@@ -1054,6 +1054,12 @@
 
 - [ ] **01. Панель «Почему агент ждёт?»** Показывать текущий run/child, lease, модель и endpoint, фазу (`model`, `tool`, `approval`, `user`, `queue`, `reconnect`), длительность, последний durable checkpoint и безопасное действие восстановления. Проверить на зависшем запросе и двух клиентах.
 - [ ] **02. Unified run inspector.** Дерево parent → children → tool calls → artifacts с точными ID, временами, статусами и cursor; переход из Goal/Plan/Subagent UI к конкретному событию.
+  - 2026-09-23: локально добавлен owner-scoped bounded inspector с курсорами
+    parent run, child event, replay event и ленивым раскрытием child evidence.
+    В изолированном браузерном fixture с 205 событиями проверены два клиента,
+    1280×800/390×844, переход из Why waiting/Goal/Plan/Subagents, старые
+    страницы и reload. Боевой Jetson и реальный Agent-run на выбранной модели
+    ещё не проверены; пункт остаётся открытым до релизного smoke.
 - [ ] **03. Классификация ошибок и retry policy.** Разделить timeout, rate limit, provider unload, schema mismatch, transport, context, unknown side effect; повторять только доказанно безопасные запросы с jitter и budget.
 - [ ] **04. Watchdog полезного прогресса.** Отдельно отслеживать heartbeat и реальные изменения: step, artifact, тест, diff, evidence. Оживший SSE не должен считаться прогрессом задачи.
 - [ ] **05. Детектор зацикливания.** Ловить одинаковые action→observation, повторные ошибки, A↔B циклы, монолог, бессмысленное повторное сжатие; сначала диагностический nudge, затем bounded escalation, не бесконечный автоповтор.

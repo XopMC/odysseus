@@ -93,6 +93,31 @@ def setup_chat_work_routes():
             ),
         )
 
+    @router.get("/{session_id}/run-inspector")
+    async def run_inspector(session_id: str, request: Request, limit: int = 20,
+                            before_run_id: str | None = None):
+        from src.run_inspector import snapshot
+        return snapshot(_owner(request, session_id), session_id, limit=limit,
+                        before_run_id=before_run_id)
+
+    @router.get("/{session_id}/run-inspector/{run_id}/events")
+    async def run_inspector_events(session_id: str, run_id: str, request: Request,
+                                   before_seq: int | None = None, limit: int = 200):
+        from src.run_inspector import event_refs
+        result = event_refs(_owner(request, session_id), session_id, run_id,
+                            before_seq=before_seq, limit=limit)
+        if result is None:
+            raise HTTPException(404, "Run not found")
+        return result
+
+    @router.get("/{session_id}/run-inspector/artifacts/{evidence_id}")
+    async def run_inspector_artifact(session_id: str, evidence_id: str, request: Request):
+        from src.run_inspector import artifact_detail
+        result = artifact_detail(_owner(request, session_id), session_id, evidence_id)
+        if result is None:
+            raise HTTPException(404, "Artifact not found")
+        return result
+
     @router.get("/{session_id}/unknown-effects")
     async def unknown_effects(session_id: str, request: Request):
         """Content-free durable inbox; inspection never authorizes replay."""

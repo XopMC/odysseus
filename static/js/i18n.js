@@ -1,6 +1,13 @@
 // Explicit UI catalog only. Never translate model output, names, code or form values.
 const RU = Object.freeze({
   'Goal':'Цель', 'Plan':'План', 'Plan mode':'Режим плана',
+  'Run inspector':'Инспектор запусков', 'Started':'Начало', 'Finished':'Завершение',
+  'Child':'Сабагент', 'Artifact':'Артефакт', 'Events':'События', 'Event':'Событие',
+  'Run':'Запуск', 'Tool call':'Вызов инструмента', 'Segment':'Сегмент',
+  'Event cursor':'Курсор событий',
+  'Load earlier events':'Загрузить ранние события', 'No runs':'Запусков нет',
+  'Load older runs':'Загрузить старые запуски',
+  'Replay unavailable':'История событий недоступна',
   'Access settings':'Настройки доступа',
   'Ask every time':'Спрашивать каждый раз',
   'Ask only important':'Спрашивать только важные',

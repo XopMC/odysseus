@@ -186,6 +186,11 @@ async function refreshKeepStream(expected) {
 }
 
 function bind() {
+  el('subagent-run-inspector')?.addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('odysseus:run-inspector', {
+      detail: { childId: selectedId },
+    }));
+  });
   const card=el('subagents-status'), toggle=el('subagents-toggle');
   const label=card?.querySelector('.subagents-label'); if(label) label.textContent=t('Agents');
   const title=card?.querySelector('.subagents-title strong'); if(title) title.textContent=t('Subagents');

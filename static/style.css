@@ -2697,6 +2697,31 @@ body.bg-pattern-sparkles {
     .subagent-message-row { display:flex; gap:6px; }
     .subagent-message-row[hidden] { display:none !important; }
     .subagent-message-row textarea { flex:1; min-width:0; resize:vertical; color:inherit; background:var(--panel); border:1px solid color-mix(in srgb,var(--accent) 30%,transparent); border-radius:8px; padding:6px; }
+	    .run-inspector-dialog {
+	      width:min(860px,calc(100vw - 24px)); max-height:min(82vh,760px);
+	      box-sizing:border-box; overflow:auto; padding:14px;
+	      border:1px solid var(--accent,var(--red)); border-radius:14px;
+	      background:var(--panel); color:var(--text); box-shadow:0 20px 70px #0009;
+	    }
+	    .run-inspector-dialog::backdrop { background:#0009; }
+	    .run-inspector-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+	    .run-inspector-head button,.run-inspector-run button,#run-inspector-event-list button,#run-inspector-older,#run-inspector-older-runs,#subagent-run-inspector {
+	      border:1px solid color-mix(in srgb,var(--accent) 45%,transparent); border-radius:8px;
+	      color:inherit; background:transparent; cursor:pointer; padding:5px 8px;
+	    }
+	    #run-inspector-runs,#run-inspector-event-list { display:grid; gap:6px; }
+	    .run-inspector-run,.run-inspector-child { padding:8px; border:1px solid color-mix(in srgb,var(--accent) 25%,transparent); border-radius:8px; min-width:0; overflow-wrap:anywhere; }
+	    .run-inspector-child { margin:5px 0 0 12px; }
+	    .run-inspector-child.selected { border-color:var(--accent,var(--red)); }
+	    .run-inspector-run > button,#run-inspector-event-title { max-width:100%; overflow-wrap:anywhere; white-space:normal; }
+	    .run-inspector-field { display:grid; grid-template-columns:110px minmax(0,1fr); gap:6px; margin-top:4px; font-size:11px; }
+	    .run-inspector-field span:first-child { opacity:.7; }
+	    #run-inspector-events { margin-top:14px; border-top:1px solid var(--border); }
+	    #run-inspector-event-list button { text-align:left; overflow-wrap:anywhere; }
+	    #run-inspector-event-detail { margin-top:8px; padding:8px; border:1px solid var(--accent,var(--red)); border-radius:8px; overflow-wrap:anywhere; }
+	    #run-inspector-artifact { margin-top:12px; border-top:1px solid var(--border); }
+	    #run-inspector-artifact-body { max-height:240px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+	    @media (max-width:520px) { .run-inspector-field { grid-template-columns:78px minmax(0,1fr); } }
 	    .wait-work-card { position:fixed; top:72px; right:62px; z-index:338; }
 	    .wait-work-card:not(.expanded) { width:36px; height:36px; border-radius:11px; }
 	    .wait-work-card:not(.expanded) .chat-work-card-head { padding:0; justify-content:center; font-size:18px; }

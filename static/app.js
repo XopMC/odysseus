@@ -24,8 +24,9 @@ import {
 import markdownModule from './js/markdown.js?v=20260923toolprogress1';
 import chatRenderer from './js/chatRenderer.js?v=20260923replaycursor1';
 import sessionModule from './js/sessions.js?v=20260923countrev1';
-import chatWork from './js/chat-work.js?v=20260923goalpreview1';
-import chatSubagents from './js/chat-subagents.js?v=20260923childresult1';
+import chatWork from './js/chat-work.js?v=20260923runinspector1';
+import chatSubagents from './js/chat-subagents.js?v=20260923runinspector1';
+import chatRunInspector from './js/chat-run-inspector.js?v=20260923runinspector1';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';
 import projectsModule from './js/projects.js?v=20260922projects2';
 import { createTeamWorkspace } from './js/team-workspace.js?v=20260923context1';
@@ -3868,6 +3869,7 @@ function startOdysseusApp() {
 
   // Initialize all event listeners
   try { initializeEventListeners(); } catch(e) { console.error('Event init error:', e); }
+  try { chatRunInspector.bind(); } catch(e) { console.error('Run inspector init error:', e); }
   try { chatWork.bind(); chatWork.refresh(); } catch(e) { console.error('Chat work init error:', e); }
   try { chatSubagents.bind(); chatSubagents.refresh(); } catch(e) { console.error('Chat subagents init error:', e); }
   try { accessModeModule.init(API_BASE); } catch(e) { console.error('Access mode init error:', e); }

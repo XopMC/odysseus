@@ -68,14 +68,36 @@ async def _qa_lifespan(instance):
             for index in range(50):
                 session.add_message(ChatMessage("assistant", f"[synthetic prior message {index + 1}]"))
             manager.save_sessions()
+        qa_run = None
         if os.getenv("ODYSSEUS_WAIT_QA_STALLED") == "1":
             run = agent_runs.start(SESSION_ID, _stalled_model_run(), initial_model="fixture-model")
+            qa_run = run
             run.progress.started_at = time.time() - 700
             run.wait.phase_since = time.time() - 700
             run.wait.endpoint_id = "fixture-endpoint"
             agent_runs._publish(run, 'data: {"type":"agent_step","round":1}\n\n')
         elif os.getenv("ODYSSEUS_REPLAY_QA_START_RUN", "1") == "1":
-            agent_runs.start(SESSION_ID, _synthetic_run(), initial_model="fixture-model")
+            qa_run = agent_runs.start(SESSION_ID, _synthetic_run(), initial_model="fixture-model")
+        if os.getenv("ODYSSEUS_INSPECTOR_QA_SEED") == "1" and qa_run is not None:
+            from core.database import (ChatGoal, ChatPlan, ChatSubagentRun,
+                                       ChatSubagentEvent, ChatSubagentEvidence, SessionLocal)
+            with SessionLocal.begin() as db:
+                db.add(ChatGoal(id="fixture-goal", session_id=SESSION_ID,
+                                owner="__odysseus_single_user__", objective="SAFE fixture goal",
+                                status="paused"))
+                db.add(ChatPlan(id="fixture-plan", session_id=SESSION_ID,
+                                owner="__odysseus_single_user__", title="SAFE fixture plan",
+                                status="draft", steps=[{"id": "fixture-step", "text": "SAFE step",
+                                                         "status": "pending", "required": True}]))
+                db.add(ChatSubagentRun(id="fixture-child", parent_session_id=SESSION_ID,
+                                       parent_run_id=qa_run.run_id, owner="", objective="SAFE child",
+                                       assigned_context="", model="fixture-model", status="done"))
+                db.flush()
+                db.add(ChatSubagentEvent(child_id="fixture-child", parent_session_id=SESSION_ID,
+                                         owner="", kind="status", payload={"status": "done"}))
+                db.add(ChatSubagentEvidence(id="e" * 32, child_id="fixture-child",
+                                            parent_session_id=SESSION_ID, owner="", kind="verified",
+                                            body="SAFE synthetic evidence", content_hash="f" * 64))
         yield
 
 

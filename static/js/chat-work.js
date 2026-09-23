@@ -568,6 +568,15 @@ async function chooseNoRetry(effect) {
 }
 
 function bind() {
+  for (const id of ['plan-run-inspector', 'goal-run-inspector', 'wait-run-inspector']) {
+    el(id)?.addEventListener('click', () => document.dispatchEvent(new CustomEvent('odysseus:run-inspector', {
+      detail: {
+        runId: waitSnapshot?.run_id || window.chatModule?.getActiveRunId?.(sessionId) || '',
+        eventSeq: Number.isSafeInteger(waitSnapshot?.checkpoint?.durable_seq)
+          ? waitSnapshot.checkpoint.durable_seq : null,
+      },
+    })));
+  }
   el('plan-work-execute')?.addEventListener('click', () => mutate('plan', 'execute'));
   el('plan-work-cancel')?.addEventListener('click', () => mutate('plan', 'cancel'));
   el('plan-work-edit')?.addEventListener('click', async () => {
