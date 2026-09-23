@@ -961,6 +961,31 @@ _API_HOSTS = frozenset([
 ])
 _MCP_KEYWORDS = frozenset(["mcp", "browse", "browser", "website", "calendar", "event", "email",
                            "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed"])
+
+
+def _filter_unrequested_mcp_catalog(schemas, public_rows, user_text):
+    """Hide MCP schemas from text-mode models unless this turn names an MCP domain.
+
+    ToolRegistry policy aliases intentionally equate bare email IDs with their
+    namespaced MCP IDs. That is useful for authorization, but it can expand a
+    retrieved bare alias (e.g. ``list_email_accounts``) back into a namespaced
+    MCP schema after initial selection. Filter the *presented catalogue* after
+    policy resolution so unrelated tool requests cannot expose MCP schemas.
+    """
+    text = str(user_text or "").casefold()
+    if any(keyword in text for keyword in _MCP_KEYWORDS):
+        return list(schemas or []), list(public_rows or [])
+    filtered_schemas = [
+        schema for schema in (schemas or [])
+        if not str((schema.get("function") or {}).get("name") or "").startswith("mcp__")
+    ]
+    filtered_public = [
+        row for row in (public_rows or [])
+        if not str(row.get("id") or "").startswith("mcp__")
+    ]
+    return filtered_schemas, filtered_public
+
+
 _ADMIN_SCHEMA_NAMES = frozenset([
     "manage_session", "manage_skills", "manage_tasks",
     "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
@@ -4641,8 +4666,15 @@ async def stream_agent_loop(
             candidates = {registry_canonical_name(name) for name in candidates}
             access = _engineering_policy().narrowed(candidates)
             schemas = _engineering_registry.schemas(access)
+            public_rows = _engineering_registry.public(access, include_unavailable=False)
+            if not native:
+                # Run after policy alias expansion: bare email aliases can
+                # otherwise reintroduce every `mcp__email__*` schema.
+                schemas, public_rows = _filter_unrequested_mcp_catalog(
+                    schemas, public_rows, _last_user,
+                )
             schema_names = {s['function']['name'] for s in schemas}
-            names = {row['id'] for row in _engineering_registry.public(access, include_unavailable=False)
+            names = {row['id'] for row in public_rows
                      if row['id'] in schema_names or (not native and row['id'] in TOOL_SECTIONS)}
             return {'names': frozenset(names), 'schemas': [s for s in schemas if s['function']['name'] in names]}
         except Exception:

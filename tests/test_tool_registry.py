@@ -256,6 +256,24 @@ class TeamRegistryCoreTests(unittest.TestCase):
 
 
 class AgentRegistryDispatchTests(unittest.IsolatedAsyncioTestCase):
+    def test_textual_agent_does_not_receive_unrequested_mcp_schemas_via_email_aliases(self):
+        from src.agent_loop import _filter_unrequested_mcp_catalog
+
+        schemas = [schema('bash'), schema('mcp__email__list_email_accounts')]
+        public = [{'id': 'bash'}, {'id': 'mcp__email__list_email_accounts'}]
+        filtered_schemas, filtered_public = _filter_unrequested_mcp_catalog(
+            schemas, public, 'Call the bash tool once and return the result.'
+        )
+        self.assertEqual([s['function']['name'] for s in filtered_schemas], ['bash'])
+        self.assertEqual([item['id'] for item in filtered_public], ['bash'])
+
+        # An actual email intent can still use explicitly discovered MCP tools.
+        email_schemas, email_public = _filter_unrequested_mcp_catalog(
+            schemas, public, 'List my email accounts.'
+        )
+        self.assertEqual(len(email_schemas), 2)
+        self.assertEqual(len(email_public), 2)
+
     async def _finetune_run(self, *, engineering=True, native_call=False,
                             general=False, revoke=False, fallback=False):
         from src import agent_loop, tool_execution
