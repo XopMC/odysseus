@@ -61,6 +61,13 @@ def test_existing_empty_destination_is_populated_but_never_overwritten(monkeypat
         db.add(Session(id="safe-empty", owner="alice", name="empty", model="safe", endpoint_url="http://safe"))
         db.add(ChatMessage(id="m1", session_id="source", role="user", content="private objective"))
 
+    preview = soak.create_clone(source_session_id="source", owner="alice", model="safe-model",
+                                endpoint_url="http://safe", dry_run=True)
+    assert preview["dry_run"] is True and preview["clone_id"] is None
+    with factory() as db:
+        assert db.query(Session).count() == 2
+        assert db.query(ChatMessage).count() == 1
+
     result = soak.create_clone(source_session_id="source", owner="alice", model="safe-model",
                                endpoint_url="http://safe", destination_session_id="safe-empty")
     assert result["clone_id"] == "safe-empty"
