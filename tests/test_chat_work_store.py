@@ -150,6 +150,29 @@ def test_goal_stall_wait_reason_is_durable_owner_scoped_and_cleared_on_resume(ow
     assert store.wait_metadata("alice", owned_chat)["wait_reason"] == "ask_user"
 
 
+def test_duplicate_ask_user_checkpoint_is_idempotent_and_conflicting_question_is_fenced(owned_chat):
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Harmless verification")
+    first = store.update_goal(
+        "alice", owned_chat, "Waiting for the user's decision",
+        {"question_id": "question-same", "question": "safe prompt"}, waiting_user=True,
+    )
+
+    duplicate = store.update_goal(
+        "alice", owned_chat, "Waiting for the user's decision",
+        {"question_id": "question-same", "question": "safe prompt"}, waiting_user=True,
+    )
+    assert duplicate["revision"] == first["revision"]
+    assert duplicate["checkpoint"] == first["checkpoint"]
+
+    with pytest.raises(WorkConflict, match="different user decision"):
+        store.update_goal(
+            "alice", owned_chat, "Waiting for another decision",
+            {"question_id": "question-other", "question": "other safe prompt"}, waiting_user=True,
+        )
+    assert store.get("alice", owned_chat)["goal"]["revision"] == first["revision"]
+
+
 def test_repeated_provider_failure_has_explicit_wait_reason(owned_chat):
     store = ChatWorkStore()
     store.ensure_goal("alice", owned_chat, "Harmless verification")

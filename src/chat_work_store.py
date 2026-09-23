@@ -521,7 +521,23 @@ class ChatWorkStore:
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
-            if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user", "review_required"}:
+            if row is None:
+                raise WorkNotFound("Active goal not found")
+            if row.status == "waiting_user" and waiting_user:
+                previous = dict(row.checkpoint or {})
+                question_id = (checkpoint or {}).get("question_id")
+                if (
+                    question_id
+                    and previous.get("_wait_reason") == "ask_user"
+                    and previous.get("question_id") == question_id
+                ):
+                    # A detached stream may race another completion path that
+                    # already checkpointed this exact ask_user. Treat that
+                    # duplicate as success without revising the Goal or adding
+                    # a second durable event.
+                    return _public_goal(row)
+                raise WorkConflict("Goal is already waiting for a different user decision")
+            if row.status in {"completed", "cancelled", "paused", "waiting_user", "review_required"}:
                 raise WorkNotFound("Active goal not found")
             row.progress = progress
             if checkpoint is not None:
