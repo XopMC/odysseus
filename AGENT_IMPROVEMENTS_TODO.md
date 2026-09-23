@@ -23,8 +23,17 @@
   90 секунд — реальная потеря продолжения. Причина: deny-ветка возвращала
   control SSE сразу после `goal_action(resume)` и не вызывала серверный
   dispatch. Локально добавлен bounded denial guidance и dispatch того же
-  goal_id/attempt; адресный route regression зелёный. Повторный live smoke
-  исправленной ветки и полный pytest ещё нужны. №03/04/46/51 не закрыты.
+  goal_id/attempt; адресный route regression зелёный. Полный pytest:
+  7102 passed, 20 skipped, 109 subtests. Первый live retry на новом образе
+  ошибочно завершился `dispatch_failure` из-за конфигурации самого стенда:
+  я выставил `APP_PORT=7131` внутри контейнера при Uvicorn на `7000`.
+  Исправленный запуск подтвердил `internal_api_base()=127.0.0.1:7000`.
+  Во втором safe chat `f2621c9e-d23b-41da-b2a6-35de6b208bf0` Python
+  approval был отклонён; исходный run `b8674186...` был done, новый
+  `3d89eccc...` стартовал автоматически с тем же Goal/attempt и завершился
+  через `complete_goal` без повторного Python. `why-waiting` стал `idle`,
+  Goal — `completed`, ошибок в логах кандидата нет. Это короткий smoke,
+  не закрывает №03/04/46/51 и шестичасовой gate.
 
 - 2026-09-23 04:33–04:35 +05: production safe chat
   `820e1405-1f54-4cd3-a353-46e933acc1d1` проверил Goal/Plan/question на
