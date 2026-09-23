@@ -9,8 +9,6 @@ import math
 import re
 import zipfile
 
-from sqlalchemy import func
-
 from core.database import ChatRunState, ChatToolIntent, SessionLocal
 from core.constants import APP_VERSION
 from src import agent_runs
@@ -44,6 +42,13 @@ def _status(value, allowed):
 
 
 def _safe_metric(value, maximum):
+    if isinstance(value, str):
+        # PostgreSQL JSON text extraction yields a string. Accept only a
+        # bounded decimal scalar, never arbitrary content stored under a
+        # telemetry key; SQLite already returns numeric JSON as int/float.
+        if len(value) > 32 or not re.fullmatch(r"[0-9]{1,10}(?:\.[0-9]{1,4})?", value):
+            return None
+        value = float(value)
     if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= maximum:
         return None
     return round(value, 2)
@@ -57,18 +62,14 @@ def build_incident_archive(session_id: str, owner: str | None) -> bytes:
     """
     db = SessionLocal()
     try:
-        dialect = getattr(getattr(getattr(db, "bind", None), "dialect", None), "name", "sqlite")
-        # SQL-level scalar projection keeps arbitrary continuation JSON out of
-        # Python. json_extract is SQLite-specific; other configured backends
-        # retain the safe status/cursor export until an equivalent projection
-        # is implemented and tested for that dialect.
-        safe_json_columns = (
-            [func.json_extract(ChatRunState.continuation, "$.terminal_reason").label("terminal_reason_code"),
-             *(func.json_extract(
-                 ChatRunState.continuation, f"$.health_metrics.{key}",
-             ).label(key) for key in _METRIC_LIMITS)]
-            if dialect == "sqlite" else []
-        )
+        # SQLAlchemy compiles typed JSON path extraction for both SQLite and
+        # PostgreSQL. Only scalar allowlist paths reach Python; the prompt,
+        # receipt and full continuation JSON remain inside the database.
+        safe_json_columns = [
+            ChatRunState.continuation["terminal_reason"].as_string().label("terminal_reason_code"),
+            *(ChatRunState.continuation["health_metrics"][key].as_string().label(key)
+              for key in _METRIC_LIMITS),
+        ]
         # Select only allowlisted columns. Loading ORM rows would hydrate
         # context snapshots and effect receipts containing sensitive data.
         runs_query = db.query(
@@ -129,7 +130,7 @@ def build_incident_archive(session_id: str, owner: str | None) -> bytes:
         "app_version": APP_VERSION,
         "privacy": "allowlist-only; no chat content, prompts, paths, endpoint details or secrets",
         "run_count": len(records),
-        "health_metrics_available": dialect == "sqlite",
+        "health_metrics_available": True,
         "files": ["manifest.json", "summary.json", "runs.json", "event-schema.json", "replay-fixture.json"],
     }
     status_counts = {}

@@ -84,6 +84,7 @@ def test_incident_statuses_are_allowlisted():
     assert _status("prompt text accidentally stored as status", _RUN_STATUSES) == "unrecognized"
     assert _status("no_retry", _EFFECT_STATUSES) == "no_retry"
     assert _safe_metric("PRIVATE_PROMPT_DO_NOT_EXPORT", 1000) is None
+    assert _safe_metric("420.5", 1000) == 420.5
     assert _safe_metric(float("inf"), 1000) is None
     assert _safe_metric(True, 1000) is None
     assert _safe_metric(1200, 1000) is None
@@ -133,8 +134,9 @@ def test_sqlite_incident_export_selects_only_safe_json_scalars(tmp_path):
         assert json.loads(archive.read("runs.json")) == []
 
 
-def test_non_sqlite_incident_export_keeps_safe_core_without_json_extract():
+def test_postgresql_json_projection_does_not_select_full_continuation():
     from core.database import ChatRunState
+    from sqlalchemy.dialects import postgresql
 
     class Query:
         def filter(self, *_args):
@@ -152,7 +154,10 @@ def test_non_sqlite_incident_export_keeps_safe_core_without_json_extract():
         bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
 
         def query(self, *columns):
-            assert all("json_extract" not in str(column) for column in columns)
+            compiled = [str(column.compile(dialect=postgresql.dialect())) for column in columns]
+            if columns[0].class_ is ChatRunState:
+                assert any("->>" in sql for sql in compiled)
+            assert all("json_extract" not in sql.lower() for sql in compiled)
             result = Query()
             result.is_run = columns[0].class_ is ChatRunState
             return result
@@ -164,7 +169,7 @@ def test_non_sqlite_incident_export_keeps_safe_core_without_json_extract():
          patch("src.incident_export.ReplayLog", side_effect=FileNotFoundError):
         output = build_incident_archive("safe", "alice")
     with zipfile.ZipFile(io.BytesIO(output)) as archive:
-        assert json.loads(archive.read("manifest.json"))["health_metrics_available"] is False
+        assert json.loads(archive.read("manifest.json"))["health_metrics_available"] is True
         assert json.loads(archive.read("runs.json"))[0]["health_metrics"]["ttft_max_ms"] is None
 
 
