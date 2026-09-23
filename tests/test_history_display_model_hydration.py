@@ -226,7 +226,9 @@ def test_message_count_endpoint_does_not_hydrate_latest_timeline(monkeypatch):
 
     response = TestClient(app).get("/api/session/session-1/message-count")
     assert response.status_code == 200
-    assert response.json() == {
+    payload = response.json()
+    assert payload.pop("history_revision")
+    assert payload == {
         "total": 3,
         "canonical_visible_total": 3,
         "canonical_rendered_total": 5,
@@ -235,6 +237,31 @@ def test_message_count_endpoint_does_not_hydrate_latest_timeline(monkeypatch):
         "visible_total": 5,
     }
     assert "large reasoning" not in response.text
+    engine.dispose()
+
+
+def test_metadata_revision_changes_without_changing_rendered_message_count(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=3)
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(object()))
+    client = TestClient(app)
+
+    before = client.get("/api/session/session-1/message-count").json()
+    db = db_factory()
+    try:
+        row = db.query(DbSession).filter(DbSession.id == "session-1").one()
+        row.updated_at += timedelta(seconds=1)
+        db.commit()
+    finally:
+        db.close()
+    after = client.get("/api/session/session-1/message-count").json()
+
+    assert before["rendered_total"] == after["rendered_total"] == 3
+    assert before["history_revision"] != after["history_revision"]
+    assert client.get("/api/history/session-1?limit=1").json()["history_revision"] == after["history_revision"]
     engine.dispose()
 
 

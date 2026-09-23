@@ -205,6 +205,28 @@ export function localizeToolNode(node) {
   });
 }
 
+// A tool approval updates an existing message's metadata, not its message
+// count. Reconcile only the exact card so other clients keep loaded thinking,
+// scroll position and the rest of a long chat untouched.
+export function reconcileToolApprovalCard(approvalId, decision) {
+  const key = String(approvalId || '');
+  if (!key || !['approve', 'approve_task', 'deny'].includes(decision)) return false;
+  let changed = false;
+  document.querySelectorAll('.agent-thread-node[data-approval-id]').forEach(node => {
+    if (node.dataset.approvalId !== key) return;
+    const denied = decision === 'deny';
+    node.classList.toggle('error', denied);
+    node.classList.remove('approval-pending');
+    const icon = node.querySelector('.agent-thread-icon');
+    const status = node.querySelector('.agent-thread-status');
+    if (icon) icon.textContent = denied ? '\u2717' : '\u2713';
+    if (status) status.textContent = denied ? 'failed' : 'done';
+    localizeToolNode(node);
+    changed = true;
+  });
+  return changed;
+}
+
 export function safeDisplayImageSrc(raw) {
   const src = String(raw || '').trim();
   if (!src) return '';
@@ -1539,7 +1561,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260922approval1').then(mod => {
+    import('./sessions.js?v=20260923approvalrev1').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
@@ -3451,6 +3473,7 @@ const chatRenderer = {
   copyMessageText,
   safeToolScreenshotSrc,
   localizeToolNode,
+  reconcileToolApprovalCard,
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,

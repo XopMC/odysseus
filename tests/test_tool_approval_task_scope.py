@@ -256,6 +256,7 @@ def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypa
         history=[SimpleNamespace(metadata=metadata)],
     )
     db_message = SimpleNamespace(meta_data=None)
+    db_session = SimpleNamespace(updated_at=None)
 
     class Column:
         def __eq__(self, value):
@@ -265,12 +266,18 @@ def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypa
         id = Column()
         session_id = Column()
 
+    class FakeDBSession:
+        id = Column()
+
     class FakeQuery:
+        def __init__(self, row):
+            self.row = row
+
         def filter(self, *conditions):
             return self
 
         def first(self):
-            return db_message
+            return self.row
 
     class FakeDB:
         committed = False
@@ -278,8 +285,8 @@ def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypa
         closed = False
 
         def query(self, model):
-            assert model is FakeDBMessage
-            return FakeQuery()
+            assert model in (FakeDBMessage, FakeDBSession)
+            return FakeQuery(db_message if model is FakeDBMessage else db_session)
 
         def commit(self):
             self.committed = True
@@ -292,6 +299,7 @@ def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypa
 
     db = FakeDB()
     monkeypatch.setattr(chat_routes, "DBChatMessage", FakeDBMessage)
+    monkeypatch.setattr(chat_routes, "DBSession", FakeDBSession)
     monkeypatch.setattr(chat_routes, "SessionLocal", lambda: db)
 
     assert chat_routes._mark_tool_approval_resolved(
@@ -302,6 +310,7 @@ def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypa
     assert ask_user["resolved"] == "approve"
     persisted = json.loads(db_message.meta_data)
     assert persisted["tool_events"][0]["ask_user"]["resolved"] == "approve"
+    assert db_session.updated_at is not None
     assert "_db_id" not in persisted
     assert db.committed is True
     assert db.rolled_back is False
@@ -330,8 +339,9 @@ def test_tool_approval_card_has_same_waiting_and_denied_states_live_and_replay()
         assert f"{event}.ask_user?.resolved !== 'deny'" in source
         assert "approval-pending" in source
         assert "approvalPending ? 'waiting'" in source
-    assert "node.dataset.approvalId !== approvalId" in live
-    assert "node.classList.toggle('error', denied)" in live
+    assert "chatRenderer.reconcileToolApprovalCard?.(json.approval_id, json.decision)" in live
+    assert "node.dataset.approvalId !== key" in replay
+    assert "node.classList.toggle('error', denied)" in replay
     assert "if (ev.ask_user?.approval_id) node.dataset.approvalId" in replay
     assert "if (!currentToolBubble && json.ask_user?.approval_id)" in live
     assert "no command was executed" in live
@@ -380,8 +390,8 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
 
     version = "20260922approval1"
-    assert "chat.js?v=20260923approvalcard2" in app
-    assert "chat.js?v=20260923approvalcard2" in index
-    assert "chatRenderer.js?v=20260923approvalcard1" in frontend
-    assert "chatRenderer.js?v=20260923approvalcard1" in app
-    assert "chatRenderer.js?v=20260923approvalcard1" in index
+    assert "chat.js?v=20260923approvalrev1" in app
+    assert "chat.js?v=20260923approvalrev1" in index
+    assert "chatRenderer.js?v=20260923approvalrev1" in frontend
+    assert "chatRenderer.js?v=20260923approvalrev1" in app
+    assert "chatRenderer.js?v=20260923approvalrev1" in index

@@ -51,7 +51,7 @@ from src.auth_helpers import (
 )
 from routes.session_routes import _verify_session_owner
 from routes.document_helpers import _owner_session_filter
-from core.database import SessionLocal, get_session_mode, set_session_mode
+from core.database import SessionLocal, get_session_mode, set_session_mode, utcnow_naive
 from core.database import Session as DBSession, ChatMessage as DBChatMessage
 from core.database import Document as DBDocument, ModelEndpoint
 from core.log_safety import redact_url
@@ -168,6 +168,14 @@ def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
         if db_message is None:
             return False
         db_message.meta_data = json.dumps(resolved_metadata)
+        db_session = db.query(DBSession).filter(
+            DBSession.id == str(getattr(sess, "id", "")),
+        ).first()
+        if db_session is None:
+            return False
+        # Metadata-only edits do not change message counts. Bump the cheap
+        # session revision so other devices reconcile this existing card.
+        db_session.updated_at = utcnow_naive()
         db.commit()
         return True
     except Exception:

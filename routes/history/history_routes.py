@@ -362,7 +362,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         return int(total or 0), int(canonical_visible or 0), int(rendered or 0)
 
     @router.get("/api/session/{session_id}/message-count")
-    async def get_session_message_count(request: Request, session_id: str) -> Dict[str, int]:
+    async def get_session_message_count(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         db = SessionLocal()
         try:
@@ -388,6 +388,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             )
             return {
                 "total": total,
+                "history_revision": db_session.updated_at.isoformat() if db_session.updated_at else None,
                 "canonical_visible_total": canonical_visible,
                 "canonical_rendered_total": rendered,
                 "live_rendered_units": live_units,
@@ -518,6 +519,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     has_more_after = cursor is not None
                 return {
                     "history": history_dict,
+                    "history_revision": db_session.updated_at.isoformat() if db_session.updated_at else None,
                     "model": db_session.model,
                     "endpoint_url": db_session.endpoint_url,
                     "name": db_session.name,

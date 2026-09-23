@@ -7,8 +7,8 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260922approval1';
-import chatRenderer from './chatRenderer.js?v=20260923approvalcard1';
+import sessionModule from './sessions.js?v=20260923approvalrev1';
+import chatRenderer from './chatRenderer.js?v=20260923approvalrev1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js?v=20260923toolprogress1';
@@ -3297,20 +3297,7 @@ import { bindUiText, t } from './i18n.js';
                 continue;
               }
               if (json.type === 'tool_approval_resolved') {
-                const approvalId = String(json.approval_id || '');
-                if (approvalId) {
-                  document.querySelectorAll('.agent-thread-node[data-approval-id]').forEach(node => {
-                    if (node.dataset.approvalId !== approvalId) return;
-                    const denied = json.decision === 'deny';
-                    node.classList.toggle('error', denied);
-                    node.classList.remove('approval-pending');
-                    const icon = node.querySelector('.agent-thread-icon');
-                    const status = node.querySelector('.agent-thread-status');
-                    if (icon) icon.textContent = denied ? '\u2717' : '\u2713';
-                    if (status) status.textContent = denied ? 'failed' : 'done';
-                    chatRenderer.localizeToolNode?.(node);
-                  });
-                }
+                chatRenderer.reconcileToolApprovalCard?.(json.approval_id, json.decision);
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 if (spinner && spinner.element) spinner.destroy();

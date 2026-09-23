@@ -62,6 +62,17 @@ def test_second_device_pages_active_run_before_opening_live_sse():
     assert resume.index("snapshotEvents.push(...events)") < resume.index("/api/chat/resume/")
 
 
+def test_metadata_only_approval_revision_reconciles_without_count_change():
+    root = Path(__file__).resolve().parents[1] / "static/js"
+    sessions = (root / "sessions.js").read_text(encoding="utf-8")
+    renderer = (root / "chatRenderer.js").read_text(encoding="utf-8")
+    assert "_observedHistoryRevisions.set(sessionId" in sessions
+    assert "_syncedHistoryRevisions.set(id" in sessions
+    assert "_observedHistoryRevisions.get(sessionId) !== _syncedHistoryRevisions.get(sessionId)" in sessions
+    assert "chatRenderer.reconcileToolApprovalCard?.(approval.approval_id, approval.resolved)" in sessions
+    assert "node.dataset.approvalId !== key" in renderer
+
+
 @pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):

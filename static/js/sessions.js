@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260923approvalcard1';
+import chatRenderer from './chatRenderer.js?v=20260923approvalrev1';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
 import themeModule from './theme.js?v=20260921livefix20';
@@ -41,6 +41,8 @@ let _liveSessionTimer = null;
 const _liveSessionChecks = new Map();
 const _liveSessionReruns = new Set();
 const _liveSessionRenderedCounts = new Map();
+const _observedHistoryRevisions = new Map();
+const _syncedHistoryRevisions = new Map();
 let _lastInteractionLiveCheck = 0;
 let _loadingSessionToken = null;
 const _syncedHistory = new Map();
@@ -68,6 +70,9 @@ export async function refreshSessionMessageCount(sessionId) {
     // old history?limit=1 probe reparsed and transferred it every three seconds.
     const res = await _readLiveSession(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}/message-count`);
     if (!res.ok || !res.data) return null;
+    if (res.data.history_revision) {
+      _observedHistoryRevisions.set(sessionId, String(res.data.history_revision));
+    }
     const raw = Number.isFinite(Number(res.data.rendered_total))
       ? Number(res.data.rendered_total)
       : Number.isFinite(Number(res.data.visible_total))
@@ -121,7 +126,15 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
     const role = String(msg?.role || '');
     const content = String(msg?.content || '').trim();
     const key = `${role}|${content}`;
-    if ((id && existingIds.has(id)) || existingKeys.has(key)) continue;
+    if ((id && existingIds.has(id)) || existingKeys.has(key)) {
+      for (const event of (Array.isArray(msg?.metadata?.tool_events) ? msg.metadata.tool_events : [])) {
+        const approval = event?.ask_user;
+        if (approval?.approval_id && approval?.resolved) {
+          chatRenderer.reconcileToolApprovalCard?.(approval.approval_id, approval.resolved);
+        }
+      }
+      continue;
+    }
     const rendered = _renderHistoryMessage(msg, data.model || null);
     const nodes = Array.isArray(rendered) ? rendered : (rendered ? [rendered] : []);
     for (const node of nodes) {
@@ -141,6 +154,7 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
     updateModelPicker();
   }
   _syncedHistory.set(sessionId, _historyStamp(data));
+  if (data.history_revision) _syncedHistoryRevisions.set(sessionId, String(data.history_revision));
   window.__odysseusSetServerMessageCount?.(
     sessionId,
     Number.isFinite(Number(data.rendered_total)) ? Number(data.rendered_total)
@@ -2236,6 +2250,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       if (Number.isFinite(initialRenderedCount)) {
         _liveSessionRenderedCounts.set(id, Math.floor(initialRenderedCount));
       }
+      if (data.history_revision) _syncedHistoryRevisions.set(id, String(data.history_revision));
       // The model returned by /api/history is the authoritative one the
       // backend will use for this session. Write it back into the cached
       // session meta and refresh the picker so the displayed model can
@@ -3000,7 +3015,9 @@ async function _checkServerStream(sessionId, { ensureAfterInFlight = false } = {
     const previousRenderedCount = _liveSessionRenderedCounts.get(sessionId);
     const renderedCountChanged = renderedCount === null
       || previousRenderedCount === undefined
-      || renderedCount !== previousRenderedCount;
+      || renderedCount !== previousRenderedCount
+      || (_observedHistoryRevisions.has(sessionId)
+        && _observedHistoryRevisions.get(sessionId) !== _syncedHistoryRevisions.get(sessionId));
     if (renderedCount !== null) _liveSessionRenderedCounts.set(sessionId, renderedCount);
 
     // Skip if the SSE reader is still actively connected — it handles rendering
