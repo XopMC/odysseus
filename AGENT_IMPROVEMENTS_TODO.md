@@ -10,6 +10,20 @@
 Каждый чекбокс ниже остаётся открытым до проверки всех частей требования на
 реальном runtime. Локальные тесты сами по себе не закрывают пункт.
 
+- 2026-09-23 05:58–06:05 +05: production log на `80364b0` зафиксировал
+  `Server-side post-compaction plan recovery failed`: `save_plan` отклонил
+  fallback, потому что он создавал draft с первым шагом `done` до Execute.
+  Пользовательский скрин показал повторяющиеся остановки «Compaction
+  succeeded, but the required fresh plan could not be rebuilt».
+  Исправление `8825410`: recovery draft содержит только `pending`; Execute
+  атомарно начинает первый шаг. Полный pytest: 7109 passed, 20 skipped,
+  109 subtests. Изолированный Jetson candidate `:7131` исполнил тот же
+  `save_plan → plan_action(execute)` на безопасном тестовом чате:
+  `draft → executing`, шаги `in_progress/pending`; health 200, без traceback.
+  Это адресное подтверждение failure mode; полный auto-compaction long-run и
+  шестичасовой gate остаются открытыми. Основную пользовательскую Goal не
+  запускали и её содержимое не читали.
+
 - 2026-09-23 05:55–05:57 +05: `79c0134` исправляет порядок approval
   consume/DB commit. До правки одноразовый grant расходовался до записи
   решения, а ошибка БД оставляла неработающую pending-карточку. Теперь
