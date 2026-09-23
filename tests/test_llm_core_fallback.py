@@ -1265,6 +1265,90 @@ def test_stream_transport_error_is_classified_without_leaking_provider_detail(
     assert "secret-key=do-not-log" not in caplog.text
 
 
+@pytest.mark.parametrize("status,detail,category,may_fallback", [
+    (503, "context length exceeded; token=private-example", "context", False),
+    (503, "model not loaded; token=private-example", "provider_unload", True),
+    (429, "rate limited; token=private-example", "rate_limit", True),
+])
+def test_stream_http_rejection_classifies_without_echoing_upstream_body(
+    monkeypatch, status, detail, category, may_fallback,
+):
+    class _RejectedResponse:
+        status_code = status
+
+        async def aread(self):
+            return json.dumps({"error": {"message": detail}}).encode()
+
+    class _RejectedContext:
+        async def __aenter__(self):
+            return _RejectedResponse()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _RejectedClient:
+        def stream(self, *args, **kwargs):
+            return _RejectedContext()
+
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _RejectedClient())
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda url: None)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+
+    async def run():
+        return [chunk async for chunk in llm_core._stream_llm_inner(
+            "https://openai-compatible.example/v1", "configured-model",
+            [{"role": "user", "content": "hi"}],
+        )]
+
+    output = asyncio.run(run())
+    payload = json.loads(output[0].split("data: ", 1)[1])
+    assert payload["status"] == status
+    assert payload["error_category"] == category
+    assert payload["fallback_eligible"] is may_fallback
+    assert payload["retry_phase"] == "http_rejected"
+    assert "private-example" not in "".join(output)
+    assert "raw" not in payload
+
+
+def test_stream_provider_error_event_is_not_replayed_or_echoed(monkeypatch):
+    detail = "context length exceeded; token=private-event"
+    lines = [
+        'data: ' + json.dumps({"error": {"status": 503, "message": detail}}),
+    ]
+    output = _run_provider_stream(
+        monkeypatch, "https://openai-compatible.example/v1", lines,
+    )
+    payload = json.loads(output[0].split("data: ", 1)[1])
+    assert payload["status"] == 503
+    assert payload["error_category"] == "context"
+    assert payload["fallback_eligible"] is False
+    assert "retry_phase" not in payload
+    assert "private-event" not in "".join(output)
+
+
+@pytest.mark.parametrize("url,lines", [
+    (
+        "http://localhost:11434/api/chat",
+        [json.dumps({"error": {"status": 503, "message": "context length exceeded; token=private-event"}})],
+    ),
+    (
+        "https://api.anthropic.com/v1/messages",
+        ['data: ' + json.dumps({"type": "error", "error": {"status": 503, "message": "context length exceeded; token=private-event"}})],
+    ),
+    (
+        "https://chatgpt.com/backend-api/codex/responses",
+        ['data: ' + json.dumps({"type": "error", "status": 503, "message": "context length exceeded; token=private-event"})],
+    ),
+])
+def test_provider_stream_error_events_are_sanitized_across_adapters(monkeypatch, url, lines):
+    output = _run_provider_stream(monkeypatch, url, lines)
+    payload = json.loads(output[0].split("data: ", 1)[1])
+    assert payload["error_category"] == "context"
+    assert payload["fallback_eligible"] is False
+    assert "private-event" not in "".join(output)
+
+
 @pytest.mark.parametrize("error", [
     httpx.WriteTimeout("write timed out"),
     httpx.RemoteProtocolError("peer disconnected"),

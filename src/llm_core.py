@@ -2333,6 +2333,36 @@ def _stream_transport_error_chunk(error: Exception, target_url: str) -> str:
     return f'event: error\ndata: {json.dumps({"error": message, "status": status, "fallback_eligible": fallback_eligible, "error_category": category})}\n\n'
 
 
+def _stream_http_rejection_chunk(status: int, raw: str, *, phase: str = "http_rejected") -> str:
+    """Classify provider errors without echoing provider-controlled data."""
+    category = _model_error_category(status, raw)
+    if category == "context":
+        message = "Model context limit exceeded; reduce the request or compact context."
+    elif category == "schema_mismatch":
+        message = "Model rejected the request schema; check model capabilities."
+    elif category == "provider_unload":
+        message = "Selected model is not loaded on the endpoint."
+    elif status == 429:
+        message = "Model endpoint rate limit reached."
+    elif status in (401, 403):
+        message = "Model endpoint rejected authentication or access."
+    elif status >= 500:
+        message = "Temporarily unavailable"
+    else:
+        message = f"Model endpoint rejected request (HTTP {status})."
+    # An explicit 503 is a completed HTTP rejection, so a different route may
+    # answer; a context/schema rejection instead requires a changed request.
+    # Same-route automatic retries remain narrower (rate limit/model unload).
+    fallback_eligible = phase == "http_rejected" and (
+        status == 429 or (status == 503 and category not in {"context", "schema_mismatch"})
+    )
+    payload = {"status": status, "text": message, "fallback_eligible": fallback_eligible,
+               "error_category": category}
+    if phase == "http_rejected":
+        payload["retry_phase"] = phase
+    return f'event: error\ndata: {json.dumps(payload)}\n\n'
+
+
 async def llm_call_async_with_route_fallback(
     candidates,
     messages,
@@ -2886,8 +2916,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
-                    friendly = _format_chatgpt_subscription_error(r.status_code, raw)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
+                    yield _stream_http_rejection_chunk(r.status_code, raw)
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -2972,7 +3001,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             }
                         text = err.get("message") if isinstance(err, dict) else str(err or "ChatGPT Subscription request failed")
                         status = _provider_stream_error_status(err, default=400)
-                        yield f'event: error\ndata: {json.dumps({"status": status, "text": text})}\n\n'
+                        yield _stream_http_rejection_chunk(status, text, phase="provider_event")
                         return
                 yield "data: [DONE]\n\n"
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
@@ -3001,8 +3030,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
-                    friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
+                    yield _stream_http_rejection_chunk(r.status_code, raw)
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -3015,7 +3043,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         err = j.get("error")
                         status = _provider_stream_error_status(err, default=400)
                         text = err.get("message") if isinstance(err, dict) else str(err)
-                        yield f'event: error\ndata: {json.dumps({"error": text or "Ollama request failed", "status": status})}\n\n'
+                        yield _stream_http_rejection_chunk(status, text or "Ollama request failed", phase="provider_event")
                         return
                     reported_model = _reported_model_name(j.get("model"))
                     if reported_model:
@@ -3094,8 +3122,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
-                    friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
+                    yield _stream_http_rejection_chunk(r.status_code, raw)
                     return
                 async for line in r.aiter_lines():
                     # SSE allows "data:value" with no space after the colon
@@ -3205,7 +3232,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             err = j.get("error") or {}
                             err_msg = err.get("message", "Unknown error") if isinstance(err, dict) else str(err)
                             status = _provider_stream_error_status(err, default=400)
-                            yield f'event: error\ndata: {json.dumps({"error": err_msg, "status": status})}\n\n'
+                            yield _stream_http_rejection_chunk(status, err_msg, phase="provider_event")
                             return
                     except json.JSONDecodeError:
                         continue
@@ -3270,8 +3297,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _clear_host_dead(target_url)
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
-                friendly = _format_upstream_error(r.status_code, raw, target_url)
-                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
+                yield _stream_http_rejection_chunk(r.status_code, raw)
                 return
 
             async for line in r.aiter_lines():
@@ -3300,7 +3326,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                     err = j.get("error")
                                     status = _provider_stream_error_status(err, default=400)
                                     text = err.get("message") if isinstance(err, dict) else str(err)
-                                    yield f'event: error\ndata: {json.dumps({"error": text or "Upstream request failed", "status": status})}\n\n'
+                                    yield _stream_http_rejection_chunk(status, text or "Upstream request failed", phase="provider_event")
                                     return
                                 chunk_model = j.get("model")
                                 if isinstance(chunk_model, str) and chunk_model.strip():

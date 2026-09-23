@@ -1085,6 +1085,28 @@
     точный tool-output и owner isolation. 7,165 локальных тестов и 118
     профильных Jetson candidate-тестов прошли; production healthy/0 restarts.
 - [ ] **03. Классификация ошибок и retry policy.** Разделить timeout, rate limit, provider unload, schema mismatch, transport, context, unknown side effect; повторять только доказанно безопасные запросы с jitter и budget.
+  - 2026-09-23: общий streaming transport path для ChatGPT Subscription,
+    Ollama, Anthropic и OpenAI-compatible теперь отдаёт стабильную категорию,
+    не раскрывает provider exception/URL credentials в SSE и логах. Connect
+    отказ не вызывает fallback; PoolTimeout до отправки запроса сохраняет
+    безопасный fallback, а write/read/protocol/network — unknown outcome без
+    повторного вызова. Ранее добавлен bounded jitter retry только явных
+    pre-output HTTP 429/503 model-unload. Failing-first регрессия на четыре
+    исключения прошла после исправления; полный локальный pytest 7,169
+    passed/23 skipped/109 subtests, изолированный Jetson candidate 122 passed.
+    Боевой образ `release-778c0b8` healthy/0 restarts. Пункт остаётся открыт:
+    нужны полная проверка model/schema/context/host-tool/side-effect путей и
+    длительное наблюдение после выпуска.
+  - 2026-09-23: следующий локальный шаг обнаружил, что raw HTTP body и
+    произвольный текст SSE error уходили клиенту вместе с категорией; HTTP
+    503 с ошибкой context также ошибочно разрешал fallback. Добавлен единый
+    безопасный формат ошибок для четырёх stream adapters: body используется
+    только для классификации, raw/detail не транслируется; context/schema
+    запрещают fallback, а SSE error никогда не считается доказанной точкой
+    для повторного запроса. Failing-first тесты подтвердили прежнюю утечку;
+    затем 133 профильных и полный pytest 7,176 passed/23 skipped/109
+    subtests. На Jetson эта следующая правка ещё не выпущена, поэтому пункт
+    остаётся открытым.
 - [ ] **04. Watchdog полезного прогресса.** Отдельно отслеживать heartbeat и реальные изменения: step, artifact, тест, diff, evidence. Оживший SSE не должен считаться прогрессом задачи.
 - [ ] **05. Детектор зацикливания.** Ловить одинаковые action→observation, повторные ошибки, A↔B циклы, монолог, бессмысленное повторное сжатие; сначала диагностический nudge, затем bounded escalation, не бесконечный автоповтор.
 - [ ] **06. Durable recovery matrix.** Автотесты на kill/restart в каждой точке: до tool start, после effect-intent, после tool result, во время compaction, approval, child join и terminal snapshot.
