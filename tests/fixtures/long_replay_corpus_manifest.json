@@ -1,0 +1,9 @@
+{
+  "schema": "odysseus-long-replay-v1",
+  "description": "Content-free deterministic replay corpus; SHA-256 over sorted compact JSON events separated by LF",
+  "sha256": {
+    "1000": "868b08452cb3202d53bf6671ce7cf1e8e55b4e303f55d5fc4f50fd94a2efe006",
+    "10000": "64b1e530dc0fb4c6ee64e78873c1ce500d886153d49c0c042e04baf4c18b6e36",
+    "100000": "f230b9d33132312e4a6425dfdfacb292fe27ac641ecbc75493e74d82b390d83d"
+  }
+}
