@@ -93,10 +93,13 @@ def sanitize_metadata(raw: Any) -> dict[str, Any]:
 
 
 def create_clone(*, source_session_id: str, owner: str, model: str,
-                 endpoint_url: str, name: str = "SAFE structural long-chat soak") -> dict[str, Any]:
+                 endpoint_url: str, name: str = "SAFE structural long-chat soak",
+                 destination_session_id: str | None = None) -> dict[str, Any]:
     if not source_session_id or not owner or not model or not endpoint_url:
         raise ValueError("source session, owner, model and endpoint are required")
-    new_id = str(uuid.uuid4())
+    new_id = destination_session_id or str(uuid.uuid4())
+    if new_id == source_session_id:
+        raise ValueError("destination must differ from source")
     total = 0
     visible = 0
     original_chars = 0
@@ -107,13 +110,28 @@ def create_clone(*, source_session_id: str, owner: str, model: str,
         if source is None:
             raise ValueError("source chat not found for owner")
         total = db.query(ChatMessage).filter_by(session_id=source_session_id).count()
-        clone = Session(
-            id=new_id, owner=owner, name=name, model=model,
-            endpoint_url=endpoint_url, mode="agent", rag=False,
-            archived=False, folder="Safe soak", project_id=None, headers={},
-            message_count=total, context_checkpoint=None,
-        )
-        db.add(clone)
+        if destination_session_id:
+            clone = db.query(Session).filter_by(id=new_id, owner=owner).first()
+            if clone is None or db.query(ChatMessage).filter_by(session_id=new_id).first() is not None:
+                raise ValueError("destination chat must exist, belong to owner and be empty")
+            if clone.project_id is not None:
+                raise ValueError("destination chat must not bind a project workspace")
+        else:
+            clone = Session(id=new_id, owner=owner)
+            db.add(clone)
+        clone.name = name
+        clone.model = model
+        clone.endpoint_url = endpoint_url
+        clone.mode = "agent"
+        clone.rag = False
+        clone.archived = False
+        clone.folder = "Safe soak"
+        clone.project_id = None
+        clone.headers = {}
+        clone.message_count = total
+        clone.context_checkpoint = None
+        clone.last_message_at = now
+        clone.updated_at = now
         db.flush()
         rows = (
             db.query(ChatMessage)
@@ -154,10 +172,12 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--endpoint-url", required=True)
     parser.add_argument("--name", default="SAFE structural long-chat soak")
+    parser.add_argument("--destination-session-id", help="Existing empty safe chat; keeps the UI session registered")
     args = parser.parse_args()
     print(json.dumps(create_clone(
         source_session_id=args.source_session_id, owner=args.owner,
         model=args.model, endpoint_url=args.endpoint_url, name=args.name,
+        destination_session_id=args.destination_session_id,
     ), sort_keys=True))
 
 

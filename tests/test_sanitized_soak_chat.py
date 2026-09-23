@@ -49,3 +49,29 @@ def test_sanitized_clone_has_no_source_text_goal_or_workspace(monkeypatch):
         assert len(metadata["tool_events"]) == 1
         assert metadata["tool_events"][0]["tool"] == "synthetic_check"
     engine.dispose()
+
+
+def test_existing_empty_destination_is_populated_but_never_overwritten(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[Session.__table__, ChatMessage.__table__])
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(soak, "SessionLocal", factory)
+    with factory.begin() as db:
+        db.add(Session(id="source", owner="alice", name="source", model="old", endpoint_url="http://old"))
+        db.add(Session(id="safe-empty", owner="alice", name="empty", model="safe", endpoint_url="http://safe"))
+        db.add(ChatMessage(id="m1", session_id="source", role="user", content="private objective"))
+
+    result = soak.create_clone(source_session_id="source", owner="alice", model="safe-model",
+                               endpoint_url="http://safe", destination_session_id="safe-empty")
+    assert result["clone_id"] == "safe-empty"
+    with factory() as db:
+        rows = db.query(ChatMessage).filter_by(session_id="safe-empty").all()
+        assert len(rows) == 1 and "private" not in rows[0].content
+    try:
+        soak.create_clone(source_session_id="source", owner="alice", model="safe-model",
+                          endpoint_url="http://safe", destination_session_id="safe-empty")
+    except ValueError as exc:
+        assert "empty" in str(exc)
+    else:
+        raise AssertionError("a populated destination must not be overwritten")
+    engine.dispose()
