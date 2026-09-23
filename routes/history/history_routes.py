@@ -8,6 +8,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Request, HTTPException, Depends
 from sqlalchemy import and_, case, func, or_
@@ -182,6 +183,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
     # below, so the badge remains live without rescanning thousands of rows on
     # every three-second poll from every browser.
     _rendered_totals_cache: Dict[str, tuple[tuple[Any, ...], tuple[int, int, int]]] = {}
+    _stored_context_cache: Dict[str, tuple[tuple[Any, ...], tuple[int, int]]] = {}
 
     def _session_count_signature(row: DbSession) -> tuple[Any, ...]:
         return (
@@ -189,6 +191,67 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             row.updated_at.isoformat() if row.updated_at else None,
             row.last_message_at.isoformat() if row.last_message_at else None,
         )
+
+    def _checkpoint_context_view(db, row: DbSession):
+        """Read only the model-visible tail for an idle checkpointed chat.
+
+        Paginated history remains backed by SQLite. This avoids expanding old
+        timeline JSON into the process heap merely to paint the context pill.
+        """
+        raw = row.context_checkpoint
+        covered = int(row.context_checkpoint_count or 0)
+        if not isinstance(raw, dict) or not raw.get("role") or covered <= 0:
+            return None
+        actual_count = db.query(func.count(DbChatMessage.id)).filter(
+            DbChatMessage.session_id == row.id,
+        ).scalar() or 0
+        if covered > actual_count:
+            return None
+        from core.session_manager import _parse_msg_content, _message_timestamp_iso
+
+        checkpoint = ChatMessage(raw["role"], raw.get("content", ""), raw.get("metadata"))
+        db_tail = (db.query(DbChatMessage)
+                   .filter(DbChatMessage.session_id == row.id)
+                   .order_by(DbChatMessage.timestamp, DbChatMessage.id)
+                   .offset(covered).all())
+        tail = []
+        for item in db_tail:
+            meta = json.loads(item.meta_data) if item.meta_data else {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta["_db_id"] = item.id
+            if item.timestamp:
+                meta["timestamp"] = _message_timestamp_iso(item.timestamp)
+            tail.append(ChatMessage(item.role, _parse_msg_content(item.content), meta))
+        return SimpleNamespace(
+            id=row.id, model=row.model, endpoint_url=row.endpoint_url,
+            owner=row.owner, history=tail, context_checkpoint=checkpoint,
+            context_checkpoint_count=covered,
+        )
+
+    def _stored_context_stats(db, row: DbSession, estimate_tokens) -> tuple[int, int]:
+        signature = _session_count_signature(row)
+        cached = _stored_context_cache.get(row.id)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        from core.session_manager import _parse_msg_content
+
+        stored_used = 0
+        rows = (db.query(DbChatMessage.role, DbChatMessage.content)
+                .filter(DbChatMessage.session_id == row.id).yield_per(250))
+        for role, content in rows:
+            stored_used += estimate_tokens([{
+                "role": role, "content": _message_text({"content": _parse_msg_content(content)})
+            }])
+        compacted = db.query(func.count(DbChatMessage.id)).filter(
+            DbChatMessage.session_id == row.id,
+            func.coalesce(func.json_extract(DbChatMessage.meta_data, "$.compacted"), 0) == 1,
+        ).scalar() or 0
+        result = (int(stored_used), int(compacted))
+        if len(_stored_context_cache) >= 2048:
+            _stored_context_cache.clear()
+        _stored_context_cache[row.id] = (signature, result)
+        return result
 
     def _reserve_message_uploads(
         request: Request,
@@ -1018,26 +1081,53 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         """Report working request occupancy separately from saved-chat estimates."""
         _verify_session_owner(request, session_id)
         try:
-            session = session_manager.get_session(session_id)
-        except KeyError:
-            raise HTTPException(404, "Session not found")
-
-        try:
             from src.model_context import estimate_tokens, get_context_length
             from src.agent_runs import get_context_usage, is_active
             from src.agent_context import context_endpoint_key
 
-            messages = session.get_context_messages()
+            active = is_active(session_id)
+            lightweight = False
+            visible_from_db = None
+            compacted_from_db = None
+            stored_from_db = None
+            if not active:
+                db = SessionLocal()
+                try:
+                    try:
+                        row = db.query(DbSession).filter(DbSession.id == session_id).first()
+                        if row is not None:
+                            session = _checkpoint_context_view(db, row)
+                            if session is not None:
+                                lightweight = True
+                                _, visible_from_db, _ = _cached_rendered_message_totals(db, row)
+                                stored_from_db, compacted_from_db = _stored_context_stats(db, row, estimate_tokens)
+                    except Exception:
+                        logger.debug("Lightweight context view unavailable for %s", session_id, exc_info=True)
+                        lightweight = False
+                finally:
+                    db.close()
+            if not lightweight:
+                try:
+                    session = session_manager.get_session(session_id)
+                except KeyError:
+                    raise HTTPException(404, "Session not found")
+
+            messages = ([session.context_checkpoint.to_dict(), *[
+                message.to_dict() for message in session.history
+                if (message.metadata or {}).get("source") != "slash"
+            ]] if lightweight else session.get_context_messages())
             working_used = int(estimate_tokens(messages))
             # The canonical transcript estimate is deliberately separate from
             # the compacted working ledger.  Calling the latter "stored chat"
             # made a successful compaction appear to shrink saved history.
-            stored_messages = [
-                {"role": _message_role(message), "content": _message_text(message)}
-                for message in session.history
-            ]
-            stored_used = int(estimate_tokens(stored_messages))
-            active = is_active(session_id)
+            if lightweight:
+                stored_used = stored_from_db
+            else:
+                stored_messages = [
+                    {"role": _message_role(message), "content": _message_text(message)}
+                    for message in session.history
+                ]
+                stored_used = int(estimate_tokens(stored_messages))
             # Include the just-terminal detached run.  Its exact request
             # ledger is still authoritative during approval/Stop/error
             # persistence; falling back immediately to stored-chat tokens can
@@ -1085,11 +1175,11 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             ctx_len = snapshot["context_length"] if active and snapshot else current_window
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
             pct = max(0.0, min(100.0, pct))
-            visible_messages = sum(
+            visible_messages = visible_from_db if lightweight else sum(
                 1 for m in session.history
                 if not (getattr(m, "metadata", None) or {}).get("hidden")
             )
-            compacted_messages = sum(
+            compacted_messages = compacted_from_db if lightweight else sum(
                 1 for m in session.history
                 if (getattr(m, "metadata", None) or {}).get("compacted")
             )

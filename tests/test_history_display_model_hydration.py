@@ -296,6 +296,65 @@ def test_message_count_reuses_aggregate_until_session_revision_changes(monkeypat
     engine.dispose()
 
 
+def test_idle_checkpoint_context_does_not_hydrate_archived_timeline(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=120)
+    with db_factory.begin() as db:
+        row = db.query(DbSession).filter_by(id="session-1").one()
+        row.context_checkpoint = {"role": "system", "content": "short summary", "metadata": {}}
+        row.context_checkpoint_count = 110
+        for message in db.query(DbChatMessage).filter_by(session_id="session-1").limit(110):
+            message.meta_data = json.dumps({"timeline_v2": {"events": ["x" * 10000]}})
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    monkeypatch.setattr("src.model_context.get_context_length", lambda *_args: 128000)
+    monkeypatch.setattr("src.agent_runs.is_active", lambda *_args: False)
+    monkeypatch.setattr("src.agent_runs.get_context_usage", lambda *_args, **_kwargs: None)
+
+    class NoHydrateManager:
+        def get_session(self, _session_id):
+            raise AssertionError("idle context pill must not hydrate archived metadata")
+
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(NoHydrateManager()))
+    client = TestClient(app)
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda _c, _u, sql, *_a: statements.append(sql))
+    result = client.get("/api/session/session-1/context")
+    assert result.status_code == 200, result.text
+    payload = result.json()
+    assert payload["context_status"] == "working_checkpoint"
+    assert payload["stored_chat_tokens"] > payload["working_checkpoint"]["used_tokens"]
+    first_scans = sum("json_extract" in sql.lower() for sql in statements)
+    assert first_scans >= 1
+    assert client.get("/api/session/session-1/context").status_code == 200
+    assert sum("json_extract" in sql.lower() for sql in statements) == first_scans
+    engine.dispose()
+
+
+def test_stale_checkpoint_offset_falls_back_to_full_session(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=2)
+    with db_factory.begin() as db:
+        row = db.query(DbSession).filter_by(id="session-1").one()
+        row.context_checkpoint = {"role": "system", "content": "stale", "metadata": {}}
+        row.context_checkpoint_count = 5
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    monkeypatch.setattr("src.model_context.get_context_length", lambda *_args: 128000)
+    monkeypatch.setattr("src.agent_runs.is_active", lambda *_args: False)
+    monkeypatch.setattr("src.agent_runs.get_context_usage", lambda *_args, **_kwargs: None)
+    manager = _manager(db_factory, monkeypatch)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(manager))
+    result = TestClient(app).get("/api/session/session-1/context")
+    assert result.status_code == 200, result.text
+    assert result.json()["context_messages"] == 2
+    engine.dispose()
+
+
 def test_message_count_includes_unpersisted_live_rounds(monkeypatch):
     engine, db_factory = _database()
     _seed_session(db_factory, message_count=3)
