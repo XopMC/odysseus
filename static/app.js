@@ -23,7 +23,7 @@ import {
 } from './js/startupShell.js?v=20260922restore1';
 import markdownModule from './js/markdown.js?v=20260923toolprogress1';
 import chatRenderer from './js/chatRenderer.js?v=20260923replaycursor1';
-import sessionModule from './js/sessions.js?v=20260923approvalrev1';
+import sessionModule from './js/sessions.js?v=20260923countrev1';
 import chatWork from './js/chat-work.js?v=20260923goalpreview1';
 import chatSubagents from './js/chat-subagents.js?v=20260923childresult1';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';
@@ -382,6 +382,7 @@ function initializeEventListeners() {
     let _countScheduled = false;
     let _authoritativeCountSession = null;
     let _authoritativeCount = null;
+    let _authoritativeCountRevision = null;
     const _updateMsgCount = () => {
       _countScheduled = false;
       const currentSession = window.sessionModule?.getCurrentSessionId?.() || null;
@@ -396,18 +397,26 @@ function initializeEventListeners() {
     window.__odysseusSetServerMessageCount = (sessionId, count, options = {}) => {
       const parsed = Number(count);
       const nextSession = sessionId ? String(sessionId) : null;
+      const nextRevision = options.historyRevision ? String(options.historyRevision) : null;
       let nextCount = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
-      if (options.monotonic === true && nextSession === _authoritativeCountSession
+      const sameSession = nextSession === _authoritativeCountSession;
+      if (sameSession && nextRevision && _authoritativeCountRevision
+          && nextRevision < _authoritativeCountRevision) return;
+      const sameRevision = !nextRevision || !_authoritativeCountRevision
+        || nextRevision === _authoritativeCountRevision;
+      if (options.monotonic === true && sameSession && sameRevision
           && Number.isInteger(_authoritativeCount) && Number.isInteger(nextCount)) {
         nextCount = Math.max(_authoritativeCount, nextCount);
       }
       _authoritativeCountSession = nextSession;
       _authoritativeCount = nextCount;
+      _authoritativeCountRevision = nextRevision || (sameSession ? _authoritativeCountRevision : null);
       _updateMsgCount();
     };
     window.__odysseusClearServerMessageCount = () => {
       _authoritativeCountSession = null;
       _authoritativeCount = null;
+      _authoritativeCountRevision = null;
       _updateMsgCount();
     };
     const _scheduleCount = () => {

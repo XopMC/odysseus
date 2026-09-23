@@ -60,7 +60,8 @@ async def _qa_lifespan(instance):
             for index in range(50):
                 session.add_message(ChatMessage("assistant", f"[synthetic prior message {index + 1}]"))
             manager.save_sessions()
-        agent_runs.start(SESSION_ID, _synthetic_run(), initial_model="fixture-model")
+        if os.getenv("ODYSSEUS_REPLAY_QA_START_RUN", "1") == "1":
+            agent_runs.start(SESSION_ID, _synthetic_run(), initial_model="fixture-model")
         yield
 
 

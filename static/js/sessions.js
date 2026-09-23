@@ -79,7 +79,9 @@ export async function refreshSessionMessageCount(sessionId) {
         ? Number(res.data.visible_total) : Number(res.data.total);
     if (Number.isFinite(raw) && raw >= 0) {
       const count = Math.floor(raw);
-      window.__odysseusSetServerMessageCount?.(sessionId, count, { monotonic: true });
+      window.__odysseusSetServerMessageCount?.(sessionId, count, {
+        monotonic: true, historyRevision: res.data.history_revision,
+      });
       return count;
     }
   } catch (_) { /* keep the last known authoritative count */ }
@@ -159,6 +161,7 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
     sessionId,
     Number.isFinite(Number(data.rendered_total)) ? Number(data.rendered_total)
       : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total),
+    { historyRevision: data.history_revision },
   );
   const refreshedRenderedCount = Number.isFinite(Number(data.rendered_total))
     ? Number(data.rendered_total)
@@ -2246,7 +2249,9 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       const initialRenderedCount = Number.isFinite(Number(data.rendered_total))
         ? Number(data.rendered_total)
         : Number.isFinite(Number(data.visible_total)) ? Number(data.visible_total) : Number(data.total);
-      window.__odysseusSetServerMessageCount?.(id, initialRenderedCount);
+      window.__odysseusSetServerMessageCount?.(id, initialRenderedCount, {
+        historyRevision: data.history_revision,
+      });
       if (Number.isFinite(initialRenderedCount)) {
         _liveSessionRenderedCounts.set(id, Math.floor(initialRenderedCount));
       }

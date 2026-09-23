@@ -30,7 +30,7 @@ def test_message_count_poll_does_not_fetch_latest_history_payload():
         "export async function refreshSessionHistory", 1,
     )[0]
     assert "_historyUrl(" not in count_fn
-    assert "{ monotonic: true }" in count_fn
+    assert "monotonic: true, historyRevision: res.data.history_revision" in count_fn
 
 
 def test_idle_live_sync_only_probes_history_after_rendered_count_changes():
