@@ -16,7 +16,7 @@ from sqlalchemy import or_
 
 from core.database import (
     ChatGoal, ChatMessage, ChatPlan, ChatWorkEvent, Session as DbSession, SessionLocal,
-    utcnow_naive,
+    reserve_sqlite_writer, utcnow_naive,
 )
 from src.run_wait_state import CONTEXT_FAILURE_CODES
 
@@ -558,6 +558,7 @@ class ChatWorkStore:
         if (expected_goal_id is None) != (expected_attempt is None):
             raise ValueError("Goal ID and attempt must be supplied together")
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:

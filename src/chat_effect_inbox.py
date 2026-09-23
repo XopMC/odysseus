@@ -7,7 +7,7 @@ import json
 import re
 import uuid
 
-from core.database import ChatToolIntent, ChatWorkEvent, SessionLocal, utcnow_naive
+from core.database import ChatToolIntent, ChatWorkEvent, SessionLocal, reserve_sqlite_writer, utcnow_naive
 from src.chat_work_store import WorkConflict, WorkNotFound, _session, _storage_owner
 from src.tool_capabilities import ToolEffect, capabilities_for_action
 
@@ -59,6 +59,7 @@ class ChatEffectInbox:
             raise ValueError("Bounded tool arguments required")
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             _session(db, owner, session_id)
             row = db.query(ChatToolIntent).filter_by(
                 owner=_storage_owner(owner), session_id=session_id,
@@ -88,6 +89,7 @@ class ChatEffectInbox:
 
     def mark_unknown(self, owner, session_id, intent_id):
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             row = self._row(db, owner, session_id, intent_id)
             if row.status == "unknown":
                 return _public(row)
@@ -106,6 +108,7 @@ class ChatEffectInbox:
             result, sort_keys=True, ensure_ascii=False, default=str,
         ).encode("utf-8")).hexdigest()
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             row = self._row(db, owner, session_id, intent_id)
             if row.status != "intent":
                 raise WorkConflict("Tool result is already settled or uncertain")
@@ -123,6 +126,7 @@ class ChatEffectInbox:
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
             raise ValueError("Exact run ID required")
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             _session(db, owner, session_id)
             rows = db.query(ChatToolIntent).filter_by(
                 owner=_storage_owner(owner), session_id=session_id,
@@ -163,6 +167,7 @@ class ChatEffectInbox:
         if type(expected_revision) is not int or expected_revision < 1:
             raise ValueError("Exact revision required")
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             row = self._row(db, owner, session_id, intent_id)
             if row.status != "unknown" or row.revision != expected_revision:
                 raise WorkConflict("Tool intent changed; reload before reconciling")

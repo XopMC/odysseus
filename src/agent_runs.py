@@ -212,10 +212,12 @@ def _ledger_hash(run: _Run) -> str:
 def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool = False) -> None:
     """Persist a small owner-scoped run checkpoint; never persist secrets."""
     try:
-        from core.database import ChatRunState, SessionLocal, utcnow_naive
+        from core.database import ChatRunState, SessionLocal, reserve_sqlite_writer, utcnow_naive
         effective_status = status or run.terminal_status or run.status
-        run.durable_seq = len(run.buffer) - 1
+        candidate_durable_seq = len(run.buffer) - 1
+        candidate_terminal_at = None
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             row = db.query(ChatRunState).filter(ChatRunState.run_id == run.run_id).first()
             accepted_context = dict(run.context_usage) if run.context_usage else None
             if accepted_context and (
@@ -269,14 +271,14 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
                     status=effective_status,
                     started_at=datetime.utcfromtimestamp(run.started_at),
                     last_seq=len(run.buffer) - 1,
-                    durable_seq=run.durable_seq,
+                    durable_seq=candidate_durable_seq,
                 )
                 db.add(row)
             row.status = effective_status
             row.last_seq = len(run.buffer) - 1
             row.durable_seq = (
-                run.durable_seq if durable else
-                max(int(row.durable_seq) if row.durable_seq is not None else -1, run.durable_seq)
+                candidate_durable_seq if durable else
+                max(int(row.durable_seq) if row.durable_seq is not None else -1, candidate_durable_seq)
             )
             row.context_revision = run.context_revision
             row.ledger_hash = run.ledger_hash
@@ -286,7 +288,7 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
             continuation["progress_health"] = health
             continuation["health_metrics"] = run.health_metrics.snapshot()
             continuation["wait_state"] = run.wait.snapshot(
-                effective_status, durable_seq=run.durable_seq,
+                effective_status, durable_seq=candidate_durable_seq,
                 context_revision=run.context_revision, ledger_hash=run.ledger_hash,
                 stalled=health["stalled"],
             )
@@ -295,7 +297,10 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
             row.continuation = continuation or None
             if effective_status != "running":
                 row.terminal_at = utcnow_naive()
-                run.terminal_at = row.terminal_at.timestamp()
+                candidate_terminal_at = row.terminal_at.timestamp()
+        run.durable_seq = candidate_durable_seq
+        if candidate_terminal_at is not None:
+            run.terminal_at = candidate_terminal_at
     except Exception:
         logger.warning("[agent-run] durable run-state checkpoint failed", exc_info=True)
 

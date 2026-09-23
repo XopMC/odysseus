@@ -170,6 +170,16 @@
   тест и соседние MCP/host проверки: 41 passed, 12 subtests. Классификация
   provider ошибок, bounded retry budget и live smoke остаются открытыми.
 
+- 2026-09-23: long-run SQLite incident для №03/06. На текущем production
+  наблюдались `database is locked` при effect-intent, durable run checkpoint и
+  Goal-failure записи. Помимо ожидающего релиза 30-секундного busy timeout,
+  read-then-write транзакции теперь резервируют SQLite writer до первого
+  SELECT через `BEGIN IMMEDIATE`; это исключает deadlock upgrade после
+  чтения. Курсор и terminal timestamp в памяти подтверждаются только после
+  успешного DB commit. Два конкурирующих writer и идемпотентная гонка
+  одинаковых effect-intents покрыты отдельными тестами. Production smoke и
+  полный recovery matrix остаются открытыми.
+
 - 2026-09-23: продолжение №25 (качество summary). Ручной canonical `/compact`
   больше не записывает пустой checkpoint и возвращает 502 без изменения
   состояния, если reducer отдал пустоту либо эхо внутреннего context envelope.

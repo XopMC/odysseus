@@ -135,6 +135,18 @@ def _sqlite_db_path(url) -> Optional[str]:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def reserve_sqlite_writer(db) -> None:
+    """Reserve SQLite's single writer before a read-then-write transaction.
+
+    A deferred SELECT followed by a write can fail immediately with SQLITE_BUSY
+    when another writer needs that reader to leave, regardless of busy_timeout.
+    BEGIN IMMEDIATE makes competing writers wait before taking a read snapshot.
+    Call only as the first SQL statement inside a short write transaction.
+    """
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+
+
 # Listening on the Engine class ensures this listener fires for all Engine
 # instances created within the process, not just the primary application engine.
 # The isinstance(sqlite3.Connection) check ensures that this PRAGMA foreign_keys=ON

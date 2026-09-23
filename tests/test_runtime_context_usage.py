@@ -206,6 +206,7 @@ def test_session_high_water_survives_lower_measurement_on_new_run(monkeypatch):
     class Db:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
+        def get_bind(self): return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
         def query(self, *_args, **_kwargs): return Query()
     class Factory:
         def begin(self): return Db()
