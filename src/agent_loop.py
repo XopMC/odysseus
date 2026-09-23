@@ -6541,13 +6541,13 @@ async def stream_agent_loop(
                                     {
                                         "id": f"recovery-{_context_compactions}-{_index}",
                                         "text": _text,
-                                        # Building this fallback already read
-                                        # the durable Goal/checkpoint and the
-                                        # previous unfinished plan above. Mark
-                                        # that recovery step truthfully done;
-                                        # plan_action atomically starts the
-                                        # first remaining work step.
-                                        "status": "done" if _index == 1 else "pending",
+                                        # save_plan creates a draft. A draft
+                                        # cannot claim completed progress before
+                                        # Execute; that would make post-
+                                        # compaction recovery fail before the
+                                        # checkpoint can be settled. Execute
+                                        # atomically starts the first step.
+                                        "status": "pending",
                                         "required": True,
                                     }
                                     for _index, _text in enumerate(_step_texts, 1)

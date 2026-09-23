@@ -91,6 +91,18 @@ def test_legacy_plan_update_marks_terminal_when_all_required_steps_done(owned_ch
     assert [step["id"] for step in plan["steps"]] == original_ids
 
 
+def test_post_compaction_recovery_plan_starts_from_pending_draft(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Post-compaction recovery", [
+        {"id": "recovery-1-1", "text": "Re-read the active Goal and durable checkpoint", "status": "pending", "required": True},
+        {"id": "recovery-1-2", "text": "Verify remaining work", "status": "pending", "required": True},
+    ], replace_terminal=True)
+    assert plan["status"] == "draft"
+    plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
+    assert plan["status"] == "executing"
+    assert [step["status"] for step in plan["steps"]] == ["in_progress", "pending"]
+
+
 def test_goal_stall_wait_reason_is_durable_owner_scoped_and_cleared_on_resume(owned_chat):
     store = ChatWorkStore()
     goal = store.ensure_goal("alice", owned_chat, "Harmless verification")
