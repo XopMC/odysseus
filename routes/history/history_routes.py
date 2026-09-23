@@ -1082,6 +1082,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             if not source:
                 raise HTTPException(404, "Session not found")
 
+            from core.session_manager import _full_message_metadata
+            msgs_to_copy = source.history[:keep_count]
+            full_metas = [_full_message_metadata(msg) for msg in msgs_to_copy]
+
             # Create new session
             new_id = str(uuid.uuid4())
             fork_name = f"\u2ADD {source.name}"
@@ -1095,14 +1099,12 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             )
 
             # Copy messages up to keep_count
-            msgs_to_copy = source.history[:keep_count]
-            for msg in msgs_to_copy:
+            for msg, meta in zip(msgs_to_copy, full_metas):
                 # Copy the metadata dict. Sharing it would let the fork's
                 # persistence (add_message -> _persist_message stamps
                 # _db_id/timestamp onto the dict) mutate the SOURCE session's
                 # in-memory messages, corrupting their _db_id and breaking
                 # edit/delete-by-id on the original conversation.
-                meta = dict(msg.metadata) if isinstance(msg.metadata, dict) else None
                 new_session.add_message(ChatMessage(msg.role, msg.content, meta))
             try:
                 from src.event_bus import fire_event

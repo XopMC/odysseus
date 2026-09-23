@@ -7,7 +7,11 @@ persisting the fork rewrote the SOURCE messages' _db_id — breaking
 edit/delete-by-id on the original conversation. The fork must copy the dict.
 """
 import asyncio
+import json
+import zlib
 from types import SimpleNamespace
+import pytest
+from fastapi import HTTPException
 
 from core.models import ChatMessage
 import routes.history_routes as mod
@@ -63,6 +67,9 @@ def test_fork_does_not_corrupt_source_message_metadata(monkeypatch):
         ChatMessage("user", "hi", {"_db_id": "src-0"}),
         ChatMessage("assistant", "yo", {"_db_id": "src-1"}),
     ]
+    source.history[0]._archived_metadata_zlib = zlib.compress(json.dumps({
+        "timeline_v2": {"events": [{"text": "historic evidence"}]},
+    }).encode())
     sm = _FakeSessionManager(source)
 
     req = SimpleNamespace()
@@ -83,7 +90,27 @@ def test_fork_does_not_corrupt_source_message_metadata(monkeypatch):
     new_session = sm.created
     assert new_session.history[0].metadata is not source.history[0].metadata
     assert new_session.history[1].metadata is not source.history[1].metadata
+    assert new_session.history[0].metadata["timeline_v2"]["events"][0]["text"] == "historic evidence"
 
     # ...and the source session's _db_id values are untouched.
     assert source.history[0].metadata["_db_id"] == "src-0"
     assert source.history[1].metadata["_db_id"] == "src-1"
+
+
+def test_corrupt_archived_metadata_does_not_create_partial_fork(monkeypatch):
+    monkeypatch.setattr(mod, "_verify_session_owner", lambda *a, **k: None)
+    source = _FakeSession(name="Original", owner="alice")
+    source.history = [ChatMessage("user", "hi", {"_db_id": "src-0"})]
+    source.history[0]._archived_metadata_zlib = b"corrupt"
+    sm = _FakeSessionManager(source)
+    req = SimpleNamespace()
+
+    async def _json():
+        return {"keep_count": 1}
+
+    req.json = _json
+    fork = _fork_handler(mod.setup_history_routes(sm))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(fork(request=req, session_id="src-id"))
+    assert error.value.status_code == 500
+    assert sm.created is None
