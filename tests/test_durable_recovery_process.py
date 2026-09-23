@@ -295,3 +295,58 @@ def test_process_kill_at_approval_wait_preserves_wait_state_without_reexecution(
     assert state["snapshot"]["durable_seq"] == 0
     assert state["events"][0]["data"]["type"] == "ask_user"
     assert state["assistants"] == 1
+
+
+def test_process_kill_after_child_terminal_commit_preserves_join_result_and_event(tmp_path):
+    crashed = _run_script("""
+        import os
+        from datetime import datetime, timezone
+        from core.database import Base, Session, SessionLocal, engine
+        from src.database import ChatSubagentEvent, ChatSubagentRun
+        from src.subagent_runtime import SubagentRuntime
+
+        Base.metadata.create_all(bind=engine, tables=[
+            Session.__table__, ChatSubagentRun.__table__, ChatSubagentEvent.__table__,
+        ])
+        with SessionLocal.begin() as db:
+            db.add(Session(id='child-join-fixture', name='Child join fixture', owner='alice',
+                           endpoint_url='http://fixture.invalid/v1', model='fixture'))
+            db.flush()
+            db.add(ChatSubagentRun(
+                id='d'*32, parent_session_id='child-join-fixture', parent_run_id='p'*32,
+                owner='alice', ordinal=1, name='Fixture child', objective='safe objective',
+                assigned_context='', model='fixture', endpoint_id='fixture-endpoint',
+                status='running', worker_id='old-worker',
+            ))
+        runtime = SubagentRuntime()
+        runtime._update_with_event(
+            'd'*32, 'alice', 'child-join-fixture', 'status',
+            {'status': 'completed', 'result': 'safe-result'},
+            status='completed', result='safe-result', error='', slot=None,
+            finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        os._exit(17)
+    """, tmp_path)
+    assert crashed.returncode == 17, crashed.stderr
+
+    restarted = _run_script("""
+        import asyncio, json
+        from src.subagent_runtime import SubagentRuntime
+
+        runtime = SubagentRuntime()
+        recovered = runtime.recover_stale()
+        joined = asyncio.run(runtime.wait(
+            'alice', 'child-join-fixture', ['d'*32], timeout_seconds=0, wait_for='all',
+        ))
+        events = runtime.events('alice', 'child-join-fixture', child_id='d'*32)
+        print(json.dumps({'recovered': recovered, 'joined': joined,
+                          'terminal_events': [e for e in events if e['kind'] == 'status'
+                                              and e['payload'].get('status') == 'completed']}))
+    """, tmp_path)
+    assert restarted.returncode == 0, restarted.stderr
+    state = json.loads(restarted.stdout.strip().splitlines()[-1])
+    assert state['recovered'] == 0
+    assert state['joined']['completed'] is True
+    assert state['joined']['subagents'][0]['status'] == 'completed'
+    assert state['joined']['subagents'][0]['result'] == 'safe-result'
+    assert len(state['terminal_events']) == 1

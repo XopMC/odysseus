@@ -132,6 +132,34 @@ class SubagentRuntime:
         finally:
             db.close()
 
+    def _update_with_event(self, child_id: str, owner: Optional[str], session_id: str,
+                           kind: str, payload: dict, **changes) -> Optional[dict]:
+        """Commit a child state transition and its replay event atomically."""
+        db = SessionLocal()
+        try:
+            row = db.query(ChatSubagentRun).filter(
+                ChatSubagentRun.id == child_id,
+                ChatSubagentRun.owner == (owner or ""),
+                ChatSubagentRun.parent_session_id == session_id,
+            ).first()
+            if row is None:
+                return None
+            for key, value in changes.items():
+                setattr(row, key, value)
+            row.revision = int(row.revision or 0) + 1
+            db.add(ChatSubagentEvent(
+                child_id=child_id, parent_session_id=session_id,
+                owner=owner or "", kind=kind, payload=payload or {},
+            ))
+            db.commit()
+            db.refresh(row)
+            return _public(row, include_result=True)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def _merge_metrics(self, child_id: str, owner: Optional[str], values: dict) -> Optional[dict]:
         """Merge telemetry without letting a later heartbeat erase context data."""
         db = SessionLocal()
@@ -521,35 +549,35 @@ class SubagentRuntime:
             final = "".join(output_parts).strip()
             if waiting_payload:
                 self._merge_metrics(child_id, owner, {"waiting_user": waiting_payload})
-                self._update(child_id, owner, status="waiting_user", result=final, error="")
-                self._event(child_id, owner, session_id, "status", {
+                self._update_with_event(child_id, owner, session_id, "status", {
                     "status": "waiting_user", "ask_user": waiting_payload,
-                })
+                }, status="waiting_user", result=final, error="")
                 return
             if not final:
                 # Thinking and successful transport completion are not a
                 # deliverable.  Never let a parent treat an empty child result
                 # as independent verification of the assigned objective.
                 raise RuntimeError("Subagent produced no visible final result")
-            self._update(child_id, owner, status="completed", result=final,
-                         finished_at=_utcnow(), error="", slot=None)
-            self._event(child_id, owner, session_id, "status", {
+            self._update_with_event(child_id, owner, session_id, "status", {
                 "status": "completed", "result": final[-12000:],
-            })
+            }, status="completed", result=final, finished_at=_utcnow(), error="", slot=None)
         except asyncio.CancelledError:
             await flush(force=True)
-            self._update(child_id, owner, status="cancelled", finished_at=_utcnow(),
-                         error="Stopped by user", slot=None)
-            self._event(child_id, owner, session_id, "status", {"status": "cancelled"})
+            self._update_with_event(
+                child_id, owner, session_id, "status", {"status": "cancelled"},
+                status="cancelled", finished_at=_utcnow(),
+                error="Stopped by user", slot=None,
+            )
             raise
         except Exception as exc:
             await flush(force=True)
             logger.warning("Subagent %s failed: %s", child_id, type(exc).__name__, exc_info=True)
-            self._update(child_id, owner, status="failed", finished_at=_utcnow(),
-                         error=str(exc)[:1000], slot=None)
-            self._event(child_id, owner, session_id, "status", {
-                "status": "failed", "error": str(exc)[:1000],
-            })
+            safe_error = str(exc)[:1000]
+            self._update_with_event(
+                child_id, owner, session_id, "status",
+                {"status": "failed", "error": safe_error},
+                status="failed", finished_at=_utcnow(), error=safe_error, slot=None,
+            )
         finally:
             heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
@@ -569,8 +597,11 @@ class SubagentRuntime:
                         error = str(exc)[:1000]
                 except Exception:
                     pass
-            self._update(child_id, owner, status="failed", error=error,
-                         finished_at=_utcnow(), slot=None)
+            self._update_with_event(
+                child_id, owner, session_id, "status",
+                {"status": "failed", "error": error},
+                status="failed", error=error, finished_at=_utcnow(), slot=None,
+            )
 
     def _get_any(self, owner: Optional[str], child_id: str) -> Optional[dict]:
         db = SessionLocal()
