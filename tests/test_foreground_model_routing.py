@@ -97,6 +97,9 @@ def _chat_stream_endpoint(
     capture_context=False,
     endpoint_url="https://selected.example/v1",
 ):
+    # Route unit fixtures have no persisted chat row. Exercise the control
+    # path with a successful durable resolution unless a test overrides it.
+    monkeypatch.setattr(chat_routes, "_mark_tool_approval_resolved", lambda *args: True)
     def add_message(message):
         captured.setdefault("added_messages", []).append(message)
 
@@ -376,6 +379,32 @@ async def test_chat_stream_denial_returns_control_resolution(monkeypatch):
     assert "agent" not in captured
     assert "exact_approval" not in captured
     assert chat_routes.tool_approval_store.peek(pending.approval_id) is None
+
+
+@pytest.mark.asyncio
+async def test_approval_persistence_failure_does_not_consume_or_execute(monkeypatch):
+    from src.tool_capabilities import capabilities_for_action
+
+    captured = {}
+    endpoint = _chat_stream_endpoint(monkeypatch, "agent", captured)
+    pending = chat_routes.tool_approval_store.create(
+        owner="alice", session_id="session-1", origin_run_id="run-1",
+        tool_name="python", content="print(2 + 2)", workspace=None,
+        external_untrusted_context_seen=False,
+        capabilities=capabilities_for_action("python", "print(2 + 2)"),
+    )
+    monkeypatch.setattr(chat_routes, "_mark_tool_approval_resolved", lambda *args: False)
+    request = _RouteRequest("agent")
+    request._form.update({
+        "tool_approval_id": pending.approval_id,
+        "tool_approval_decision": "approve_task",
+    })
+
+    with pytest.raises(HTTPException) as exc:
+        await endpoint(request)
+    assert exc.value.status_code == 503
+    assert chat_routes.tool_approval_store.peek(pending.approval_id) is pending
+    assert "exact_approval" not in captured
 
 
 @pytest.mark.asyncio

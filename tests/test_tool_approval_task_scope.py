@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from core.models import ChatMessage, Session
 from src.tool_approval_scopes import (
     CHAT_SESSION_APPROVAL_CONTEXT_MARKER,
@@ -62,6 +64,17 @@ def test_card_offers_task_chat_session_and_deny_without_leaking_private_state():
     assert "continuation_query" not in serialized
     assert "manage_skills" not in serialized
     assert "inspect the project" not in serialized
+
+
+def test_failed_durable_precondition_preserves_exact_pending_approval():
+    store = ToolApprovalStore()
+    pending = _pending(store)
+    args = dict(decision="approve_task", owner="Alice", session_id="session-1")
+    assert store.consume(pending.approval_id, before_consume=lambda: False, **args) is None
+    assert store.peek(pending.approval_id) is pending
+    grant = store.consume(pending.approval_id, before_consume=lambda: True, **args)
+    assert grant is not None and grant.pending is pending
+    assert store.peek(pending.approval_id) is None
 
 
 def test_allow_for_task_bypasses_only_the_resumed_run_gate():
@@ -239,7 +252,8 @@ def test_private_continuation_state_is_canonical_bounded_and_digest_bound():
     ) is False
 
 
-def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypatch):
+@pytest.mark.parametrize("commit_fails", [False, True])
+def test_consumed_card_resolution_updates_memory_only_after_commit(monkeypatch, commit_fails):
     from routes import chat_routes
 
     ask_user = {
@@ -289,6 +303,8 @@ def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypa
             return FakeQuery(db_message if model is FakeDBMessage else db_session)
 
         def commit(self):
+            if commit_fails:
+                raise RuntimeError("simulated durable write failure")
             self.committed = True
 
         def rollback(self):
@@ -302,11 +318,18 @@ def test_consumed_card_resolution_updates_memory_and_persisted_metadata(monkeypa
     monkeypatch.setattr(chat_routes, "DBSession", FakeDBSession)
     monkeypatch.setattr(chat_routes, "SessionLocal", lambda: db)
 
-    assert chat_routes._mark_tool_approval_resolved(
+    result = chat_routes._mark_tool_approval_resolved(
         sess,
         "approval-1",
         "approve",
-    ) is True
+    )
+    if commit_fails:
+        assert result is False
+        assert "resolved" not in ask_user
+        assert db.rolled_back is True
+        assert db.closed is True
+        return
+    assert result is True
     assert ask_user["resolved"] == "approve"
     persisted = json.loads(db_message.meta_data)
     assert persisted["tool_events"][0]["ask_user"]["resolved"] == "approve"

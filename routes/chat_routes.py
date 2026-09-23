@@ -1,6 +1,7 @@
 """Chat routes — /api/chat, /api/chat_stream, /api/inject_context, /api/search."""
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -129,6 +130,8 @@ def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
 
     message_id = None
     resolved_metadata = None
+    original_approval = None
+    updated_approval = None
     for item in reversed(getattr(sess, "history", []) or []):
         metadata = getattr(item, "metadata", None)
         if not isinstance(metadata, dict):
@@ -142,15 +145,24 @@ def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
                 continue
             if str(ask_user.get("approval_id") or "") != approval_key:
                 continue
-            ask_user["resolved"] = normalized_decision
+            updated_metadata = copy.deepcopy(metadata)
+            updated_approval = next(
+                candidate.get("ask_user")
+                for candidate in reversed(updated_metadata["tool_events"])
+                if isinstance(candidate, dict)
+                and isinstance(candidate.get("ask_user"), dict)
+                and str(candidate["ask_user"].get("approval_id") or "") == approval_key
+            )
+            updated_approval["resolved"] = normalized_decision
             stamp_chat_session_grant(
-                ask_user,
+                updated_approval,
                 getattr(sess, "id", ""),
                 normalized_decision,
             )
             message_id = metadata.get("_db_id")
+            original_approval = ask_user
             resolved_metadata = {
-                key: value for key, value in metadata.items() if key != "_db_id"
+                key: value for key, value in updated_metadata.items() if key != "_db_id"
             }
             break
         if resolved_metadata is not None:
@@ -177,6 +189,11 @@ def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
         # session revision so other devices reconcile this existing card.
         db_session.updated_at = utcnow_naive()
         db.commit()
+        # Only publish the resolved card in this process after its durable
+        # metadata and revision have committed. A failed write must leave all
+        # clients looking at the same still-pending approval.
+        original_approval.clear()
+        original_approval.update(updated_approval)
         return True
     except Exception:
         db.rollback()
@@ -1269,13 +1286,33 @@ def setup_chat_routes(
                         409,
                         "Tool approvals cannot be consumed while plan mode is active.",
                     )
+                resolution = {"attempted": False, "persisted": False}
+
+                def persist_before_consume() -> bool:
+                    resolution["attempted"] = True
+                    resolution["persisted"] = _mark_tool_approval_resolved(
+                        sess, tool_approval_id, decision,
+                    )
+                    return resolution["persisted"]
+
                 exact_tool_approval = tool_approval_store.consume(
                     tool_approval_id,
                     decision=decision,
                     owner=owner,
                     session_id=session,
+                    before_consume=persist_before_consume,
                 )
                 tool_approval_continuation = True
+                if resolution["attempted"] and not resolution["persisted"]:
+                    # No action is authorized and the sealed approval is
+                    # still pending. The user can retry after storage recovers.
+                    raise HTTPException(
+                        503, "The approval could not be saved. No action was run; please retry.",
+                    )
+                if not resolution["attempted"]:
+                    raise HTTPException(
+                        409, "This tool approval is invalid or expired.",
+                    )
                 if (
                     decision in {"approve", "approve_task"}
                     and exact_tool_approval is None
@@ -1283,15 +1320,6 @@ def setup_chat_routes(
                     raise HTTPException(
                         409,
                         "This tool approval could not be consumed.",
-                    )
-                if not _mark_tool_approval_resolved(
-                    sess,
-                    tool_approval_id,
-                    decision,
-                ):
-                    logger.warning(
-                        "Tool approval %s was consumed but its persisted card could not be marked resolved",
-                        tool_approval_id,
                     )
                 resumed_goal = None
                 try:

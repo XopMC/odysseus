@@ -15,7 +15,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from src.tool_approval_scopes import (
     CHAT_SESSION_APPROVAL_DECISION,
@@ -431,6 +431,7 @@ class ToolApprovalStore:
         owner: Any,
         session_id: Any,
         allow_continuation: bool = True,
+        before_consume: Callable[[], bool] | None = None,
     ) -> ExactToolApproval | None:
         """Consume a pending approval.
 
@@ -455,6 +456,11 @@ class ToolApprovalStore:
                 # Authentication is checked before destructive consumption so
                 # a leaked/guessed opaque id cannot be used to invalidate
                 # another owner's pending action.
+                return None
+            # The chat route persists the exact decision before retiring the
+            # sealed approval. A failed durable write leaves the same pending
+            # action available for retry and cannot execute it accidentally.
+            if before_consume is not None and not before_consume():
                 return None
             self._pending.pop(approval_key, None)
         normalized_decision = str(decision or "").strip().lower()
