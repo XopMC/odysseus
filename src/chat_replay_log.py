@@ -226,7 +226,7 @@ class ReplayLog:
         self.metadata = meta
 
     def page(self, after_seq=-1, limit=100, *, active=False):
-        if type(after_seq) is not int or after_seq < -1 or type(limit) is not int or not 1 <= limit <= 100:
+        if type(after_seq) is not int or after_seq < -1 or type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError('Invalid replay cursor or page size')
         count = len(self)
         if after_seq >= count:
@@ -244,3 +244,31 @@ class ReplayLog:
             status = 'interrupted'
         return {'run_id': self.run_id, 'status': status, 'events': events,
                 'next_seq': cursor, 'has_more': cursor + 1 < count}
+
+    def page_before(self, before_seq, limit=100, *, active=False):
+        """Read the immediately preceding page by indexed sequence, newest window first.
+
+        The response itself is chronological so an older-page renderer can
+        prepend it without reversing event order. No earlier replay frames are
+        scanned, even when a run has hundreds of thousands of events.
+        """
+        if (type(before_seq) is not int or before_seq < 0 or
+                type(limit) is not int or not 1 <= limit <= 200):
+            raise ValueError('Invalid replay cursor or page size')
+        count = len(self)
+        if before_seq > count:
+            raise ValueError('Replay cursor is ahead of the log')
+        events, used = [], 0
+        for seq in range(before_seq - 1, max(-1, before_seq - limit - 1), -1):
+            event = self[seq]
+            used += len(event.encode())
+            if events and used > MAX_EVENT_BYTES:
+                break
+            events.append({'seq': seq, 'event': event})
+        events.reverse()
+        cursor = events[0]['seq'] if events else before_seq
+        status = self.metadata['status']
+        if status == 'running' and not active:
+            status = 'interrupted'
+        return {'run_id': self.run_id, 'status': status, 'events': events,
+                'previous_cursor': cursor, 'has_more_before': cursor > 0}

@@ -3171,6 +3171,20 @@ def setup_chat_routes(
             raise HTTPException(404, "No run for this session")
         return snapshot
 
+    @router.get("/api/chat/run/{session_id}/events/older")
+    async def chat_run_older_events(
+        request: Request, session_id: str, before_seq: int, limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Owner-scoped backward page for lazy active-run history."""
+        _verify_session_owner(request, session_id)
+        try:
+            snapshot = agent_runs.event_page_before(session_id, before_seq=before_seq, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        if snapshot is None:
+            raise HTTPException(404, "No run for this session")
+        return snapshot
+
     @router.get("/api/chat/run/{session_id}/artifacts/{run_id}/{seq}")
     async def chat_run_artifact(request: Request, session_id: str, run_id: str, seq: int):
         """Fetch one bounded tool output on demand.

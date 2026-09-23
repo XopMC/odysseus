@@ -31,6 +31,10 @@ def setup_chat_replay_routes():
         _verify_session_owner(request, session_id)
         if os.getenv('ODYSSEUS_DURABLE_CHAT_REPLAY') != '1':
             raise HTTPException(404, 'Durable chat replay is disabled')
+        # The legacy artifact endpoint keeps its 100-frame contract. The
+        # owner-scoped active-run snapshot API may request up to 200 frames.
+        if limit > 100:
+            raise HTTPException(400, 'Invalid replay request')
         try:
             log = ReplayLog(agent_runs.replay_root(), run_id, session_id)
             run = agent_runs.get_active_run(session_id)

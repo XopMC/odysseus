@@ -75,6 +75,10 @@ def test_durable_long_replay_cursor_restart_and_reasoning_index(count):
                 break
         assert seen == count and cursor == count - 1
         assert json.loads(interrupted[count - 1].split("data: ", 1)[1])["_replay"]["seq"] == count - 1
+        tail = interrupted.page_before(count, 200)
+        assert [item["seq"] for item in tail["events"]] == list(range(count - 200, count))
+        assert tail["previous_cursor"] == count - 200
+        assert interrupted.page_before(tail["previous_cursor"], 200)["events"][-1]["seq"] == count - 201
 
         log.checkpoint("done")
         completed = ReplayLog(directory, "e" * 32, "safe-fixture")

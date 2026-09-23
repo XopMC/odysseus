@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
+from types import SimpleNamespace
+import pytest
 from src.chat_replay_log import ReplayLog, ReplayLimitError
 from src import agent_runs
 
@@ -37,6 +39,95 @@ def test_process_restart_reason_is_persisted_for_success_and_missing_artifact_pa
     assert recovery.count('continuation["terminal_reason"] = "process_restarted"') == 2
 
 
+def test_live_backward_event_page_has_stable_exclusive_cursor():
+    run = SimpleNamespace(buffer=[f'data: {json.dumps({"delta": str(i)})}\n\n' for i in range(7)])
+    with patch.dict(agent_runs._RUNS, {'fixture-chat': run}), \
+         patch.object(agent_runs, 'describe_run', return_value={'run_id': 'a' * 32, 'status': 'running'}):
+        page = agent_runs.event_page_before('fixture-chat', before_seq=7, limit=3)
+        assert [item['seq'] for item in page['events']] == [4, 5, 6]
+        assert [item['data']['delta'] for item in page['events']] == ['4', '5', '6']
+        assert page['previous_cursor'] == 4 and page['has_more_before']
+        retry = agent_runs.event_page_before('fixture-chat', before_seq=7, limit=3)
+        assert retry['events'] == page['events']
+        older = agent_runs.event_page_before('fixture-chat', before_seq=4, limit=3)
+        assert [item['seq'] for item in older['events']] == [1, 2, 3]
+        with pytest.raises(ValueError):
+            agent_runs.event_page_before('fixture-chat', before_seq=8, limit=3)
+
+
+def test_durable_event_pages_accept_client_200_limit_and_reject_stale_cursor(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from core.database import Base, ChatRunState, Session as DbSession
+
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[DbSession.__table__, ChatRunState.__table__])
+    factory = sessionmaker(bind=engine)
+    with factory() as db:
+        db.add(DbSession(id='fixture-chat', name='Safe fixture', model='local',
+                         endpoint_url='http://local/v1', owner='alice'))
+        db.flush()
+        db.add(ChatRunState(run_id='a' * 32, session_id='fixture-chat', owner='alice', status='interrupted'))
+        db.commit()
+    log = ReplayLog(tmp_path, 'a' * 32, 'fixture-chat', create=True)
+    for seq in range(405):
+        log.append(f'data: {json.dumps({"delta": str(seq)})}\n\n')
+    with patch.dict(agent_runs._RUNS, {}, clear=True), \
+         patch('core.database.SessionLocal', factory), \
+         patch.object(agent_runs, 'replay_root', return_value=tmp_path):
+        forward = agent_runs.event_page('fixture-chat', after_seq=-1, limit=200)
+        assert [item['seq'] for item in forward['events']] == list(range(200))
+        older = agent_runs.event_page_before('fixture-chat', before_seq=405, limit=200)
+        assert [item['seq'] for item in older['events']] == list(range(205, 405))
+        assert older['previous_cursor'] == 205 and older['has_more_before']
+        with pytest.raises(ValueError):
+            agent_runs.event_page_before('fixture-chat', before_seq=406, limit=200)
+    engine.dispose()
+
+
+def test_backward_replay_route_enforces_owner_and_cursor(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from core.database import Base, ChatRunState, Session as DbSession
+    from routes import chat_routes, session_routes
+
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[DbSession.__table__, ChatRunState.__table__])
+    factory = sessionmaker(bind=engine)
+    with factory() as db:
+        db.add(DbSession(id='fixture-chat', name='Safe fixture', model='local',
+                         endpoint_url='http://local/v1', owner='alice'))
+        db.flush()
+        db.add(ChatRunState(run_id='a' * 32, session_id='fixture-chat', owner='alice', status='interrupted'))
+        db.commit()
+    log = ReplayLog(tmp_path, 'a' * 32, 'fixture-chat', create=True)
+    for seq in range(3):
+        log.append(f'data: {json.dumps({"delta": str(seq)})}\n\n')
+    monkeypatch.setattr(session_routes, 'SessionLocal', factory)
+    monkeypatch.setattr(agent_runs, 'replay_root', lambda: tmp_path)
+    monkeypatch.setattr(__import__('core.database', fromlist=['SessionLocal']), 'SessionLocal', factory)
+    app = FastAPI()
+
+    @app.middleware('http')
+    async def owner(request, call_next):
+        request.state.current_user = request.headers.get('X-Test-User', 'alice')
+        return await call_next(request)
+
+    app.include_router(chat_routes.setup_chat_routes(*[SimpleNamespace() for _ in range(6)]))
+    path = '/api/chat/run/fixture-chat/events/older?before_seq=3&limit=2'
+    with TestClient(app) as client:
+        allowed = client.get(path)
+        assert allowed.status_code == 200
+        assert [item['seq'] for item in allowed.json()['events']] == [1, 2]
+        assert client.get(path, headers={'X-Test-User': 'bob'}).status_code == 404
+        assert client.get(path.replace('before_seq=3', 'before_seq=4')).status_code == 400
+    engine.dispose()
+
+
 class ReplayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -59,6 +150,27 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(seen, [f'data: {i}\n\n' for i in range(205)])
         self.log.checkpoint('done')
         self.assertEqual(ReplayLog(self.temp.name, 'a' * 32, 'alice-chat').page()['status'], 'done')
+
+    def test_two_hundred_event_page_and_backward_cursor_after_restart(self):
+        for i in range(405):
+            self.log.append(f'data: {i}\n\n')
+        reopened = ReplayLog(self.temp.name, 'a' * 32, 'alice-chat')
+        forward = reopened.page(-1, 200)
+        assert [item['seq'] for item in forward['events']] == list(range(200))
+        last = reopened.page_before(405, 200)
+        assert [item['seq'] for item in last['events']] == list(range(205, 405))
+        assert last['previous_cursor'] == 205 and last['has_more_before']
+        previous = reopened.page_before(last['previous_cursor'], 200)
+        assert [item['seq'] for item in previous['events']] == list(range(5, 205))
+        first = reopened.page_before(previous['previous_cursor'], 200)
+        assert [item['seq'] for item in first['events']] == list(range(5))
+        assert first['previous_cursor'] == 0 and not first['has_more_before']
+        assert reopened.page_before(0, 200)['events'] == []
+        for cursor in (-1, True, 406):
+            with self.assertRaises(ValueError):
+                reopened.page_before(cursor, 200)
+        with self.assertRaises(ValueError):
+            reopened.page_before(405, 201)
 
     def test_read_only_reopen_does_not_scan_all_replay_artifacts(self):
         self.log.append('complete')

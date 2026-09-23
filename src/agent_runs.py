@@ -1162,8 +1162,10 @@ def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Opt
                 "progress_health": _durable_progress_health(state),
                 "wait_state": _durable_wait_state(state),
             }
-        except (FileNotFoundError, ValueError, OSError):
+        except (FileNotFoundError, OSError):
             return None
+        except ValueError:
+            raise
         except Exception:
             logger.debug("[agent-run] durable event-page lookup failed", exc_info=True)
             return None
@@ -1189,6 +1191,66 @@ def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Opt
         "next_cursor": cursor,
         "has_more": cursor + 1 < count,
     }
+
+
+def event_page_before(session_id: str, *, before_seq: int, limit: int = 100) -> Optional[dict]:
+    """Return the immediately preceding bounded replay window in event order.
+
+    This is the inverse cursor needed by a newest-first active-run client.
+    It never walks from seq 0 to reach a long run's current tail.
+    """
+    if (type(before_seq) is not int or before_seq < 0 or
+            type(limit) is not int or not 1 <= limit <= 200):
+        raise ValueError("Invalid replay cursor or page size")
+    run = _RUNS.get(session_id)
+    if run is not None:
+        if before_seq > len(run.buffer):
+            raise ValueError("Replay cursor is ahead of the log")
+        first = max(0, before_seq - limit)
+        page = event_page(session_id, after_seq=first - 1, limit=before_seq - first or 1)
+        if page is None:
+            return None
+        events = [item for item in page["events"] if item["seq"] < before_seq]
+        return {**page, "events": events, "previous_cursor": first,
+                "has_more_before": first > 0}
+
+    try:
+        from core.database import ChatRunState, SessionLocal
+        from src.chat_replay_log import ReplayLog
+        with SessionLocal() as db:
+            state = db.query(ChatRunState).filter(
+                ChatRunState.session_id == session_id,
+            ).order_by(ChatRunState.updated_at.desc()).first()
+            if state is None:
+                return None
+            log = ReplayLog(replay_root(), state.run_id, session_id)
+            page = log.page_before(before_seq, limit, active=False)
+        rows = []
+        for item in page["events"]:
+            raw = "\n".join(
+                line[5:].lstrip() for line in item["event"].splitlines()
+                if line.startswith("data:")
+            )
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                data = {"type": "opaque"}
+            rows.append({"seq": item["seq"], "data": data})
+        return {
+            "run_id": state.run_id,
+            "status": page["status"],
+            "events": rows,
+            "previous_cursor": page["previous_cursor"],
+            "has_more_before": page["has_more_before"],
+            "last_seq": len(log) - 1,
+        }
+    except (FileNotFoundError, OSError):
+        return None
+    except ValueError:
+        raise
+    except Exception:
+        logger.debug("[agent-run] durable older event-page lookup failed", exc_info=True)
+        return None
 
 
 def normalize_context_usage(data) -> Optional[dict]:
