@@ -22,6 +22,22 @@
   последний диапазон после reload. Пункт №30 закрыт, но это не доказывает
   все шесть часов и не закрывает №50 или другие пункты.
 
+- 2026-09-23 12:29 +05: пункт №10 подтверждён для технического экспорта.
+  Owner-scoped `/api/chat/incident/{session_id}` отдаёт один детерминированный
+  ZIP со схемой событий, версией, cursor/status, allowlisted причинами,
+  числовыми TTFT/tool/compaction/reconnect метриками и синтетическим replay
+  fixture. SQL-проекция выбирает только нужные JSON scalars (SQLite runtime,
+  PostgreSQL SQL compile); полный `continuation`, context snapshot, prompts,
+  receipts и аргументы инструментов не загружаются в архив. Отрицательные
+  тесты с секретом в соседнем JSON-поле и чужим owner зелёные; полный pytest:
+  7,145 passed, 21 skipped, 109 subtests. Изолированный Jetson-кандидат
+  `d64b0a3` ответил 200 и выдал ZIP с одним синтетическим run и реальной
+  TTFT; неизвестный session ID получил 404. Кнопка в отдельном тестовом
+  браузерном чате вызвала тот же endpoint (200); адаптер браузера не отдал
+  blob-download event, поэтому сохранение файла не заявляется отдельно.
+  Пункт №10 закрыт как API/архив с UI invocation; production switch и общий
+  шестичасовой gate остаются открытыми.
+
 - 2026-09-23 05:58–06:05 +05: production log на `80364b0` зафиксировал
   `Server-side post-compaction plan recovery failed`: `save_plan` отклонил
   fallback, потому что он создавал draft с первым шагом `done` до Execute.
@@ -1124,7 +1140,7 @@
     fencing, затем 33 теста store/stream прошли; полный pytest — 6999 passed,
     20 skipped, 109 subtests passed. Live race пока не проверен.
 - [ ] **09. Run health SLO.** Метрики TTFT, prefill, tool latency, durable lag, SSE reconnect, UI long tasks, compaction time/failure, child queue wait; алерты на нарушение заданных порогов.
-- [ ] **10. Экспорт технического инцидента.** Один owner-scoped архив со схемой событий, версиями, обезличенными метриками и ошибками без содержимого чата/секретов; воспроизводимый test fixture.
+- [x] **10. Экспорт технического инцидента.** Один owner-scoped архив со схемой событий, версиями, обезличенными метриками и ошибками без содержимого чата/секретов; воспроизводимый test fixture.
 
 ## P0 — безопасные изменения и выпуск
 
