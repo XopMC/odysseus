@@ -11,6 +11,7 @@ import collections
 import hashlib
 import inspect
 import json
+import math
 import re
 import time
 import logging
@@ -2357,7 +2358,7 @@ def _checkpoint_shape_error_code(exc: Exception) -> str:
         return "context_policy_changed"
     if "automatic compaction is disabled" in detail:
         return "auto_compact_disabled"
-    if "no reduction" in detail:
+    if "no reduction" in detail or "still above trigger" in detail:
         return "context_no_reduction"
     if "input budget" in detail:
         return "context_input_budget_exceeded"
@@ -5790,6 +5791,13 @@ async def stream_agent_loop(
             _compacted_messages, _compact_status = await compact_working_context(
                 messages, int(_working_limit / _context_calibration), _summarize_working_context,
             )
+        if (_compact_status == "compacted"
+                and math.ceil(estimate_tokens(_compacted_messages) * _context_calibration) >= _working_limit):
+            # Legacy/economic paths must obey the same anti-loop invariant as
+            # configured policy: do not publish a checkpoint that immediately
+            # triggers another compaction before the next model request.
+            _compact_status = "uncompactable"
+            _compact_failure_detail = "context_no_reduction"
         if _compact_status == "compacted":
             messages = _compacted_messages
             _context_compactions += 1

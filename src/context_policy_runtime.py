@@ -107,6 +107,11 @@ async def shape_request(messages, tools, record, window, summarize, *, calibrati
             # decision next round and misrepresent the run as healthy.
             raise ValueError('Context compaction made no reduction at the configured trigger')
     after = math.ceil(estimate_tokens(shaped) * calibration)
+    if status == 'compacted' and after >= budget.trigger_messages:
+        # The next round would immediately invoke the same summarizer again.
+        # A nominal checkpoint above the trigger is not a successful compact;
+        # stop with the old durable ledger intact for explicit recovery.
+        raise ValueError('Context compacted but still above trigger')
     if after > budget.hard_messages:
         raise ValueError('Context exceeds the configured input budget')
     return shaped, {'status': status, 'before_tokens': before + budget.schema_tokens,

@@ -316,6 +316,56 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compact.await_count, 1)
         self.assertEqual(summarize.await_count, 0)
 
+    async def test_nominal_compaction_still_above_trigger_stops_instead_of_looping(self):
+        from src.context_policy import ContextPolicy
+        from src.context_policy_runtime import shape_request
+        messages = [{'role': 'user', 'content': 'evidence ' * 21000}]
+        still_full = [{'role': 'user', 'content': 'evidence ' * 20999}]
+        record = {'effective': ContextPolicy().to_dict(), 'revisions': {'owner': 1}}
+        summarize = AsyncMock(return_value='summary')
+        with patch(
+            'src.context_policy_runtime.compact_working_context',
+            new=AsyncMock(return_value=(still_full, 'compacted')),
+        ) as compact:
+            with self.assertRaisesRegex(ValueError, 'still above trigger'):
+                await shape_request(messages, [], record, 65536, summarize)
+        self.assertEqual(compact.await_count, 1)
+        self.assertEqual(summarize.await_count, 0)
+
+    async def test_agent_does_not_dispatch_nominal_compaction_above_trigger(self):
+        self.save({'trigger_percent': 75, 'target_percent': 50})
+        history = [{'role': 'user', 'content': 'evidence ' * 21000}]
+        still_full = [{'role': 'user', 'content': 'evidence ' * 20999}]
+        with patch(
+            'src.context_policy_runtime.compact_working_context',
+            new=AsyncMock(return_value=(still_full, 'compacted')),
+        ) as compact:
+            sent, _, chunks = await self.run_agent(history)
+        self.assertFalse(sent)
+        self.assertEqual(compact.await_count, 1)
+        events = [json.loads(line[6:]) for line in chunks.splitlines() if line.startswith('data: {')]
+        failed = [event for event in events if event.get('type') == 'context_compaction_failed']
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]['detail'], 'context_no_reduction')
+        self.assertNotIn('"type": "compacted"', chunks)
+
+    async def test_legacy_nominal_compaction_above_input_limit_stops_once(self):
+        from src import agent_loop
+        history = [{'role': 'user', 'content': 'evidence ' * 26000}]
+        still_full = [{'role': 'user', 'content': 'evidence ' * 25999}]
+        with patch.object(
+            agent_loop, 'compact_working_context',
+            new=AsyncMock(return_value=(still_full, 'compacted')),
+        ) as compact:
+            sent, _, chunks = await self.run_agent(history)
+        events = [json.loads(line[6:]) for line in chunks.splitlines() if line.startswith('data: {')]
+        failed = [event for event in events if event.get('type') == 'context_compaction_failed']
+        self.assertEqual(compact.await_count, 1)
+        self.assertFalse(sent)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]['detail'], 'context_no_reduction')
+        self.assertNotIn('"type": "compacted"', chunks)
+
     async def test_agent_reports_noop_compaction_without_model_dispatch(self):
         self.save({'trigger_percent': 75, 'target_percent': 50})
         history = [{'role': 'user', 'content': 'evidence ' * 21000}]

@@ -1114,8 +1114,11 @@
     учитывает только распознаваемые checkpoint evidence, не prose/round;
     повтор той же verification с новой revision не засчитывается. Проверен
     реальный `agent_runs._publish` и UI-срез; полный pytest 7,179
-    passed/23 skipped/109 subtests. До выпуска на Jetson и повторной live
-    проверки пункт остаётся открытым.
+    passed/23 skipped/109 subtests. Изолированный Jetson candidate прошёл
+    29 профильных тестов, exact release `d1dfabe` healthy/0 restarts.
+    Двухклиентный rendered browser smoke с synthetic stalled model-like run,
+    reload и одинаковым run/checkpoint прошёл. Настоящий production stall
+    ещё не наблюдался на этой ревизии, поэтому пункт остаётся открытым.
 - [ ] **05. Детектор зацикливания.** Ловить одинаковые action→observation, повторные ошибки, A↔B циклы, монолог, бессмысленное повторное сжатие; сначала диагностический nudge, затем bounded escalation, не бесконечный автоповтор.
   - 2026-09-23: failing-first тест обнаружил, что шесть одинаковых
     Goal-монологов переводили цель в `waiting_user` без `ask_user`/вопроса.
@@ -1126,6 +1129,14 @@
     перезагрузка подтвердили UI; 108 профильных и полный pytest 7,177
     passed/23 skipped/109 subtests. Бессмысленные повторные compaction и
     продлённый боевой Goal ещё требуют отдельной проверки; пункт открыт.
+  - 2026-09-23: failing-first тест доказал, что `status=compacted` принимался
+    даже когда новый ledger остаётся выше trigger и следующий раунд снова
+    запустит summarizer. Saved-policy, legacy и economic пути теперь
+    отклоняют такой nominal checkpoint как `context_no_reduction` без
+    публикации `compacted` и без model dispatch; старый ledger сохранён.
+    31 контекстный тест + 2 subtests и полный pytest 7,182 passed/23
+    skipped/109 subtests. Нужны Jetson candidate и долгий live Goal;
+    пункт остаётся открытым до этих проверок.
 - [ ] **06. Durable recovery matrix.** Автотесты на kill/restart в каждой точке: до tool start, после effect-intent, после tool result, во время compaction, approval, child join и terminal snapshot.
   - 2026-09-22: добавлены реальные subprocess `os._exit(17)` проверки на
     двух границах compaction (`compacted` summary и model-visible
