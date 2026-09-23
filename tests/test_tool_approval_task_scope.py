@@ -312,13 +312,27 @@ def test_deny_resolution_stream_is_control_only():
     from routes.chat_routes import _tool_approval_resolution_stream
 
     async def collect():
-        return [chunk async for chunk in _tool_approval_resolution_stream("deny")]
+        return [chunk async for chunk in _tool_approval_resolution_stream("deny", approval_id="approval-1")]
 
     chunks = asyncio.run(collect())
     assert chunks[-1] == "data: [DONE]\n\n"
     event = json.loads(chunks[0][len("data: "):])
-    assert event == {"type": "tool_approval_resolved", "decision": "deny"}
+    assert event == {"type": "tool_approval_resolved", "decision": "deny", "approval_id": "approval-1"}
     assert "Denied the" not in "".join(chunks)
+
+
+def test_tool_approval_card_has_same_waiting_and_denied_states_live_and_replay():
+    root = Path(__file__).resolve().parents[1]
+    live = (root / "static/js/chat.js").read_text(encoding="utf-8")
+    replay = (root / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    for source, event in ((live, "json"), (replay, "ev")):
+        assert f"{event}.ask_user?.approval_id && !{event}.ask_user?.resolved" in source
+        assert f"{event}.ask_user?.resolved !== 'deny'" in source
+        assert "approval-pending" in source
+        assert "approvalPending ? 'waiting'" in source
+    assert "node.dataset.approvalId !== approvalId" in live
+    assert "node.classList.toggle('error', denied)" in live
+    assert "if (ev.ask_user?.approval_id) node.dataset.approvalId" in replay
 
 
 def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
@@ -339,7 +353,7 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "pending_tool_approval.continuation_query" in route
     assert "persist_user_message=not tool_approval_continuation" in route
     assert "_mark_tool_approval_resolved(" in route
-    assert "_tool_approval_resolution_stream(decision, resumed_goal)" in route
+    assert "_tool_approval_resolution_stream(decision, resumed_goal, tool_approval_id)" in route
     assert "Approved the exact" not in route
     assert "Denied the" not in route
     assert "continuation_context_message: str | None = None" in helpers
@@ -364,8 +378,8 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
 
     version = "20260922approval1"
-    assert "chat.js?v=20260923toolprogress1" in app
-    assert "chat.js?v=20260923toolprogress1" in index
-    assert "chatRenderer.js?v=20260923toolprogress1" in frontend
-    assert "chatRenderer.js?v=20260923toolprogress1" in app
-    assert "chatRenderer.js?v=20260923toolprogress1" in index
+    assert "chat.js?v=20260923approvalcard1" in app
+    assert "chat.js?v=20260923approvalcard1" in index
+    assert "chatRenderer.js?v=20260923approvalcard1" in frontend
+    assert "chatRenderer.js?v=20260923approvalcard1" in app
+    assert "chatRenderer.js?v=20260923approvalcard1" in index

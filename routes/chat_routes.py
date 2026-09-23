@@ -180,8 +180,9 @@ def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
 
 async def _tool_approval_resolution_stream(
     decision: str, goal: Optional[Dict[str, Any]] = None,
+    approval_id: Any = None,
 ) -> AsyncGenerator[str, None]:
-    yield f"data: {json.dumps({'type': 'tool_approval_resolved', 'decision': decision})}\n\n"
+    yield f"data: {json.dumps({'type': 'tool_approval_resolved', 'decision': decision, 'approval_id': str(approval_id or '')})}\n\n"
     if goal:
         yield f"data: {json.dumps({'type': 'goal_update', 'data': goal})}\n\n"
     yield "data: [DONE]\n\n"
@@ -1318,7 +1319,7 @@ def setup_chat_routes(
                             expected_attempt=resumed_goal.get("attempt"),
                         )
                     return StreamingResponse(
-                        _tool_approval_resolution_stream(decision, resumed_goal),
+                        _tool_approval_resolution_stream(decision, resumed_goal, tool_approval_id),
                         media_type="text/event-stream",
                     )
                 # Approval is a control-plane continuation, not a new user turn.

@@ -2939,8 +2939,9 @@ export function addMessage(role, content, modelName, metadata) {
           }
           for (const ev of roundTools) {
             if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
-            const ok = ev.ask_user?.resolved === 'deny'
-              ? false : (ev.exit_code === 0 || ev.exit_code == null);
+            const approvalPending = Boolean(ev.ask_user?.approval_id && !ev.ask_user?.resolved);
+            const ok = !approvalPending && ev.ask_user?.resolved !== 'deny'
+              && (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
               outHtml = _historyToolOutputMarkup(ev);
@@ -2972,10 +2973,11 @@ export function addMessage(role, content, modelName, metadata) {
               evDiffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
             }
             const node = document.createElement('div');
-            node.className = 'agent-thread-node' + (ok ? '' : ' error');
+            node.className = 'agent-thread-node' + (approvalPending ? ' approval-pending' : (ok ? '' : ' error'));
+            if (ev.ask_user?.approval_id) node.dataset.approvalId = String(ev.ask_user.approval_id);
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
-            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${approvalPending ? '\u2026' : (ok ? '\u2713' : '\u2717')}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${approvalPending ? 'waiting' : (ok ? 'done' : 'failed')}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
             localizeToolNode(node);
             _bindHistoryToolOutput(node);
             // Click handling is delegated globally \u2014 see chat.js init.

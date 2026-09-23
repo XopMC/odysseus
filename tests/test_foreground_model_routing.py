@@ -371,7 +371,7 @@ async def test_chat_stream_denial_returns_control_resolution(monkeypatch):
     chunks = [chunk async for chunk in response.body_iterator]
 
     event = json.loads(chunks[0][len("data: "):])
-    assert event == {"type": "tool_approval_resolved", "decision": "deny"}
+    assert event == {"type": "tool_approval_resolved", "decision": "deny", "approval_id": pending.approval_id}
     assert chunks[-1] == "data: [DONE]\n\n"
     assert "agent" not in captured
     assert "exact_approval" not in captured

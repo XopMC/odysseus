@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js?v=20260922approval1';
-import chatRenderer from './chatRenderer.js?v=20260923toolprogress1';
+import chatRenderer from './chatRenderer.js?v=20260923approvalcard1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js?v=20260923toolprogress1';
@@ -3297,6 +3297,20 @@ import { bindUiText, t } from './i18n.js';
                 continue;
               }
               if (json.type === 'tool_approval_resolved') {
+                const approvalId = String(json.approval_id || '');
+                if (approvalId) {
+                  document.querySelectorAll('.agent-thread-node[data-approval-id]').forEach(node => {
+                    if (node.dataset.approvalId !== approvalId) return;
+                    const denied = json.decision === 'deny';
+                    node.classList.toggle('error', denied);
+                    node.classList.remove('approval-pending');
+                    const icon = node.querySelector('.agent-thread-icon');
+                    const status = node.querySelector('.agent-thread-status');
+                    if (icon) icon.textContent = denied ? '\u2717' : '\u2713';
+                    if (status) status.textContent = denied ? 'failed' : 'done';
+                    chatRenderer.localizeToolNode?.(node);
+                  });
+                }
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 if (spinner && spinner.element) spinner.destroy();
@@ -4072,7 +4086,9 @@ import { bindUiText, t } from './i18n.js';
                     clearInterval(currentToolBubble._elapsedTicker);
                     currentToolBubble._elapsedTicker = null;
                   }
-                  const ok = (json.exit_code === 0 || json.exit_code == null);
+                  const approvalPending = Boolean(json.ask_user?.approval_id && !json.ask_user?.resolved);
+                  const ok = !approvalPending && json.ask_user?.resolved !== 'deny'
+                    && (json.exit_code === 0 || json.exit_code == null);
                   const cmd = json.command || '';
                   let outHtml = '';
                   if (json.output && json.output.trim()) {
@@ -4111,8 +4127,9 @@ import { bindUiText, t } from './i18n.js';
                   // click again. Click handling is delegated (see init at
                   // bottom of file) so no per-node listener needed.
                   const _wasOpen = currentToolBubble.classList.contains('open');
-                  currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '');
-                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
+                  currentToolBubble.className = 'agent-thread-node' + (approvalPending ? ' approval-pending' : (ok ? '' : ' error')) + (_wasOpen ? ' open' : '');
+                  if (json.ask_user?.approval_id) currentToolBubble.dataset.approvalId = String(json.ask_user.approval_id);
+                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${approvalPending ? '\u2026' : (ok ? '\u2713' : '\u2717')}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${approvalPending ? 'waiting' : (ok ? 'done' : 'failed')}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   chatRenderer.localizeToolNode?.(currentToolBubble);
                   _bindLazyToolOutput(currentToolBubble, json, streamSessionId);
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label

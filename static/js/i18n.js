@@ -743,7 +743,7 @@ const RU = Object.freeze({
   'Other… (type your own answer)':'Другое… (введите свой ответ)', 'Allow once':'Разрешить один раз', 'Deny':'Отклонить',
   'Allow for this task':'Разрешить для этой задачи', 'Approve once':'Одобрить один раз',
   'Allow for this chat session':'Разрешить для этой сессии чата',
-  'done':'готово', 'failed':'ошибка', 'running':'выполняется', 'running…':'выполняется…', 'running...':'выполняется…',
+  'done':'готово', 'failed':'ошибка', 'waiting':'ожидает', 'running':'выполняется', 'running…':'выполняется…', 'running...':'выполняется…',
   'Output':'Вывод', 'Screenshot':'Снимок экрана', 'Continue':'Продолжить', 'Continue ▸':'Продолжить ▸',
   'Continue the task':'Продолжить задачу', 'Continue — pick up where it left off':'Продолжить с места остановки',
   'Start now':'Запустить сейчас', 'Reconnect tmux':'Переподключиться к tmux', 'Restart':'Перезапустить',
