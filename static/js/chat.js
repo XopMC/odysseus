@@ -101,6 +101,14 @@ import { bindUiText, t } from './i18n.js';
     return n != null && Number.isFinite(Number(n)) ? Number(n).toLocaleString() : '?';
   }
 
+  export function contextWindowChange(data) {
+    const previous = Number(data?.backend_measurement?.context_length);
+    const current = Number(data?.context_length);
+    return !data?.active_run && Number.isSafeInteger(previous) && previous > 0
+      && Number.isSafeInteger(current) && current > 0 && previous !== current
+      ? { previous, current } : null;
+  }
+
   function _contextSourceLabel(data) {
     const scope = data.context_status === 'active_request' ? 'Live request'
       : data.context_status === 'last_request' ? 'Last request'
@@ -186,6 +194,7 @@ import { bindUiText, t } from './i18n.js';
     if (wasOpen) return;
 
     const d = _contextHeaderData;
+    const changedWindow = contextWindowChange(d);
     const pct = Number(d.context_percent || 0);
     const colorClass = _contextColorClass(pct);
     const modelShort = String(d.model || 'Unknown').split('/').pop();
@@ -214,10 +223,14 @@ import { bindUiText, t } from './i18n.js';
           : d.context_status === 'working_checkpoint' ? 'Working checkpoint' : 'Stored chat'],
       ['Count source', d.source === 'backend' ? 'Backend tokens' : 'Estimate'],
       ['Window model', modelShort],
+      ['Window basis', 'Current serving window'],
       ['Messages', `${Number(d.messages || 0).toLocaleString()}`],
       ['Auto compact', d.auto_compact_enabled === false ? 'Disabled'
         : `${Number(d.configured_auto_compact_threshold || d.auto_compact_threshold || 75)}%`],
     ];
+    if (changedWindow) {
+      rows.push(['Last request window', _fmtContextNumber(changedWindow.previous)]);
+    }
     if (d.auto_compact_enabled !== false
         && d.effective_auto_compact_threshold != null
         && Number(d.effective_auto_compact_threshold) !== Number(d.configured_auto_compact_threshold)) {
@@ -244,7 +257,7 @@ import { bindUiText, t } from './i18n.js';
       const b = document.createElement('span');
       b.textContent = value;
       b.title = value;
-      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request'].includes(label)) {
+      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request', 'Window basis'].includes(label)) {
         bindUiText(b, value);
         bindUiText(b, value, 'title');
       }

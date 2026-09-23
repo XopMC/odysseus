@@ -268,6 +268,8 @@ const RU = Object.freeze({
   'Scope':'Область', 'Live request':'Текущий запрос', 'Last request':'Последний запрос',
   'Stored chat':'Сохранённый чат', 'Count source':'Источник подсчёта',
   'Backend tokens':'Токены сервера модели', 'Estimate':'Оценка', 'Window model':'Модель окна контекста',
+  'Window basis':'База окна', 'Current serving window':'Текущее окно загруженной модели',
+  'Last request window':'Окно последнего запроса',
   'Messages':'Сообщения', 'Auto compact':'Автосжатие', 'Stored chat (est.)':'Сохранённый чат (оценка)',
   'Manual compact':'Ручное сжатие', 'Run active':'Задача выполняется',
   'Run status':'Статус запуска', 'Active':'Активен',

@@ -48,6 +48,14 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
       }, {context}));
       await mod.evaluate();
       const apply = mod.namespace.applyStreamContextUsage;
+      const windowChange = mod.namespace.contextWindowChange;
+      assert.equal(JSON.stringify(windowChange({context_length:131840,active_run:false,
+        backend_measurement:{context_length:128256}})),JSON.stringify({previous:128256,current:131840}));
+      assert.equal(windowChange({context_length:131840,active_run:true,
+        backend_measurement:{context_length:128256}}),null);
+      assert.equal(windowChange({context_length:131840,active_run:false,
+        backend_measurement:{context_length:131840}}),null);
+      assert.equal(windowChange({context_length:131840,active_run:false}),null);
       const snapshot = {used_tokens: 82000, prompt_tokens: 81000, context_length: 262144,
         context_percent: 1.2, source: 'backend', model: 'mac-qwen', round: 12};
       const pending = mod.namespace.refreshChatContextHeader('initial');

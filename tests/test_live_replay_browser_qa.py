@@ -93,6 +93,11 @@ def test_live_replay_keeps_browser_dom_bounded_and_pages_older_activity():
                         pytest.fail(f"initial replay unavailable: {exc}; page={state}; "
                                     f"run_status={run.get('status')}, last_seq={run.get('last_seq')}; "
                                     f"errors={errors}; server_log={log_path.read_text()[-3000:]}")
+                    page.locator("#chat-context-pill").click()
+                    assert page.locator(".chat-context-popup").get_by_text(
+                        "Current serving window"
+                    ).is_visible()
+                    page.locator("#chat-context-pill").click()
                     if event_count >= 10000:
                         page.wait_for_function("""() => Array.from(document.querySelectorAll(
                             '#chat-history > .streaming[data-replay-seq]')).some(
