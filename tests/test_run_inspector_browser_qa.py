@@ -120,6 +120,11 @@ def test_inspector_exact_events_two_clients_and_reload():
                         assert page.locator("#run-inspector-artifact-body").inner_text() == "[tool result fixture]"
                         page.locator("#run-inspector-close").click()
                         page.locator("#goal-mode-status").wait_for(state="visible", timeout=15000)
+                        assert "Review required" in page.locator("#goal-work-state").inner_text()
+                        assert page.locator("#goal-work-quick-resume").is_visible()
+                        page.locator("#wait-toggle").click()
+                        assert page.locator("#wait-phase").inner_text() == "Review required"
+                        assert "Goal stalled" in page.locator("#wait-recovery").inner_text()
                         page.locator("#goal-mode-status .chat-work-card-toggle").click()
                         page.locator("#goal-run-inspector").click()
                         page.locator("#run-inspector-runs button[data-run-id]").first.wait_for(state="visible", timeout=15000)
@@ -146,6 +151,7 @@ def test_inspector_exact_events_two_clients_and_reload():
                         identities.append(run_id)
                         page.reload(wait_until="domcontentloaded")
                         page.locator("#wait-mode-status").wait_for(state="visible", timeout=15000)
+                        assert "Review required" in page.locator("#goal-work-state").inner_text()
                         page.locator("#wait-toggle").click()
                         page.locator("#wait-run-inspector").click()
                         page.locator("#run-inspector-runs button[data-run-id]").first.wait_for(state="visible", timeout=15000)

@@ -73,7 +73,7 @@ const RU = Object.freeze({
   'Action: inspect_effect':'Проверить неопределённое действие',
   'Question card unavailable; reload chat.':'Карточка вопроса недоступна; обновите чат.',
   'Latest event unavailable; reload chat.':'Последнее событие недоступно; обновите чат.',
-  'attempt':'попытка', 'starting':'запускается', 'active':'активна', 'paused':'на паузе', 'waiting_user':'ожидает пользователя', 'completed':'завершена', 'cancelled':'отменена',
+  'attempt':'попытка', 'starting':'запускается', 'active':'активна', 'paused':'на паузе', 'waiting_user':'ожидает пользователя', 'Review required':'Нужна проверка', 'completed':'завершена', 'cancelled':'отменена',
   'draft':'черновик', 'approved':'утверждён', 'executing':'выполняется', 'done':'готов', 'Edit plan':'Изменить план',
   'Execute the approved plan and update each step after verification.':'Выполни утверждённый план и обновляй каждый шаг после проверки.',
   'Projects':'Проекты', 'Create project':'Создать проект', 'Project name':'Название проекта',

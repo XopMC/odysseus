@@ -1109,6 +1109,15 @@
     остаётся открытым.
 - [ ] **04. Watchdog полезного прогресса.** Отдельно отслеживать heartbeat и реальные изменения: step, artifact, тест, diff, evidence. Оживший SSE не должен считаться прогрессом задачи.
 - [ ] **05. Детектор зацикливания.** Ловить одинаковые action→observation, повторные ошибки, A↔B циклы, монолог, бессмысленное повторное сжатие; сначала диагностический nudge, затем bounded escalation, не бесконечный автоповтор.
+  - 2026-09-23: failing-first тест обнаружил, что шесть одинаковых
+    Goal-монологов переводили цель в `waiting_user` без `ask_user`/вопроса.
+    Введён отдельный durable статус `review_required` для bounded escalation:
+    он освобождает lease, не маскируется под пользовательскую Pause или вопрос,
+    переживает reload, показывает диагностическую причину и допускает только
+    явное Resume. Два изолированных browser-клиента (desktop/mobile) и
+    перезагрузка подтвердили UI; 108 профильных и полный pytest 7,177
+    passed/23 skipped/109 subtests. Бессмысленные повторные compaction и
+    продлённый боевой Goal ещё требуют отдельной проверки; пункт открыт.
 - [ ] **06. Durable recovery matrix.** Автотесты на kill/restart в каждой точке: до tool start, после effect-intent, после tool result, во время compaction, approval, child join и terminal snapshot.
   - 2026-09-22: добавлены реальные subprocess `os._exit(17)` проверки на
     двух границах compaction (`compacted` summary и model-visible

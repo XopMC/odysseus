@@ -136,17 +136,17 @@ function renderGoal() {
     preview.textContent = goal.objective || '';
     preview.title = goal.objective || '';
   }
-  el('goal-work-state').textContent = `${t(goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
+  el('goal-work-state').textContent = `${t(goal.status === 'review_required' ? 'Review required' : goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
   el('goal-work-objective').value = goal.objective || '';
   el('goal-work-progress').textContent = goal.progress || '';
   const effectFence = goal.status === 'waiting_user'
     && goal.checkpoint?._wait_reason === 'unknown_side_effect'
     && (!effectInboxLoaded || effectInbox.length > 0);
   el('goal-work-pause').hidden = goal.status !== 'active';
-  el('goal-work-resume').hidden = effectFence || !['paused', 'waiting_user'].includes(goal.status);
+  el('goal-work-resume').hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
   el('goal-work-cancel').hidden = !live;
   el('goal-work-quick-pause').hidden = goal.status !== 'active';
-  el('goal-work-quick-resume').hidden = effectFence || !['paused', 'waiting_user'].includes(goal.status);
+  el('goal-work-quick-resume').hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
   el('goal-work-quick-cancel').hidden = !live;
   el('goal-mode-status-toggle').hidden = true;
   if (goal.status === 'completed') window.__odysseusSetGoalMode?.(false);
@@ -198,7 +198,7 @@ function renderWait() {
     return;
   }
   const put = (id, value) => { const target = el(id); if (target) target.textContent = value == null || value === '' ? '—' : String(value); };
-  put('wait-phase', t(state.phase || 'unavailable'));
+  put('wait-phase', t(state.phase === 'review' ? 'Review required' : state.phase || 'unavailable'));
   put('wait-duration', `${Math.max(0, Math.round(Number(state.phase_seconds) || 0))} ${t('seconds')}`);
   put('wait-run-id', state.run_id);
   put('wait-child-id', state.current_child?.child_id);
@@ -511,7 +511,7 @@ async function runWaitAction() {
   const action = waitSnapshot?.recovery_action;
   if (!sessionId || !action) return;
   if (action === 'resume_goal') {
-    if (['paused', 'waiting_user'].includes(snapshot.goal?.status)) await mutate('goal', 'resume');
+    if (['paused', 'waiting_user', 'review_required'].includes(snapshot.goal?.status)) await mutate('goal', 'resume');
     return;
   }
   if (action === 'reconnect') {

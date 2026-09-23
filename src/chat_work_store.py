@@ -23,7 +23,7 @@ from src.run_wait_state import CONTEXT_FAILURE_CODES
 
 PLAN_STATES = {"pending", "in_progress", "done", "blocked"}
 PLAN_STATUS = {"draft", "approved", "executing", "done", "cancelled"}
-GOAL_STATUS = {"active", "paused", "waiting_user", "completed", "cancelled"}
+GOAL_STATUS = {"active", "paused", "waiting_user", "review_required", "completed", "cancelled"}
 _SINGLE_USER_OWNER_KEY = "__odysseus_single_user__"
 
 
@@ -157,7 +157,10 @@ class ChatWorkStore:
                 "revision": row.revision,
                 "wait_reason": (
                     dict(row.checkpoint or {}).get("_wait_reason")
-                    if row.status == "waiting_user" else None
+                    if row.status == "waiting_user" or (
+                        row.status == "review_required"
+                        and dict(row.checkpoint or {}).get("_wait_reason") == "repeated_premature_stop"
+                    ) else None
                 ),
                 "failure_code": (
                     dict(row.checkpoint or {}).get("failure_code")
@@ -473,7 +476,7 @@ class ChatWorkStore:
             row = db.query(ChatGoal).filter_by(
                 owner=_storage_owner(owner), session_id=session_id,
             ).first()
-            if row is None or row.status not in {"active", "paused", "waiting_user"}:
+            if row is None or row.status not in {"active", "paused", "waiting_user", "review_required"}:
                 raise WorkConflict("Goal is not available for background context")
             guidance = dict(row.checkpoint or {}).get("guidance") or []
             guidance = list(guidance) if isinstance(guidance, list) else []
@@ -508,14 +511,17 @@ class ChatWorkStore:
             db.flush()
             return {"goal": _public_goal(row), "guidance": item}
 
-    def update_goal(self, owner, session_id, progress, checkpoint=None, *, waiting_user=False):
+    def update_goal(self, owner, session_id, progress, checkpoint=None, *,
+                    waiting_user=False, review_required=False):
         progress = _clean_text(progress, "goal progress", 12000)
         if checkpoint is not None and not isinstance(checkpoint, dict):
             raise ValueError("Goal checkpoint must be an object")
+        if waiting_user and review_required:
+            raise ValueError("Goal cannot wait for an answer and require review simultaneously")
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
-            if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:
+            if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user", "review_required"}:
                 raise WorkNotFound("Active goal not found")
             row.progress = progress
             if checkpoint is not None:
@@ -523,7 +529,7 @@ class ChatWorkStore:
                 # the durable model ledger, prior tool results, or approval
                 # provenance when a later event only carries one field.
                 row.checkpoint = {**dict(row.checkpoint or {}), **checkpoint}
-            if waiting_user:
+            if waiting_user or review_required:
                 reason = (checkpoint or {}).get("reason")
                 row.checkpoint = {
                     **dict(row.checkpoint or {}),
@@ -539,7 +545,10 @@ class ChatWorkStore:
                     key: value for key, value in dict(row.checkpoint or {}).items()
                     if key != "_wait_reason"
                 }
-            row.status = "waiting_user" if waiting_user else "active"
+            row.status = "review_required" if review_required else "waiting_user" if waiting_user else "active"
+            if review_required:
+                row.lease_token = None
+                row.lease_expires_at = None
             if not waiting_user:
                 row.failure_count = 0
                 row.last_error = None
@@ -561,7 +570,7 @@ class ChatWorkStore:
             reserve_sqlite_writer(db)
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
-            if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user"}:
+            if row is None or row.status in {"completed", "cancelled", "paused", "waiting_user", "review_required"}:
                 raise WorkNotFound("Active goal not found")
             if expected_goal_id is not None and (
                 row.id != expected_goal_id or row.attempt != expected_attempt

@@ -84,7 +84,8 @@ async def _qa_lifespan(instance):
             with SessionLocal.begin() as db:
                 db.add(ChatGoal(id="fixture-goal", session_id=SESSION_ID,
                                 owner="__odysseus_single_user__", objective="SAFE fixture goal",
-                                status="paused"))
+                                status="review_required",
+                                checkpoint={"_wait_reason": "repeated_premature_stop"}))
                 db.add(ChatPlan(id="fixture-plan", session_id=SESSION_ID,
                                 owner="__odysseus_single_user__", title="SAFE fixture plan",
                                 status="draft", steps=[{"id": "fixture-step", "text": "SAFE step",

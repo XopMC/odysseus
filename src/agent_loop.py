@@ -7003,7 +7003,7 @@ async def stream_agent_loop(
                             owner, session_id,
                             "No new safe progress after repeated continuation attempts.",
                             {"round": round_num, "reason": "repeated_premature_stop"},
-                            waiting_user=True,
+                            review_required=True,
                         )
                         yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                         break

@@ -79,6 +79,33 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
         store.get("bob", owned_chat)
 
 
+def test_repeated_monologue_requires_review_without_fake_question_or_user_pause(owned_chat):
+    store = ChatWorkStore()
+    goal = store.ensure_goal("alice", owned_chat, "Verify arithmetic")
+    assert store.acquire_goal_lease("alice", owned_chat)
+    review = store.update_goal(
+        "alice", owned_chat, "No new progress after repeated responses.",
+        {"reason": "repeated_premature_stop", "round": 6}, review_required=True,
+    )
+    assert review["status"] == "review_required"
+    assert review["checkpoint"]["_wait_reason"] == "repeated_premature_stop"
+    metadata = store.wait_metadata("alice", owned_chat)
+    assert metadata["status"] == "review_required"
+    assert metadata["wait_reason"] == "repeated_premature_stop"
+    assert metadata["lease_held"] is False
+    from src.run_wait_state import compose_wait_panel
+    panel = compose_wait_panel(
+        run={"run_id": "finished-run", "status": "done", "started_at": 100},
+        goal=metadata, now=200,
+    )
+    assert panel["phase"] == "review"
+    assert panel["recovery_action"] == "resume_goal"
+    assert panel["wait_reason"] == "repeated_premature_stop"
+    resumed = store.goal_action("alice", owned_chat, "resume", review["revision"])
+    assert resumed["status"] == "active"
+    assert "_wait_reason" not in resumed["checkpoint"]
+
+
 def test_legacy_plan_update_marks_terminal_when_all_required_steps_done(owned_chat):
     work = ChatWorkStore()
     plan = work.save_plan("alice", owned_chat, "Arithmetic", "- [ ] Direct\n- [ ] Independent")

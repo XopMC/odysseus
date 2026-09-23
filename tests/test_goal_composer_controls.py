@@ -134,7 +134,7 @@ def test_waiting_goal_reply_does_not_preview_a_new_objective():
         assert.equal(allowed(null),true);
         assert.equal(allowed({status:'completed'}),true);
         assert.equal(allowed({status:'cancelled'}),true);
-        for(const status of ['starting','active','waiting_user','paused'])
+        for(const status of ['starting','active','waiting_user','paused','review_required'])
           assert.equal(allowed({status}),false,status);
       })().catch(error=>{console.error(error);process.exitCode=1});
     """

@@ -360,8 +360,8 @@ def test_goal_repeated_monologue_emits_explicit_stall_not_silent_question(monkey
     goal = {"id": "goal-1", "status": "active", "revision": 1}
     monkeypatch.setattr(store, "get", lambda *_: {"goal": goal})
 
-    def update_goal(_owner, _session, _progress, checkpoint=None, *, waiting_user=False):
-        goal["status"] = "waiting_user" if waiting_user else "active"
+    def update_goal(_owner, _session, _progress, checkpoint=None, *, waiting_user=False, review_required=False):
+        goal["status"] = "review_required" if review_required else "waiting_user" if waiting_user else "active"
         goal["revision"] += 1
         return dict(goal)
 
@@ -379,7 +379,7 @@ def test_goal_repeated_monologue_emits_explicit_stall_not_silent_question(monkey
     )))
     assert any(e.get("type") == "loop_breaker_triggered"
                and e.get("reason") == "repeated_premature_stop" for e in events)
-    assert goal["status"] == "waiting_user"
+    assert goal["status"] == "review_required"
     assert not any(e.get("type") == "ask_user" for e in events)
 
 

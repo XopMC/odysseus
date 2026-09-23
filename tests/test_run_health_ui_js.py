@@ -77,8 +77,8 @@ def test_goal_health_is_owner_snapshot_driven_and_hidden_without_active_goal():
     assert "goal-work-health-detail" in html
     assert "./runHealth.js?v=20260922batch1" in work
     assert "/static/js/runHealth.js?v=20260922batch1" in sw
-    assert "./js/chat-work.js?v=20260923runinspector1" in app
-    assert "/static/js/chat-work.js?v=20260923runinspector1" in sw
+    assert "./js/chat-work.js?v=20260923goalreview1" in app
+    assert "/static/js/chat-work.js?v=20260923goalreview1" in sw
 
 
 def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
@@ -163,10 +163,12 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       assert.equal(ids['wait-action'].hidden,false);
       await api.runWaitAction();
       assert.match(ids['wait-recovery'].textContent,/Question card unavailable/);
-      goal={...goal,status:'waiting_user'};await api.refresh('chat-1');
-      wait={...wait,phase:'user',goal_status:'waiting_user',wait_reason:'repeated_premature_stop',recovery_action:'resume_goal'};
+      goal={...goal,status:'review_required'};await api.refresh('chat-1');
+      wait={...wait,phase:'review',goal_status:'review_required',wait_reason:'repeated_premature_stop',recovery_action:'resume_goal'};
       await api.refreshWait('chat-1');
       assert.match(ids['wait-recovery'].textContent,/Goal stalled/);
+      assert.equal(ids['wait-phase'].textContent,'Review required');
+      assert.equal(ids['goal-work-quick-resume'].hidden,false);
       await api.runWaitAction();
       assert.equal(goalResumeCalls,1);
       assert.equal(goal.status,'active');

@@ -144,7 +144,9 @@ def compose_wait_panel(
         "repeated_premature_stop", "ask_user", "other", "provider_failure", "context_compaction", "unknown_side_effect", "dispatch_failure", "resource_budget",
     } else None
     run_status = run.get("status")
-    if goal_status == "waiting_user":
+    if goal_status == "review_required":
+        phase = "review"
+    elif goal_status == "waiting_user":
         phase = "approval" if state.get("phase") == "approval" else "user"
     elif goal_status == "paused":
         phase = "paused"
@@ -175,7 +177,7 @@ def compose_wait_panel(
 
     phase_since = (
         goal.get("status_since")
-        if phase == "paused" or (phase == "user" and state.get("phase") not in {"user", "approval"})
+        if phase in {"paused", "review"} or (phase == "user" and state.get("phase") not in {"user", "approval"})
         else state.get("phase_since")
     )
     if not isinstance(phase_since, (int, float)) or isinstance(phase_since, bool):
@@ -191,7 +193,8 @@ def compose_wait_panel(
         "ledger_hash": digest if isinstance(digest, str) and len(digest) == 64 else None,
     }
     recovery = (
-        "resume_goal" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect" and unknown_effects == 0
+        "resume_goal" if goal_status == "review_required"
+        else "resume_goal" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect" and unknown_effects == 0
         else "inspect_effect" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect"
         else "inspect_context" if goal_status == "waiting_user" and wait_reason == "context_compaction"
         else "resume_goal" if goal_status == "waiting_user" and wait_reason in {"repeated_premature_stop", "provider_failure", "dispatch_failure", "resource_budget"}

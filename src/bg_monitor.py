@@ -163,7 +163,7 @@ async def _run_followup(rec: dict) -> bool:
         from src.chat_work_store import store as chat_work_store
         work = chat_work_store.get(getattr(sess, "owner", None), sess.id)
         goal = work.get("goal") or {}
-        if goal.get("status") in {"active", "paused", "waiting_user"}:
+        if goal.get("status") in {"active", "paused", "waiting_user", "review_required"}:
             chat_work_store.add_goal_background_context(
                 getattr(sess, "owner", None), sess.id,
                 _background_result_message(rec), rec.get("id"),
