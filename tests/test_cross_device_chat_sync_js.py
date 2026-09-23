@@ -73,7 +73,7 @@ def test_metadata_only_approval_revision_reconciles_without_count_change():
     assert "node.dataset.approvalId !== key" in renderer
 
 
-@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k"])
+@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k", "replay_lazy_older"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):
         pytest.skip("node is not installed")
@@ -83,12 +83,15 @@ def test_cross_device_subscription_lifecycle(scenario):
       const scenario=process.argv[2],noop=()=>{},deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
       const flush=async()=>{for(let i=0;i<30;i++)await Promise.resolve();};
       class Element {
-        constructor(){this.children=[];this.dataset={};this.style={setProperty:noop};this.classList={add:noop,remove:noop,toggle:noop,contains:()=>false};this.parentNode=null;this.value='unsent draft';this.fields={};}
+        constructor(){this.children=[];this.dataset={};this.style={setProperty:noop};this.classList={add:noop,remove:noop,toggle:noop,contains:()=>false};this.parentNode=null;this.value='unsent draft';this.fields={};this.listeners={};}
         set innerHTML(value){this.html=value;this.children=[];} get innerHTML(){return this.html||'';}
+        get lastElementChild(){return this.children.at(-1)||null;} get firstElementChild(){return this.children[0]||null;}
+        get nextElementSibling(){if(!this.parentNode)return null;return this.parentNode.children[this.parentNode.children.indexOf(this)+1]||null;}
         appendChild(child){child.parentNode=this;this.children.push(child);return child;}
+        insertBefore(child,anchor){if(child.parentNode)child.remove();const index=this.children.indexOf(anchor);child.parentNode=this;this.children.splice(index<0?this.children.length:index,0,child);return child;}
         remove(){if(this.parentNode)this.parentNode.children=this.parentNode.children.filter(x=>x!==this);this.parentNode=null;}
         querySelector(key){return this.fields[key]||(this.fields[key]=new Element());}
-        querySelectorAll(){return [];} addEventListener(){} removeEventListener(){} setAttribute(){} focus(){}
+        querySelectorAll(){return [];} addEventListener(key,fn){this.listeners[key]=fn;} removeEventListener(){} setAttribute(){} focus(){}
       }
       const box=new Element(),composer=new Element(),body=new Element(),listeners={},timers=[];
       const document={body,visibilityState:'visible',hidden:false,readyState:'loading',
@@ -103,7 +106,7 @@ def test_cross_device_subscription_lifecycle(scenario):
       const proxy=extras=>new Proxy(extras||{},{get:(o,k)=>k in o?o[k]:noop});
       const ui=proxy({el:document.getElementById,esc:x=>x});
       const modules={'sessions.js':sm,'storage.js':proxy({get:(key,fallback)=>fallback,getJSON:(key,fallback)=>fallback}),
-        'ui.js':ui,'chatRenderer.js':proxy({stripToolBlocks:text=>text,addMessage:(...args)=>appended.push(args)}),
+        'ui.js':ui,'chatRenderer.js':proxy({stripToolBlocks:text=>text,addMessage:(...args)=>{appended.push(args);if(scenario==='replay_lazy_older'){const node=new Element();node.className='msg msg-ai';box.appendChild(node);return node;}}}),
         'markdown.js':proxy({normalizeThinkingMarkup:x=>x,mdToHtml:x=>x,squashOutsideCode:x=>x}),
         'spinner.js':proxy({create:()=>proxy({createElement:()=>new Element()})})};
       const window={location:{origin:'http://odysseus.test',hash:'',pathname:'/'},sessionModule:sm,innerWidth:1280,
@@ -111,13 +114,34 @@ def test_cross_device_subscription_lifecycle(scenario):
       let remoteRunning=false,attached=0,remoteHistory=[];
       window.chatModule={hasActiveStream:()=>false,resumeStream:async id=>{assert.equal(id,'chat-a');attached++;return true;}};
       const reader={read:()=>pendingRead.promise,cancel:async()=>{cancelled++;pendingRead.resolve({done:true});}};
-      const response={ok:true,headers:{get:()=> 'remote-run'},body:{getReader:()=>reader,cancel:reader.cancel}};
+      const response={ok:true,headers:{get:()=>scenario==='replay_lazy_older'?'a'.repeat(32):'remote-run'},body:{getReader:()=>reader,cancel:reader.cancel}};
+      const fixtureEvents=[];
+      if(scenario==='replay_lazy_older')for(let seq=0;seq<205;seq++){
+        const round=Math.floor(seq/5)+1,tool_call_id=`fixture-tool-${round}`;
+        let data;
+        switch(seq%5){
+          case 0:data={type:'agent_step',round};break;
+          case 1:data={delta:'[thinking fixture]',thinking:true,round};break;
+          case 2:data={type:'tool_start',tool:'fixture_tool',tool_call_id,round};break;
+          case 3:data={type:'tool_output',tool:'fixture_tool',tool_call_id,exit_code:0,round};break;
+          default:data={delta:'[answer fixture]',round};
+        }
+        data._replay={run_id:'a'.repeat(32),seq,round,segment_id:`${'a'.repeat(32)}:${round}`};
+        fixtureEvents.push({seq,data});
+      }
       const context=vm.createContext({console,document,window,navigator:{platform:'Linux'},history:{replaceState:noop},
         Date:class extends Date{static now(){return now;}},
-        localStorage:{getItem:()=>null},sessionStorage:{getItem:()=>null},URL,TextDecoder,AbortController,
+        localStorage:{getItem:()=>null},sessionStorage:{getItem:()=>null},URL,TextDecoder,TextEncoder,AbortController,
         MutationObserver:class{observe(){}},setTimeout:()=>0,clearTimeout:noop,
         setInterval:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearInterval:noop,
         fetch:async(url,options={})=>{requests.push({url:String(url),options});
+          if(scenario==='replay_lazy_older'){
+            const path=String(url);
+            if(path.endsWith('/api/chat/run/chat-a'))return {ok:true,json:async()=>({run_id:'a'.repeat(32),last_seq:204,started_at:1000})};
+            if(path.includes('/events/older?'))return {ok:true,json:async()=>({run_id:'a'.repeat(32),events:fixtureEvents.slice(0,5),previous_cursor:0,has_more_before:false})};
+            if(path.includes('/events?'))return {ok:true,json:async()=>({run_id:'a'.repeat(32),events:fixtureEvents.slice(5),next_cursor:204,has_more:false})};
+            if(path.includes('/api/chat/resume/'))return response;
+          }
           if(scenario.startsWith('idle_')||scenario==='hidden_focus'){
             if(String(url).includes('/message-count')){
               return {ok:true,status:200,json:async()=>({rendered_total:remoteHistory.length,visible_total:remoteHistory.length,total:remoteHistory.length})};
@@ -131,9 +155,12 @@ def test_cross_device_subscription_lifecycle(scenario):
           return pendingHeaders.promise;}});
       const file=scenario.startsWith('idle_')||scenario==='hidden_focus'?'sessions.js':'chat.js';
       const code=fs.readFileSync(process.argv[1]+'/'+file,'utf8'),mod=new vm.SourceTextModule(code,{context});
+      const replayModule=new vm.SourceTextModule(fs.readFileSync(process.argv[1]+'/replayHistory.js','utf8'),{context});
+      await replayModule.link(()=>{throw Error('replayHistory has no imports');});await replayModule.evaluate();
+      modules['replayHistory.js']=replayModule.namespace;
       const names=new Set(['default']);
       for(const match of code.matchAll(/import(?:\s+\w+\s*,)?\s*\{([\s\S]*?)\}\s+from/g))for(const name of match[1].split(',')){const key=name.trim().split(/\s+as\s+/)[0];if(key)names.add(key);}
-          await mod.link(async spec=>new vm.SyntheticModule([...names],function(){const key=spec.split('/').pop().split('?')[0];for(const name of names)this.setExport(name,name==='default'?(modules[key]||proxy()):name==='stripToolBlocks'?(text=>text):name==='createLiveThinkingThrottle'?((commit,{prepare=(value)=>value}={})=>{let latest,dirty=false;return{update(value){latest=value;dirty=true;commit(prepare(value));dirty=false;},flush(){if(!dirty)return false;commit(prepare(latest));dirty=false;return true;},cancel(){dirty=false;}};}):name==='createStreamRenderer'?((el,{render=(value)=>value}={})=>({update(value){el.innerHTML=render(value);},finalize(){}})):noop);},{context}));
+          await mod.link(async spec=>new vm.SyntheticModule([...names],function(){const key=spec.split('/').pop().split('?')[0];for(const name of names)this.setExport(name,name==='default'?(modules[key]||proxy()):key==='replayHistory.js'?(modules[key][name]||noop):name==='stripToolBlocks'?(text=>text):name==='createLiveThinkingThrottle'?((commit,{prepare=(value)=>value}={})=>{let latest,dirty=false;return{update(value){latest=value;dirty=true;commit(prepare(value));dirty=false;},flush(){if(!dirty)return false;commit(prepare(latest));dirty=false;return true;},cancel(){dirty=false;}};}):name==='createStreamRenderer'?((el,{render=(value)=>value}={})=>({update(value){el.innerHTML=render(value);},finalize(){}})):noop);},{context}));
       await mod.evaluate();
       if(scenario.startsWith('idle_')||scenario==='hidden_focus'){
         mod.namespace.initDependencies();
@@ -161,7 +188,7 @@ def test_cross_device_subscription_lifecycle(scenario):
         assert.equal(requests.filter(x=>/\/api\/history\//.test(x.url)&&!x.url.endsWith('limit=1')).length,historyFetches,'unchanged canonical history must not reload');
         assert.equal(composer.value,'unsent draft','sync must preserve unsent input');
       }else{
-        const first=mod.namespace.resumeStream('chat-a');await flush();
+        let firstResult='pending';const first=mod.namespace.resumeStream('chat-a');first.then(value=>{firstResult=String(value);},error=>{firstResult=String(error);});await flush();
         if(scenario==='resume_lock'){
           const second=mod.namespace.resumeStream('chat-a');await flush();
           assert.equal(requests.length,1,'duplicate attach requests must be locked before headers');
@@ -179,6 +206,24 @@ def test_cross_device_subscription_lifecycle(scenario):
           assert(cancelled>0,'watchdog must release reader');
           assert.equal(box.children.length,0,'dead replay placeholder must not duplicate the retry');
           assert.equal(requests.filter(x=>/\/stop\//.test(x.url)).length,0,'stall recovery must not stop remote run');
+        }else if(scenario==='replay_lazy_older'){
+          await flush();await flush();
+          assert.equal(requests.filter(x=>x.url.includes('/events?after_seq=4&limit=200')).length,1,
+            'the second client fetches the current tail, not seq zero');
+          assert.equal(requests.filter(x=>x.url.includes('/events?after_seq=-1')).length,0,
+            'initial attach must not scan the whole 205-event run');
+          assert.equal(requests.filter(x=>x.url.includes('/api/chat/resume/chat-a?after_seq=204')).length,1);
+          const button=box.children.find(node=>node.className==='replay-older-button');
+          assert(button,'older run activity remains explicitly accessible: '+JSON.stringify({nodes:box.children.map(node=>node.className),requests:requests.map(x=>x.url),cancelled,firstResult}));
+          assert.equal(appended.length,0,'older cards are not built until requested');
+          await button.listeners.click();await flush();
+          assert.equal(appended.length,1,'older page uses the canonical card renderer');
+          assert.equal(appended[0][3].round_reasonings[0],'[thinking fixture]');
+          assert.equal(appended[0][3].tool_events[0].tool_call_id,'fixture-tool-1');
+          assert.equal(appended[0][3].replay_preview,true,'old activity is read-only');
+          assert.equal(button.parentNode,null,'older button disappears after the first page reaches seq zero');
+          assert.equal(box.children[0].className,'msg msg-ai','old round is prepended before current activity');
+          selected='chat-b';pendingRead.resolve({done:true});await first;
         }else if(scenario.startsWith('replay_corpus_')){
           const count=scenario==='replay_corpus_1k'?1000:scenario==='replay_corpus_10k'?10000:100000;
           const frames=[];

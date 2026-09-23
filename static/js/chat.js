@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js?v=20260923approvalrev1';
-import chatRenderer from './chatRenderer.js?v=20260923approvalrev1';
+import chatRenderer from './chatRenderer.js?v=20260923replaycursor1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js?v=20260923toolprogress1';
@@ -23,6 +23,7 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { createTimelineReducer } from './timelineReducer.js';
+import { replayEventsToHistoryMessage, replayThinkingStats, splitReplayPageAtRoundBoundary } from './replayHistory.js?v=20260923replaycursor2';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
 import {
   createIncrementalDisplayProjector,
@@ -5399,6 +5400,7 @@ import { bindUiText, t } from './i18n.js';
     let snapshotCursor = -1;
     let snapshotRunId = '';
     let snapshotStartedAt = 0;
+    let olderReplayCursor = null;
     try {
       const snapshotResponse = await fetch(
         `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}`,
@@ -5408,7 +5410,11 @@ import { bindUiText, t } from './i18n.js';
         const snapshot = await snapshotResponse.json();
         snapshotRunId = String(snapshot.run_id || '');
         snapshotStartedAt = Number(snapshot.started_at || 0);
-        let after = -1;
+        const snapshotLastSeq = Number(snapshot.last_seq);
+        const hasSnapshotCursor = Number.isSafeInteger(snapshotLastSeq) && snapshotLastSeq >= 0;
+        const tailStart = hasSnapshotCursor ? Math.max(0, snapshotLastSeq - 199) : 0;
+        let after = tailStart - 1;
+        olderReplayCursor = tailStart > 0 ? tailStart : null;
         while (isCurrentView()) {
           const pageResponse = await fetch(
             `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}/events?after_seq=${after}&limit=200`,
@@ -5419,13 +5425,48 @@ import { bindUiText, t } from './i18n.js';
           if (snapshotRunId && page.run_id && String(page.run_id) !== snapshotRunId) {
             throw new Error('Active run changed during replay snapshot');
           }
-          const events = Array.isArray(page.events) ? page.events : [];
+          const events = (Array.isArray(page.events) ? page.events : [])
+            .filter(item => !hasSnapshotCursor || Number(item.seq) <= snapshotLastSeq);
           snapshotEvents.push(...events);
           const next = Number(page.next_cursor);
           if (!Number.isInteger(next) || next <= after) break;
-          after = next;
-          snapshotCursor = next;
-          if (!page.has_more) break;
+          const acceptedCursor = events.length ? Number(events[events.length - 1].seq) : after;
+          after = acceptedCursor;
+          snapshotCursor = acceptedCursor;
+          if (!page.has_more || (hasSnapshotCursor && next >= snapshotLastSeq)) break;
+        }
+        // Start at a durable round boundary. Otherwise the first visible
+        // thinking/tool card would be a severed tail of the previous round.
+        // A single exceptionally long round keeps the full replay path until
+        // it can be paged without losing its leading deltas.
+        if (olderReplayCursor !== null && snapshotEvents.length) {
+          const firstStep = snapshotEvents.findIndex(item => item?.data?.type === 'agent_step');
+          if (firstStep < 0) {
+            snapshotEvents = [];
+            snapshotCursor = -1;
+            olderReplayCursor = null;
+            let fullAfter = -1;
+            while (isCurrentView()) {
+              const response = await fetch(
+                `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}/events?after_seq=${fullAfter}&limit=200`,
+                { signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store' },
+              );
+              if (!response.ok) throw new Error(`Replay snapshot HTTP ${response.status}`);
+              const page = await response.json();
+              if (snapshotRunId && page.run_id && String(page.run_id) !== snapshotRunId) {
+                throw new Error('Active run changed during replay snapshot');
+              }
+              snapshotEvents.push(...(Array.isArray(page.events) ? page.events : []));
+              const next = Number(page.next_cursor);
+              if (!Number.isInteger(next) || next <= fullAfter) break;
+              fullAfter = next;
+              snapshotCursor = next;
+              if (!page.has_more) break;
+            }
+          } else if (firstStep > 0) {
+            olderReplayCursor = Number(snapshotEvents[firstStep].seq);
+            snapshotEvents = snapshotEvents.slice(firstStep);
+          }
         }
       }
     } catch (error) {
@@ -5435,6 +5476,7 @@ import { bindUiText, t } from './i18n.js';
       snapshotCursor = -1;
       snapshotRunId = '';
       snapshotStartedAt = 0;
+      olderReplayCursor = null;
     }
 
     let res;
@@ -5479,6 +5521,7 @@ import { bindUiText, t } from './i18n.js';
     let nextRoundTimestamp = 0;
     const replayHolders = [];
     const replayNodes = [];
+    let cleanupOlderListener = null;
     // Tool results often arrive tens of thousands of events after reconnect.
     // Scanning every rendered replay card for each result made a 100K-event
     // trajectory quadratic and froze the second client's UI.
@@ -5512,6 +5555,7 @@ import { bindUiText, t } from './i18n.js';
       return holder;
     };
     const removeReplayHolders = () => {
+      if (cleanupOlderListener) { cleanupOlderListener(); cleanupOlderListener = null; }
       for (const node of replayNodes) {
         _cancelIncrementalStreamTree(node);
         node.querySelectorAll?.('.agent-thread-node').forEach(toolNode => {
@@ -5525,6 +5569,117 @@ import { bindUiText, t } from './i18n.js';
     let holder = createReplayHolder();
     let contentDiv = holder.querySelector('.stream-content');
 
+    // A long active run attaches at its newest complete rounds. Older durable
+    // rounds stay accessible through an explicit backward page instead of
+    // forcing hundreds of sequential fetches and thousands of DOM cards
+    // before the second device can show the current model activity.
+    if (olderReplayCursor !== null && snapshotRunId) {
+      const olderButton = document.createElement('button');
+      olderButton.type = 'button';
+      olderButton.className = 'replay-older-button';
+      olderButton.textContent = t('Load earlier run activity');
+      box.insertBefore(olderButton, holder);
+      replayNodes.push(olderButton);
+      let insertAnchor = holder;
+      let pendingPrefix = [];
+      let loadingOlder = false;
+      olderButton.addEventListener('click', async () => {
+        if (loadingOlder || olderReplayCursor === null || !isCurrentView()) return;
+        loadingOlder = true;
+        olderButton.disabled = true;
+        const beforeSeq = olderReplayCursor;
+        try {
+          const response = await fetch(
+            `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}/events/older?before_seq=${beforeSeq}&limit=200`,
+            { signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store' },
+          );
+          if (!response.ok) throw new Error(`Older replay HTTP ${response.status}`);
+          const page = await response.json();
+          if (!isCurrentView() || String(page.run_id || '') !== snapshotRunId) return;
+          const events = Array.isArray(page.events) ? page.events : [];
+          if (events.length && Number(events[events.length - 1].seq) !== beforeSeq - 1) {
+            throw new Error('Older replay cursor gap');
+          }
+          const combined = [...events, ...pendingPrefix];
+          const split = splitReplayPageAtRoundBoundary(combined);
+          const hasEarlier = Boolean(page.has_more_before);
+          const complete = hasEarlier ? split.completeRounds : combined;
+          pendingPrefix = hasEarlier ? split.incompletePrefix : [];
+          const oldTop = box.scrollTop;
+          const oldHeight = box.scrollHeight;
+          if (complete.length) {
+            const shaped = replayEventsToHistoryMessage(complete, {
+              runId: snapshotRunId, model: meta?.model || '',
+            });
+            if (shaped) {
+              const previousLast = box.lastElementChild;
+              chatRenderer.addMessage(shaped.role, shaped.content, meta?.model || '', shaped.metadata);
+              const added = [];
+              for (let node = previousLast?.nextElementSibling; node; node = node.nextElementSibling) {
+                added.push(node);
+              }
+              for (const node of added) box.insertBefore(node, insertAnchor);
+              if (added.length) insertAnchor = added[0];
+              replayNodes.push(...added);
+            }
+          }
+          const next = Number(page.previous_cursor);
+          if (!Number.isSafeInteger(next) || next >= beforeSeq || next < 0) {
+            throw new Error('Invalid older replay cursor');
+          }
+          olderReplayCursor = hasEarlier ? next : null;
+          if (olderReplayCursor === null) olderButton.remove();
+          else olderButton.textContent = t('Load earlier run activity');
+          if (oldTop > 0) box.scrollTop = oldTop + box.scrollHeight - oldHeight;
+        } catch (error) {
+          if (!subscription.abortCtrl.signal.aborted) {
+            olderButton.textContent = t('Older activity unavailable — retry');
+            console.warn('[chat-replay] older page unavailable', error);
+          }
+        } finally {
+          loadingOlder = false;
+          olderButton.disabled = false;
+        }
+      });
+      // Upward scrolling is an explicit request for older activity. Do not
+      // hydrate old pages merely because Safari restored an earlier scroll
+      // position during startup.
+      let requestedOlder = false;
+      let touchY = null;
+      const loadIfNear = () => {
+        if (!requestedOlder || !olderButton.parentNode || loadingOlder) return;
+        const buttonRect = olderButton.getBoundingClientRect?.();
+        const boxRect = box.getBoundingClientRect?.();
+        if (buttonRect && boxRect && buttonRect.bottom >= boxRect.top
+            && buttonRect.top <= boxRect.bottom) {
+          requestedOlder = false;
+          olderButton.click();
+        }
+      };
+      const onOlderWheel = event => {
+        if (event.isTrusted === false || event.deltaY >= 0) return;
+        requestedOlder = true;
+        loadIfNear();
+      };
+      const onTouchStart = event => { touchY = event.touches?.[0]?.clientY ?? null; };
+      const onTouchMove = event => {
+        const nextY = event.touches?.[0]?.clientY;
+        if (event.isTrusted === false || touchY == null || nextY == null || nextY <= touchY) return;
+        requestedOlder = true;
+        loadIfNear();
+      };
+      box.addEventListener('wheel', onOlderWheel, { passive: true });
+      box.addEventListener('scroll', loadIfNear, { passive: true });
+      box.addEventListener('touchstart', onTouchStart, { passive: true });
+      box.addEventListener('touchmove', onTouchMove, { passive: true });
+      cleanupOlderListener = () => {
+        box.removeEventListener('wheel', onOlderWheel);
+        box.removeEventListener('scroll', loadIfNear);
+        box.removeEventListener('touchstart', onTouchStart);
+        box.removeEventListener('touchmove', onTouchMove);
+      };
+    }
+
     const spinner = spinnerModule.create('Generating response...', 'right');
     holder.querySelector('.body').appendChild(spinner.createElement());
     spinner.start();
@@ -5532,6 +5687,17 @@ import { bindUiText, t } from './i18n.js';
 
     const liveReader = res.body.getReader();
     let snapshotIndex = 0;
+    const shouldFollowSnapshot = box.scrollHeight - box.scrollTop - box.clientHeight < 160;
+    let snapshotUserScrolledUp = false;
+    let snapshotTailPlaced = false;
+    const onSnapshotWheel = event => {
+      if (event.isTrusted !== false && event.deltaY < 0) snapshotUserScrolledUp = true;
+    };
+    const onSnapshotTouchMove = event => {
+      if (event.isTrusted !== false) snapshotUserScrolledUp = true;
+    };
+    box.addEventListener?.('wheel', onSnapshotWheel, { passive: true });
+    box.addEventListener?.('touchmove', onSnapshotTouchMove, { passive: true });
     const reader = {
       async read() {
         if (snapshotIndex < snapshotEvents.length) {
@@ -5541,6 +5707,10 @@ import { bindUiText, t } from './i18n.js';
             `id: ${Number(item.seq)}\ndata: ${JSON.stringify(item.data || {})}\n\n`
           ).join('');
           return { done: false, value: new TextEncoder().encode(frames) };
+        }
+        if (!snapshotTailPlaced) {
+          snapshotTailPlaced = true;
+          if (shouldFollowSnapshot && !snapshotUserScrolledUp) box.scrollTop = box.scrollHeight;
         }
         return liveReader.read();
       },
@@ -5581,6 +5751,8 @@ import { bindUiText, t } from './i18n.js';
       try { spinner.destroy(); } catch (_) {}
       if (replayThinkingTimer !== null) clearInterval(replayThinkingTimer);
       replayThinkingTimer = null;
+      box.removeEventListener?.('wheel', onSnapshotWheel);
+      box.removeEventListener?.('touchmove', onSnapshotTouchMove);
     };
 
     const ensureReplayThinkingSection = () => {
@@ -5629,7 +5801,7 @@ import { bindUiText, t } from './i18n.js';
       if (replayThinkingTimer === null) replayThinkingTimer = setInterval(updateStats, 250);
     };
 
-    const finishReplayThinking = () => {
+    const finishReplayThinking = (endedAt = 0) => {
       if (replayThinkingTimer !== null) clearInterval(replayThinkingTimer);
       replayThinkingTimer = null;
       if (replayThinkingThrottle) {
@@ -5640,6 +5812,10 @@ import { bindUiText, t } from './i18n.js';
       }
       const section = holder?.querySelector('.thinking-section');
       if (!section) return;
+      const stats = section.querySelector('.replay-think-stats');
+      if (stats && replayThinkingStartedAt && Number(endedAt) > 0) {
+        stats.textContent = replayThinkingStats(replayThinkingStartedAt, endedAt, replayThinking);
+      }
       const inner = section.querySelector('.thinking-content-inner');
       let thinkingText = replayThinking;
       // A tool boundary and the following agent_step may both finalize the
@@ -5784,7 +5960,7 @@ import { bindUiText, t } from './i18n.js';
             if (json.thinking === true || json.channel === 'thinking' || json.channel === 'thought') {
               if (nextDeltaStartsRound) {
                 _flushIncrementalStreamRender(contentDiv);
-                finishReplayThinking();
+                finishReplayThinking(Number(json._replay?.created_at || 0) * 1000);
                 if (replayThread) replayThread.classList.add('has-bottom');
                 holder = createReplayHolder(holder, nextRoundTimestamp);
                 nextRoundTimestamp = 0;
@@ -5809,9 +5985,12 @@ import { bindUiText, t } from './i18n.js';
             // A tool result closes the preceding model turn. New prose needs
             // a fresh bubble even when an older persisted run omitted the
             // agent_step event between the tool and its next delta.
+            if (replayThinkingTimer !== null) {
+              finishReplayThinking(Number(json._replay?.created_at || 0) * 1000);
+            }
             if (replayTool || nextDeltaStartsRound) {
               _flushIncrementalStreamRender(contentDiv);
-              finishReplayThinking();
+              finishReplayThinking(Number(json._replay?.created_at || 0) * 1000);
               if (replayThread) replayThread.classList.add('has-bottom');
               holder = createReplayHolder(holder, nextRoundTimestamp);
               nextRoundTimestamp = 0;
@@ -5914,7 +6093,7 @@ import { bindUiText, t } from './i18n.js';
             // Avoid an empty leading duplicate, but preserve every real
             // persisted round boundary in a long-running agent timeline.
             _flushIncrementalStreamRender(contentDiv);
-            finishReplayThinking();
+            finishReplayThinking(Number(json._replay?.created_at || 0) * 1000);
             // The detached run annotates each boundary with server time. Keep
             // per-round cards aligned with the actual event rather than the
             // original run-start timestamp (which made every old bubble show
@@ -5932,7 +6111,7 @@ import { bindUiText, t } from './i18n.js';
             rich = true;
             try { spinner.destroy(); } catch (_) {}
             _flushIncrementalStreamRender(contentDiv);
-            finishReplayThinking();
+            finishReplayThinking(Number(json._replay?.created_at || 0) * 1000);
             if (json.type === 'tool_start') replayTool = startReplayTool(json);
             else replayTool = findReplayTool(json) || startReplayTool(json);
             const node = replayTool.node;
@@ -5969,6 +6148,7 @@ import { bindUiText, t } from './i18n.js';
     } catch (e) {
       // Network drop or parse failure: fall through to the canonical reload.
       rich = true;
+      console.warn('[chat-replay] subscriber stopped after render/network error', e);
     }
 
     _flushIncrementalStreamRender(contentDiv);

@@ -311,6 +311,8 @@ const RU = Object.freeze({
   'Model window':'Окно модели', 'Nothing old enough to compact':'Нет достаточно старых сообщений для сжатия',
   'Thinking saved — open to load':'Размышления сохранены — откройте для загрузки',
   'Preserved thinking is unavailable.':'Сохранённые размышления недоступны.',
+  'Load earlier run activity':'Загрузить более ранний ход агента',
+  'Older activity unavailable — retry':'Не удалось загрузить старый ход — повторить',
   'Context:':'Контекст:',
   'Refresh models':'Обновить модели',
   'Subagents':'Сабагенты', 'Subagent models':'Модели сабагентов',

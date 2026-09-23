@@ -20,7 +20,7 @@ def test_history_reasons_fill_partial_round_reasonings_from_timeline():
 
 def test_replay_flush_recovers_thinking_from_shared_timeline_reducer():
     source = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
-    finish = source.split("const finishReplayThinking = () =>", 1)[1].split(
+    finish = source.split("const finishReplayThinking = ", 1)[1].split(
         "const ensureReplayThread", 1
     )[0]
     assert "timelineReducer.thinkingForSegment?.(replayThinkingSegmentId)" in finish

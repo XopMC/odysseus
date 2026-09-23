@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v456-approvalrev1';
+const CACHE_NAME = 'odysseus-v458-replaycursor2';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -39,10 +39,10 @@ const KATEX_FONTS = [
 // exact URL the browser requests, query string included.
 const PRECACHE = [
   '/',
-  '/static/style.css?v=20260922batch1',
+  '/static/style.css?v=20260923replaycursor1',
   '/static/css/team-workspace.css?v=20260921livefix18',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
-  '/static/app.js?v=20260923approvalrev1',
+  '/static/app.js?v=20260923replaycursor2',
   '/static/js/startupShell.js?v=20260922restore1',
   '/static/js/i18n.js',
   '/static/js/storage.js',
@@ -65,10 +65,11 @@ const PRECACHE = [
   '/static/js/tts-ai.js',
   '/static/js/document.js?v=20260815approvalsave1',
   '/static/js/gallery.js?v=20260708match1',
-  '/static/js/chatRenderer.js?v=20260923approvalrev1',
+  '/static/js/chatRenderer.js?v=20260923replaycursor1',
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js?v=20260819approvalcontrol1',
-  '/static/js/chat.js?v=20260923approvalrev1',
+  '/static/js/chat.js?v=20260923replaycursor2',
+  '/static/js/replayHistory.js?v=20260923replaycursor2',
   '/static/js/context-settings-dialog.js?v=20260923context1',
   '/static/js/engineering-workspace.js?v=20260923context1',
   '/static/js/timelineReducer.js',

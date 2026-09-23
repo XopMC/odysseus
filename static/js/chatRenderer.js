@@ -2960,7 +2960,7 @@ export function addMessage(role, content, modelName, metadata) {
             box.appendChild(threadWrap);
           }
           for (const ev of roundTools) {
-            if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
+            if (ev.ask_user && !ev.ask_user.resolved && !metadata?.replay_preview) pendingAskUser = ev.ask_user;
             const approvalPending = Boolean(ev.ask_user?.approval_id && !ev.ask_user?.resolved);
             const ok = !approvalPending && ev.ask_user?.resolved !== 'deny'
               && (ev.exit_code === 0 || ev.exit_code == null);
@@ -3047,8 +3047,10 @@ export function addMessage(role, content, modelName, metadata) {
       const firstWrap = lastMsgAi || lastWrap;
       if (firstWrap && firstWrap.classList.contains('msg-ai')) {
         if (metadata?.memories_used?.length) firstWrap._memoriesUsed = metadata.memories_used;
-        firstWrap.appendChild(createMsgFooter(firstWrap));
-        if (metadata) displayMetrics(firstWrap, metadata);
+        if (!metadata?.replay_preview) {
+          firstWrap.appendChild(createMsgFooter(firstWrap));
+          if (metadata) displayMetrics(firstWrap, metadata);
+        }
       }
 
       const newRoots = [];
@@ -3431,8 +3433,10 @@ export function addMessage(role, content, modelName, metadata) {
       // survives a page refresh (live-stream path sets it via SSE, but
       // history reloads need this assignment).
       if (metadata?.memories_used?.length) wrap._memoriesUsed = metadata.memories_used;
-      wrap.appendChild(createMsgFooter(wrap));
-      if (metadata) displayMetrics(wrap, metadata);
+      if (!metadata?.replay_preview) {
+        wrap.appendChild(createMsgFooter(wrap));
+        if (metadata) displayMetrics(wrap, metadata);
+      }
     } else {
       // Add timestamp to user header (like AI messages)
       r.appendChild(roleTimestamp(metadata?.timestamp));
