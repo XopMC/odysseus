@@ -141,7 +141,8 @@ function renderGoal() {
   el('goal-work-progress').textContent = goal.progress || '';
   const effectFence = goal.status === 'waiting_user'
     && goal.checkpoint?._wait_reason === 'unknown_side_effect'
-    && (!effectInboxLoaded || effectInbox.length > 0);
+    && (!effectInboxLoaded || effectInbox.some(effect =>
+      ['unknown', 'verified_not_applied'].includes(effect.status)));
   el('goal-work-pause').hidden = goal.status !== 'active';
   el('goal-work-resume').hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
   el('goal-work-cancel').hidden = !live;
@@ -176,12 +177,20 @@ function renderEffectInbox() {
   for (const effect of effectInbox) {
     const row = document.createElement('div'); row.className = 'wait-effect-entry';
     const label = document.createElement('span');
-    label.textContent = `${effect.tool_name || 'tool'} · ${effect.run_id || '—'} · ${effect.tool_call_id || '—'}`;
+    label.textContent = `${effect.tool_name || 'tool'} · ${t(`Effect ${effect.status || 'unknown'}`)} · ${effect.run_id || '—'} · ${effect.tool_call_id || '—'}`;
     label.title = `${effect.action_hash || ''}`;
-    const button = document.createElement('button');
-    button.type = 'button'; button.textContent = t('Do not retry');
-    button.dataset.intentId = effect.id;
-    row.append(label, button); node.appendChild(row);
+    row.appendChild(label);
+    const addAction = (action, text) => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = t(text);
+      button.dataset.intentId = effect.id;
+      button.dataset.effectAction = action;
+      row.appendChild(button);
+    };
+    if (effect.status === 'unknown') addAction('verify', 'Verify effect');
+    if (effect.status === 'verified_not_applied') addAction('authorize-retry', 'Authorize one exact retry');
+    addAction('no-retry', effect.status === 'retry_authorized' ? 'Revoke retry authorization' : 'Do not retry');
+    node.appendChild(row);
   }
 }
 
@@ -221,9 +230,13 @@ function renderWait() {
       : state.wait_reason === 'resource_budget'
         ? `${t(state.budget?.resource === 'model_rounds' ? 'Model-round budget reached:' : state.budget?.resource === 'model_tokens' ? 'Model-token budget reached:' : state.budget?.resource === 'model_requests' ? 'Model-request budget reached:' : state.budget?.resource === 'wall_seconds' ? 'Wall-time budget reached:' : state.budget?.resource === 'children' ? 'Child-agent budget reached:' : 'Tool-call budget reached:')} ${Number(state.budget?.used) || 0}/${Number(state.budget?.limit) || 0}. ${state.budget?.resource === 'model_tokens' && state.budget?.usage_source && state.budget.usage_source !== 'real' ? `${t('Estimated usage')}. ` : ''}${t('Review the limit before resuming.')}`
       : state.wait_reason === 'unknown_side_effect'
-        ? t(state.unknown_effect_count === 0
-          ? 'No unresolved effects. You may resume the goal explicitly.'
-          : 'A tool outcome is unknown. Inspect the effect and choose whether to forbid a repeat.')
+        ? t(Number(state.unknown_effect_count) > 0
+          ? 'A tool outcome is unknown. Verify its outcome or forbid a repeat.'
+          : Number(state.blocking_effect_count) > 0
+            ? 'The effect was verified as not applied. Authorize one exact retry or forbid a repeat before resuming.'
+            : Number(state.pending_effect_count) > 0
+              ? 'One exact retry is authorized. Resume explicitly; only the matching action can consume it.'
+              : 'No unresolved effects. You may resume the goal explicitly.')
       : t(`Recovery: ${state.recovery_action || 'none'}`));
   renderEffectInbox();
   const action = el('wait-action');
@@ -551,7 +564,12 @@ async function runWaitAction() {
 
 async function chooseNoRetry(effect) {
   if (!effect?.id || !sessionId) return;
-  if (!window.confirm(t('Do not retry this tool action? This does not verify whether it already happened.'))) return;
+  const confirmation = effect.status === 'retry_authorized'
+    ? 'Revoke the one-shot retry authorization? No action will run.'
+    : effect.status === 'verified_not_applied'
+      ? 'Do not retry this action even though it was verified as not applied?'
+      : 'Do not retry this tool action? This does not verify whether it already happened.';
+  if (!window.confirm(t(confirmation))) return;
   const targetSession = sessionId;
   try {
     await post(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/unknown-effects/${encodeURIComponent(effect.id)}/no-retry`, {
@@ -559,6 +577,45 @@ async function chooseNoRetry(effect) {
     });
     if (targetSession !== sessionId) return;
     toast('Effect marked no-retry. Goal was not resumed automatically.');
+    await refreshEffects(targetSession);
+    await refreshWait(targetSession);
+  } catch (error) {
+    toast(error.message, true);
+    await refreshEffects(targetSession);
+  }
+}
+
+async function verifyEffect(effect) {
+  if (!effect?.id || !sessionId || effect.status !== 'unknown') return;
+  const evidence = window.prompt?.(t('Briefly describe how you checked the external effect. Only a SHA-256 digest is stored.'));
+  if (!evidence?.trim()) return;
+  const outcome = window.confirm(t('Did the side effect occur? Choose OK for yes, Cancel for no.'))
+    ? 'applied' : 'not_applied';
+  const targetSession = sessionId;
+  try {
+    await post(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/unknown-effects/${encodeURIComponent(effect.id)}/verify`, {
+      expected_revision: effect.revision, outcome, evidence,
+    });
+    if (targetSession !== sessionId) return;
+    toast('Verification receipt recorded. No action was replayed.');
+    await refreshEffects(targetSession);
+    await refreshWait(targetSession);
+  } catch (error) {
+    toast(error.message, true);
+    await refreshEffects(targetSession);
+  }
+}
+
+async function authorizeEffectRetry(effect) {
+  if (!effect?.id || !sessionId || effect.status !== 'verified_not_applied') return;
+  if (!window.confirm(t('You verified the effect did not occur. Authorize one future tool call only if its action hash matches exactly. This does not replay the saved payload.'))) return;
+  const targetSession = sessionId;
+  try {
+    await post(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/unknown-effects/${encodeURIComponent(effect.id)}/authorize-retry`, {
+      expected_revision: effect.revision,
+    });
+    if (targetSession !== sessionId) return;
+    toast('One exact-hash retry was authorized; no action ran now.');
     await refreshEffects(targetSession);
     await refreshWait(targetSession);
   } catch (error) {
@@ -596,10 +653,15 @@ function bind() {
   el('wait-refresh')?.addEventListener('click', () => refreshWait());
   el('wait-action')?.addEventListener('click', runWaitAction);
   el('wait-unknown-effects')?.addEventListener('click', event => {
-    const id = event.target?.closest?.('button[data-intent-id]')?.dataset.intentId;
+    const button = event.target?.closest?.('button[data-intent-id]');
+    const id = button?.dataset.intentId;
     if (!id) return;
     const effect = effectInbox.find(item => item.id === id);
-    if (effect) void chooseNoRetry(effect);
+    if (!effect) return;
+    const action = button.dataset.effectAction;
+    if (action === 'verify') void verifyEffect(effect);
+    else if (action === 'authorize-retry') void authorizeEffectRetry(effect);
+    else if (action === 'no-retry') void chooseNoRetry(effect);
   });
   document.querySelectorAll('#plan-mode-status, #goal-mode-status, #wait-mode-status').forEach(node => {
     const toggle = node.querySelector('.chat-work-card-toggle');
@@ -650,7 +712,8 @@ function bind() {
 const chatWork = {
   bind, refresh, render, handleEvent, beginGoal, prepareNewPlan, prepareNewGoal,
   onRunEnded, pauseActiveGoal, addGuidance, continueGoal, refreshRunHealth,
-  refreshWait, refreshEffects, runWaitAction, chooseNoRetry, mutate,
+  refreshWait, refreshEffects, runWaitAction, chooseNoRetry, verifyEffect,
+  authorizeEffectRetry, mutate,
   getSnapshot: () => snapshot,
 };
 export default chatWork;

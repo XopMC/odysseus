@@ -130,12 +130,18 @@ def compose_wait_panel(
     *, run: Optional[dict], goal: Optional[dict],
     children: Optional[list[dict]] = None, now: Optional[float] = None,
     unknown_effects: Optional[int] = None,
+    blocking_effects: Optional[int] = None,
+    pending_effects: Optional[int] = None,
     selected_endpoint_label: Optional[str] = None,
 ) -> dict:
     """Merge owner-gated records into one content-free waiting diagnosis."""
     now = time.time() if now is None else now
     run = run if isinstance(run, dict) else {}
     goal = goal if isinstance(goal, dict) else {}
+    if blocking_effects is None:
+        blocking_effects = unknown_effects
+    if pending_effects is None:
+        pending_effects = unknown_effects
     state = run.get("wait_state") if isinstance(run.get("wait_state"), dict) else {}
     health = run.get("progress_health") if isinstance(run.get("progress_health"), dict) else {}
     run_id = _label(run.get("run_id"), 200)
@@ -194,7 +200,7 @@ def compose_wait_panel(
     }
     recovery = (
         "resume_goal" if goal_status == "review_required"
-        else "resume_goal" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect" and unknown_effects == 0
+        else "resume_goal" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect" and blocking_effects == 0
         else "inspect_effect" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect"
         else "inspect_context" if goal_status == "waiting_user" and wait_reason == "context_compaction"
         else "resume_goal" if goal_status == "waiting_user" and wait_reason in {"repeated_premature_stop", "provider_failure", "dispatch_failure", "resource_budget"}
@@ -238,6 +244,8 @@ def compose_wait_panel(
             else None
         ),
         "unknown_effect_count": unknown_effects if type(unknown_effects) is int and unknown_effects >= 0 else None,
+        "blocking_effect_count": blocking_effects if type(blocking_effects) is int and blocking_effects >= 0 else None,
+        "pending_effect_count": pending_effects if type(pending_effects) is int and pending_effects >= 0 else None,
         "attempt": goal.get("attempt") if type(goal.get("attempt")) is int else None,
         "checkpoint": checkpoint,
         "progress_revision": health.get("revision") if type(health.get("revision")) is int else None,

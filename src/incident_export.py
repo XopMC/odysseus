@@ -20,7 +20,10 @@ def _json(value):
 
 
 _RUN_STATUSES = frozenset({"running", "done", "error", "stopped", "interrupted"})
-_EFFECT_STATUSES = frozenset({"intent", "unknown", "done", "no_retry"})
+_EFFECT_STATUSES = frozenset({
+    "intent", "unknown", "done", "verified", "verified_not_applied",
+    "retry_authorized", "retry_consumed", "no_retry",
+})
 _TERMINAL_REASONS = frozenset({
     "process_restarted", "cancelled", "superseded_by_new_run", "user_stop",
 })

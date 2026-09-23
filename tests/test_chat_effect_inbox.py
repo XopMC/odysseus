@@ -127,6 +127,80 @@ def test_no_retry_requires_exact_revision_and_generates_server_receipt(inbox):
         assert event.payload == {"intent_id": item["id"], "status": "no_retry"}
 
 
+def test_verified_not_applied_requires_one_shot_exact_hash_retry_authorization(inbox):
+    store, factory = inbox
+    action = '{"path":"fixture.txt","content":"safe"}'
+    item = store.record_intent("alice", "owned-chat", "1" * 32, "call-unknown",
+                               "write_file", action)
+    unknown = store.mark_unknown("alice", "owned-chat", item["id"])
+    with pytest.raises(WorkConflict):
+        store.verify(
+            "alice", "owned-chat", item["id"], expected_revision=unknown["revision"] + 1,
+            outcome="not_applied", evidence="stale evidence",
+        )
+    with pytest.raises(ValueError):
+        store.verify(
+            "alice", "owned-chat", item["id"], expected_revision=unknown["revision"],
+            outcome="maybe", evidence="invalid outcome",
+        )
+    verified = store.verify(
+        "alice", "owned-chat", item["id"], expected_revision=unknown["revision"],
+        outcome="not_applied", evidence="Independent check: destination is absent",
+    )
+    assert verified["status"] == "verified_not_applied"
+    assert len(verified["receipt_hash"]) == 64
+    assert "destination is absent" not in json.dumps(verified)
+    assert "Independent check" not in json.dumps(verified)
+    assert store.pending_actions("alice", "owned-chat")[0]["status"] == "verified_not_applied"
+    with pytest.raises(WorkNotFound):
+        store.verify(
+            "bob", "owned-chat", item["id"], expected_revision=verified["revision"],
+            outcome="not_applied", evidence="foreign owner evidence",
+        )
+
+    with pytest.raises(WorkConflict, match="explicit retry authorization"):
+        store.record_intent("alice", "owned-chat", "2" * 32, "call-unapproved",
+                            "write_file", action)
+    authorized = store.authorize_retry(
+        "alice", "owned-chat", item["id"], expected_revision=verified["revision"],
+    )
+    assert authorized["status"] == "retry_authorized"
+    with pytest.raises(WorkConflict):
+        store.authorize_retry("alice", "owned-chat", item["id"],
+                              expected_revision=verified["revision"])
+
+    unrelated = store.record_intent(
+        "alice", "owned-chat", "2" * 32, "call-other-tool", "bash", action,
+    )
+    assert unrelated["created"] is True
+    assert unrelated["retry_authorization_id"] is None
+    retried = store.record_intent(
+        "alice", "owned-chat", "2" * 32, "call-authorized", "write_file", action,
+    )
+    assert retried["created"] is True
+    assert retried["retry_authorization_id"] == item["id"]
+    with factory() as db:
+        from core.database import ChatToolIntent
+        original = db.query(ChatToolIntent).filter_by(id=item["id"]).one()
+        assert original.status == "retry_consumed"
+        assert original.receipt["retry_consumed"]["action_hash"] == item["action_hash"]
+
+
+def test_verified_applied_is_terminal_and_does_not_offer_retry(inbox):
+    store, _factory = inbox
+    item = store.record_intent("alice", "owned-chat", "3" * 32, "call-applied", "bash", "safe")
+    unknown = store.mark_unknown("alice", "owned-chat", item["id"])
+    verified = store.verify(
+        "alice", "owned-chat", item["id"], expected_revision=unknown["revision"],
+        outcome="applied", evidence="Independent check: expected marker exists",
+    )
+    assert verified["status"] == "verified"
+    assert store.pending_actions("alice", "owned-chat") == []
+    with pytest.raises(WorkConflict):
+        store.authorize_retry("alice", "owned-chat", item["id"],
+                              expected_revision=verified["revision"])
+
+
 def test_unknown_fence_is_not_hidden_behind_200_open_intents(inbox):
     store, factory = inbox
     from core.database import ChatToolIntent

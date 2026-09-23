@@ -73,7 +73,7 @@ const PRECACHE = [
   '/static/js/context-settings-dialog.js?v=20260923context1',
   '/static/js/engineering-workspace.js?v=20260923context1',
   '/static/js/timelineReducer.js',
-  '/static/js/chat-work.js?v=20260923goalreview1',
+  '/static/js/chat-work.js?v=20260923effectinbox1',
   '/static/js/chat-run-inspector.js?v=20260923runinspector3',
   '/static/js/runHealth.js?v=20260922batch1',
   '/static/js/chat-subagents.js?v=20260923runinspector1',

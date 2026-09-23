@@ -28,11 +28,20 @@ def needs_effect_intent(tool_name, content):
 
 
 def _public(row, *, created=False):
+    receipt = dict(row.receipt or {})
+    verification = receipt.get("verification")
+    retry_authorization_id = receipt.get("retry_authorization_id")
     return {
         "id": row.id, "session_id": row.session_id, "run_id": row.run_id,
         "tool_call_id": row.tool_call_id, "tool_name": row.tool_name,
         "action_hash": row.action_hash, "status": row.status,
         "revision": row.revision, "receipt_hash": row.receipt_hash,
+        "verification_outcome": (
+            verification.get("outcome") if isinstance(verification, dict) else None
+        ),
+        "retry_authorization_id": (
+            retry_authorization_id if isinstance(retry_authorization_id, str) else None
+        ),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "created": created,
@@ -69,10 +78,48 @@ class ChatEffectInbox:
                 if row.tool_name != tool_name or row.action_hash != digest:
                     raise WorkConflict("Tool call ID was reused for a different action")
                 return _public(row)
+            verified_not_applied = db.query(ChatToolIntent).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+                tool_name=tool_name, action_hash=digest, status="verified_not_applied",
+            ).first()
+            retry_authorization = db.query(ChatToolIntent).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+                tool_name=tool_name, action_hash=digest, status="retry_authorized",
+            ).order_by(ChatToolIntent.created_at.asc(), ChatToolIntent.id.asc()).with_for_update().first()
+            if verified_not_applied is not None and retry_authorization is None:
+                raise WorkConflict(
+                    "Matching action was verified not applied; explicit retry authorization required"
+                )
+            retry_link = None
+            if retry_authorization is not None:
+                old_receipt_hash = retry_authorization.receipt_hash
+                consumed = {
+                    "kind": "matching_retry_consumed",
+                    "intent_id": retry_authorization.id,
+                    "action_hash": digest,
+                    "new_run_id": run_id,
+                    "new_tool_call_id": tool_call_id,
+                    "previous_revision": retry_authorization.revision,
+                    "recorded_at": utcnow_naive().isoformat(),
+                }
+                retry_authorization.status = "retry_consumed"
+                retry_authorization.revision += 1
+                retry_authorization.receipt = {
+                    **dict(retry_authorization.receipt or {}), "retry_consumed": consumed,
+                }
+                retry_authorization.receipt_hash = hashlib.sha256(json.dumps(
+                    retry_authorization.receipt, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                self._event(db, retry_authorization, "effect_reconciled")
+                retry_link = {
+                    "retry_authorization_id": retry_authorization.id,
+                    "retry_authorization_hash": old_receipt_hash,
+                }
             row = ChatToolIntent(
                 id=uuid.uuid4().hex, owner=_storage_owner(owner), session_id=session_id,
                 run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
                 action_hash=digest, status="intent", revision=1,
+                receipt=retry_link,
             )
             db.add(row)
             db.flush()
@@ -122,6 +169,70 @@ class ChatEffectInbox:
             db.flush()
             return _public(row)
 
+    def verify(self, owner, session_id, intent_id, *, expected_revision, outcome, evidence):
+        """Record a content-free user verification receipt for an unknown effect."""
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("Exact effect revision required")
+        if outcome not in {"applied", "not_applied"}:
+            raise ValueError("Verification outcome must be applied or not_applied")
+        if not isinstance(evidence, str) or not evidence.strip() or len(evidence.encode("utf-8")) > 4096 or "\0" in evidence:
+            raise ValueError("Bounded verification evidence is required")
+        evidence_hash = hashlib.sha256(evidence.strip().encode("utf-8")).hexdigest()
+        with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
+            row = self._row(db, owner, session_id, intent_id)
+            if row.status != "unknown" or row.revision != expected_revision:
+                raise WorkConflict("Tool intent changed; reload before verifying")
+            verification = {
+                "kind": "user_verified_effect",
+                "outcome": outcome,
+                "intent_id": row.id,
+                "action_hash": row.action_hash,
+                "evidence_sha256": evidence_hash,
+                "evidence_bytes": len(evidence.strip().encode("utf-8")),
+                "previous_revision": row.revision,
+                "recorded_at": utcnow_naive().isoformat(),
+            }
+            row.status = "verified" if outcome == "applied" else "verified_not_applied"
+            row.revision += 1
+            row.receipt = {**dict(row.receipt or {}), "verification": verification}
+            row.receipt_hash = hashlib.sha256(json.dumps(
+                row.receipt, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            self._event(db, row, "effect_reconciled")
+            db.flush()
+            return _public(row)
+
+    def authorize_retry(self, owner, session_id, intent_id, *, expected_revision):
+        """Authorize one future, exact-hash retry; never replays the old payload."""
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("Exact effect revision required")
+        with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
+            row = self._row(db, owner, session_id, intent_id)
+            if row.status != "verified_not_applied" or row.revision != expected_revision:
+                raise WorkConflict("Only the current verified-not-applied intent can authorize retry")
+            verification = dict(row.receipt or {}).get("verification")
+            if not isinstance(verification, dict) or verification.get("outcome") != "not_applied":
+                raise WorkConflict("A valid not-applied verification receipt is required")
+            authorization = {
+                "kind": "user_authorized_one_shot_retry",
+                "intent_id": row.id,
+                "action_hash": row.action_hash,
+                "verification_receipt_hash": row.receipt_hash,
+                "previous_revision": row.revision,
+                "recorded_at": utcnow_naive().isoformat(),
+            }
+            row.status = "retry_authorized"
+            row.revision += 1
+            row.receipt = {**dict(row.receipt or {}), "retry_authorization": authorization}
+            row.receipt_hash = hashlib.sha256(json.dumps(
+                row.receipt, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            self._event(db, row, "effect_reconciled")
+            db.flush()
+            return _public(row)
+
     def mark_interrupted_run_unknown(self, owner, session_id, run_id):
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
             raise ValueError("Exact run ID required")
@@ -158,6 +269,28 @@ class ChatEffectInbox:
             ).order_by(ChatToolIntent.created_at, ChatToolIntent.id).limit(200).all()
             return [_public(row) for row in rows]
 
+    def blocking(self, owner, session_id):
+        """Effects that still require a human decision before a Goal resumes."""
+        with SessionLocal() as db:
+            _session(db, owner, session_id)
+            rows = db.query(ChatToolIntent).filter(
+                ChatToolIntent.owner == _storage_owner(owner),
+                ChatToolIntent.session_id == session_id,
+                ChatToolIntent.status.in_(("unknown", "verified_not_applied")),
+            ).order_by(ChatToolIntent.created_at, ChatToolIntent.id).limit(200).all()
+            return [_public(row) for row in rows]
+
+    def pending_actions(self, owner, session_id):
+        """Owner inbox for unresolved effects and one-shot retry decisions."""
+        with SessionLocal() as db:
+            _session(db, owner, session_id)
+            rows = db.query(ChatToolIntent).filter(
+                ChatToolIntent.owner == _storage_owner(owner),
+                ChatToolIntent.session_id == session_id,
+                ChatToolIntent.status.in_(("unknown", "verified_not_applied", "retry_authorized")),
+            ).order_by(ChatToolIntent.created_at, ChatToolIntent.id).limit(200).all()
+            return [_public(row) for row in rows]
+
     def no_retry(self, owner, session_id, intent_id, *, expected_revision):
         """Explicitly retire uncertainty without claiming that the effect was verified.
 
@@ -169,11 +302,12 @@ class ChatEffectInbox:
         with SessionLocal.begin() as db:
             reserve_sqlite_writer(db)
             row = self._row(db, owner, session_id, intent_id)
-            if row.status != "unknown" or row.revision != expected_revision:
+            if row.status not in {"unknown", "verified_not_applied", "retry_authorized"} or row.revision != expected_revision:
                 raise WorkConflict("Tool intent changed; reload before reconciling")
             receipt = {
                 "kind": "user_no_retry", "intent_id": row.id,
                 "action_hash": row.action_hash, "owner": row.owner,
+                "previous_status": row.status,
                 "previous_revision": row.revision,
                 "recorded_at": utcnow_naive().isoformat(),
             }

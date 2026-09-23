@@ -77,8 +77,8 @@ def test_goal_health_is_owner_snapshot_driven_and_hidden_without_active_goal():
     assert "goal-work-health-detail" in html
     assert "./runHealth.js?v=20260922batch1" in work
     assert "/static/js/runHealth.js?v=20260922batch1" in sw
-    assert "./js/chat-work.js?v=20260923goalreview1" in app
-    assert "/static/js/chat-work.js?v=20260923goalreview1" in sw
+    assert "./js/chat-work.js?v=20260923effectinbox1" in app
+    assert "/static/js/chat-work.js?v=20260923effectinbox1" in sw
 
 
 def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
@@ -107,19 +107,29 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
         lease:{held:true,expires_at:'2099-01-01T00:00:00Z'},
         checkpoint:{durable_seq:7,context_revision:3,ledger_hash:'a'.repeat(64)},
         recovery_action:'inspect'};
-      let effects=[],noRetryCalls=0,staleResume=false,errorToasts=[];
+      let effects=[],noRetryCalls=0,verifyCalls=0,retryAuthorizeCalls=0,staleResume=false,errorToasts=[];
+      let confirmAnswers=[false,true,true];
       let delayOld=false,releaseOld;
       const document={visibilityState:'hidden',getElementById:id=>ids[id]||null,querySelectorAll:()=>[],
-        createElement:tag=>({tag,textContent:'',dataset:{},children:[],append(...nodes){this.children.push(...nodes)}})};
+        createElement:tag=>({tag,textContent:'',dataset:{},children:[],append(...nodes){this.children.push(...nodes)},appendChild(node){this.children.push(node)}})};
       let resumeCalls=0,reloadCalls=0,goalResumeCalls=0,contextClicks=0;
       ids['chat-context-pill'].click=()=>{contextClicks++};
       const window={location:{origin:'http://odysseus.test',reload:()=>{reloadCalls++}},
-        confirm:()=>true,
+        confirm:()=>confirmAnswers.length?confirmAnswers.shift():true,
+        prompt:()=> 'safe verification note',
         uiModule:{showError:message=>errorToasts.push(message)},
         sessionModule:{getCurrentSessionId:()=> 'chat-1'},
         chatModule:{resumeStream:async()=>{resumeCalls++;return false}}};
       const context=vm.createContext({window,document,console,setTimeout,clearTimeout,setInterval,clearInterval,
         fetch:async url=>{
+          if(url.includes('/unknown-effects/')&&url.endsWith('/verify')){
+            verifyCalls++;effects=[{...effects[0],status:'verified_not_applied',revision:3}];
+            return{ok:true,json:async()=>({status:'verified_not_applied',revision:3})};
+          }
+          if(url.includes('/unknown-effects/')&&url.endsWith('/authorize-retry')){
+            retryAuthorizeCalls++;effects=[{...effects[0],status:'retry_authorized',revision:4}];
+            return{ok:true,json:async()=>({status:'retry_authorized',revision:4})};
+          }
           if(url.includes('/unknown-effects/')&&url.endsWith('/no-retry')){noRetryCalls++;effects=[];return{ok:true,json:async()=>({status:'no_retry'})};}
           if(url.endsWith('/unknown-effects'))return{ok:true,json:async()=>({effects})};
           if(url.endsWith('/goal/resume')){goalResumeCalls++;goal={...goal,status:'active',revision:goal.revision+1};
@@ -202,13 +212,21 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       wait={...wait,budget:{resource:'children',used:5,limit:5,run_id:'e'.repeat(32)}};
       await api.refreshWait('chat-1');
       assert.match(ids['wait-recovery'].textContent,/Child-agent budget reached: 5\/5/);
-      effects=[{id:'effect-1',run_id:'run-1',tool_call_id:'round-1-tool-0',tool_name:'bash',action_hash:'a'.repeat(64),revision:2}];
+      effects=[{id:'effect-1',run_id:'run-1',tool_call_id:'round-1-tool-0',tool_name:'bash',action_hash:'a'.repeat(64),status:'unknown',revision:2}];
       goal={...goal,status:'waiting_user',checkpoint:{_wait_reason:'unknown_side_effect'}};
       wait={...wait,wait_reason:'unknown_side_effect',recovery_action:'inspect_effect'};
       await api.refresh('chat-1');await api.refreshWait('chat-1');await api.refreshEffects('chat-1');
       assert.equal(ids['goal-work-resume'].hidden,true);
       assert.equal(ids['wait-unknown-effects'].hidden,false);
       assert.equal(ids['wait-unknown-effects'].children.length,2);
+      await api.verifyEffect(effects[0]);
+      assert.equal(verifyCalls,1);
+      assert.equal(effects[0].status,'verified_not_applied');
+      assert.equal(ids['goal-work-resume'].hidden,true,'verified-not-applied must still require a decision');
+      await api.authorizeEffectRetry(effects[0]);
+      assert.equal(retryAuthorizeCalls,1);
+      assert.equal(effects[0].status,'retry_authorized');
+      assert.equal(ids['goal-work-resume'].hidden,false,'one-shot authorization allows explicit continuation');
       await api.chooseNoRetry(effects[0]);
       assert.equal(noRetryCalls,1);
       assert.equal(ids['goal-work-resume'].hidden,false,'no-retry unlocks explicit resume only');

@@ -264,6 +264,29 @@ def test_reconciled_effect_wait_offers_explicit_goal_resume():
     assert panel["unknown_effect_count"] == 0
 
 
+def test_verified_missing_effect_blocks_goal_until_retry_is_authorized():
+    from src.run_wait_state import compose_wait_panel
+
+    waiting = compose_wait_panel(
+        run=None,
+        goal={"status": "waiting_user", "wait_reason": "unknown_side_effect",
+              "status_since": 180, "lease_held": False},
+        unknown_effects=0, blocking_effects=1, pending_effects=1, now=200,
+    )
+    assert waiting["recovery_action"] == "inspect_effect"
+    assert waiting["unknown_effect_count"] == 0
+    assert waiting["blocking_effect_count"] == 1
+
+    authorized = compose_wait_panel(
+        run=None,
+        goal={"status": "waiting_user", "wait_reason": "unknown_side_effect",
+              "status_since": 180, "lease_held": False},
+        unknown_effects=0, blocking_effects=0, pending_effects=1, now=200,
+    )
+    assert authorized["recovery_action"] == "resume_goal"
+    assert authorized["pending_effect_count"] == 1
+
+
 @pytest.mark.parametrize("resource", ["tool_calls", "model_rounds", "model_tokens", "model_requests", "wall_seconds", "children"])
 def test_resource_budget_wait_is_visible_and_requires_explicit_resume(resource):
     from src.run_wait_state import compose_wait_panel

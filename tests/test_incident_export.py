@@ -83,6 +83,9 @@ def test_incident_statuses_are_allowlisted():
     assert _status("error", _RUN_STATUSES) == "error"
     assert _status("prompt text accidentally stored as status", _RUN_STATUSES) == "unrecognized"
     assert _status("no_retry", _EFFECT_STATUSES) == "no_retry"
+    assert _status("verified_not_applied", _EFFECT_STATUSES) == "verified_not_applied"
+    assert _status("retry_authorized", _EFFECT_STATUSES) == "retry_authorized"
+    assert _status("private evidence text", _EFFECT_STATUSES) == "unrecognized"
     assert _safe_metric("PRIVATE_PROMPT_DO_NOT_EXPORT", 1000) is None
     assert _safe_metric("420.5", 1000) == 420.5
     assert _safe_metric(float("inf"), 1000) is None

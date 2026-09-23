@@ -87,10 +87,12 @@ def setup_chat_work_routes():
         return compose_wait_panel(
             run=run, goal=goal, children=children,
             selected_endpoint_label=selected_endpoint_label,
-            unknown_effects=(
-                len(inbox.unknown(owner, session_id))
-                if goal.get("wait_reason") == "unknown_side_effect" else None
-            ),
+            unknown_effects=len(inbox.unknown(owner, session_id))
+            if goal.get("wait_reason") == "unknown_side_effect" else None,
+            blocking_effects=len(inbox.blocking(owner, session_id))
+            if goal.get("wait_reason") == "unknown_side_effect" else None,
+            pending_effects=len(inbox.pending_actions(owner, session_id))
+            if goal.get("wait_reason") == "unknown_side_effect" else None,
         )
 
     @router.get("/{session_id}/run-inspector")
@@ -120,9 +122,34 @@ def setup_chat_work_routes():
 
     @router.get("/{session_id}/unknown-effects")
     async def unknown_effects(session_id: str, request: Request):
-        """Content-free durable inbox; inspection never authorizes replay."""
+        """Content-free durable reconciliation inbox; reads never authorize replay."""
         from src.chat_effect_inbox import inbox
-        return {"effects": inbox.unknown(_owner(request, session_id), session_id)}
+        return {"effects": inbox.pending_actions(_owner(request, session_id), session_id)}
+
+    @router.post("/{session_id}/unknown-effects/{intent_id}/verify")
+    async def effect_verify(session_id: str, intent_id: str, request: Request):
+        owner = _owner(request, session_id, mutation=True)
+        body = await _json(request)
+        if set(body) != {"expected_revision", "outcome", "evidence"}:
+            raise HTTPException(400, "Exact revision, verification outcome, and evidence required")
+        from src.chat_effect_inbox import inbox
+        return inbox.verify(
+            owner, session_id, intent_id,
+            expected_revision=body["expected_revision"],
+            outcome=body["outcome"], evidence=body["evidence"],
+        )
+
+    @router.post("/{session_id}/unknown-effects/{intent_id}/authorize-retry")
+    async def effect_authorize_retry(session_id: str, intent_id: str, request: Request):
+        owner = _owner(request, session_id, mutation=True)
+        body = await _json(request)
+        if set(body) != {"expected_revision"}:
+            raise HTTPException(400, "Exact effect revision required")
+        from src.chat_effect_inbox import inbox
+        return inbox.authorize_retry(
+            owner, session_id, intent_id,
+            expected_revision=body["expected_revision"],
+        )
 
     @router.post("/{session_id}/unknown-effects/{intent_id}/no-retry")
     async def effect_no_retry(session_id: str, intent_id: str, request: Request):
@@ -224,8 +251,8 @@ def setup_chat_work_routes():
             raise HTTPException(400, "Exact goal revision required")
         if action == "resume":
             from src.chat_effect_inbox import inbox
-            if inbox.unknown(owner, session_id):
-                raise HTTPException(409, "Unknown tool effect must be reconciled before Goal resumes")
+            if inbox.blocking(owner, session_id):
+                raise HTTPException(409, "Tool effect must be reconciled or explicitly authorized before Goal resumes")
         # Stop the exact detached attempt before changing durable Goal state.
         # Otherwise a slow run can publish progress after Cancel/Pause and
         # resurrect the goal on another browser.
@@ -257,8 +284,8 @@ def setup_chat_work_routes():
         if set(body) != {"objective", "expected_revision", "run_id"}:
             raise HTTPException(400, "Exact goal objective, revision and run id required")
         from src.chat_effect_inbox import inbox
-        if inbox.unknown(owner, session_id):
-            raise HTTPException(409, "Unknown tool effect must be reconciled before Goal revision")
+        if inbox.blocking(owner, session_id):
+            raise HTTPException(409, "Tool effect must be reconciled before Goal revision")
         from src import agent_runs
         run = agent_runs.describe_run(session_id)
         active_id = run.get("run_id") if run and run.get("status") == "running" else None

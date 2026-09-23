@@ -155,13 +155,13 @@ def test_unknown_effect_inbox_is_identical_across_clients_and_owner_scoped(monke
     monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
     monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: request.headers.get("X-Test-Owner"))
 
-    def unknown(owner, session_id):
+    def pending_actions(owner, session_id):
         if owner != "alice":
             raise WorkNotFound("Chat not found")
         assert session_id == "chat-1"
-        return [{"id": "effect-1", "status": "unknown", "action_hash": "a" * 64}]
+        return [{"id": "effect-1", "status": "verified_not_applied", "action_hash": "a" * 64}]
 
-    monkeypatch.setattr(inbox, "unknown", unknown)
+    monkeypatch.setattr(inbox, "pending_actions", pending_actions)
     app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
     with TestClient(app) as client:
         desktop = client.get("/api/chat/work/chat-1/unknown-effects", headers={"X-Test-Owner": "alice"})
@@ -169,6 +169,7 @@ def test_unknown_effect_inbox_is_identical_across_clients_and_owner_scoped(monke
         foreign = client.get("/api/chat/work/chat-1/unknown-effects", headers={"X-Test-Owner": "bob"})
     assert desktop.status_code == mobile.status_code == 200
     assert desktop.json() == mobile.json()
+    assert desktop.json()["effects"][0]["status"] == "verified_not_applied"
     assert foreign.status_code == 404
 
 
@@ -182,12 +183,12 @@ def test_goal_resume_is_rejected_while_unknown_effect_is_unresolved(monkeypatch)
     monkeypatch.setattr(chat_work_routes, "store", GoalStore())
     monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
     monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: "alice")
-    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [{"id": "effect-1"}])
+    monkeypatch.setattr(inbox, "blocking", lambda owner, session: [{"id": "effect-1"}])
     app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
     with TestClient(app) as client:
         response = client.post("/api/chat/work/chat-1/goal/resume", json={"expected_revision": 5})
     assert response.status_code == 409
-    assert "unknown" in str(response.json()).lower()
+    assert "effect" in str(response.json()).lower()
 
 
 def test_owner_can_choose_no_retry_with_cas_but_foreign_owner_cannot(monkeypatch):
@@ -215,6 +216,53 @@ def test_owner_can_choose_no_retry_with_cas_but_foreign_owner_cannot(monkeypatch
     assert good.status_code == 200 and good.json()["status"] == "no_retry"
     assert foreign.status_code == 404 and malformed.status_code == 400
     assert calls == [("alice", "chat-1", "effect-1", 2)]
+
+
+def test_owner_verification_and_retry_authorization_routes_are_strict_and_scoped(monkeypatch):
+    from src.chat_effect_inbox import inbox
+    calls = []
+    monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: request.headers.get("X-Test-Owner"))
+
+    def verify(owner, session, intent, *, expected_revision, outcome, evidence):
+        if owner != "alice":
+            raise WorkNotFound("Tool intent not found")
+        calls.append(("verify", expected_revision, outcome, evidence))
+        return {"id": intent, "status": "verified_not_applied", "revision": expected_revision + 1}
+
+    def authorize(owner, session, intent, *, expected_revision):
+        if owner != "alice":
+            raise WorkNotFound("Tool intent not found")
+        calls.append(("authorize", expected_revision))
+        return {"id": intent, "status": "retry_authorized", "revision": expected_revision + 1}
+
+    monkeypatch.setattr(inbox, "verify", verify)
+    monkeypatch.setattr(inbox, "authorize_retry", authorize)
+    app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
+    with TestClient(app) as client:
+        verified = client.post(
+            "/api/chat/work/chat-1/unknown-effects/effect-1/verify",
+            json={"expected_revision": 2, "outcome": "not_applied", "evidence": "checked safely"},
+            headers={"X-Test-Owner": "alice"},
+        )
+        foreign = client.post(
+            "/api/chat/work/chat-1/unknown-effects/effect-1/verify",
+            json={"expected_revision": 2, "outcome": "applied", "evidence": "checked"},
+            headers={"X-Test-Owner": "bob"},
+        )
+        malformed = client.post(
+            "/api/chat/work/chat-1/unknown-effects/effect-1/verify",
+            json={"expected_revision": 2, "outcome": "not_applied", "evidence": "checked", "replay": True},
+            headers={"X-Test-Owner": "alice"},
+        )
+        retry = client.post(
+            "/api/chat/work/chat-1/unknown-effects/effect-1/authorize-retry",
+            json={"expected_revision": 3}, headers={"X-Test-Owner": "alice"},
+        )
+    assert verified.status_code == 200 and verified.json()["status"] == "verified_not_applied"
+    assert foreign.status_code == 404 and malformed.status_code == 400
+    assert retry.status_code == 200 and retry.json()["status"] == "retry_authorized"
+    assert calls == [("verify", 2, "not_applied", "checked safely"), ("authorize", 3)]
 
 
 def test_goal_cancel_still_requires_an_authenticated_owner(monkeypatch):
@@ -272,7 +320,7 @@ def test_events_stream_rejects_missing_work_state_before_starting_sse(monkeypatc
 
 def test_goal_resume_dispatches_server_controller_before_return(monkeypatch):
     from src.chat_effect_inbox import inbox
-    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [])
+    monkeypatch.setattr(inbox, "blocking", lambda owner, session: [])
     class ResumeStore(WorkStoreStub):
         def goal_action(self, owner, session_id, action, expected_revision):
             self.calls.append((owner, session_id, action, expected_revision))
@@ -306,7 +354,7 @@ def test_goal_resume_does_not_report_success_when_controller_did_not_start(monke
     async def failed_dispatch(owner, session_id, *, reason):
         return False
 
-    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [])
+    monkeypatch.setattr(inbox, "blocking", lambda owner, session: [])
     monkeypatch.setattr(controller, "dispatch_goal_continuation", failed_dispatch)
     monkeypatch.setattr(chat_work_routes, "store", ResumeStore())
     monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
