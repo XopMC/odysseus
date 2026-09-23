@@ -13,6 +13,8 @@ Team MCP is registered only by the reviewed read-only policy adapter.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -23,7 +25,7 @@ from src.tool_security import email_tool_policy_names
 
 
 READ_TOOLS = frozenset({'read_file', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'compare_files', 'verify_hashes', 'inspect_toolchain', 'get_workspace'})
-WRITE_TOOLS = frozenset({'write_file', 'edit_file', 'apply_patch'})
+WRITE_TOOLS = frozenset({'write_file', 'edit_file', 'apply_patch', 'rollback_file_checkpoint'})
 WEB_TOOLS = frozenset({'web_search', 'web_fetch'})
 EXECUTE_TOOLS = frozenset({'bash', 'python'})
 _TEAM_HOST_TOOLS = READ_TOOLS | WRITE_TOOLS | EXECUTE_TOOLS
@@ -35,6 +37,56 @@ _READ_EFFECTS = frozenset({ToolEffect.READ_PUBLIC, ToolEffect.READ_WORKSPACE,
                          ToolEffect.READ_PRIVATE, ToolEffect.BROKERED_NETWORK_READ})
 _PART = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z')
 _BUILTIN_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_]{0,127}\Z')
+
+
+def tool_inventory_revision(
+    schemas: Iterable[Mapping[str, Any]], *,
+    selected_names: Iterable[str],
+    disabled_names: Iterable[str] = (),
+    relevant_names: Iterable[str] | None = None,
+    policy_mode: str = 'normal',
+    block_all: bool = False,
+    disable_mcp: bool = False,
+    plan_mode: bool = False,
+    access_mode: str = '',
+) -> str:
+    """Hash the exact presented schemas plus their effective policy envelope.
+
+    The digest is safe to persist in run events: it contains no schema text,
+    user prompts, credentials, or endpoint data. Object-key order is ignored;
+    schema/list order is normalized by function name and canonical JSON.
+    """
+    canonical_schemas = []
+    for schema in schemas:
+        if not isinstance(schema, Mapping):
+            raise ValueError('Tool schemas must be mappings')
+        encoded = json.dumps(
+            dict(schema), sort_keys=True, ensure_ascii=False,
+            separators=(',', ':'), default=str,
+        )
+        function = schema.get('function')
+        name = function.get('name') if isinstance(function, Mapping) else schema.get('name')
+        canonical_schemas.append((str(name or ''), encoded))
+    canonical_schemas.sort()
+
+    def names(values):
+        return sorted({str(value) for value in values if isinstance(value, str) and value})
+
+    envelope = {
+        'version': 1,
+        'schemas': canonical_schemas,
+        'selected': names(selected_names),
+        'disabled': names(disabled_names),
+        'relevant': None if relevant_names is None else names(relevant_names),
+        'policy_mode': str(policy_mode or ''),
+        'block_all': bool(block_all),
+        'disable_mcp': bool(disable_mcp),
+        'plan_mode': bool(plan_mode),
+        'access_mode': str(access_mode or ''),
+    }
+    canonical = json.dumps(envelope, sort_keys=True, ensure_ascii=False,
+                           separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
 def mcp_tool_id(server_id: str, tool_name: str) -> str:

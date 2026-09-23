@@ -25,7 +25,7 @@ from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPa
 from .git_tools import GitStatusTool, GitDiffTool, GitLogTool
 from .file_comparison_tools import CompareFilesTool, VerifyHashesTool
 from .verification_tools import RunVerificationTool
-from .host_diagnostic_tools import HostDiagnosticTool
+from .host_diagnostic_tools import HostDiagnosticTool, HostFileCheckpointTool
 from .http_probe_tool import HttpProbeTool
 from .toolchain_diagnostics import InspectToolchainTool
 from .coding_tools import TodoWriteTool
@@ -70,6 +70,7 @@ TOOL_HANDLERS = {
     "inspect_process": HostDiagnosticTool("inspect_process").execute,
     "inspect_port": HostDiagnosticTool("inspect_port").execute,
     "tail_log": HostDiagnosticTool("tail_log").execute,
+    "rollback_file_checkpoint": HostFileCheckpointTool().execute,
     "http_probe": HttpProbeTool().execute,
     "inspect_toolchain": InspectToolchainTool().execute,
     "create_document": CreateDocumentTool().execute,
@@ -114,6 +115,7 @@ PYTHON_TIMEOUT = 30
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
              "apply_patch", "todowrite",
+             "rollback_file_checkpoint",
              "grep", "search_files", "glob", "ls", "list_tree", "file_outline", "git_status", "git_diff", "git_log", "compare_files", "verify_hashes", "run_tests", "run_lint", "inspect_process", "inspect_port", "tail_log", "http_probe", "inspect_toolchain", "get_workspace", "manage_bg_jobs", "read_tool_artifact", "search_artifacts", "publish_subagent_evidence", "manage_auto_research_lab",
              "create_document", "update_document", "edit_document",
              "search_chats",

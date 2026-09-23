@@ -42,6 +42,7 @@ from src.context_compactor import (
     maybe_compact,
 )
 from src.settings import get_setting
+from src.run_budget import soft_budget_warning
 from src.harness_efficiency import enabled as _efficiency_enabled, profile_name as _efficiency_profile_name
 from src.prompt_security import untrusted_context_message
 from src.tool_security import (
@@ -632,7 +633,14 @@ Fetch and read the text content of a SPECIFIC URL the user names (e.g. "check ex
 ```read_file
 <file path>
 ```
-Read a file and return its contents.""",
+Read a bounded text file. Prefer JSON args for large/focused reads:
+`{"path":"...","offset":1,"limit":120,"line_numbers":true}` uses 1-based
+line ranges; `byte_offset` (0-based) + `byte_limit` selects a byte range and is
+mutually exclusive with line args. The result includes the full-file SHA-256,
+size, encoding, binary and truncation flags. Large UTF-8 files return a short
+preview plus an owner-scoped `read_tool_artifact` handle when storage is
+available; page that artifact rather than pulling megabytes into context. Use
+the returned `sha256` as `edit_file.expected_sha256`.""",
 
     "write_file": """\
 ```write_file
@@ -3389,6 +3397,7 @@ def _compute_final_metrics(
     prep_timings: Optional[Dict[str, float]] = None,
     backend_gen_tps: float = 0,
     backend_prefill_tps: float = 0,
+    model_stream_duration: float = 0,
 ) -> dict:
     """Compute token counts, TPS, and build the final metrics dict."""
     if has_real_usage:
@@ -3408,8 +3417,16 @@ def _compute_final_metrics(
     # total_duration includes prefill + agent overhead.
     if backend_gen_tps and backend_gen_tps > 0:
         tps = backend_gen_tps
+        tps_source = "backend"
+    elif output_tokens > 0 and model_stream_duration > 0:
+        # Agent wall time includes tool execution and inter-round work. Divide
+        # by model-stream time only, otherwise long shell calls make a fast
+        # model appear 4-6x slower than its actual generation throughput.
+        tps = output_tokens / model_stream_duration
+        tps_source = "stream_elapsed"
     else:
         tps = output_tokens / total_duration if total_duration > 0 else 0
+        tps_source = "computed"
     # Context % should describe the prompt Odysseus assembled, not provider
     # billing/usage counters. Some providers report only the final agent round
     # or cache-adjusted input, which made the displayed context jump from e.g.
@@ -3430,9 +3447,10 @@ def _compute_final_metrics(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "tokens_per_second": round(tps, 2),
+        **({"generation_time": round(model_stream_duration, 2)} if model_stream_duration > 0 else {}),
         # True decode speed when the backend reported it; "computed" = the
         # tokens/wall-clock fallback (reads low — includes prefill/overhead).
-        "tps_source": "backend" if (backend_gen_tps and backend_gen_tps > 0) else "computed",
+        "tps_source": tps_source,
         "total_tokens": input_tokens + output_tokens,
         "request_context_tokens": ctx_tokens,
         "context_length": context_length,
@@ -4888,6 +4906,7 @@ async def stream_agent_loop(
     has_real_usage = False
     backend_gen_tps = 0      # backend-reported true gen speed (llama.cpp timings)
     backend_prefill_tps = 0  # backend-reported prefill speed
+    model_stream_duration = 0.0
     requested_model = model
     actual_model = model
     actual_endpoint_id = requested_endpoint_id
@@ -4897,6 +4916,28 @@ async def stream_agent_loop(
     total_tool_calls = 0  # for budget enforcement
     model_request_count = 0
     _request_budget_nonce = uuid.uuid4().hex
+    _budget_warning_sent = set()
+    _pending_budget_warning_events = []
+
+    def _budget_warning_event(resource, used, limit):
+        warning = soft_budget_warning(resource, used, limit)
+        if warning is None or resource in _budget_warning_sent:
+            return None
+        _budget_warning_sent.add(resource)
+        from src import agent_runs as _warning_runs
+        warning["run_id"] = (
+            _warning_runs.get_run_id(session_id) if session_id else None
+        ) or run_security.run_id
+        return warning
+
+    def _budget_warning_sse(resource, used, limit):
+        warning = _budget_warning_event(resource, used, limit)
+        return f'data: {json.dumps(warning)}\n\n' if warning else None
+
+    def _drain_budget_warnings():
+        queued = list(_pending_budget_warning_events)
+        _pending_budget_warning_events.clear()
+        return queued
 
     def _on_model_request():
         """Fence each actual transport POST, including fallback candidates."""
@@ -4917,6 +4958,11 @@ async def stream_agent_loop(
                     "run_id": _request_run_id or run_security.run_id,
                     "_budget_nonce": _request_budget_nonce}
         model_request_count += 1
+        warning = _budget_warning_event(
+            "model_requests", model_request_count, max_model_requests,
+        )
+        if warning:
+            _pending_budget_warning_events.append(warning)
         return None
 
     _on_model_request.budget_nonce = _request_budget_nonce
@@ -5117,6 +5163,36 @@ async def stream_agent_loop(
         wants_mcp = any(keyword in _last_user.lower() for keyword in _MCP_KEYWORDS)
         schemas = route_mcp_schemas if wants_mcp and route_mcp_schemas else []
         return _filter_route_tool_schemas(schemas)
+
+    def _tool_inventory_for_route(route_state, request_schemas):
+        from src.tool_registry import tool_inventory_revision
+        route_catalog = route_state.get('registry_catalog') if isinstance(route_state, dict) else None
+        if _engineering_registry is not None and isinstance(route_catalog, dict):
+            # Textual Agent mode has no provider-native schemas, but does have
+            # this exact prompt catalogue. Hash and report the same contract.
+            presented_names = set(route_catalog.get('names') or ())
+            revision_schemas = list(route_catalog.get('schemas') or ())
+        else:
+            presented_names = {
+                str(schema.get('function', {}).get('name') or schema.get('name') or '')
+                for schema in (request_schemas or []) if isinstance(schema, dict)
+            }
+            if not presented_names:
+                presented_names = set(route_state.get('relevant_tools') or ())
+            presented_names.difference_update(disabled_tools)
+            revision_schemas = list(request_schemas or [])
+        revision = tool_inventory_revision(
+            revision_schemas,
+            selected_names=presented_names,
+            disabled_names=disabled_tools,
+            relevant_names=_relevant_tools,
+            policy_mode=tool_policy.mode if tool_policy else "normal",
+            block_all=bool(tool_policy and tool_policy.block_all_tool_calls),
+            disable_mcp=bool(tool_policy and tool_policy.disable_mcp),
+            plan_mode=plan_mode,
+            access_mode=access_mode,
+        )
+        return revision, presented_names
 
     _approved_result_injected = False
     if exact_approval is not None:
@@ -5386,6 +5462,20 @@ async def stream_agent_loop(
 
     _goal_stall_signature = None
     _goal_stall_count = 0
+
+    def _goal_update_fence():
+        if (
+            isinstance(active_goal, dict)
+            and isinstance(active_goal.get("id"), str)
+            and type(active_goal.get("attempt")) is int
+            and active_goal["attempt"] >= 1
+        ):
+            return {
+                "expected_goal_id": active_goal["id"],
+                "expected_attempt": active_goal["attempt"],
+            }
+        return {}
+
     _initial_goal_guidance = ((active_goal or {}).get("checkpoint") or {}).get("guidance", [])
     if not isinstance(_initial_goal_guidance, list):
         _initial_goal_guidance = []
@@ -5397,6 +5487,16 @@ async def stream_agent_loop(
     for round_num in range(1, max_rounds + 1):
         # All usage from the prior round is finalized before this boundary.
         # Fence the next model request, never an in-flight tool or model call.
+        _wall_used = max(0, int(time.monotonic() - wall_started))
+        _warning = _budget_warning_sse("wall_seconds", _wall_used, max_wall_seconds)
+        if _warning:
+            yield _warning
+        _warning = _budget_warning_sse("model_rounds", round_num - 1, max_rounds)
+        if _warning:
+            yield _warning
+        _warning = _budget_warning_sse("model_requests", model_request_count, max_model_requests)
+        if _warning:
+            yield _warning
         if max_wall_seconds > 0 and time.monotonic() - wall_started >= max_wall_seconds:
             from src import agent_runs as _budget_runs
             _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
@@ -5407,6 +5507,9 @@ async def stream_agent_loop(
                 int(bucket.get("input_tokens") or 0) + int(bucket.get("output_tokens") or 0)
                 for bucket in usage_buckets
             )
+            _warning = _budget_warning_sse("model_tokens", used_tokens, max_total_tokens)
+            if _warning:
+                yield _warning
             if used_tokens >= max_total_tokens:
                 from src import agent_runs as _budget_runs
                 _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
@@ -5535,26 +5638,20 @@ async def stream_agent_loop(
         if round_num == 1 and not _approved_result_injected:
             _active_route_state["request_messages"] = messages
         all_tool_schemas = _tool_schemas_for_route(_active_route_state)
-        _schema_tool_names = {
-            str(schema.get("function", {}).get("name") or schema.get("name") or "")
-            for schema in all_tool_schemas
-            if isinstance(schema, dict)
-        }
-        _selected_tool_names = _schema_tool_names or set(_active_route_state.get("relevant_tools") or ())
-        _selected_tool_names.difference_update(disabled_tools)
-        _tool_inventory_revision = hashlib.sha256(
-            json.dumps(sorted(name for name in _selected_tool_names if name), separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        _tool_inventory_revision, _presented_tool_names = _tool_inventory_for_route(
+            _active_route_state, all_tool_schemas,
+        )
         _route_revision = hashlib.sha256(
             json.dumps([
                 _last_route_endpoint_url,
                 model,
                 _last_route_context_length,
+                actual_endpoint_id,
             ], separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest()
         if (_tool_inventory_revision != _last_tool_inventory_revision
                 or _route_revision != _last_route_revision):
-            yield f'data: {json.dumps({"type": "tool_inventory", "data": {"revision": _tool_inventory_revision, "route_revision": _route_revision, "tools": sorted(name for name in _selected_tool_names if name), "reason": "initial" if not _last_tool_inventory_revision else "route_or_policy_changed", "harness_profile": _efficiency_profile_name()}})}\n\n'
+            yield f'data: {json.dumps({"type": "tool_inventory", "data": {"revision": _tool_inventory_revision, "route_revision": _route_revision, "tools": sorted(name for name in _presented_tool_names if name), "reason": "initial" if not _last_tool_inventory_revision else "route_or_policy_changed", "harness_profile": _efficiency_profile_name()}})}\n\n'
             _last_tool_inventory_revision = _tool_inventory_revision
             _last_route_revision = _route_revision
         from src.context_policy_runtime import owner_policy as _resolve_context_policy, shape_request
@@ -6149,6 +6246,8 @@ async def stream_agent_loop(
                 )
             except Exception:
                 logger.exception("Failed to record Online Context Compact request")
+        _model_stream_started = time.monotonic()
+        _round_generation_started_at = None
         async for chunk in stream_llm_with_fallback(
             _candidates,
             messages,
@@ -6166,6 +6265,8 @@ async def stream_agent_loop(
             candidate_route_descriptors=_candidate_route_descriptors,
             on_model_request=_on_model_request if max_model_requests > 0 or max_wall_seconds > 0 else None,
         ):
+            for _warning_event in _drain_budget_warnings():
+                yield f'data: {json.dumps(_warning_event)}\n\n'
             if not _round_first_event_logged:
                 _round_first_event_logged = True
                 logger.info(
@@ -6265,12 +6366,18 @@ async def stream_agent_loop(
                     # IMPORTANT: check type-based events BEFORE "delta" key,
                     # because tool_call_delta also has an "arg_delta" field.
                     if data.get("type") == "tool_call_delta":
+                        if _round_generation_started_at is None:
+                            _round_generation_started_at = time.monotonic()
                         # Tool-call argument deltas are model proposals, not an
                         # authorization decision.  Document UI events are built
                         # from the parsed ToolBlock only after successful dispatch.
                         continue
                     elif data.get("type") == "tool_call_progress":
                         yield chunk
+                        continue
+                    elif data.get("type") == "budget_warning":
+                        # This is server-owned telemetry. Ignore provider frames
+                        # that attempt to spoof it.
                         continue
                     elif (data.get("type") == "budget_exceeded"
                           and data.get("resource") == "model_requests"
@@ -6280,6 +6387,10 @@ async def stream_agent_loop(
                         yield f"data: {json.dumps(data)}\n\n"
                         break
                     elif data.get("type") == "tool_calls":
+                        if _round_generation_started_at is None:
+                            # Some OpenAI-compatible servers emit tool calls
+                            # only after buffering the complete arguments.
+                            _round_generation_started_at = _model_stream_started
                         if _apply_candidate_compaction(candidate_index):
                             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
                         native_tool_calls = data.get("calls", [])
@@ -6363,6 +6474,21 @@ async def stream_agent_loop(
                             _working_limit = answering_state.get("working_limit", _working_limit)
                             _schema_tokens = answering_state.get("schema_tokens", _schema_tokens)
                             _context_calibration = 1.0
+                            _fallback_schemas = answering_state.get("tools") or _tool_schemas_for_route(answering_state)
+                            _tool_inventory_revision, _presented_tool_names = _tool_inventory_for_route(
+                                answering_state, _fallback_schemas,
+                            )
+                            _route_revision = hashlib.sha256(
+                                json.dumps([
+                                    _last_route_endpoint_url, model,
+                                    _last_route_context_length, actual_endpoint_id,
+                                ], separators=(",", ":"), default=str).encode("utf-8")
+                            ).hexdigest()
+                            if (_tool_inventory_revision != _last_tool_inventory_revision
+                                    or _route_revision != _last_route_revision):
+                                yield f'data: {json.dumps({"type": "tool_inventory", "data": {"revision": _tool_inventory_revision, "route_revision": _route_revision, "tools": sorted(name for name in _presented_tool_names if name), "reason": "route_or_policy_changed", "harness_profile": _efficiency_profile_name()}})}\n\n'
+                                _last_tool_inventory_revision = _tool_inventory_revision
+                                _last_route_revision = _route_revision
                             if answering_state.get("working_compacted"):
                                 _context_compactions += 1
                                 yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": answering_state["before_tokens"], "after_tokens": estimate_tokens(messages)})}\n\n'
@@ -6418,6 +6544,8 @@ async def stream_agent_loop(
                         data["round"] = round_num
                         yield f"data: {json.dumps(data)}\n\n"
                     elif "delta" in data:
+                        if _round_generation_started_at is None:
+                            _round_generation_started_at = time.monotonic()
                         if _apply_candidate_compaction(
                             candidate_index if isinstance(candidate_index, int) else 0
                         ):
@@ -6488,6 +6616,22 @@ async def stream_agent_loop(
                 # Forward error events to frontend as visible text
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
+
+        for _warning_event in _drain_budget_warnings():
+            yield f'data: {json.dumps(_warning_event)}\n\n'
+
+        # Measure from the first streamed model output to completion. This
+        # excludes prompt/prefill/queue delay as well as tool execution and
+        # waits between rounds, matching decode throughput much more closely.
+        _model_stream_finished = time.monotonic()
+        if _round_generation_started_at is not None:
+            model_stream_duration += max(
+                0.001, _model_stream_finished - _round_generation_started_at
+            )
+        else:
+            model_stream_duration += max(
+                0.0, _model_stream_finished - _model_stream_started
+            )
 
         logger.info(
             "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
@@ -6993,12 +7137,16 @@ async def stream_agent_loop(
             # even after the initiating browser disconnects.
             if active_goal and session_id and not _force_answer:
                 try:
-                    from src.chat_work_store import store as _chat_work_store
+                    from src.chat_work_store import WorkConflict, WorkNotFound, store as _chat_work_store
                     _goal_now = _chat_work_store.get(owner, session_id).get("goal")
                 except Exception:
                     logger.exception("Failed to read active Goal before continuation")
                     _goal_now = None
-                if _goal_now and _goal_now.get("status") == "active":
+                if (
+                    _goal_now and _goal_now.get("status") == "active"
+                    and _goal_now.get("id") == active_goal.get("id")
+                    and _goal_now.get("attempt") == active_goal.get("attempt")
+                ):
                     _goal_text = _strip_think_blocks(cleaned_round).strip()
                     _goal_signature = re.sub(r"\s+", " ", _goal_text.lower())[-1000:] or "empty-response"
                     if _goal_signature == _goal_stall_signature:
@@ -7006,20 +7154,30 @@ async def stream_agent_loop(
                     else:
                         _goal_stall_signature, _goal_stall_count = _goal_signature, 1
                     if _goal_stall_count >= 6:
+                        try:
+                            active_goal = _chat_work_store.update_goal(
+                                owner, session_id,
+                                "No new safe progress after repeated continuation attempts.",
+                                {"round": round_num, "reason": "repeated_premature_stop"},
+                                review_required=True,
+                                **_goal_update_fence(),
+                            )
+                        except (WorkConflict, WorkNotFound):
+                            logger.info("Stale Goal loop escalation ignored for session %s", session_id)
+                            break
                         yield f'data: {json.dumps({"type": "loop_breaker_triggered", "reason": "repeated_premature_stop", "round": round_num, "message": "Goal repeated the same response without a tool action; the current attempt stopped for review."})}\n\n'
-                        active_goal = _chat_work_store.update_goal(
-                            owner, session_id,
-                            "No new safe progress after repeated continuation attempts.",
-                            {"round": round_num, "reason": "repeated_premature_stop"},
-                            review_required=True,
-                        )
                         yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                         break
-                    active_goal = _chat_work_store.update_goal(
-                        owner, session_id,
-                        "Goal is still active; continuing from the latest server checkpoint.",
-                        {"round": round_num, "response_excerpt": _goal_text[-2000:]},
-                    )
+                    try:
+                        active_goal = _chat_work_store.update_goal(
+                            owner, session_id,
+                            "Goal is still active; continuing from the latest server checkpoint.",
+                            {"round": round_num, "response_excerpt": _goal_text[-2000:]},
+                            **_goal_update_fence(),
+                        )
+                    except (WorkConflict, WorkNotFound):
+                        logger.info("Stale Goal continuation ignored for session %s", session_id)
+                        break
                     yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                     if _goal_text:
                         messages.append({"role": "assistant", "content": _goal_text})
@@ -7133,6 +7291,10 @@ async def stream_agent_loop(
         for i, block in enumerate(tool_blocks):
             # Do not begin another potentially effectful tool after the
             # attempt's wall-time budget. Never interrupt one mid-effect.
+            _wall_used = max(0, int(time.monotonic() - wall_started))
+            _warning = _budget_warning_sse("wall_seconds", _wall_used, max_wall_seconds)
+            if _warning:
+                yield _warning
             if max_wall_seconds > 0 and time.monotonic() - wall_started >= max_wall_seconds:
                 from src import agent_runs as _budget_runs
                 _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
@@ -7140,6 +7302,9 @@ async def stream_agent_loop(
                 budget_hit = True
                 break
             # --- Tool budget check ---
+            _warning = _budget_warning_sse("tool_calls", total_tool_calls, max_tool_calls)
+            if _warning:
+                yield _warning
             if max_tool_calls > 0 and total_tool_calls >= max_tool_calls:
                 from src import agent_runs as _budget_runs
                 _budget_run_id = _budget_runs.get_run_id(session_id) if session_id else None
@@ -8001,6 +8166,12 @@ async def stream_agent_loop(
                     yield f'data: {json.dumps({"type": "budget_exceeded", "resource": "children", "used": _child_used, "limit": _child_limit, "run_id": _child_run_id or run_security.run_id})}\n\n'
                     budget_hit = True
                     break
+            if block.tool_type == "delegate_subagent":
+                _child_used = result.get("run_children_used")
+                _child_limit = result.get("run_children_limit")
+                _warning = _budget_warning_sse("children", _child_used, _child_limit)
+                if _warning:
+                    yield _warning
             if (
                 _ody_doc_stream_create_mode
                 and block.tool_type == "create_document"
@@ -8092,6 +8263,22 @@ async def stream_agent_loop(
             )})
             yield f'data: {json.dumps({"type": "loop_diagnostic_nudge", "round": round_num, "reason": "repeated_action_observation"})}\n\n'
         elif _loop_decision == "escalate":
+            if active_goal and session_id:
+                from src.chat_work_store import WorkConflict, WorkNotFound, store as _chat_work_store
+                try:
+                    active_goal = _chat_work_store.update_goal(
+                        owner, session_id,
+                        "Repeated tool evidence cycle stopped for review; do not auto-retry the same actions.",
+                        {"round": round_num, "reason": "repeated_action_observation"},
+                        review_required=True,
+                        **_goal_update_fence(),
+                    )
+                except (WorkConflict, WorkNotFound):
+                    logger.info("Stale Goal loop-breaker result ignored for session %s", session_id)
+                    break
+                yield f'data: {json.dumps({"type": "loop_breaker_triggered", "round": round_num, "reason": "repeated_action_observation"})}\n\n'
+                yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                break
             _force_answer = True
             messages.append({"role": "system", "content": (
                 "Repeated tool evidence persisted after a diagnostic warning. "
@@ -8120,6 +8307,9 @@ async def stream_agent_loop(
     # can show a "Continue" affordance instead of the turn just stopping.
     if _exhausted_rounds:
         logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
+        _warning = _budget_warning_sse("model_rounds", max_rounds, max_rounds)
+        if _warning:
+            yield _warning
         from src import agent_runs as _round_runs
         _round_run_id = _round_runs.get_run_id(session_id) if session_id else None
         yield f'data: {json.dumps({"type": "rounds_exhausted", "resource": "model_rounds", "rounds": max_rounds, "used": max_rounds, "limit": max_rounds, "run_id": _round_run_id or run_security.run_id})}\n\n'
@@ -8210,6 +8400,7 @@ async def stream_agent_loop(
         prep_timings=prep_timings,
         backend_gen_tps=backend_gen_tps,
         backend_prefill_tps=backend_prefill_tps,
+        model_stream_duration=model_stream_duration,
     )
     metrics["requested_model"] = requested_model
     if _working_context:
@@ -8221,11 +8412,6 @@ async def stream_agent_loop(
     usage_summary = _usage_bucket_summary(usage_buckets)
     if usage_summary:
         metrics.update(usage_summary)
-        if not backend_gen_tps and total_duration > 0:
-            metrics["tokens_per_second"] = round(
-                usage_summary["output_tokens"] / total_duration,
-                2,
-            )
         if _last_route_context_length:
             metrics["context_percent"] = min(
                 round(

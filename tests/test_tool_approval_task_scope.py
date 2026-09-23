@@ -404,6 +404,10 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "fd.append('message', approvalForSend ? '' : _finalMsgWithInject);" in frontend
     assert "json.type === 'tool_approval_resolved'" in frontend
     assert "if (aq.resolved) return null;" in renderer
+    assert "const preview = aq.action.preview" in renderer
+    assert "previewNode.textContent = previewLines.join('\\n')" in renderer
+    assert "previewNode.innerHTML" not in renderer
+    assert "ask-user-action-preview" in renderer
     assert "ev.ask_user && !ev.ask_user.resolved" in renderer
     assert '"label": "Allow once"' not in approvals
     assert '"label": "Allow for this task"' in approvals
@@ -413,8 +417,14 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
 
     version = "20260922approval1"
-    assert "chat.js?v=20260923contextretry1" in app
-    assert "chat.js?v=20260923contextretry1" in index
-    assert "chatRenderer.js?v=20260923replaycursor1" in frontend
-    assert "chatRenderer.js?v=20260923replaycursor1" in app
-    assert "chatRenderer.js?v=20260923replaycursor1" in index
+    assert "chat.js?v=20260924compactpreview1" in app
+    assert "chat.js?v=20260924compactpreview1" in index
+    assert "previewNode.textContent = previewLines.join('\\n')" in renderer
+    assert "previewNode.innerHTML" not in renderer
+    assert "chatRenderer.js?v=20260924actionpreview1" in frontend
+    assert "chatRenderer.js?v=20260924actionpreview1" in app
+    assert "chatRenderer.js?v=20260924actionpreview1" in index
+    assert "style.css?v=20260924actionpreview1" in index
+    service_worker = (root / "static/sw.js").read_text(encoding="utf-8")
+    assert "chatRenderer.js?v=20260924actionpreview1" in service_worker
+    assert "style.css?v=20260924actionpreview1" in service_worker

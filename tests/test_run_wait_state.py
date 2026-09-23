@@ -198,6 +198,20 @@ def test_goal_monologue_stall_is_resumable_not_missing_question():
     assert panel["wait_reason"] == "repeated_premature_stop"
 
 
+def test_repeated_action_loop_review_is_resumable_with_exact_reason():
+    from src.run_wait_state import compose_wait_panel
+
+    panel = compose_wait_panel(
+        run={"run_id": "run-loop", "status": "done", "started_at": 100},
+        goal={"status": "review_required", "wait_reason": "repeated_action_observation",
+              "status_since": 180, "lease_held": False},
+        now=200,
+    )
+    assert panel["phase"] == "review"
+    assert panel["recovery_action"] == "resume_goal"
+    assert panel["wait_reason"] == "repeated_action_observation"
+
+
 def test_repeated_provider_failure_is_not_presented_as_unanswered_question():
     from src.run_wait_state import compose_wait_panel
 

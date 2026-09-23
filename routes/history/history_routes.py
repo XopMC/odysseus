@@ -226,7 +226,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         return SimpleNamespace(
             id=row.id, model=row.model, endpoint_url=row.endpoint_url,
             owner=row.owner, history=tail, context_checkpoint=checkpoint,
-            context_checkpoint_count=covered,
+            context_checkpoint_count=covered, message_count=actual_count,
         )
 
     def _stored_context_stats(db, row: DbSession, estimate_tokens) -> tuple[int, int]:
@@ -1241,7 +1241,25 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 1 for m in session.history
                 if (getattr(m, "metadata", None) or {}).get("compacted")
             )
-            can_compact = stored_used > 0 and not active
+            from src.agent_context import manual_compaction_preview
+            raw_message_count = max(
+                len(getattr(session, 'history', None) or []),
+                int(getattr(session, 'message_count', 0) or 0),
+            )
+            recent_keep = min(8, max(4, raw_message_count // 4),
+                             max(1, len(messages) - 1))
+            compaction_preview = manual_compaction_preview(
+                messages, recent_keep, measured_tokens=working_used,
+            )
+            compaction_preview['summarizer_configured'] = False
+            compaction_preview['summarizer_model'] = None
+            can_compact = bool(stored_used > 0 and not active
+                               and raw_message_count >= 6
+                               and compaction_preview['feasible'])
+            if active:
+                compaction_preview['reason'] = 'active_run'
+            elif stored_used <= 0 or raw_message_count < 6:
+                compaction_preview['reason'] = 'not_enough_messages'
             # Keep the observed request separate from newly saved settings. A
             # settings edit cannot retroactively change an in-flight snapshot.
             from src.context_policy import ContextPolicy
@@ -1263,6 +1281,26 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     effective_policy = ContextPolicy().to_dict()
             except ValueError:
                 policy_error = True
+            if can_compact:
+                try:
+                    from src.endpoint_resolver import resolve_endpoint
+                    compact_owner = getattr(session, 'owner', None) or effective_user(request)
+                    summary_url, summary_model, _summary_headers = resolve_endpoint(
+                        'utility', fallback_url=session.endpoint_url,
+                        fallback_model=session.model,
+                        fallback_headers=getattr(session, 'headers', None) or {},
+                        owner=compact_owner,
+                    )
+                    compaction_preview['summarizer_configured'] = bool(summary_url and summary_model)
+                    compaction_preview['summarizer_model'] = summary_model if summary_url else None
+                    if not compaction_preview['summarizer_configured']:
+                        compaction_preview['reason'] = 'summarizer_not_configured'
+                        compaction_preview['feasible'] = False
+                        can_compact = False
+                except Exception:
+                    compaction_preview['reason'] = 'summarizer_not_configured'
+                    compaction_preview['feasible'] = False
+                    can_compact = False
             observed_threshold = snapshot.get("auto_compact_threshold") if snapshot else None
             observed_enabled = snapshot.get("auto_compact_enabled") if snapshot else None
             if active:
@@ -1342,6 +1380,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "context_messages": len(messages),
                 "compacted_messages": compacted_messages,
                 "can_compact": can_compact,
+                "compaction_preview": compaction_preview,
                 "should_compact": bool(display_enabled and effective_trigger_tokens is not None
                                        and used >= effective_trigger_tokens),
                 # While idle, show the policy that will shape the *next*

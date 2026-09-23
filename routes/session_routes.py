@@ -1078,26 +1078,46 @@ def setup_session_routes(
         # Earlier messages are already represented by its durable checkpoint.
         working_history = list(session.get_context_messages())
         recent_keep = min(8, max(4, len(history) // 4), max(1, len(working_history) - 1))
+        # Shared read-only preview enforces whole native batches and protects
+        # the newest user group before any summarizer request is dispatched.
+        from src.agent_context import manual_compaction_plan
+        from src.model_context import estimate_tokens
+        preview = manual_compaction_plan(
+            working_history, recent_keep, measured_tokens=int(estimate_tokens(working_history)),
+        )
+        older, recent = preview["older"], preview["recent"]
+        if not preview["feasible"]:
+            return {
+                "ok": False, "status": "unchanged", "reason": "native_not_compactable",
+                "message": "No safe context cut is available without splitting protected conversation/tool groups",
+                "compaction_preview": {
+                    "feasible": False, "reason": "native_not_compactable",
+                    "archive_groups": preview["archive_groups"],
+                    "protected_groups": preview["protected_groups"],
+                },
+            }
         # The checkpoint cut is a raw-history index, whereas working_history
-        # excludes slash UI chatter. Locate the cut by visible messages so a
-        # hidden slash entry cannot silently discard an unsummarized turn.
+        # excludes slash UI chatter. Locate the boundary using the *expanded*
+        # atomic-group tail, not the requested message count.
         recent_start = len(history)
         visible_tail = 0
+        recent_visible_count = sum(
+            1 for message in recent
+            if _message_metadata(message).get("source") != "slash"
+        )
         for index in range(len(history) - 1, -1, -1):
             if _message_metadata(history[index]).get("source") != "slash":
                 visible_tail += 1
-            if visible_tail >= recent_keep:
+            if visible_tail >= recent_visible_count:
                 recent_start = index
                 break
-        older = working_history[:-recent_keep]
-        recent = working_history[-recent_keep:]
         if not older:
             raise HTTPException(400, "Nothing old enough to compact")
 
         from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary, is_compaction_prompt_echo
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
-        from src.model_context import estimate_tokens, get_context_length
+        from src.model_context import get_context_length
         import hashlib
 
         owner = getattr(session, "owner", None) or effective_user(request)

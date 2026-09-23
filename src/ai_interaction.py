@@ -363,6 +363,8 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
     if not _memory_manager:
         return {"error": "Memory manager not available"}
 
+    from src.memory_safety import is_sensitive_memory_text
+
     lines = content.strip().split("\n")
     if not lines:
         return {"error": "Need at least 1 line: action"}
@@ -371,7 +373,8 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 
     if action == "list":
         category_filter = lines[1].strip().lower() if len(lines) > 1 and lines[1].strip() else None
-        memories = _memory_manager.load(owner=owner)
+        memories = [m for m in _memory_manager.load(owner=owner)
+                    if not is_sensitive_memory_text(m.get("text"))]
         if category_filter:
             memories = [m for m in memories if m.get("category", "").lower() == category_filter]
         if not memories:
@@ -394,6 +397,8 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         category = lines[2].strip().lower() if len(lines) > 2 and lines[2].strip() else "fact"
         if not text:
             return {"error": "Memory text cannot be empty"}
+        if is_sensitive_memory_text(text):
+            return {"error": "Credential-shaped content cannot be saved as model-recalled memory."}
 
         entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
         # Strict load: this is a read-modify-write, and it is the path an
@@ -493,7 +498,8 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         if len(lines) < 2:
             return {"error": "Search needs line 2: query"}
         query = lines[1].strip()
-        memories = _memory_manager.load(owner=owner)
+        memories = [m for m in _memory_manager.load(owner=owner)
+                    if not is_sensitive_memory_text(m.get("text"))]
         query_lower = query.lower()
         exact_results = [m for m in memories if query_lower in (m.get("text", "").lower())]
 

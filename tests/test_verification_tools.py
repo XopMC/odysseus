@@ -67,6 +67,25 @@ def test_default_test_profile_falls_back_to_npm(tmp_path, monkeypatch):
     assert result["exit_code"] == 0
 
 
+def test_verification_profile_discovery_is_read_only_and_kind_scoped(tmp_path, monkeypatch):
+    import importlib
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {
+        "test": "node test.js", "lint": "node lint.js",
+    }}))
+    monkeypatch.setattr("src.tool_execution._resolve_search_root", lambda raw: str(tmp_path))
+    verification_tools = importlib.import_module("src.agent_tools.verification_tools")
+    monkeypatch.setattr(verification_tools, "run_profile",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not execute")))
+
+    tests = asyncio.run(RunVerificationTool("test").execute(
+        json.dumps({"path": ".", "profile": "list"}), {}))
+    lint = asyncio.run(RunVerificationTool("lint").execute(
+        json.dumps({"path": ".", "profile": "list"}), {}))
+    assert tests == {"available_profiles": ["npm_test", "pytest"], "code": "ok", "exit_code": 0}
+    assert lint == {"available_profiles": ["npm_lint"], "code": "ok", "exit_code": 0}
+
+
 def test_verification_tools_keep_execution_permissions():
     from src.tool_capabilities import ToolEffect, capabilities_for_tool
     from src.tool_security import NON_ADMIN_BLOCKED_TOOLS, plan_mode_disabled_tools
@@ -83,3 +102,16 @@ def test_native_function_call_maps_to_verification_handler():
         block = function_call_to_tool_block(name, "{}")
         assert block.tool_type == name
         assert name in agent_tools.TOOL_HANDLERS
+
+
+def test_native_verification_schemas_offer_read_only_profile_discovery():
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+    schemas = {
+        entry["function"]["name"]: entry["function"]["parameters"]["properties"]["profile"]["enum"]
+        for entry in FUNCTION_TOOL_SCHEMAS
+        if entry["function"]["name"] in {"run_tests", "run_lint"}
+    }
+    assert schemas == {
+        "run_tests": ["list", "pytest", "npm_test"],
+        "run_lint": ["list", "npm_lint"],
+    }

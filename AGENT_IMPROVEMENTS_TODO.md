@@ -10,6 +10,78 @@
 Каждый чекбокс ниже остаётся открытым до проверки всех частей требования на
 реальном runtime. Локальные тесты сами по себе не закрывают пункт.
 
+- 2026-09-23 17:09 UTC: начата интеграция №11 для Agent/Goal host file tools.
+  Вместо прямого stateless SSH file helper mutations теперь направляются в
+  существующий owner/session-scoped Team host runner transaction; он уже
+  фиксирует before-image до записи, after hashes, проверяет active writers,
+  scope, identities и hash на выборочном rollback. Ответ мутации теперь
+  включает `file_checkpoint` с точными `after_sha256`; добавлен host-only
+  `rollback_file_checkpoint` с явными ID/hash, unknown SSH ack остаётся
+  non-retryable. Checkpoint record дополнен durable `run_id`. Failing-first
+  transport/rollback regressions и host runner suite: 122 passed, 51 subtests.
+  Это пока локальная host-route реализация: Agent edits внутри контейнерного
+  workspace и live Jetson/Safari ещё не проверены; №11 открыт.
+
+- 2026-09-23 17:29 UTC: расширена №11 на локальный Agent/Goal workspace.
+  `write_file`, `edit_file`, `apply_patch` теперь сначала создают durable
+  before-image в app-owned `DATA_DIR/agent-file-checkpoints` (owner/chat/run
+  scope, 0700/0600), затем прикладывают exact before/after hashes в результат.
+  Общий `rollback_file_checkpoint` работает с local и Jetson ID, сериализует
+  local rollback с canonical-path mutation queue, проверяет owner/chat/after
+  hash и отказывается затирать user edits. Local/host checkpoint suite:
+  153 passed, 60 subtests; полный pytest после объединения изменений:
+  7,233 passed, 23 skipped, 109 subtests, 9 warnings; py_compile и diff check
+  чистые. Local restart boundary сбросила in-memory Runner и восстановила
+  файл по persisted before-image (15 passed, 2 subtests для local/host restart).
+  Это пока local evidence; Jetson candidate, Safari UI/reload smoke и
+  многопроцессный/длительный runtime ещё не проверены, №11 открыт.
+
+- 2026-09-23 15:00–15:26 UTC: продолжен №07 Unknown-side-effect inbox.
+  Добавлены owner-scoped verify receipt (хранится только digest evidence),
+  one-shot authorize-retry, CAS revision, exact tool-name+action-hash binding,
+  atomic consumption when a new matching intent is recorded, and revoke/no-retry.
+  No stored payload is replayed; Goal resume/revise remains blocked until unknown
+  or verified-not-applied effects are resolved; an explicit retry authorization
+  enables only the matching action. UI has verify/no-retry/authorize/revoke
+  actions and localized labels; incident export allowlists the additive states.
+  Focused suites: 52 passed; full pytest: 7,189 passed, 23 skipped, 109 subtests.
+  Real effect verification/retry has not been exercised against production and
+  the candidate is not deployed; №07 remains open.
+
+- 2026-09-23 14:49–14:52 UTC: расширена №06 recovery matrix после tool-result
+  границы: subprocess записал tool intent/receipt и `tool_output`, был убит
+  сразу после публикации; новый процесс восстановил тот же cursor и один
+  interrupted run, сохранил intent=`done`/revision 2, replay ровно
+  `agent_step → tool_start → tool_output`, а повторное recovery ничего не
+  выполнило. Agent/subagent/recovery suite: 46 passed. Это детерминированный
+  crash-тест, не live external-tool test; №06 открыт.
+
+- 2026-09-23 14:32–14:42 UTC: для crash boundary `child join` из №06
+  обнаружен разрыв между двумя commits: runtime сохранял `completed/result`,
+  затем отдельно писал terminal status event. Добавлен `_update_with_event`,
+  который атомарно записывает оба; его используют completed, waiting_user,
+  failed и cancelled child transitions. Process-kill regression убивает worker
+  сразу после commit и после restart проверяет `wait(all)`, непустой result и
+  ровно одно terminal event. Полный pytest: 7,184 passed, 23 skipped,
+  109 subtests; изолированный Jetson exact-image suite: 45 passed. Код
+  `43c0612` отправлен в GitHub main/master; production пока остаётся на
+  `b90c9ba`, потому что перед switch подтверждён один running chat run.
+  Нужны switch после естественного завершения run и Safari/cross-client smoke;
+  №06 остаётся открытым.
+
+- 2026-09-23 14:10–14:18 UTC: в content-free production log counters
+  обнаружены два повторных исключения из `stream_agent_loop` при фиксации
+  `ask_user`; оба стека сходились на отказе `update_goal` для уже ожидающей
+  Goal. Добавлен idempotent путь только для совпадающего durable
+  `question_id`; другая ожидающая карточка fenced как конфликт и не меняет
+  revision. Failing-first регрессия воспроизведена, затем store/routes suite:
+  57 passed. Изолированный Jetson candidate прошёл те же 57; exact image
+  `release-b90c9ba` (revision label `b90c9ba31b41edaea3dd4ddc6ab0041385c032e2`)
+  deployed after zero-active-run check, health 200/healthy/0 restarts, and
+  post-switch log counters zero Traceback/SQLite-lock. Safari safe test chat
+  retained the selected VL model, smoke response, and context estimate after
+  reload. A duplicate event was not observed again live, so №06/51 remain open.
+
 - 2026-09-23 11:58 +05: пункт №30 подтверждён отдельно от шестичасового gate.
   `tests/fixtures/long_replay_corpus_manifest.json` фиксирует SHA-256 corpus
   1K/10K/100K; `test_long_replay_corpus.py` проверяет durable cursor,
@@ -1053,6 +1125,7 @@
   passed. Live build ещё не проверен.
 
 - [ ] **01. Панель «Почему агент ждёт?»** Показывать текущий run/child, lease, модель и endpoint, фазу (`model`, `tool`, `approval`, `user`, `queue`, `reconnect`), длительность, последний durable checkpoint и безопасное действие восстановления. Проверить на зависшем запросе и двух клиентах.
+  - 2026-09-23 17:47 UTC: исправлена доказательность opt-in real-browser QA. Раньше desktop и mobile проходили последовательно, хотя тест назывался двухклиентным; теперь два независимых контекста остаются открытыми на одном synthetic stalled run, сравнивают run/model/endpoint/checkpoint, затем каждый по отдельности reload-ится и проверяется, что run всё ещё `running`, wait diagnosis сохранился, а браузерных ошибок и данных child-контекста нет. `ODYSSEUS_REAL_WAIT_BROWSER_QA=1 ./.venv/bin/python -m pytest -q tests/test_why_waiting_browser_qa.py` — 1 passed; state/UI/inspector slice — 29 passed; `node --check static/js/chat-work.js` и `git diff --check` прошли. Это синтетический локальный Chromium QA, не реальный production Safari stalled-run; пункт остаётся открытым.
 - [x] **02. Unified run inspector.** Дерево parent → children → tool calls → artifacts с точными ID, временами, статусами и cursor; переход из Goal/Plan/Subagent UI к конкретному событию.
   - 2026-09-23: локально добавлен owner-scoped bounded inspector с курсорами
     parent run, child event, replay event и ленивым раскрытием child evidence.
@@ -1085,6 +1158,9 @@
     точный tool-output и owner isolation. 7,165 локальных тестов и 118
     профильных Jetson candidate-тестов прошли; production healthy/0 restarts.
 - [ ] **03. Классификация ошибок и retry policy.** Разделить timeout, rate limit, provider unload, schema mismatch, transport, context, unknown side effect; повторять только доказанно безопасные запросы с jitter и budget.
+  - 2026-09-23 17:54 UTC: закрыт локальный retry-policy дефект: non-stream уже учитывал `Retry-After`, а SSE stream терял заголовок и повторял 429/503 только по локальному backoff. Теперь все HTTP stream rejection paths переносят только нормализованное числовое `retry_after_seconds`; HTTP-date и delay-seconds разбираются, ожидание ограничено monotonic retry deadline, сырой header/body наружу не попадает. Transport/read/write timeout остаётся fenced как unknown outcome; автоматически повторяются только явные pre-content HTTP overload/provider-unload rejection. Failing-first tests: 3 ожидаемых падения на недостающих API/поведении; после фикса — retry/date/SSE slice 9 passed, полный `tests/test_llm_core_fallback.py` 130 passed; `py_compile` и `git diff --check` чистые. Не проверено на real provider 429/503 или Jetson, поэтому пункт №03 открыт.
+  - 2026-09-23 17:58 UTC: полный pytest на текущем интегрированном локальном дереве — 7,237 passed, 23 skipped, 109 subtests passed, 9 warnings за 187.96s. `GET /api/health` production после suite — healthy; это не подтверждает image SHA/log counters или release correctness. Новая retry-правка не развёрнута.
+  - 2026-09-23 18:04 UTC: добавлен сквозной async transport regression с case-insensitive `httpx.Headers`: upstream first returns 429 + `Retry-After: 3.5`, middleware waits exactly 3.5s within budget, second request streams the answer and `[DONE]`. Full integrated pytest with `ODYSSEUS_REAL_WAIT_BROWSER_QA=1`: 7,239 passed, 22 skipped, 109 subtests passed, 9 warnings (192.04s); this includes actual two-client synthetic waiting QA. Health after test healthy; all disposable fixture workers exited. This remains local/isolated evidence, not provider fault-injection against production or Jetson.
   - 2026-09-23: общий streaming transport path для ChatGPT Subscription,
     Ollama, Anthropic и OpenAI-compatible теперь отдаёт стабильную категорию,
     не раскрывает provider exception/URL credentials в SSE и логах. Connect
@@ -1107,6 +1183,27 @@
     затем 133 профильных и полный pytest 7,176 passed/23 skipped/109
     subtests. На Jetson эта следующая правка ещё не выпущена, поэтому пункт
     остаётся открытым.
+  - 2026-09-23 19:56 UTC: проверка выявила дополнительный retry-дефект:
+    обычный non-stream HTTP 503 без признака безопасного overload/unload
+    также запускал повтор. Теперь повтор ограничен rate-limit, явным
+    provider-unload и транспортными сбоями до доставки запроса; общий 503
+    заканчивается сразу. В terminal stream error сохраняются только
+    allowlisted category, bounded Retry-After и fallback flag; UI добавляет
+    безопасное действие для context/schema/unload/timeout/transport/unknown
+    outcome, не интерполируя текст как HTML. `pytest` для fallback,
+    browser error helper и i18n: 140 passed, 1 skipped, 1 существующее
+    SQLAlchemy warning. Изменение локальное; полный suite, Jetson/live Safari
+    fault-injection и итоговая приемка taxonomy остаются открытыми.
+  - 2026-09-23 19:58 UTC: расширена fail-closed регрессия для 503 context и
+    schema mismatch (не ретраятся так же, как общий 503); свежий focused run
+    `test_llm_core_fallback.py`, `test_chat_stream_errors_js.py`,
+    `test_i18n_js.py`: 142 passed, 1 skipped, 1 существующее предупреждение.
+    `node --check` для четырёх изменённых JS-файлов, `.venv/bin/python -m
+    py_compile src/llm_core.py` и `git diff --check` прошли. Первоначально
+    использованный `python` отсутствует в PATH; валидатор повторён через
+    проектный `.venv` и завершился успешно. Live/deploy/full-suite по-прежнему
+    не выполнены.
+  - 2026-09-23 20:06 UTC: полный `ODYSSEUS_REAL_WAIT_BROWSER_QA=1 ./.venv/bin/python -m pytest -q` после синхронизации asset identities завершился успешно: 7,268 passed, 22 skipped, 109 subtests, 9 warnings (196.42 s). Первый полный прогон до обновления ожидаемых asset versions показал две test-only ошибки; обе version assertions синхронизированы и их адресный прогон 2 passed. Production health healthy; безопасный Safari QA URL пережил повторный Cmd-R. Ошибки retry не вводились на production image, exact-SHA/provider fault injection и шестичасовой acceptance ещё открыты.
 - [ ] **04. Watchdog полезного прогресса.** Отдельно отслеживать heartbeat и реальные изменения: step, artifact, тест, diff, evidence. Оживший SSE не должен считаться прогрессом задачи.
   - 2026-09-23: failing-first регрессия обнаружила, что обычное продление
     Goal с новым `round` и тем же монологом ошибочно повышало progress
@@ -1119,6 +1216,8 @@
     Двухклиентный rendered browser smoke с synthetic stalled model-like run,
     reload и одинаковым run/checkpoint прошёл. Настоящий production stall
     ещё не наблюдался на этой ревизии, поэтому пункт остаётся открытым.
+  - 2026-09-23 18:18 UTC: новые failing-first проверки нашли два long-run пробела. Plan-store emits stable step IDs as `steps[].id`, while watchdog hashed only `steps[].step_id`, so a different completed step with the same status vector could be dropped as a duplicate. Separately, exact duplicate suppression retained only the latest 512 evidence digests, so an older repeated result could reset the stall clock after eviction. Fixed both: recognize either ID form, plus a bounded 512-KiB chunked Bloom filter remembers old fingerprints; after the hard cap the detector refuses new resets and exposes `tracking_capacity_exhausted` in the UI for manual review. Watchdog/telemetry/UI/inspector slice: 20 passed; full pytest with isolated two-client browser QA: 7,242 passed, 22 skipped, 109 subtests, 9 warnings (191.16s); JS syntax and diff check clean. Production health endpoint healthy at 18:18 UTC, which is availability-only. Code remains local; production Safari/Jetson run validation is still required and #04 stays open.
+  - 2026-09-23 18:21 UTC: rendered synthetic acceptance дополнительно создаёт active Goal с saturated progress telemetry. Два одновременно открытых desktop/mobile browser клиента показывают notice о ручной проверке, сохраняют его после независимого reload, а stalled synthetic run остаётся активным. Combined progress/telemetry/UI/inspector + opt-in browser suite: 21 passed; service-worker и изменённые JS syntax checks и diff-check clean. Production `/api/health` healthy (availability only); live Safari/Jetson verification отсутствует, #04 открыт.
 - [ ] **05. Детектор зацикливания.** Ловить одинаковые action→observation, повторные ошибки, A↔B циклы, монолог, бессмысленное повторное сжатие; сначала диагностический nudge, затем bounded escalation, не бесконечный автоповтор.
   - 2026-09-23: failing-first тест обнаружил, что шесть одинаковых
     Goal-монологов переводили цель в `waiting_user` без `ask_user`/вопроса.
@@ -1135,9 +1234,32 @@
     отклоняют такой nominal checkpoint как `context_no_reduction` без
     публикации `compacted` и без model dispatch; старый ledger сохранён.
     31 контекстный тест + 2 subtests и полный pytest 7,182 passed/23
-    skipped/109 subtests. Нужны Jetson candidate и долгий live Goal;
-    пункт остаётся открытым до этих проверок.
+    skipped/109 subtests. Exact Jetson candidate прошёл 31 тест/2 subtests,
+    release `451b3ae` healthy/0 restarts. Нужен долгий live Goal с реальной
+    моделью; пункт остаётся открытым до этой проверки.
+  - 2026-09-23 18:40 UTC: failing-first Goal-cycle integration обнаружил, что action→observation escalation останавливал текущую agent loop с `force_answer`, но оставлял durable Goal в `active`; terminal controller мог запустить следующую попытку и повторить тот же цикл. Эскалация теперь CAS-фенсит `goal_id + attempt`, атомарно переводит только текущую попытку в `review_required`, сохраняет отдельную причину `repeated_action_observation`, освобождает lease и запрещает авто-повтор до явного Resume. Stale loop/update не может поменять новую попытку. Goal producer tests: 27 passed; Goal store: 47 passed; wait-state/UI: 27 passed; full pytest with isolated two-client browser QA: 7,246 passed, 22 skipped, 109 subtests, 9 warnings (191.75s); JS syntax/diff checks clean. Production health healthy at 18:40 UTC, availability only. #05 остаётся открытым до live Safari/Jetson длительного-run acceptance и compaction-cycle проверок.
 - [ ] **06. Durable recovery matrix.** Автотесты на kill/restart в каждой точке: до tool start, после effect-intent, после tool result, во время compaction, approval, child join и terminal snapshot.
+  - 2026-09-23 18:52 UTC: закрыты ещё две недостающие границы process-kill matrix.
+    Если процесс умирает после `agent_step`, но до `tool_start`/effect-intent,
+    restart восстанавливает только событие и `interrupted`: intent и unknown
+    side effect не создаются. Если процесс завершается штатно и умирает сразу
+    после durable terminal snapshot, recovery не переводит `done` в
+    `interrupted`; terminal replay возвращает тот же `done` sentinel. Эта
+    последняя проверка выявила расхождение: offline `event_page` отдавал
+    `[DONE]` как `opaque`, тогда как live путь возвращал `type=done`; нормализация
+    исправлена и закреплена регрессией. Durable recovery/replay suite: 46
+    passed; полный suite с isolated two-client browser QA: 7,248 passed,
+    22 skipped, 109 subtests, 9 warnings; Python compile, JS syntax и
+    `git diff --check` чистые. #06 остаётся открытым: требуется полный audit
+    crash-точек, Jetson exact-image и live Safari/cross-client acceptance.
+  - 2026-09-23 18:58 UTC: добавлена отдельная граница между durable
+    `effect-intent` и `tool_start`: принудительная смерть процесса оставляет
+    единственную запись `unknown` в inbox, сохраняет `agent_step`, не публикует
+    ложный `tool_start` и не повторяет действие при повторном recovery.
+    Полный `tests/test_durable_recovery_process.py`: 16 passed; полный pytest с
+    isolated two-client browser QA: 7,249 passed, 22 skipped, 109 subtests,
+    9 warnings (193.47 s). Python compile и `git diff --check` clean. Полная
+    acceptance #06 всё ещё ждёт exact Jetson image и live Safari.
   - 2026-09-22: добавлены реальные subprocess `os._exit(17)` проверки на
     двух границах compaction (`compacted` summary и model-visible
     `context_checkpoint`) и на `ask_user` approval-wait. После restart
@@ -1166,7 +1288,18 @@
     summarizer; конкретный HTTP status старый image не логирует, поэтому
     не утверждаем, что единственная причина — именно транспорт. Сервис,
     маршруты, чат и Goal не менялись. Запрошена проверка LM Studio host.
-- [ ] **07. Unknown-side-effect inbox.** Отдельная очередь неопределённых side effects с проверяемыми receipts и кнопками «проверено / не повторять / повторить после проверки».
+- [x] **07. Unknown-side-effect inbox.** Отдельная очередь неопределённых side effects с проверяемыми receipts и кнопками «проверено / не повторять / повторить после проверки».
+  - 2026-09-23: acceptance на production Safari в отдельном QA-чате: две synthetic
+    `write_file` записи (никакого внешнего действия не запускалось) отобразились
+    в inbox; одна прошла not-applied verification → точная одноразовая авторизация
+    → отзыв, вторая — `no_retry`. Подтверждения UI явно сообщили, что tool не
+    replay-ился и Goal не продолжалась автоматически; после reload модель/ответ
+    сохранились, а завершённые записи больше не отображались как pending. Ни один
+    external effect не исполнялся. Адресные suites:
+    `test_chat_effect_inbox`, `test_chat_work_routes`, `test_incident_export`,
+    `test_run_wait_state`, `test_run_health_ui_js`: 54 passed, 2 warnings.
+    Перезапуск действия после matching exact-hash authorization доказан unit
+    regression-тестами, но намеренно не исполнялся в production.
 - [ ] **08. Per-run resource budget.** Время, токены, запросы, CPU/RAM, tool calls и число children с видимым soft/hard limit; Goal при достижении лимита ждёт решения, а не молча останавливается.
   - 2026-09-22: optional `goal_max_model_requests` (0 = без лимита)
     считает фактические transport POST к модели до отправки, в том числе
@@ -1252,6 +1385,29 @@
     snapshot этой попытки. Failing-first тест воспроизвёл прежнее отсутствие
     fencing, затем 33 теста store/stream прошли; полный pytest — 6999 passed,
     20 skipped, 109 subtests passed. Live race пока не проверен.
+  - 2026-09-23 19:38 UTC: для измеряемых per-run hard caps добавлено
+    одноразовое soft-warning на пороге 80% (для целочисленных cap — floor,
+    минимум 1): раунды, tokens, requests, elapsed wall time, tool calls,
+    children. Warning не меняет state machine и не ставит Goal на паузу;
+    provider не может подделать server-owned event, telemetry хранит только
+    числовые значения, health snapshot/replay переживают restart, Goal показывает
+    компактный badge и подробность. HTTP route передаёт warning без вызова
+    `wait_on_goal_budget`. Focused producer/store/UI/route/recovery/subagent
+    suites: 102 passed плюс отдельный model-round boundary test passed; полный
+    pytest с opt-in two-client browser QA: 7,259 passed, 22 skipped,
+    109 subtests, 9 warnings (199.94 s). Python compile, JS syntax и
+    `git diff --check` clean. #08 остаётся открытым: CPU/RAM пока доступны
+    только как общесервисные показатели (их нельзя честно приписывать одному
+    run при конкурентных запросах); нет live exact-image/Safari acceptance,
+    а soft cap округляется и не настраивается отдельно.
+  - 2026-09-23 19:45 UTC: расширены отрицательные/граничные проверки:
+    wall-time и model-round предупреждения проверены до hard event, request/token
+    soft warnings остаются видимы при продолжении, successful child spawn
+    передаёт точный per-run `used/limit`, а provider-spoof и malformed
+    resource не влияют на telemetry/Goal. Focused matrix: 104 passed; свежий
+    полный pytest: 7,260 passed, 22 skipped, 109 subtests, 9 warnings
+    (192.03 s). `git diff --check`, Python compile, Node syntax clean; Jetson
+    health healthy. #08 всё ещё открыт по CPU/RAM per-run и live acceptance.
 - [ ] **09. Run health SLO.** Метрики TTFT, prefill, tool latency, durable lag, SSE reconnect, UI long tasks, compaction time/failure, child queue wait; алерты на нарушение заданных порогов.
   - 2026-09-23: bounded tool-start telemetry: в длительном run незавершённые
     замеры latency ограничены 256 ключами и сроком 1 час; старые или потерянные
@@ -1263,6 +1419,23 @@
     SQLite fixture содержит секреты в соседних JSON полях и подтверждает,
     что их нет в отчёте; PostgreSQL SQL projection проверена компиляцией.
     Live multiworker и пороги UI long-task/child queue ещё не приняты.
+  - 2026-09-23 19:11 UTC: long-task warning получил явный helper с границами
+    `3` events / `200 ms`; Goal UI показывает доступный и озвучиваемый
+    предупреждающий индикатор только при активной цели, а unsupported Safari
+    не трактуется как `0`. Данные остаются browser-local: сообщения, URL и DOM
+    не отправляются backend. Граничные unit tests + полный Goal-render test:
+    7 passed; полный suite с isolated two-client browser QA: 7,249 passed,
+    22 skipped, 109 subtests, 9 warnings (190.98 s). `node --check` для
+    связанных JS и `git diff --check` чистые. #09 открыт до production Safari,
+    межустройственного поведения и полной проверки всех SLO/alert thresholds.
+  - 2026-09-23 21:40 UTC: failing-first regression показал, что при ошибке
+    чтения run-метрик диагностика возвращала нулевые значения без признака
+    неполноты, что могло выглядеть как здоровый SLO. Теперь admin runtime
+    diagnostics добавляет `database_metrics_available`, `collection_status`,
+    allowlisted `collection_errors` и `diagnostics_incomplete` alert; текст
+    исключения не сериализуется. `tests/test_diagnostics_service_route.py`:
+    9 passed. Пункт остаётся открыт до live-проверки порогов/Safari и
+    multiworker aggregation.
 - [x] **10. Экспорт технического инцидента.** Один owner-scoped архив со схемой событий, версиями, обезличенными метриками и ошибками без содержимого чата/секретов; воспроизводимый test fixture.
 
 ## P0 — безопасные изменения и выпуск
@@ -1271,8 +1444,57 @@
 - [ ] **12. Review-gate перед выпуском.** Независимый reviewer сверяет задачу, diff, тесты, риски и unknown outcomes; выдаёт адресные замечания или evidence-backed verdict до deploy/push.
 - [ ] **13. Изолированные worktrees для пишущих сабагентов — расширить Team Git primitive.** Каждый child получает отдельный tree; parent видит conflict/diff/test status и принимает изменения явно; поддержать cross-host без общей writable директории.
 - [ ] **14. Atomic edit + syntax gate.** `edit_file`/`apply_patch` проверяют old-hash и точное совпадение патча, затем parser/linter; при ошибке не оставляют частично применённый файл.
-- [ ] **15. Shared canonical-path mutation queue.** Все write/edit/patch, fused и обычные, проходят одну очередь по canonical path; mutation→verification не может быть перебита другим writer.
+  - 2026-09-23: local + Jetson-host tool paths now require `read_file.sha256`
+    for `edit_file`, per-path hashes (or `missing` for Add File) for patches,
+    check exact patch context, parse Python/JSON/JavaScript before mutation,
+    and atomically replace a single file while preserving owner/group/mode.
+    Multi-file patch performs complete preflight and on a handled I/O failure
+    rolls prior paths back only when their after-hashes still match; a detected
+    concurrent edit is preserved and surfaced as `patch_rollback_failed`.
+    The regression initially reproduced partial multi-file updates on both
+    local and host implementations; after rollback fix the focused local/host/
+    Team suites passed 157 tests + 15 subtests. Parser unavailable is a failure,
+    never a silent pass; unsupported extensions report `not_applicable`. This
+    is local evidence only; exact Jetson candidate and production Safari tool
+    acceptance remain open, so the checklist item stays open.
+  - 2026-09-23: full local suite after this change: 7,214 passed, 23 skipped,
+    9 warnings, 109 subtests passed. One earlier run exposed an underspecified
+    route test with unknown context size; it now declares its large fixture
+    window explicitly, leaving low/unknown-window schema budget tests to #21/#23.
+- [x] **15. Shared canonical-path mutation queue.** Все write/edit/patch, fused и обычные, проходят одну очередь по canonical path; mutation→verification не может быть перебита другим writer.
+  - 2026-09-23: implementation routes ordinary `write_file`, `edit_file`,
+    `apply_patch`, and fused mutation+verification through the same sorted
+    per-canonical-path locks. Added missing race regressions for `edit_file`
+    and `apply_patch` against a fused writer, plus relative-path/symlink alias
+    canonicalization; existing write/legacy interleave test retained. Fresh
+    `tests/test_action_fusion.py`: 14 passed; `git diff --check` clean. These
+    run through real local file operations in isolated temporary workspaces;
+    no production file was modified.
 - [ ] **16. Предпросмотр действия.** Для файла — diff, для shell — cwd/host/command/effect class, для сетевого POST — target/payload summary; разрешение привязывается к точному hash действия.
+  - 2026-09-23 21:55 UTC: approval cards now carry a server-built bounded
+    typed preview and the full exact-action SHA-256. Shell preview shows cwd,
+    command and effect classes; `edit_file` shows a clearly labelled requested
+    fragment diff; POST-style `api_call` shows redacted target, method, payload
+    keys/size, never values. The browser inserts all preview material with
+    `textContent`; a real browser regression verifies markup-shaped command
+    text creates no element. URL query and secret-labelled path segments are
+    redacted; preview parsing and diff generation have input/output caps.
+    Focused approval/frontend/localization suite: 62 passed, 1 skipped;
+    changed JS syntax and `git diff --check` clean.
+    Follow-up failing-first tests found that changing the configured runner or
+    Jetson shell cwd while an approval card was pending did not invalidate the
+    grant. The exact execution target and effective cwd are now included in its
+    server digest and preview; a changed runner/cwd refuses the stale claim.
+    Focused approval/frontend/localization suite: 64 passed, 1 skipped.
+    #16 remains open: `write_file` needs a verified full target diff and the
+    production Jetson approval flow has not been smoke-tested.
+  - 2026-09-23 22:24 UTC: after the execution-target/cwd binding follow-up,
+    focused approval/frontend/localization suite passed 64 tests (1 skipped);
+    full `ODYSSEUS_REAL_WAIT_BROWSER_QA=1 ./.venv/bin/python -m pytest -q`
+    passed 7,288 tests, 22 skipped, 109 subtests and 9 existing warnings.
+    The permitted Safari reload stayed on the synthetic fixture and production
+    health stayed healthy. This is local-only; the six-hour follow-up soak for
+    any eventual release and live production approval flow remain open.
 - [ ] **17. Release gate как состояние.** Backup → candidate → smoke → switch → post-switch checks → promote/rollback с durable receipts и exact SHA; никакого «успеха» до всех проверок.
 - [ ] **18. Проверка рисков зависимостей и секретов в diff.** Перед commit/deploy запускать pin/SBOM/license/secrets checks; выдавать реальные находки с evidence, без автоматического удаления данных.
 
@@ -1282,6 +1504,9 @@
 - [ ] **20. Symbol tools.** `find_symbol`, `find_references`, `go_to_definition`, `outline_file`, `diagnostics` через реально доступный LSP или локальный AST fallback; явное `unavailable` вместо выдуманной поддержки.
 - [ ] **21. Deferred tool discovery.** Стабильное ядро маленьких tool schemas плюс поиск/загрузка нужной capability группы по запросу; измерять точность вызовов и сэкономленные schema tokens.
 - [ ] **22. Версионированный tool registry.** Инвокация захватывает точную схему/политику; обновление registry применяется к следующему раунду без потери `bash`/`read_file` посреди Goal.
+  - 2026-09-23 20:23 UTC: failing-first integration showed the prior revision hashed only provider-schema names; in textual Agent mode, this mislabeled the inventory (advertised a disabled `bash` and omitted prompt-visible `ask_user`/`update_plan`). Added canonical SHA-256 over exact route schemas plus effective selected/disabled/relevant names, plan/access mode and policy clamps. The emitted `tool_inventory.tools` now uses the actual route registry catalogue shared by text/native modes; context snapshots carry the same revision, and no schema body is persisted. Regression proves schema changes and policy changes alter the fingerprint, order alone does not, and the live Agent-loop event matches the prompt-visible catalogue in both modes. `tests/test_tool_registry.py`: 31 passed, 49 subtests, 1 existing warning. #22 remains open pending model/registry mutation mid-run, exact release and live Goal acceptance.
+  - 2026-09-23 20:27 UTC: integrated gate `ODYSSEUS_REAL_WAIT_BROWSER_QA=1 ./.venv/bin/python -m pytest -q` passed: 7,273 passed, 22 skipped, 109 subtests, 9 warnings (197.41 s). `py_compile` and `git diff --check` passed. Metadata-only Safari reload stayed on the safe QA URL and Jetson health reported healthy. This revision is not deployed; registry mutation mid-Goal and exact-image acceptance remain outstanding.
+  - 2026-09-23 20:47 UTC: found that pre-content fallback pinned a new route/schema set mid-round but left the round's tool/route revision at the primary model until the next round. The fallback acceptance event now immediately publishes the answering route's catalogue/schema digest, route revision and context checkpoint; model switch between rounds continues to recompute as before. Regression asserts the real Agent-loop fallback emits a second route revision and context carries it. Registry + foreground routing suites: 147 passed, 49 subtests, 1 existing warning. #22 remains open pending production model-switch/fallback and exact-image acceptance.
 - [ ] **23. Контекстный budget waterfall.** UI отдельно показывает window, output/safety/schema reserve, trigger basis, protected messages, recent tail, summary, actual model-visible tokens и причину compaction.
   - 2026-09-23: live Safari показал зависший `stale` индикатор после
     рестарта сервиса при уже восстановленном API. Локально добавлен
@@ -1292,6 +1517,11 @@
     ошибку и восстановление после искусственного 503. Полный pytest:
     7,178 passed/23 skipped/109 subtests. Полный waterfall ещё открыт.
 - [ ] **24. Feasibility preview перед compaction.** Проверить protected groups, native tool pairs, минимальный целевой размер и доступность summarizer до расхода модели; если безопасного среза нет — не объявлять сжатие успешным.
+  - 2026-09-23 20:54 UTC: manual `/compact` previously cut by a fixed message count, which could split an assistant native `tool_calls` batch from its tool result, then spend a summarizer request on an unsafe cut. It now expands the retained tail to complete native groups and newest user group, computes the raw transcript prefix at that safe boundary, and runs the same `working_context_compactable` gate before resolving/dispatching the summarizer. No-safe-cut returns `unchanged/native_not_compactable` with a preview and does not call the model or save a checkpoint. Failing-first pair-split and all-protected tool-batch cases now pass; context/manual compaction slice: 43 passed, 6 subtests, 2 existing warnings. Main-model usable-input target preview and live provider/runtime acceptance remain open.
+  - 2026-09-23 20:59 UTC: full `ODYSSEUS_REAL_WAIT_BROWSER_QA=1 ./.venv/bin/python -m pytest -q` passed with 7,277 passed, 22 skipped, 109 subtests, 9 warnings (200.61 s). Python compile and diff check were clean. Safari metadata-only reload stayed on the safe QA URL; health remained healthy. #24 remains open for a configured main-model target/usable-input preview and exact-image/live-provider acceptance.
+  - 2026-09-23 21:06 UTC: UI now differentiates a genuine compaction failure from a no-op feasibility result: `native_not_compactable` keeps the popup open, shows the safe-cut reason and never displays a success transition. Fresh full `ODYSSEUS_REAL_WAIT_BROWSER_QA=1 ./.venv/bin/python -m pytest -q`: 7,278 passed, 22 skipped, 109 subtests, 9 warnings (196.23 s); py_compile, JS syntax, cache identity tests and diff check passed. Still local-only; saved-policy target preview and live Jetson/browser acceptance remain open.
+  - 2026-09-23 21:16 UTC: the same shared group-aware planner now powers `/api/session/{id}/context` read-only preview; the context pill reports safe/archive/protected group counts and whether the fallback/utility summarizer route is configured. `can_compact` is hidden for too-short, active, unsafe-cut, or unavailable-summarizer states. The UI keeps the actual reason visible without touching transcript or calling a model. Full local suite: 7,279 passed, 22 skipped, 109 subtests, 9 warnings (197.78 s). Safari URL-only reload and Jetson health are healthy; not deployed.
+  - 2026-09-23 21:21 UTC: clarified the preview contract: the route reports `summarizer_configured` (not provider-reachable; no probe is sent before user confirmation), and UI says “route not configured” when absent. Added route/API regression for a feasible preview with configured fallback and an unsafe native batch with no compact button. Fresh full suite: 7,280 passed, 22 skipped, 109 subtests, 9 warnings (196.00 s). Still local-only; target from saved usable-input policy is not yet included and live release acceptance remains open.
 - [ ] **25. Summary quality checks.** После сжатия машинно проверить сохранение Goal, критичных constraints, решений, незавершённых работ, file hashes и tool outcomes; сравнить hash/revision до и после.
 - [ ] **26. Prompt-cache observability.** Измерять hit/miss и стабильность префикса по provider/model; не вставлять динамические поля в начало prompt без необходимости.
 - [ ] **27. Dynamic model routing.** Раздельные профили planner/editor/reviewer/reducer; переключать только на границе round, пересчитывая окно и budget; показывать фактически выбранную модель и причину.
@@ -1302,10 +1532,15 @@
 ## P1 — инструменты, которыми пользуется модель
 
 - [ ] **31. `read_file` v2.** Диапазон строк/байт, line numbers, encoding/binary indication, файл-хеш и запрет выдачи мегабайт в prompt; большие данные — artifact handle.
+  - 2026-09-23 20:08 UTC: verified the existing backend contract end-to-end locally: 1-based line range/line numbers, 0-based byte ranges, SHA-256/size/encoding/binary/truncated metadata, bounded inline output and owner-scoped artifact paging. The model-facing tool prompts did not describe byte ranges, line numbering or artifact paging; both the tool-index description and Agent tool section now teach those arguments and the `edit_file` hash handoff. Added a regression on the actual prompt catalogs. `tests/test_code_nav_tools.py tests/test_host_files.py tests/test_misfenced_read_file_tool_call.py`: 68 passed, 1 existing warning. #31 remains open until exact deployed build and separate live test-chat smoke.
 - [ ] **32. `search_files` v2.** `rg`-семантика с кратким списком файлов по умолчанию, затем точные совпадения по запросу; лимиты результатов, owner/project scope и pagination.
+  - 2026-09-23 20:10 UTC: backend already returns distinct-file pages by default and explicit exact-match pages, with workspace/sensitive-file confinement and bounded cursor/page size. The global tool-index text did not tell the model which mode to select or that it must pass back `next_cursor`; the native schema also omitted paging descriptions. Both now explain `files` vs `matches`, cursor handoff and default/max page sizes. Added a regression against the real schema/description catalog. Combined read/search/host-file focused suite: 69 passed, 1 existing warning. #32 remains open pending exact release/live smoke and cross-project/large-tree acceptance.
 - [ ] **33. `list_tree`/`file_outline`.** Быстрая иерархия с ignore rules, symbol outline и оценкой размера без чтения тела файла.
+  - 2026-09-23 20:11 UTC: implementations/tests already cover bounded `.gitignore`-aware tree listing and exact Python AST outlines without returning file bodies. Expanded the Agent tool-index and native schemas so the model sees defaults/caps (depth 2/6, entries 100/200, symbols 100/200), symlink/sensitive exclusions, Python-only/2 MiB limit and explicit unavailable behavior. Schema/model-guidance regression added. `tests/test_code_nav_tools.py`: 37 passed, 1 existing warning. #33 remains open pending exact-image/live chat and large workspace acceptance.
 - [ ] **34. `git_status`/`git_diff`/`git_log` как typed tools.** Machine-readable staged/unstaged/untracked, hashes и file-level diff; безопаснее и дешевле постоянного вызова `bash`.
 - [ ] **35. `run_tests`/`run_lint` как typed tools.** Обнаружение доступных профилей, bounded output, failed-test artifacts и точный exit code; не выдавать «passed» при timeout.
+  - 2026-09-23 20:33 UTC: added an explicit `profile=list` read-only operation so Agent can discover pytest/npm_test/npm_lint without accidentally launching the default suite. Implemented for both local workspace and registered-host runners; kind-specific filtering prevents run_tests from advertising lint and vice versa. Native schemas and tool-index descriptions mark discovery as non-executing; existing timeout result remains code=timeout/exit 124 and is not reported as pass. Failing-first reproduced `profile=list` as invalid arguments; local + host execution/schema tests: 11 passed, 1 existing warning. Broader output-quota, real host service and live-chat acceptance remain open.
+  - 2026-09-23 20:41 UTC: the first full suite exposed a test-only import-order issue in the new no-execution assertion; made the submodule import explicit, then reran. Fresh `ODYSSEUS_REAL_WAIT_BROWSER_QA=1 ./.venv/bin/python -m pytest -q`: 7,275 passed, 22 skipped, 109 subtests, 9 warnings (197.90 s). Metadata-only Safari reload stayed on the QA session and Jetson health was healthy. Host-profile discovery is still unit/local transport only; #35 remains open until live exact-image use.
 - [ ] **36. `inspect_process`/`inspect_port`/`tail_log`.** Read-only диагностика зарегистрированного хоста, bounded tail и PID/start-time fencing.
 - [ ] **37. `http_probe` read-only.** DNS/TLS/status/headers/latency с зарегистрированными целями и SSRF-защитой; не превращать в произвольный POST-инструмент.
 - [ ] **38. Browser toolset.** Навигация, DOM/accessibility snapshot, click/type, screenshot, network/console errors и запись короткого воспроизводимого сценария; отдельная browser permission scope.

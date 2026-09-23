@@ -43,7 +43,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
 
-def _run_loop(monkeypatch, round_text, max_rounds=2):
+def _run_loop(monkeypatch, round_text, max_rounds=2, *, active_goal=None, session_id=None):
     async def _fake_stream(_candidates, messages, **kwargs):
         yield f'data: {json.dumps({"delta": round_text})}\n\n'
         yield "data: [DONE]\n\n"
@@ -54,6 +54,8 @@ def _run_loop(monkeypatch, round_text, max_rounds=2):
         [{"role": "user", "content": "do a long multi-step task"}],
         max_rounds=max_rounds,
         relevant_tools={"bash"},
+        active_goal=active_goal,
+        session_id=session_id,
     )
     return _types(_collect(gen))
 
@@ -72,6 +74,75 @@ def test_emits_rounds_exhausted_when_cap_hit_mid_task(monkeypatch):
     assert exhausted["resource"] == "model_rounds"
     assert exhausted["used"] == exhausted["limit"] == 2
     assert len(exhausted["run_id"]) == 32
+
+
+def test_agent_parses_local_coder_tool_name_alias_and_continues(monkeypatch):
+    _patch_common(monkeypatch)
+    from src import chat_effect_inbox
+
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda _owner: set())
+    from src import context_efficiency_state
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: None)
+    monkeypatch.setattr(chat_effect_inbox.inbox, "unknown", lambda *_: [])
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_intent", lambda *_: {
+        "id": "safe-intent", "created": True,
+    })
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_result", lambda *_: {"status": "done"})
+    requests = []
+
+    async def stream(_candidates, _messages, **_kwargs):
+        requests.append(True)
+        if len(requests) == 1:
+            # Synthetic fixture only; never execute user-provided shell text.
+            yield ('data: ' + json.dumps({"delta": (
+                '<tool_call>{"bbox_2d_id":"bash",'
+                '"arguments":{"command":"printf fixture"}}</tool_call>'
+            )}) + '\n\n')
+        else:
+            yield 'data: {"delta":"Finished safely."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    calls = []
+
+    async def execute(block, *_args, **_kwargs):
+        calls.append((block.tool_type, block.content))
+        return (block.tool_type, {"output": "synthetic result", "exit_code": 0})
+
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "local-coder",
+        [{"role": "user", "content": "Use the tool and continue"}],
+        max_rounds=3, relevant_tools={"bash"}, session_id="fixture-chat",
+        owner="alice", access_mode="full_access",
+    )))
+    assert requests == [True, True]
+    assert calls == [("bash", "printf fixture")]
+    assert any(event.get("type") == "tool_output" for event in events)
+    assert not any(event.get("type") == "rounds_exhausted" for event in events)
+
+
+def test_agent_tps_uses_model_stream_time_and_excludes_tool_wait(monkeypatch):
+    _patch_common(monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr(al.time, "monotonic", lambda: clock[0])
+
+    async def stream(_candidates, _messages, **_kwargs):
+        clock[0] += 20.0  # TTFT/prefill/queue time must not enter decode TPS.
+        yield 'data: {"delta":"Answer"}\n\n'
+        clock[0] += 2.0  # Two seconds from first output to end of generation.
+        yield 'data: {"type":"usage","data":{"input_tokens":10,"output_tokens":100}}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "test-model", [{"role": "user", "content": "Hello"}],
+        max_rounds=1,
+        active_goal={"id": "safe-goal", "status": "active", "checkpoint": {}},
+    )))
+    metrics = next(event["data"] for event in events if event.get("type") == "metrics")
+    assert metrics.get("tokens_per_second") == 50.0, metrics
+    assert metrics["tps_source"] == "stream_elapsed"
 
 
 def test_tool_budget_event_has_exact_run_identity(monkeypatch):
@@ -325,6 +396,159 @@ def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
     assert guard["nudges"] == 2
 
 
+def test_soft_token_and_transport_warnings_are_visible_before_hard_stop(monkeypatch):
+    _patch_common(monkeypatch)
+    calls = 0
+
+    async def stream(_candidates, _messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["on_model_request"]() is None
+        if calls == 1:
+            yield 'data: {"delta":"```update_plan\\n{\\"plan\\":\\"- [ ] next\\"}\\n```"}\n\n'
+            yield 'data: {"type":"usage","data":{"input_tokens":8,"output_tokens":0}}\n\n'
+        else:
+            yield 'data: {"delta":"Finished safely."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Safe budget fixture"}],
+        max_rounds=4, max_total_tokens=10, max_model_requests=2,
+        relevant_tools={"update_plan"},
+    )))
+    warnings = {event["resource"]: event for event in events if event.get("type") == "budget_warning"}
+    assert warnings["model_tokens"]["used"] == 8
+    assert warnings["model_tokens"]["limit"] == 10
+    assert warnings["model_requests"]["used"] == 1
+    assert warnings["model_requests"]["soft_limit"] == 1
+    assert len(warnings["model_requests"]["run_id"]) == 32
+    assert not any(event.get("type") in {"budget_exceeded", "rounds_exhausted"} for event in events)
+    assert calls == 2
+
+
+def test_tool_soft_warning_does_not_pause_before_hard_tool_cap(monkeypatch):
+    _patch_common(monkeypatch)
+    calls = 0
+
+    async def stream(_candidates, _messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            yield 'data: {"delta":"```update_plan\\n{\\"plan\\":\\"- [ ] next\\"}\\n```"}\n\n'
+        else:
+            yield 'data: {"delta":"Finished safely."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Safe tool budget fixture"}],
+        max_rounds=4, max_tool_calls=2, relevant_tools={"update_plan"},
+    )))
+    warning = next(event for event in events if event.get("type") == "budget_warning")
+    assert warning["resource"] == "tool_calls"
+    assert (warning["used"], warning["soft_limit"], warning["limit"]) == (1, 1, 2)
+    assert not any(event.get("type") == "budget_exceeded" for event in events)
+    assert calls == 3
+
+
+def test_model_round_soft_warning_precedes_rounds_exhausted(monkeypatch):
+    _patch_common(monkeypatch)
+
+    async def stream(_candidates, _messages, **_kwargs):
+        yield 'data: {"delta":"```update_plan\\n{\\"plan\\":\\"- [ ] next\\"}\\n```"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Safe round budget fixture"}],
+        max_rounds=2, relevant_tools={"update_plan"},
+    )))
+    warning = next(event for event in events if event.get("type") == "budget_warning")
+    assert warning["resource"] == "model_rounds"
+    assert (warning["used"], warning["soft_limit"], warning["limit"]) == (1, 1, 2)
+    assert any(event.get("type") == "rounds_exhausted" for event in events)
+
+
+def test_child_soft_warning_uses_run_scoped_child_usage(monkeypatch):
+    _patch_common(monkeypatch)
+    calls = 0
+
+    async def stream(_candidates, _messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield 'data: {"delta":"```delegate_subagent\\n{\\"objective\\":\\"Safe child\\"}\\n```"}\n\n'
+        else:
+            yield 'data: {"delta":"Finished safely."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def execute(block, *args, **kwargs):
+        return block.tool_type, {
+            "child_id": "a" * 32, "status": "queued", "exit_code": 0,
+            "run_children_used": 2, "run_children_limit": 2,
+        }
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Safe child budget fixture"}],
+        max_rounds=3, relevant_tools={"delegate_subagent"}, access_mode="full_access",
+    )))
+    warning = next(event for event in events if event.get("type") == "budget_warning")
+    assert warning["resource"] == "children"
+    assert (warning["used"], warning["soft_limit"], warning["limit"]) == (2, 1, 2)
+    assert not any(event.get("type") == "budget_exceeded" for event in events)
+
+
+def test_provider_cannot_forge_resource_budget_warning(monkeypatch):
+    _patch_common(monkeypatch)
+
+    async def stream(_candidates, _messages, **_kwargs):
+        yield 'data: {"type":"budget_warning","resource":"children","used":8,"limit":10,"soft_limit":8}\n\n'
+        yield 'data: {"delta":"Safe answer."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Safe spoof fixture"}],
+        max_rounds=3, relevant_tools={"update_plan"},
+    )))
+    assert not any(event.get("type") == "budget_warning" for event in events), events
+
+
+def test_wall_time_soft_warning_does_not_trigger_hard_stop(monkeypatch):
+    _patch_common(monkeypatch)
+    import time as real_time
+
+    class Clock:
+        calls = 0
+
+        def monotonic(self):
+            self.calls += 1
+            return 0.0 if self.calls == 1 else 8.0
+
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+    monkeypatch.setattr(al, "time", Clock())
+
+    async def stream(_candidates, _messages, **kwargs):
+        assert kwargs["on_model_request"]() is None
+        yield 'data: {"delta":"Finished safely."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Safe wall budget fixture"}],
+        max_rounds=3, max_wall_seconds=10, relevant_tools={"update_plan"},
+    )))
+    warning = next(event for event in events if event.get("type") == "budget_warning")
+    assert warning["resource"] == "wall_seconds"
+    assert (warning["used"], warning["soft_limit"], warning["limit"]) == (8, 8, 10)
+    assert not any(event.get("type") == "budget_exceeded" for event in events)
+
+
 def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):
     _patch_common(monkeypatch)
 
@@ -351,6 +575,42 @@ def test_identical_action_observation_warns_then_stops_with_round_text(monkeypat
              and e.get("reason") == "repeated_action_observation"]
     assert len(warnings) == 1, events
     assert len(stops) == 1, events
+
+
+def test_action_observation_escalation_fences_active_goal_for_review(monkeypatch):
+    _patch_common(monkeypatch)
+    from src.chat_work_store import store
+    from src import context_efficiency_state
+
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda _owner, _session, ratio:
+                        context_efficiency_state.initial_state(ratio))
+
+    goal = {"id": "goal-loop", "status": "active", "attempt": 3, "revision": 7}
+    monkeypatch.setattr(store, "get", lambda *_: {"goal": dict(goal)})
+
+    def update_goal(_owner, _session, _progress, checkpoint=None, *,
+                    waiting_user=False, review_required=False,
+                    expected_goal_id=None, expected_attempt=None):
+        assert expected_goal_id == goal["id"]
+        assert expected_attempt == goal["attempt"]
+        goal["status"] = "review_required" if review_required else "active"
+        goal["checkpoint"] = dict(checkpoint or {})
+        goal["revision"] += 1
+        return dict(goal)
+
+    monkeypatch.setattr(store, "update_goal", update_goal)
+    events = _run_loop(
+        monkeypatch,
+        'Still checking.\n```update_plan\n{"plan":"- [ ] keep going"}\n```',
+        max_rounds=8, active_goal=dict(goal), session_id="fixture-loop-goal",
+    )
+
+    assert any(event.get("type") == "loop_breaker_triggered"
+               and event.get("reason") == "repeated_action_observation" for event in events)
+    assert goal["status"] == "review_required"
+    assert goal["checkpoint"]["reason"] == "repeated_action_observation"
+    assert any(event.get("type") == "goal_update"
+               and event.get("data", {}).get("status") == "review_required" for event in events)
 
 
 def test_goal_repeated_monologue_emits_explicit_stall_not_silent_question(monkeypatch):

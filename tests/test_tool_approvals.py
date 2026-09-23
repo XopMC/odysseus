@@ -61,6 +61,133 @@ def test_approval_is_bound_to_exact_action_and_claimed_once():
     )
 
 
+def test_public_approval_payload_includes_typed_shell_preview_bound_to_digest(monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_HOST_ENABLED", raising=False)
+    monkeypatch.setenv("ODYSSEUS_HOST_OWNER", "Alice")
+    store = ToolApprovalStore()
+    pending = _pending(store, content="git status --short", workspace="/workspace/demo")
+
+    action = pending.public_payload()["action"]
+    preview = action["preview"]
+
+    assert preview["kind"] == "shell"
+    assert preview["working_directory"] == "/workspace/demo"
+    assert preview["command"] == "git status --short"
+    assert preview["execution_target"] == "Odysseus local runtime"
+    assert preview["effect_class"]
+    assert preview["action_hash"] == pending.digest
+
+
+def test_exact_approval_is_invalidated_when_execution_host_changes(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_HOST_OWNER", "alice")
+    monkeypatch.delenv("ODYSSEUS_HOST_ENABLED", raising=False)
+    store = ToolApprovalStore()
+    pending = _pending(store, owner="alice", content="git status", workspace="/workspace/demo")
+    grant = store.consume(pending.approval_id, decision="approve", owner="alice", session_id="session-1")
+    assert grant is not None
+
+    monkeypatch.setenv("ODYSSEUS_HOST_ENABLED", "1")
+    assert not grant.claim(
+        owner="alice", session_id="session-1", tool_name="bash",
+        content="git status", workspace="/workspace/demo",
+    )
+
+
+def test_exact_approval_binds_jetson_cwd_used_for_shell(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_HOST_OWNER", "alice")
+    monkeypatch.setenv("ODYSSEUS_HOST_ENABLED", "1")
+    monkeypatch.setenv("ODYSSEUS_HOST_CWD", "/srv/project")
+    store = ToolApprovalStore()
+    pending = _pending(store, owner="alice", content="pwd", workspace="/workspace/demo")
+    preview = pending.public_payload()["action"]["preview"]
+    assert preview["execution_target"] == "Jetson host"
+    assert preview["working_directory"] == "/srv/project"
+
+    grant = store.consume(pending.approval_id, decision="approve", owner="alice", session_id="session-1")
+    assert grant is not None
+    monkeypatch.setenv("ODYSSEUS_HOST_CWD", "/srv/other")
+    assert not grant.claim(
+        owner="alice", session_id="session-1", tool_name="bash",
+        content="pwd", workspace="/workspace/demo",
+    )
+
+
+def test_file_edit_preview_is_a_bounded_requested_diff_not_full_payload():
+    import json
+
+    store = ToolApprovalStore()
+    content = json.dumps({"path": "src/a.py", "old_string": "old value", "new_string": "new value"})
+    pending = _pending(
+        store, tool_name="edit_file", content=content, workspace="/workspace/demo",
+        capabilities=capabilities_for_action("edit_file", content),
+    )
+
+    preview = pending.public_payload()["action"]["preview"]
+
+    assert preview["kind"] == "file"
+    assert preview["path"] == "src/a.py"
+    assert "-old value" in preview["diff"]
+    assert "+new value" in preview["diff"]
+    assert content not in json.dumps(preview)
+
+
+def test_network_post_preview_redacts_url_query_and_payload_values():
+    import json
+
+    store = ToolApprovalStore()
+    content = json.dumps({"method": "POST", "url": "https://example.test/api?token=secret", "json": {"email": "person@example.test"}})
+    pending = _pending(
+        store, tool_name="api_call", content=content, workspace=None,
+        capabilities=capabilities_for_action("api_call", content),
+    )
+
+    preview = pending.public_payload()["action"]["preview"]
+
+    assert preview["kind"] == "http_request"
+    assert preview["method"] == "POST"
+    assert preview["target"] == "https://example.test/api"
+    assert preview["payload_keys"] == ["email"]
+    assert "secret" not in json.dumps(preview)
+    assert "person@example.test" not in json.dumps(preview)
+
+
+def test_action_preview_redacts_sensitive_path_segments_and_bounds_large_inputs():
+    import json
+    from src.tool_action_preview import build_tool_action_preview
+
+    secret_path_value = "path-secret-value-123456789"
+    content = json.dumps({
+        "method": "POST",
+        "url": f"https://example.test/api/token/{secret_path_value}?key=query-secret",
+        "body": {"payload": "x" * 1_100_000},
+    })
+    preview = build_tool_action_preview(
+        tool_name="api_call", content=content, workspace=None,
+        effects=("network_egress",), action_hash="a" * 64,
+    )
+
+    assert preview["kind"] == "http_request"
+    assert preview["target"] == "https://example.test/api/token/[redacted]"
+    assert secret_path_value not in json.dumps(preview)
+    assert "query-secret" not in json.dumps(preview)
+    assert len(json.dumps(preview)) < 10_000
+
+
+def test_action_preview_skips_parsing_inputs_over_the_bound():
+    import json
+    from src.tool_action_preview import build_tool_action_preview
+
+    content = '{"method":"POST","url":"https://example.test/","body":"' + ("x" * 2_100_000) + '"}'
+    preview = build_tool_action_preview(
+        tool_name="api_call", content=content, workspace=None,
+        effects=("network_egress",), action_hash="b" * 64,
+    )
+
+    assert preview["kind"] == "tool"
+    assert preview["preview_limited"] is True
+    assert "x" * 100 not in json.dumps(preview)
+
+
 def test_wrong_owner_cannot_consume_but_deny_retires_pending_action():
     store = ToolApprovalStore()
     wrong_owner = _pending(store)

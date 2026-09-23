@@ -25,6 +25,7 @@ from src.tool_approval_scopes import (
     scope_for_decision,
 )
 from src.tool_capabilities import ToolCapabilities, capabilities_for_action
+from src.tool_action_preview import build_tool_action_preview
 
 
 DEFAULT_APPROVAL_TTL_SECONDS = 10 * 60
@@ -86,6 +87,24 @@ def _normalized_continuation_query(value: Any) -> str:
     return str(value or "").strip()[:_MAX_APPROVAL_CONTINUATION_QUERY_CHARS]
 
 
+def _execution_context(owner: Any, tool_name: Any, workspace: Any) -> tuple[str, str]:
+    """Resolve the actual runner and working directory bound to approval."""
+    name = str(tool_name or "")
+    try:
+        from src.host_execution import TOOLS as host_tools, enabled_for
+        if name in host_tools:
+            # Match the exact runtime route predicate: do not normalize here,
+            # or the preview can claim a host that the dispatcher will not use.
+            if enabled_for(owner):
+                cwd = os.environ.get("ODYSSEUS_HOST_CWD", "/home/xopmc") if name in {"bash", "python"} else ""
+                return "Jetson host", str(cwd)[:2048]
+            cwd = (_normalized_workspace(workspace) or os.getcwd()) if name in {"bash", "python"} else ""
+            return "Odysseus local runtime", str(cwd)[:2048]
+    except Exception:
+        return "Execution target unavailable", ""
+    return "Action-defined destination", ""
+
+
 def _canonical_digest(payload: dict[str, Any]) -> str:
     encoded = json.dumps(
         payload,
@@ -118,11 +137,14 @@ def _binding_payload(
     effects: tuple[str, ...],
     result_integrity: str,
 ) -> dict[str, Any]:
+    execution_target, execution_cwd = _execution_context(owner, tool_name, workspace)
     return {
         "owner": _normalized_owner(owner),
         "session_id": str(session_id or ""),
         "origin_run_id": str(origin_run_id or ""),
         "tool_name": str(tool_name or ""),
+        "execution_target": execution_target,
+        "execution_cwd": execution_cwd,
         "content": str(content or ""),
         "workspace": _normalized_workspace(workspace),
         "document_id": str(document_id or ""),
@@ -147,6 +169,8 @@ class PendingToolApproval:
     session_id: str
     origin_run_id: str
     tool_name: str
+    execution_target: str
+    execution_cwd: str
     content: str
     workspace: str
     document_id: str
@@ -206,11 +230,20 @@ class PendingToolApproval:
                 # Show the complete sealed input so approval never hides
                 # trailing lines.  This is not read back as authority.
                 "content": self.content,
-                "digest": self.digest[:16],
+                "digest": self.digest,
                 "effects": list(self.effects),
                 "workspace": self.workspace or None,
                 "document_id": self.document_id or None,
                 "document_version": self.document_version,
+                "preview": build_tool_action_preview(
+                    tool_name=self.tool_name,
+                    content=self.content,
+                    workspace=self.workspace,
+                    effects=self.effects,
+                    action_hash=self.digest,
+                    execution_target=self.execution_target,
+                    execution_cwd=self.execution_cwd,
+                ),
             },
         }
 
@@ -378,6 +411,8 @@ class ToolApprovalStore:
             session_id=payload["session_id"],
             origin_run_id=payload["origin_run_id"],
             tool_name=payload["tool_name"],
+            execution_target=payload["execution_target"],
+            execution_cwd=payload["execution_cwd"],
             content=payload["content"],
             workspace=payload["workspace"],
             document_id=payload["document_id"],

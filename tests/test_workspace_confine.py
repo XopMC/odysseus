@@ -10,6 +10,7 @@ Covers: the resolver helper, the central binding (the safety net), end-to-end
 confinement of read/write/edit/grep/ls + subprocess cwd via execute_tool_block,
 the get_workspace tool, no-leak across calls, and the admin-gated browse route.
 """
+import hashlib
 import json
 import os
 import tempfile
@@ -110,8 +111,10 @@ async def test_read_write_edit_confined_e2e(ws, admin):
 
     with open(os.path.join(ws, "f.txt"), "w") as f:
         f.write("foo bar")
+    current_hash = hashlib.sha256(b"foo bar").hexdigest()
     _, r = await execute_tool_block(
-        _block("edit_file", json.dumps({"path": "f.txt", "old_string": "foo", "new_string": "baz"})),
+        _block("edit_file", json.dumps({"path": "f.txt", "old_string": "foo", "new_string": "baz",
+                                         "expected_sha256": current_hash})),
         owner="a", workspace=ws,
     )
     assert r["exit_code"] == 0
@@ -145,7 +148,11 @@ async def test_apply_patch_confined_e2e(ws, admin):
 *** Add File: added.txt
 +new file
 *** End Patch"""
-    _, r = await execute_tool_block(_block("apply_patch", patch), owner="a", workspace=ws)
+    patch_payload = {"patch_text": patch, "expected_sha256_by_path": {
+        "patchme.txt": hashlib.sha256(b"alpha\nbeta\ngamma\n").hexdigest(),
+        "added.txt": "missing",
+    }}
+    _, r = await execute_tool_block(_block("apply_patch", json.dumps(patch_payload)), owner="a", workspace=ws)
     assert r["exit_code"] == 0
     assert r["diff"]["added"] >= 2
     with open(os.path.join(ws, "patchme.txt")) as f:
@@ -163,7 +170,10 @@ async def test_apply_patch_confined_e2e(ws, admin):
 -x
 +y
 *** End Patch"""
-    _, r = await execute_tool_block(_block("apply_patch", escape_patch), owner="a", workspace=ws)
+    escape_payload = {"patch_text": escape_patch, "expected_sha256_by_path": {
+        outside_file: hashlib.sha256(b"x\n").hexdigest(),
+    }}
+    _, r = await execute_tool_block(_block("apply_patch", json.dumps(escape_payload)), owner="a", workspace=ws)
     assert r["exit_code"] == 1 and "outside the workspace" in r["error"]
     with open(outside_file) as f:
         assert f.read() == "x\n"

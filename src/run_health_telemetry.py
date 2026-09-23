@@ -2,6 +2,8 @@
 
 import time
 
+from src.run_budget import WARNING_RESOURCES
+
 
 class RunHealthTelemetry:
     _MAX_PENDING_TOOLS = 256
@@ -22,6 +24,7 @@ class RunHealthTelemetry:
         self.compaction_last_ms = None
         self.compaction_max_ms = None
         self.sse_reconnects = 0
+        self.budget_warnings = {}
 
     def reconnect(self) -> None:
         self.sse_reconnects += 1
@@ -67,6 +70,20 @@ class RunHealthTelemetry:
             value = data.get("prefill_tps") if isinstance(data, dict) else None
             if type(value) in (int, float) and 0 < value < 1_000_000:
                 self.prefill_tps_last = round(value, 2)
+        elif kind == "budget_warning":
+            resource = payload.get("resource")
+            used, limit, soft_limit = (
+                payload.get("used"), payload.get("limit"), payload.get("soft_limit"),
+            )
+            if (isinstance(resource, str) and resource in WARNING_RESOURCES
+                    and type(used) is int and used >= 0
+                    and type(limit) is int and limit > 0
+                    and type(soft_limit) is int and 1 <= soft_limit <= limit
+                    and used >= soft_limit):
+                self.budget_warnings[resource] = {
+                    "resource": resource, "used": used, "limit": limit,
+                    "soft_limit": soft_limit,
+                }
 
     def _prune_tool_starts(self, now: float) -> None:
         cutoff = now - self._MAX_TOOL_AGE_SECONDS
@@ -95,4 +112,5 @@ class RunHealthTelemetry:
             "compaction_last_ms": self.compaction_last_ms,
             "compaction_max_ms": self.compaction_max_ms,
             "sse_reconnects": self.sse_reconnects,
+            "budget_warnings": list(self.budget_warnings.values()),
         }

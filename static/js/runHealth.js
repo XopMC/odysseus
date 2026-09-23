@@ -14,7 +14,35 @@ export function describeProgressHealth(goal, run, nowMs = Date.now()) {
     minutes,
     heartbeatAlive,
     lastProgressKind: typeof health.last_progress_kind === 'string' ? health.last_progress_kind : '',
+    trackingCapacityExhausted: health.tracking_capacity_exhausted === true,
   };
+}
+
+export function describeUiLongTasks(goal, snapshot, {
+  countLimit = 3,
+  durationLimitMs = 200,
+} = {}) {
+  if (goal?.status !== 'active' || snapshot?.supported !== true) return null;
+  const count = Number(snapshot.count);
+  const maxDurationMs = Number(snapshot.max_duration_ms);
+  if (!Number.isInteger(count) || count < countLimit
+      || !Number.isFinite(maxDurationMs) || maxDurationMs < durationLimitMs) return null;
+  return { count, maxDurationMs, countLimit, durationLimitMs };
+}
+
+export function describeBudgetWarnings(goal, run) {
+  if (goal?.status !== 'active' || run?.status !== 'running') return [];
+  const warnings = run.health_metrics?.budget_warnings;
+  if (!Array.isArray(warnings)) return [];
+  const resources = new Set([
+    'model_rounds', 'model_tokens', 'model_requests', 'wall_seconds', 'tool_calls', 'children',
+  ]);
+  return warnings.filter(item => item && resources.has(item.resource)
+    && Number.isSafeInteger(item.used) && item.used >= 0
+    && Number.isSafeInteger(item.limit) && item.limit > 0
+    && Number.isSafeInteger(item.soft_limit) && item.soft_limit >= 1
+    && item.soft_limit <= item.limit && item.used >= item.soft_limit)
+    .map(({ resource, used, limit, soft_limit }) => ({ resource, used, limit, soft_limit }));
 }
 
 // Browser-local telemetry: no task text, DOM nodes, URLs or network requests.

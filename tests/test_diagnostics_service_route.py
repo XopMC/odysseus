@@ -186,3 +186,21 @@ def test_runtime_slo_uses_durable_metrics_when_local_run_is_absent(tmp_path, mon
         "compaction_failed", "compaction_slow", "sse_reconnects_high",
     }
     assert "SECRET_NOT_FOR_ADMIN" not in str(runtime)
+
+
+def test_runtime_diagnostics_never_reports_healthy_when_database_metrics_unavailable(monkeypatch, tmp_path):
+    from core import database
+
+    monkeypatch.setattr(diag, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(database, "SessionLocal", lambda: (_ for _ in ()).throw(
+        RuntimeError("PRIVATE_DATABASE_DETAIL")
+    ))
+
+    runtime = diag._runtime_diagnostics()
+
+    assert runtime["runs"]["database_metrics_available"] is False
+    assert runtime["slo"]["collection_status"] == "partial"
+    assert "database_metrics_unavailable" in runtime["slo"]["collection_errors"]
+    assert any(alert["code"] == "diagnostics_incomplete"
+               for alert in runtime["slo"]["alerts"])
+    assert "PRIVATE_DATABASE_DETAIL" not in str(runtime)

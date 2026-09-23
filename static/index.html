@@ -245,11 +245,11 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260923waitwrap1">
+  <link rel="stylesheet" href="/static/style.css?v=20260924actionpreview1">
   <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260921livefix18">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260923contextretry1">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260923contextretry1">
+  <link rel="modulepreload" href="/static/app.js?v=20260924compactpreview1">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260924compactpreview1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js?v=20260923countrev1">
   <link rel="modulepreload" href="/static/js/markdown.js?v=20260923toolprogress1">
@@ -1104,7 +1104,7 @@
       </section>
       <section id="goal-mode-status" class="chat-work-card goal-work-card" hidden>
         <div class="chat-work-card-head goal-work-card-head">
-          <button type="button" class="chat-work-card-toggle goal-work-card-main" aria-expanded="false"><strong>Goal</strong><span id="goal-work-objective-preview"></span><span id="goal-work-health-indicator" class="goal-work-health-indicator" hidden aria-label="No verified progress">!</span><span id="goal-work-ui-lag" class="goal-work-health-indicator" hidden aria-label="UI long tasks">⚠</span><span id="goal-work-state"></span></button>
+          <button type="button" class="chat-work-card-toggle goal-work-card-main" aria-expanded="false"><strong>Goal</strong><span id="goal-work-objective-preview"></span><span id="goal-work-health-indicator" class="goal-work-health-indicator" hidden aria-label="No verified progress">!</span><span id="goal-work-budget-warning-indicator" class="goal-work-health-indicator" hidden aria-label="Resource budget approaching">⚠</span><span id="goal-work-ui-lag" class="goal-work-health-indicator" hidden aria-label="UI long tasks">⚠</span><span id="goal-work-state"></span></button>
           <div class="goal-work-quick-actions">
             <button type="button" id="goal-work-quick-pause" aria-label="Pause goal" title="Pause goal">&#x23F8;</button>
             <button type="button" id="goal-work-quick-resume" aria-label="Resume goal" title="Resume goal">&#x25B6;</button>
@@ -1115,6 +1115,7 @@
         <textarea id="goal-work-objective" class="chat-work-current" aria-label="Goal objective"></textarea>
         <div id="goal-work-progress"></div>
         <div id="goal-work-health-detail" class="goal-work-health-detail" role="status" hidden></div>
+        <div id="goal-work-budget-warning" class="goal-work-health-detail" role="status" hidden></div>
         <div class="chat-work-actions">
           <button type="button" id="goal-work-save">Save goal</button>
           <button type="button" id="goal-work-pause">Pause</button>
@@ -2832,10 +2833,10 @@
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/document.js?v=20260815approvalsave1"></script>
 <script type="module" src="/static/js/gallery.js?v=20260708match1"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260923replaycursor1"></script>
+<script type="module" src="/static/js/chatRenderer.js?v=20260924actionpreview1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260819approvalcontrol1"></script>
-<script type="module" src="/static/js/chat.js?v=20260923contextretry1"></script>
+<script type="module" src="/static/js/chat.js?v=20260924compactpreview1"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
@@ -2843,7 +2844,7 @@
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260922batch2"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260923contextretry1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260924compactpreview1"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260923approvalrev1"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

@@ -270,6 +270,54 @@ def test_manual_compaction_uses_working_checkpoint_not_full_transcript(monkeypat
     assert manager.session.context_checkpoint_count == 92
 
 
+def test_manual_compaction_cut_expands_to_keep_native_tool_batch_atomic(monkeypatch):
+    tool_call = {"id": "call-1", "type": "function", "function": {
+        "name": "read_file", "arguments": "{\"path\":\"fixture\"}",
+    }}
+    working = [
+        {"role": "user", "content": "old 1"},
+        {"role": "assistant", "content": "old 2"},
+        {"role": "user", "content": "old 3"},
+        {"role": "assistant", "content": "old 4"},
+        {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "tool result"},
+        {"role": "assistant", "content": "after tool"},
+        {"role": "user", "content": "latest request"},
+        {"role": "assistant", "content": "latest reply"},
+    ]
+    history = [ChatMessage(role=item["role"], content=item.get("content")) for item in working]
+    response, _captured, manager = _registered_compact_response(
+        monkeypatch, history, working_messages=working,
+    )
+
+    assert response.status_code == 200
+    # Keep the assistant call with its tool result; checkpoint replaces only
+    # the raw transcript prefix before that pair.
+    assert manager.session.context_checkpoint_count == 4
+
+
+def test_manual_compaction_native_feasibility_gate_avoids_summarizer(monkeypatch):
+    working = [
+        {"role": "user", "content": "latest request"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"call-{i}", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+            for i in range(5)
+        ]},
+        *[{"role": "tool", "tool_call_id": f"call-{i}", "content": "result"}
+          for i in range(5)],
+    ]
+    history = [ChatMessage(role=item["role"], content=item.get("content")) for item in working]
+    response, captured, manager = _registered_compact_response(
+        monkeypatch, history, working_messages=working,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "unchanged"
+    assert response.json()["reason"] == "native_not_compactable"
+    assert captured == {}
+    assert manager.saved is False
+
+
 def test_manual_compaction_does_not_claim_success_without_reduction(monkeypatch):
     from src import model_context
     monkeypatch.setattr(model_context, "estimate_tokens", lambda messages: 2000)

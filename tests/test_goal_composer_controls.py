@@ -119,11 +119,13 @@ def test_waiting_goal_reply_does_not_preview_a_new_objective():
           document:{getElementById:()=>null}, console, setTimeout, clearTimeout, setInterval, clearInterval});
         const work=new vm.SourceTextModule(fs.readFileSync(process.argv[1],'utf8'),{context});
         await work.link(spec=>new vm.SyntheticModule(
-          spec.includes('runHealth') ? ['describeProgressHealth','createUiLongTaskMonitor']
+              spec.includes('runHealth') ? ['describeProgressHealth','describeUiLongTasks','describeBudgetWarnings','createUiLongTaskMonitor']
             : ['bindUiText','t','unbindUiText'], function(){
               if(spec.includes('runHealth')){
-                this.setExport('describeProgressHealth',()=>null);
-                this.setExport('createUiLongTaskMonitor',()=>({start(){},stop(){}}));
+                    this.setExport('describeProgressHealth',()=>null);
+                    this.setExport('describeUiLongTasks',()=>null);
+                    this.setExport('describeBudgetWarnings',()=>[]);
+                    this.setExport('createUiLongTaskMonitor',()=>({start(){},stop(){}}));
               }else{
                 this.setExport('bindUiText',()=>{});this.setExport('t',x=>x);
                 this.setExport('unbindUiText',()=>{});

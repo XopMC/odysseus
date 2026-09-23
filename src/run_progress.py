@@ -8,6 +8,10 @@ from typing import Optional
 
 STALL_SECONDS = 600.0
 _MAX_MARKERS = 512
+_FILTER_CHUNK_BYTES = 32 * 1024
+_FILTER_CHUNK_INSERTS = 4_096
+_FILTER_MAX_CHUNKS = 16
+_FILTER_HASHES = 7
 _VERIFICATION_TOOLS = frozenset({
     "run_tests", "run_lint", "verify_hashes", "compare_files",
 })
@@ -42,7 +46,7 @@ def progress_marker(payload: dict) -> Optional[tuple[str, str]]:
         ):
             return None
         step_states = [
-            (step.get("step_id"), step.get("status"))
+            (step.get("step_id") or step.get("id"), step.get("status"))
             for step in steps if isinstance(step, dict)
         ]
         return "step", _digest((data["id"], data.get("current_step_id"), step_states))
@@ -88,6 +92,48 @@ def progress_marker(payload: dict) -> Optional[tuple[str, str]]:
     return None
 
 
+class _SeenMarkerFilter:
+    """Bounded long-run duplicate filter; false positives only suppress a reset.
+
+    The exact LRU below handles recent events. These small rotating Bloom
+    chunks retain older fingerprints without keeping an unbounded Python set;
+    after the hard cap, new markers are conservatively ignored rather than
+    forgetting old evidence and allowing an old loop to reset the watchdog.
+    """
+
+    def __init__(self) -> None:
+        self._chunks: list[bytearray] = []
+        self._counts: list[int] = []
+        self.saturated = False
+
+    @staticmethod
+    def _indices(digest: str):
+        raw = bytes.fromhex(digest)
+        first = int.from_bytes(raw[:8], "big")
+        step = int.from_bytes(raw[8:16], "big") | 1
+        bit_count = _FILTER_CHUNK_BYTES * 8
+        for index in range(_FILTER_HASHES):
+            yield (first + index * step) % bit_count
+
+    def contains(self, digest: str) -> bool:
+        indices = tuple(self._indices(digest))
+        return any(all(chunk[index >> 3] & (1 << (index & 7))
+                       for index in indices) for chunk in self._chunks)
+
+    def add(self, digest: str) -> bool:
+        if not self._chunks or self._counts[-1] >= _FILTER_CHUNK_INSERTS:
+            if len(self._chunks) >= _FILTER_MAX_CHUNKS:
+                self.saturated = True
+                return False
+            self._chunks.append(bytearray(_FILTER_CHUNK_BYTES))
+            self._counts.append(0)
+        chunk = self._chunks[-1]
+        for index in self._indices(digest):
+            chunk[index >> 3] |= 1 << (index & 7)
+        self._counts[-1] += 1
+        return True
+
+
 class ProgressTracker:
     def __init__(self, started_at: float) -> None:
         self.started_at = started_at
@@ -98,6 +144,7 @@ class ProgressTracker:
         self.revision = 0
         self._seen: set[str] = set()
         self._order: list[str] = []
+        self._seen_filter = _SeenMarkerFilter()
 
     def observe(self, payload: dict, *, now: Optional[float] = None) -> bool:
         now = time.time() if now is None else now
@@ -106,7 +153,9 @@ class ProgressTracker:
         if marker is None:
             return False
         kind, digest = marker
-        if digest in self._seen:
+        if digest in self._seen or self._seen_filter.contains(digest):
+            return False
+        if not self._seen_filter.add(digest):
             return False
         self._seen.add(digest)
         self._order.append(digest)
@@ -131,4 +180,5 @@ class ProgressTracker:
             "last_progress_kind": self.last_progress_kind,
             "seconds_without_progress": round(elapsed, 1),
             "stalled": status == "running" and elapsed >= STALL_SECONDS,
+            "tracking_capacity_exhausted": self._seen_filter.saturated,
         }

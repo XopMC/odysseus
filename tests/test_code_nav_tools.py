@@ -362,6 +362,52 @@ def test_read_file_plain_path_backcompat(repo):
     assert "needle" in r["output"]
 
 
+def test_read_file_v2_model_guidance_explains_bounded_ranges_and_artifacts():
+    from src.agent_loop import TOOL_SECTIONS
+    from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
+
+    for description in (TOOL_SECTIONS["read_file"], BUILTIN_TOOL_DESCRIPTIONS["read_file"]):
+        assert "byte_offset" in description
+        assert "line_numbers" in description
+        assert "read_tool_artifact" in description
+        assert "sha256" in description
+        assert "megabytes" in description or "megabytes inline" in description
+
+
+def test_search_files_v2_prompt_and_schema_explain_paging_contract():
+    from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+    description = BUILTIN_TOOL_DESCRIPTIONS["search_files"]
+    for term in ("mode=files", "mode=matches", "next_cursor", "page_size"):
+        assert term in description
+    schema = next(
+        item["function"] for item in FUNCTION_TOOL_SCHEMAS
+        if item["function"]["name"] == "search_files"
+    )
+    properties = schema["parameters"]["properties"]
+    assert "next_cursor" in properties["cursor"]["description"]
+    assert "default 25" in properties["page_size"]["description"]
+    assert properties["page_size"]["maximum"] == 50
+
+
+def test_list_tree_and_outline_prompts_state_scope_and_bounds():
+    from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+    catalog = {
+        item["function"]["name"]: item["function"]
+        for item in FUNCTION_TOOL_SCHEMAS
+    }
+    tree = BUILTIN_TOOL_DESCRIPTIONS["list_tree"]
+    outline = BUILTIN_TOOL_DESCRIPTIONS["file_outline"]
+    assert all(term in tree for term in (".gitignore", "without opening file bodies", "depth 2/100", "200"))
+    assert all(term in outline for term in ("Python-stub", "start/end line numbers", "2 MiB", "unavailable"))
+    assert "default 2" in catalog["list_tree"]["parameters"]["properties"]["max_depth"]["description"]
+    assert "default 100" in catalog["list_tree"]["parameters"]["properties"]["max_entries"]["description"]
+    assert "default 100" in catalog["file_outline"]["parameters"]["properties"]["max_symbols"]["description"]
+
+
 def test_read_file_v2_metadata_line_numbers_and_binary(repo):
     import hashlib
     import json

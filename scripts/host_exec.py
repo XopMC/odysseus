@@ -199,6 +199,8 @@ def _verification_command(tool, content, default_cwd):
     profile = args.get('profile') or (('pytest' if 'pytest' in profiles else 'npm_test')
                                       if tool == 'run_tests' else 'npm_lint')
     allowed = {'pytest', 'npm_test'} if tool == 'run_tests' else {'npm_lint'}
+    if profile == 'list':
+        return None, root, profile, args.get('timeout_seconds', 120), sorted(set(profiles) & allowed)
     if profile not in allowed or profile not in profiles:
         return None, root, profile, args['timeout_seconds'] if 'timeout_seconds' in args else 120, sorted(set(profiles) & allowed)
     return profiles[profile], root, profile, args.get('timeout_seconds', 120), sorted(set(profiles) & allowed)
@@ -220,6 +222,8 @@ def execute(request):
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {'error': 'Invalid verification arguments or path', 'code': 'invalid_arguments', 'exit_code': 1}
         if command is None:
+            if profile == 'list':
+                return {'available_profiles': available, 'code': 'ok', 'exit_code': 0}
             return {'error': 'Verification profile is unavailable', 'code': 'not_found',
                     'available_profiles': available, 'exit_code': 1}
     elif not isinstance(content, str) or len(content.encode()) > 100000:

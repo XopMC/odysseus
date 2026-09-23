@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js?v=20260923countrev1';
-import chatRenderer from './chatRenderer.js?v=20260923replaycursor1';
+import chatRenderer from './chatRenderer.js?v=20260924actionpreview1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js?v=20260923toolprogress1';
@@ -36,9 +36,24 @@ import {
   applyModelRouteEventState,
   inheritModelRouteState,
 } from './chatModelProvenance.js';
-import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
+import {
+  createTerminalStreamError,
+  isRecoverableStreamError,
+  streamErrorPresentation,
+} from './chatStreamErrors.js';
 import { loadPanel } from './panels.js';
 import { bindUiText, t } from './i18n.js';
+
+function appendStreamErrorGuidance(container, error) {
+  const presentation = streamErrorPresentation(error, t);
+  if (!container || !presentation) return;
+  container.dataset.errorCategory = presentation.category;
+  const guidance = document.createElement('div');
+  guidance.className = 'stream-error-guidance';
+  guidance.textContent = `${presentation.title}. ${presentation.action}`;
+  guidance.style.cssText = 'margin-top:4px;padding-left:10px;border-left:2px solid var(--color-warning);font-style:normal;opacity:.9;';
+  container.appendChild(guidance);
+}
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -245,6 +260,16 @@ import { bindUiText, t } from './i18n.js';
     if (d.context_status === 'working_checkpoint' && d.backend_measurement?.context_percent != null) {
       rows.push(['Last backend request', `${Number(d.backend_measurement.context_percent).toFixed(1)}%`]);
     }
+    if (d.compaction_preview) {
+      const preview = d.compaction_preview;
+      let previewText;
+      if (preview.reason === 'native_not_compactable') previewText = t('No safe cut');
+      else if (preview.reason === 'summarizer_not_configured') previewText = t('Summarizer route not configured');
+      else if (preview.reason === 'active_run') previewText = t('Unavailable during active run');
+      else if (preview.reason === 'not_enough_messages') previewText = t('Nothing old enough to compact');
+      else previewText = `${Number(preview.archive_groups) || 0} groups to summarize · ${Number(preview.retained_messages) || 0} retained`;
+      rows.push(['Compaction preview', previewText]);
+    }
     if (d.active_run) rows.push(['Run status', 'Active']);
     if (d.saved_context_policy) {
       rows.push(['Threshold basis', d.threshold_basis === 'usable_input' ? 'Usable input budget' : 'Model window']);
@@ -260,7 +285,7 @@ import { bindUiText, t } from './i18n.js';
       const b = document.createElement('span');
       b.textContent = value;
       b.title = value;
-      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request', 'Window basis'].includes(label)) {
+      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request', 'Window basis', 'Compaction preview'].includes(label)) {
         bindUiText(b, value);
         bindUiText(b, value, 'title');
       }
@@ -306,8 +331,12 @@ import { bindUiText, t } from './i18n.js';
         } catch (_) {}
         compactBtn.appendChild(document.createTextNode('Compacting'));
         bindUiText(compactBtn, 'Compacting');
-        const ok = await compactCurrentChatContext();
-        if (!ok) {
+        const result = await compactCurrentChatContext();
+        if (result && result.status === 'unchanged') {
+          compactBtn.disabled = true;
+          compactBtn.textContent = result.reason === 'native_not_compactable' ? 'No safe cut' : 'Unchanged';
+          bindUiText(compactBtn, compactBtn.textContent);
+        } else if (!result) {
           compactBtn.disabled = false;
           compactBtn.textContent = 'Compact failed';
           bindUiText(compactBtn, 'Compact failed');
@@ -377,9 +406,11 @@ import { bindUiText, t } from './i18n.js';
       if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
       if (data.status !== 'compacted' || !Number.isInteger(Number(data.compaction_revision))) {
         uiModule.showToast(data.message || 'Nothing old enough to compact');
-        _closeContextHeaderPopup();
+        if (data.reason !== 'native_not_compactable') _closeContextHeaderPopup();
         refreshChatContextHeader('compact-unchanged');
-        return false;
+        return data.status === 'unchanged'
+          ? { status: 'unchanged', reason: String(data.reason || '') }
+          : false;
       }
       uiModule.showToast(`Context compacted: ${data.before}% → ${data.after}%`);
       _closeContextHeaderPopup();
@@ -4469,6 +4500,7 @@ import { bindUiText, t } from './i18n.js';
                 const errDiv = document.createElement('div');
                 errDiv.style.cssText = 'color: var(--color-error); font-style: italic; padding: 4px 0;';
                 errDiv.textContent = `[Error: ${json.error}]`;
+                appendStreamErrorGuidance(errDiv, createTerminalStreamError(json));
                 roundHolder.querySelector('.body').appendChild(errDiv);
                 uiModule.scrollHistory();
               }
@@ -5026,6 +5058,7 @@ import { bindUiText, t } from './i18n.js';
                 errMsg += '\n\nThis model may not support tools — try switching to Chat mode.';
               }
               typewriterInto(errorHolder, errMsg);
+              appendStreamErrorGuidance(errorHolder, err);
             }
           }
         }

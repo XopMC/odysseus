@@ -942,9 +942,10 @@ def _parse_json_tool_call_body(body: str) -> Optional[ToolBlock]:
       </tool_call>
 
     Strict by design (issue #5187 / tracker #5333): the body must decode to an
-    object with a string "name", and "arguments" — when present — must itself
-    be an object. Anything else returns None rather than being coerced, so a
-    malformed call is dropped instead of dispatching with mangled arguments.
+    object with a string "name" (or the observed ``bbox_2d_id`` alias emitted
+    by a local vision-tuned coder), and "arguments" — when present — must
+    itself be an object. Anything else returns None rather than being coerced,
+    so a malformed call is dropped instead of dispatching with mangled args.
     raw_decode tolerates trailing chatter after the JSON object; the trailing
     text is never scanned for tool markup. Conversion goes through
     function_call_to_tool_block so aliases and per-tool argument formatting
@@ -960,6 +961,8 @@ def _parse_json_tool_call_body(body: str) -> Optional[ToolBlock]:
     if not isinstance(parsed, dict):
         return None
     name = parsed.get("name")
+    if not name:
+        name = parsed.get("bbox_2d_id")
     if not isinstance(name, str) or not name.strip():
         return None
     if "arguments" in parsed and not isinstance(parsed["arguments"], dict):

@@ -106,6 +106,47 @@ def test_repeated_monologue_requires_review_without_fake_question_or_user_pause(
     assert "_wait_reason" not in resumed["checkpoint"]
 
 
+def test_stale_action_loop_cannot_mark_a_new_goal_attempt_for_review(owned_chat):
+    store = ChatWorkStore()
+    first = store.ensure_goal("alice", owned_chat, "Verify arithmetic")
+    lease = store.acquire_goal_lease("alice", owned_chat)
+    current = store.consume_goal_lease("alice", owned_chat, lease)
+    assert current["attempt"] == first["attempt"] + 1
+
+    with pytest.raises(WorkConflict):
+        store.update_goal(
+            "alice", owned_chat, "Stale loop breaker",
+            {"reason": "repeated_action_observation", "round": 8},
+            review_required=True, expected_goal_id=first["id"],
+            expected_attempt=first["attempt"],
+        )
+    unchanged = store.get("alice", owned_chat)
+    assert unchanged["goal"]["status"] == "active"
+    assert unchanged["goal"]["attempt"] == current["attempt"]
+
+
+def test_action_loop_review_reason_survives_wait_metadata_and_panel(owned_chat):
+    store = ChatWorkStore()
+    goal = store.ensure_goal("alice", owned_chat, "Verify arithmetic")
+    review = store.update_goal(
+        "alice", owned_chat, "Repeated tool evidence cycle stopped for review.",
+        {"reason": "repeated_action_observation", "round": 8},
+        review_required=True, expected_goal_id=goal["id"],
+        expected_attempt=goal["attempt"],
+    )
+    metadata = store.wait_metadata("alice", owned_chat)
+    assert review["status"] == metadata["status"] == "review_required"
+    assert metadata["wait_reason"] == "repeated_action_observation"
+    from src.run_wait_state import compose_wait_panel
+    panel = compose_wait_panel(
+        run={"run_id": "loop-run", "status": "done", "started_at": 100},
+        goal=metadata, now=200,
+    )
+    assert panel["phase"] == "review"
+    assert panel["wait_reason"] == "repeated_action_observation"
+    assert panel["recovery_action"] == "resume_goal"
+
+
 def test_legacy_plan_update_marks_terminal_when_all_required_steps_done(owned_chat):
     work = ChatWorkStore()
     plan = work.save_plan("alice", owned_chat, "Arithmetic", "- [ ] Direct\n- [ ] Independent")

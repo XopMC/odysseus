@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from src.tool_capabilities import ToolCapabilities, ToolEffect, capabilities_for_tool
 from src.tool_registry import (
     ToolAccess, ToolRegistry, canonical_name, mcp_tool_id, policy_names,
+    tool_inventory_revision,
 )
 
 
@@ -26,6 +27,45 @@ class RegistryCoreTests(unittest.TestCase):
 
     def team(self, role='executor', **config):
         return ToolAccess.team(role, {'trusted_host': True, 'web': True, **config})
+
+    def test_inventory_revision_hashes_schema_and_effective_policy_not_just_names(self):
+        first_schema = schema('read_file')
+        first = tool_inventory_revision(
+            [schema('bash'), first_schema], selected_names={'bash', 'read_file'},
+            disabled_names={'write_file'}, relevant_names={'read_file'},
+        )
+        reordered = tool_inventory_revision(
+            [copy.deepcopy(first_schema), schema('bash')],
+            selected_names={'read_file', 'bash'}, disabled_names={'write_file'},
+            relevant_names={'read_file'},
+        )
+        changed_schema = schema('read_file')
+        changed_schema['function']['parameters']['properties']['limit'] = {'type': 'integer'}
+        changed = tool_inventory_revision(
+            [schema('bash'), changed_schema], selected_names={'bash', 'read_file'},
+            disabled_names={'write_file'}, relevant_names={'read_file'},
+        )
+        changed_policy = tool_inventory_revision(
+            [schema('bash'), first_schema], selected_names={'bash', 'read_file'},
+            disabled_names={'write_file', 'bash'}, relevant_names={'read_file'},
+        )
+        self.assertEqual(first, reordered)
+        self.assertNotEqual(first, changed)
+        self.assertNotEqual(first, changed_policy)
+        self.assertRegex(first, r'^[0-9a-f]{64}$')
+
+    def test_inventory_revision_hash_is_content_free_and_tracks_execution_mode(self):
+        description_secret = 'DO-NOT-PERSIST-PRIVATE-DESCRIPTION'
+        private_schema = schema('read_file')
+        private_schema['function']['description'] = description_secret
+        revision = tool_inventory_revision(
+            [private_schema], selected_names={'read_file'}, policy_mode='guide_only',
+            block_all=True, disable_mcp=True, plan_mode=True, access_mode='ask_every_time',
+        )
+        self.assertNotIn(description_secret, revision)
+        self.assertNotEqual(revision, tool_inventory_revision(
+            [private_schema], selected_names={'read_file'}, policy_mode='normal',
+        ))
 
     def test_shell_alias_has_one_identity_schema_and_shared_effects(self):
         for name in ('bash', 'shell', 'Shell'):
@@ -279,6 +319,15 @@ class AgentRegistryDispatchTests(unittest.IsolatedAsyncioTestCase):
                           if line.startswith('data: {')]
                 metrics = next(event['data'] for event in events if event.get('type') == 'metrics')
                 self.assertNotIn('```manage_notes', ''.join(metrics['round_texts']))
+                if fallback:
+                    inventories = [event['data'] for event in events
+                                   if event.get('type') == 'tool_inventory']
+                    self.assertGreaterEqual(len(inventories), 2)
+                    self.assertNotEqual(inventories[0]['route_revision'],
+                                        inventories[1]['route_revision'])
+                    context_routes = [event['data'].get('route_revision') for event in events
+                                      if event.get('type') == 'context_usage']
+                    self.assertIn(inventories[1]['route_revision'], context_routes)
 
     async def test_engineering_finetune_fences_preserve_current_permission_and_no_tool_clamps(self):
         sent, chunks, dispatch = await self._finetune_run(revoke=True)
@@ -331,7 +380,7 @@ class AgentRegistryDispatchTests(unittest.IsolatedAsyncioTestCase):
         from src import team_tools
         observed = []
         for native in (True, False):
-            sent, _ = await self._catalogue_run(native)
+            sent, chunks = await self._catalogue_run(native)
             prompt = '\n'.join(m.get('content', '') for m in sent[0][0] if m['role'] == 'system')
             match = re.search(r'<tool_catalogue>(.*?)</tool_catalogue>', prompt)
             self.assertIsNotNone(match)
@@ -340,6 +389,20 @@ class AgentRegistryDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('Shell', names)
             self.assertNotIn('```bash', prompt)
             self.assertTrue({'read_file', 'grep'} <= names)
+            events = [json.loads(line[6:]) for line in chunks.splitlines()
+                      if line.startswith('data: {')]
+            inventory = next(event['data'] for event in events if event.get('type') == 'tool_inventory')
+            self.assertRegex(inventory['revision'], r'^[0-9a-f]{64}$')
+            self.assertEqual(set(inventory['tools']), names,
+                             {'native': native, 'inventory': inventory,
+                              'catalogue': sorted(names),
+                              'sent_schemas': sorted(s['function']['name'] for s in sent[0][1])})
+            context_revisions = {
+                (event.get('data') or {}).get('tool_inventory_revision')
+                for event in events if event.get('type') == 'context_usage'
+            }
+            self.assertIn(inventory['revision'], context_revisions)
+            self.assertNotIn('function', json.dumps(inventory))
             if native:
                 self.assertEqual({s['function']['name'] for s in sent[0][1]}, names)
             observed.append(names)

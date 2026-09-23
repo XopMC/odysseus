@@ -3368,6 +3368,7 @@ def test_agent_builds_backup_prompt_and_tool_transport_before_attempt(monkeypatc
             primary[1],
             [{"role": "user", "content": "Use bash if needed."}],
             headers=primary[2],
+            context_length=131072,
             max_rounds=1,
             relevant_tools={"bash"},
             fallbacks=[backup],
@@ -3377,6 +3378,7 @@ def test_agent_builds_backup_prompt_and_tool_transport_before_attempt(monkeypatc
         )
     )
 
+    assert requests, next((chunk for chunk in chunks if 'context_compaction_failed' in chunk), chunks)
     assert requests[0]["kwargs"]["tools"]
     assert requests[1]["kwargs"]["tools"] is None
     backup_contents = [message.get("content") for message in requests[1]["messages"]]

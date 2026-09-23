@@ -821,7 +821,7 @@ class Runner:
         if not state['exists'] or self._file_identity(current) != state.get('identity'):
             raise ValueError('file changed during rollback')
 
-    def _begin_file_checkpoint(self, paths, owner, scope, model_policy=None):
+    def _begin_file_checkpoint(self, paths, owner, scope, model_policy=None, run_id=None, backend='jetson'):
         paths = sorted(set(os.path.abspath(path) for path in paths))
         if not 1 <= len(paths) <= 32:
             raise ValueError('file checkpoint requires 1..32 exact paths')
@@ -853,7 +853,7 @@ class Runner:
             files.append({'path': path, 'before': state, 'blob': blob, 'after': None})
         record = {'id': identity, 'owner': owner, 'scope': scope, 'created_at': time.time(),
                   'status': 'prepared', 'files': files, 'bytes': size,
-                  'model_policy': model_policy}
+                  'model_policy': model_policy, 'run_id': run_id, 'backend': backend}
         self.data['file_checkpoints'][identity] = record
         self.save()  # originals and claim durable BEFORE changing the target
         return record
@@ -873,6 +873,7 @@ class Runner:
     @staticmethod
     def _public_file_checkpoint(record):
         return {'id': record['id'], 'status': record['status'], 'created_at': record['created_at'],
+                'run_id': record.get('run_id'), 'backend': record.get('backend', 'jetson'),
                 'files': [{'path': item['path'], 'before_sha256': item['before']['sha256'],
                            'after_sha256': item['after']['sha256'] if item['after'] else None,
                            'before_exists': item['before']['exists'],
@@ -965,6 +966,9 @@ class Runner:
         cwd = self.safe_cwd(args.get('cwd'))
         if op == 'file.call':
             tool, content = args.get('tool'), args.get('content', {})
+            run_id = args.get('run_id')
+            if run_id is not None and (not isinstance(run_id, str) or len(run_id) > 200):
+                raise ValueError('invalid durable run identity')
             if tool not in {'read_file', 'write_file', 'edit_file', 'apply_patch', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'get_workspace'}:
                 raise ValueError('unknown file tool')
             parsed = json.loads(content) if isinstance(content, str) and content.strip().startswith('{') else content
@@ -987,7 +991,8 @@ class Runner:
                 lease = self.lease(path, owner, scope)
                 if lease and tool in {'write_file', 'edit_file', 'apply_patch'} and self.busy(self.data['worktrees'][lease]['path']):
                     raise ValueError('worktree has an active writer')
-            checkpoint = self._begin_file_checkpoint([_path(raw, cwd) for raw in paths], owner, scope, path_guard) if tool in {'write_file', 'edit_file', 'apply_patch'} else None
+            checkpoint = self._begin_file_checkpoint([_path(raw, cwd) for raw in paths], owner, scope,
+                                                     path_guard, run_id, backend='jetson') if tool in {'write_file', 'edit_file', 'apply_patch'} else None
             try:
                 result = handle(tool, content, cwd, path_guard=path_guard)
             except Exception:
@@ -997,6 +1002,11 @@ class Runner:
             if checkpoint:
                 self._finish_file_checkpoint(checkpoint, result.get('exit_code') == 0)
                 result['checkpoint_id'] = checkpoint['id']
+                # Give Agent/Goal the exact post-mutation hashes required by
+                # file.rollback. Never infer them later from model prose; the
+                # runner still rechecks owner, scope, current file identity,
+                # active writers and the stored before-image on rollback.
+                result['file_checkpoint'] = self._public_file_checkpoint(checkpoint)
             if tool == 'ls' and result.get('exit_code') == 0:
                 directory = _path(paths[0], cwd)
                 entries = []

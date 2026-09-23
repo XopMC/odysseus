@@ -50,6 +50,26 @@ def test_pending_tool_latency_tracking_is_bounded_for_long_runs():
     assert metrics.snapshot()["tool_latency_count"] == 1
 
 
+def test_budget_warning_snapshot_is_bounded_content_free_and_latest_per_resource():
+    metrics = RunHealthTelemetry(100.0)
+    metrics.observe({"type": "budget_warning", "resource": "model_tokens",
+                     "used": 800, "limit": 1000, "soft_limit": 800,
+                     "message": "private prompt text"})
+    metrics.observe({"type": "budget_warning", "resource": "model_tokens",
+                     "used": 900, "limit": 1000, "soft_limit": 800})
+    metrics.observe({"type": "budget_warning", "resource": "process_rss",
+                     "used": 900, "limit": 1000, "soft_limit": 800})
+    metrics.observe({"type": "budget_warning", "resource": ["model_tokens"],
+                     "used": 900, "limit": 1000, "soft_limit": 800})
+    metrics.observe({"type": "budget_warning", "resource": "children",
+                     "used": True, "limit": 10, "soft_limit": 8})
+    snapshot = metrics.snapshot()
+    assert snapshot["budget_warnings"] == [{
+        "resource": "model_tokens", "used": 900, "limit": 1000, "soft_limit": 800,
+    }]
+    assert "private" not in str(snapshot)
+
+
 def test_active_run_summary_has_only_numeric_latency(monkeypatch):
     from src import agent_runs
 

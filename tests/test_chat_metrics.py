@@ -153,6 +153,19 @@ def test_stream_llm_omits_tps_when_backend_has_no_timings(monkeypatch):
     assert "prefill_tps" not in usage
 
 
+def test_stream_llm_reads_lm_studio_stats_from_usage_frame(monkeypatch):
+    events = _stream_events(monkeypatch, [
+        'data: ' + json.dumps({
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 120},
+            "stats": {"tokens_per_second": 123.45},
+        }),
+        'data: [DONE]',
+    ])
+    usage = next(e["data"] for e in events if e.get("type") == "usage")
+    assert usage["gen_tps"] == 123.45
+
+
 def test_stream_llm_surfaces_provider_resolved_model(monkeypatch):
     events = _stream_events(monkeypatch, [
         'data: ' + json.dumps({
@@ -212,3 +225,13 @@ def test_metrics_fall_back_to_wallclock_without_backend_timings():
     assert m["tokens_per_second"] == 4.2
     assert m["tps_source"] == "computed"
     assert "prefill_tps" not in m
+
+
+def test_metrics_use_model_stream_time_not_total_agent_wall_time():
+    m = _metrics(
+        total_duration=36.73,
+        model_stream_duration=8.4,
+        real_output_tokens=1034,
+    )
+    assert m["tokens_per_second"] == 123.1
+    assert m["tps_source"] == "stream_elapsed"

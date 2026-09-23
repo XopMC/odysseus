@@ -82,6 +82,63 @@ def working_context_compactable(messages, limit: int) -> bool:
     return len(archive_groups) >= 2
 
 
+def manual_compaction_plan(messages, recent_message_limit: int, *, measured_tokens=None) -> dict:
+    """Preview/split a manual checkpoint without splitting tool batches.
+
+    The returned message lists are internal-only; API callers should expose
+    only the content-free counts/reason. The cut is a contiguous suffix so the
+    durable checkpoint can still be represented by one transcript index.
+    """
+    if type(recent_message_limit) is not int or recent_message_limit < 1:
+        return {'feasible': False, 'reason': 'invalid_target', 'older': [], 'recent': [],
+                'archive_groups': 0, 'protected_groups': 0}
+    groups = _groups(messages)
+    start = len(groups)
+    retained_count = 0
+    while start > 0 and retained_count < recent_message_limit:
+        start -= 1
+        retained_count += len(groups[start])
+    latest_user_group = next((
+        index for index in range(len(groups) - 1, -1, -1)
+        if any(message.get('role') == 'user'
+               and not message.get('_agent_injected')
+               and (message.get('metadata') or {}).get('trusted') is not False
+               for message in groups[index])
+    ), None)
+    if latest_user_group is not None:
+        start = min(start, latest_user_group)
+    older_groups = groups[:start]
+    recent_groups = groups[start:]
+    older = [message for group in older_groups for message in group]
+    recent = [message for group in recent_groups for message in group]
+    archive_groups = sum(
+        1 for group in older_groups
+        if any(message.get('role') != 'system' for message in group)
+    )
+    if measured_tokens is None:
+        measured_tokens = estimate_tokens(messages)
+    feasible = type(measured_tokens) is int and measured_tokens > 0 and archive_groups >= 2
+    return {
+        'feasible': feasible,
+        'reason': None if feasible else 'native_not_compactable',
+        'older': older,
+        'recent': recent,
+        'archive_groups': archive_groups,
+        'protected_groups': len(recent_groups),
+        'retained_messages': len(recent),
+    }
+
+
+def manual_compaction_preview(messages, recent_message_limit: int, *, measured_tokens=None) -> dict:
+    """Content-free form of ``manual_compaction_plan`` for the context UI."""
+    plan = manual_compaction_plan(
+        messages, recent_message_limit, measured_tokens=measured_tokens,
+    )
+    return {key: plan[key] for key in (
+        'feasible', 'reason', 'archive_groups', 'protected_groups', 'retained_messages',
+    )}
+
+
 async def compact_working_context(messages, limit, summarize, *, policy=None, target_limit=None, manual=False):
     """Summarize between rounds before the transport's destructive soft trim.
 

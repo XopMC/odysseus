@@ -150,3 +150,64 @@ def test_total_memory_injection_is_capped_at_five_across_pinned_and_recalled():
 
     assert len(processor._last_used_memories) <= 5
     assert sum(1 for m in processor._last_used_memories if m["type"] == "pinned") == 4
+
+
+def test_credential_shaped_pinned_memory_is_neither_injected_nor_reported():
+    rows = [
+        {
+            "id": "credential",
+            "text": "Jetson host sudo password: QA_SECRET_SENTINEL_NEVER_USE",
+            "category": "identity",
+            "pinned": True,
+            "timestamp": 3,
+        },
+        {
+            "id": "safe",
+            "text": "User prefers concise technical answers.",
+            "category": "identity",
+            "pinned": True,
+            "timestamp": 2,
+        },
+    ]
+    processor = _processor(rows)
+
+    preface, _, _ = processor.build_context_preface(
+        message="Explain the project setup",
+        session=SimpleNamespace(),
+        use_rag=False,
+        use_memory=True,
+    )
+
+    assert "QA_SECRET_SENTINEL_NEVER_USE" not in _context_text(preface)
+    assert "QA_SECRET_SENTINEL_NEVER_USE" not in repr(processor._last_used_memories)
+    assert any("concise technical answers" in row["text"] for row in processor._last_used_memories)
+
+
+def test_sensitive_extended_memory_cannot_win_recall_or_enter_metadata():
+    rows = [
+        {
+            "id": "credential",
+            "text": "SSH credential: QA_SECRET_SENTINEL_NEVER_USE",
+            "category": "fact",
+            "pinned": False,
+            "timestamp": 3,
+        },
+        {
+            "id": "safe",
+            "text": "User prefers concise technical answers.",
+            "category": "fact",
+            "pinned": False,
+            "timestamp": 2,
+        },
+    ]
+    processor = _processor(rows)
+
+    preface, _, _ = processor.build_context_preface(
+        message="SSH credential concise technical answers",
+        session=SimpleNamespace(),
+        use_rag=False,
+        use_memory=True,
+    )
+
+    assert "QA_SECRET_SENTINEL_NEVER_USE" not in _context_text(preface)
+    assert "QA_SECRET_SENTINEL_NEVER_USE" not in repr(processor._last_used_memories)

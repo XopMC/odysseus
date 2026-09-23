@@ -17,6 +17,8 @@ def test_goal_health_warning_requires_active_stalled_run():
       const module=new vm.SourceTextModule(fs.readFileSync(process.argv[1],'utf8'));
       await module.link(()=>{throw Error('unexpected dependency')});await module.evaluate();
       const describe=module.namespace.describeProgressHealth;
+      const describeUi=module.namespace.describeUiLongTasks;
+      const describeBudgets=module.namespace.describeBudgetWarnings;
       const active={status:'active'},running={status:'running',run_id:'run-1',progress_health:{
         revision:0,stalled:true,seconds_without_progress:731,last_heartbeat_at:1000,
       }};
@@ -24,10 +26,26 @@ def test_goal_health_warning_requires_active_stalled_run():
       assert.equal(warning.minutes,12);
       assert.equal(warning.heartbeatAlive,true);
       assert.equal(warning.runId,'run-1');
+      const capacityWarning=describe(active,{...running,progress_health:{...running.progress_health,tracking_capacity_exhausted:true}},1010000);
+      assert.equal(capacityWarning.trackingCapacityExhausted,true);
       assert.equal(describe(active,{...running,status:'done'},1010000),null);
       assert.equal(describe({status:'waiting_user'},running,1010000),null);
       assert.equal(describe(active,{...running,progress_health:{...running.progress_health,stalled:false}},1010000),null);
       assert.equal(describe(active,{...running,progress_health:{...running.progress_health,last_heartbeat_at:null}},1010000).heartbeatAlive,false);
+      assert.equal(describeUi(active,{supported:false,count:20,max_duration_ms:900}),null);
+      assert.equal(describeUi({status:'paused'},{supported:true,count:20,max_duration_ms:900}),null);
+      assert.equal(describeUi(active,{supported:true,count:2,max_duration_ms:900}),null);
+      assert.equal(describeUi(active,{supported:true,count:3,max_duration_ms:199}),null);
+      assert.deepEqual(JSON.parse(JSON.stringify(describeUi(active,{supported:true,count:3,max_duration_ms:200}))),
+        {count:3,maxDurationMs:200,countLimit:3,durationLimitMs:200});
+      assert.deepEqual(JSON.parse(JSON.stringify(describeBudgets(active,{status:'running',health_metrics:{budget_warnings:[
+        {resource:'model_tokens',used:800,limit:1000,soft_limit:800},
+        {resource:'process_rss',used:800,limit:1000,soft_limit:800},
+        {resource:'children',used:true,limit:10,soft_limit:8},
+      ]}}))),[{resource:'model_tokens',used:800,limit:1000,soft_limit:800}]);
+      assert.deepEqual(describeBudgets({status:'paused'},{status:'running',health_metrics:{budget_warnings:[
+        {resource:'model_tokens',used:800,limit:1000,soft_limit:800},
+      ]}}),[]);
       })().catch(error=>{console.error(error);process.exitCode=1});
     """
     result = subprocess.run(
@@ -75,10 +93,12 @@ def test_goal_health_is_owner_snapshot_driven_and_hidden_without_active_goal():
     assert "describeProgressHealth" in work
     assert "goal-work-health-indicator" in html
     assert "goal-work-health-detail" in html
-    assert "./runHealth.js?v=20260922batch1" in work
-    assert "/static/js/runHealth.js?v=20260922batch1" in sw
-    assert "./js/chat-work.js?v=20260923effectinbox1" in app
-    assert "/static/js/chat-work.js?v=20260923effectinbox1" in sw
+    assert "describeUiLongTasks(goal, uiLongTasks.snapshot())" in work
+    assert "describeBudgetWarnings(goal, runHealthSnapshot)" in work
+    assert "./runHealth.js?v=20260924budgetwarn1" in work
+    assert "/static/js/runHealth.js?v=20260924budgetwarn1" in sw
+    assert "./js/chat-work.js?v=20260924budgetwarn1" in app
+    assert "/static/js/chat-work.js?v=20260924budgetwarn1" in sw
 
 
 def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
@@ -89,7 +109,9 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       (async()=>{
       const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
       const ids={};for(const id of [
-        'goal-mode-status','goal-work-state','goal-work-objective','goal-work-objective-preview',
+        'goal-mode-status','goal-work-state','goal-work-objective','goal-work-objective-preview','goal-work-ui-lag',
+        'goal-work-budget-warning',
+        'goal-work-budget-warning-indicator',
         'goal-work-progress','goal-work-pause','goal-work-resume','goal-work-cancel',
         'goal-work-quick-pause','goal-work-quick-resume','goal-work-quick-cancel',
         'goal-mode-status-toggle','goal-work-health-indicator','goal-work-health-detail',
@@ -101,7 +123,9 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       ids['wait-unknown-effects'].replaceChildren=function(){this.children=[]};
       ids['wait-unknown-effects'].appendChild=function(child){this.children.push(child)};
       let goal={id:'goal-1',objective:'Harmless fixture',status:'active',attempt:1,progress:'',revision:1};
-      let run={run_id:'run-1',status:'running',progress_health:{stalled:true,seconds_without_progress:660,last_heartbeat_at:1000}};
+      let uiLongTaskCallback;
+      class FakePerformanceObserver {constructor(callback){uiLongTaskCallback=callback}observe(){}disconnect(){}}
+      let run={run_id:'run-1',status:'running',progress_health:{stalled:true,seconds_without_progress:660,last_heartbeat_at:1000,tracking_capacity_exhausted:true}};
       let wait={run_id:'run-1',phase:'tool',phase_seconds:22,model:'fixture-model',endpoint_id:'endpoint-1',
         tool:'run_tests',current_child:{child_id:'child-1',model:'worker-model'},
         lease:{held:true,expires_at:'2099-01-01T00:00:00Z'},
@@ -110,7 +134,7 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       let effects=[],noRetryCalls=0,verifyCalls=0,retryAuthorizeCalls=0,staleResume=false,errorToasts=[];
       let confirmAnswers=[false,true,true];
       let delayOld=false,releaseOld;
-      const document={visibilityState:'hidden',getElementById:id=>ids[id]||null,querySelectorAll:()=>[],
+      const document={visibilityState:'visible',getElementById:id=>ids[id]||null,querySelectorAll:()=>[],
         createElement:tag=>({tag,textContent:'',dataset:{},children:[],append(...nodes){this.children.push(...nodes)},appendChild(node){this.children.push(node)}})};
       let resumeCalls=0,reloadCalls=0,goalResumeCalls=0,contextClicks=0;
       ids['chat-context-pill'].click=()=>{contextClicks++};
@@ -121,6 +145,7 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
         sessionModule:{getCurrentSessionId:()=> 'chat-1'},
         chatModule:{resumeStream:async()=>{resumeCalls++;return false}}};
       const context=vm.createContext({window,document,console,setTimeout,clearTimeout,setInterval,clearInterval,
+        PerformanceObserver:FakePerformanceObserver,
         fetch:async url=>{
           if(url.includes('/unknown-effects/')&&url.endsWith('/verify')){
             verifyCalls++;effects=[{...effects[0],status:'verified_not_applied',revision:3}];
@@ -152,6 +177,16 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       assert.equal(typeof api.runWaitAction,'function');
       await api.refresh('chat-1');await api.refreshRunHealth('chat-1');
       await api.refreshWait('chat-1');
+      uiLongTaskCallback({getEntries:()=>[{duration:80},{duration:250},{duration:120}]});
+      await api.refresh('chat-1');
+      assert.equal(ids['goal-work-ui-lag'].hidden,false);
+      assert.match(ids['goal-work-ui-lag']['aria-label'],/UI long tasks: 3, maximum 250 ms/);
+      run={...run,health_metrics:{budget_warnings:[{resource:'model_tokens',used:800,limit:1000,soft_limit:800}]}};
+      await api.refreshRunHealth('chat-1');
+      assert.equal(ids['goal-work-budget-warning'].hidden,false);
+      assert.match(ids['goal-work-budget-warning'].textContent,/model tokens 800\/1000/);
+      assert.equal(ids['goal-work-budget-warning-indicator'].hidden,false);
+      assert.match(ids['goal-work-budget-warning-indicator']['aria-label'],/Resource budget approaching/);
       assert.equal(ids['wait-mode-status'].hidden,false);
       assert.equal(ids['wait-run-id'].textContent,'run-1');
       assert.equal(ids['wait-child-id'].textContent,'child-1');
@@ -162,9 +197,13 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       assert.equal(ids['wait-checkpoint'].textContent.includes('secret-marker'),false);
       assert.equal(ids['goal-work-health-indicator'].hidden,false);
       assert.match(ids['goal-work-health-detail'].textContent,/No verified progress/);
+      assert.match(ids['goal-work-health-detail'].textContent,/Progress tracking capacity reached/);
       goal={...goal,status:'paused'};await api.refresh('chat-1');
       assert.equal(ids['goal-work-health-indicator'].hidden,true);
       assert.equal(ids['goal-work-health-detail'].hidden,true);
+      assert.equal(ids['goal-work-ui-lag'].hidden,true);
+      assert.equal(ids['goal-work-budget-warning'].hidden,true);
+      assert.equal(ids['goal-work-budget-warning-indicator'].hidden,true);
       run={...run,progress_health:{...run.progress_health,stalled:false}};
       goal={...goal,status:'active'};await api.refresh('chat-1');await api.refreshRunHealth('chat-1');
       assert.equal(ids['goal-work-health-indicator'].hidden,true);
@@ -182,6 +221,10 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       await api.runWaitAction();
       assert.equal(goalResumeCalls,1);
       assert.equal(goal.status,'active');
+      goal={...goal,status:'review_required'};await api.refresh('chat-1');
+      wait={...wait,phase:'review',goal_status:'review_required',wait_reason:'repeated_action_observation',recovery_action:'resume_goal'};
+      await api.refreshWait('chat-1');
+      assert.match(ids['wait-recovery'].textContent,/Repeated tool evidence cycle detected/);
       goal={...goal,status:'waiting_user'};await api.refresh('chat-1');
       wait={...wait,wait_reason:'provider_failure'};await api.refreshWait('chat-1');
       assert.match(ids['wait-recovery'].textContent,/Model endpoint failed repeatedly/);

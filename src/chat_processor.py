@@ -9,6 +9,7 @@ from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
 from src.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
+from src.memory_safety import is_sensitive_memory_text
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +311,12 @@ class ChatProcessor:
         # Memory: core pinned facts + relevant pinned/extended recall.
         self._last_used_memories = []  # track what was injected
         if use_memory:
-            mem_entries = self.memory_manager.load(owner=owner)
+            # Keep credential-shaped memories in the owner's memory manager,
+            # but never send them to a model or copy them to message metadata.
+            mem_entries = [
+                m for m in self.memory_manager.load(owner=owner)
+                if isinstance(m, dict) and not is_sensitive_memory_text(m.get("text"))
+            ]
 
             pinned = [m for m in mem_entries if m.get("pinned")]
             extended = [m for m in mem_entries if not m.get("pinned")]

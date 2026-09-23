@@ -1,5 +1,5 @@
 import { bindUiText, t, unbindUiText } from './i18n.js';
-import { describeProgressHealth, createUiLongTaskMonitor } from './runHealth.js?v=20260922batch1';
+import { describeProgressHealth, describeUiLongTasks, describeBudgetWarnings, createUiLongTaskMonitor } from './runHealth.js?v=20260924budgetwarn1';
 
 const api = window.location.origin;
 let snapshot = { plan: null, goal: null, cursor: 0 };
@@ -82,20 +82,40 @@ function renderGoal() {
   const warning = describeProgressHealth(goal, runHealthSnapshot);
   if (goal?.status === 'active' && document.visibilityState !== 'hidden') uiLongTasks.start();
   else uiLongTasks.stop();
-  const uiLag = uiLongTasks.snapshot();
+  const uiLag = describeUiLongTasks(goal, uiLongTasks.snapshot());
   const uiLagNode = el('goal-work-ui-lag');
   if (uiLagNode) {
-    uiLagNode.hidden = goal?.status !== 'active' || !uiLag.supported || uiLag.count < 3 || uiLag.max_duration_ms < 200;
+    uiLagNode.hidden = !uiLag;
     if (!uiLagNode.hidden) {
-      const label = `${t('UI long tasks')}: ${uiLag.count}, ${t('maximum')} ${uiLag.max_duration_ms} ms`;
+      const label = `${t('UI long tasks')}: ${uiLag.count}, ${t('maximum')} ${uiLag.maxDurationMs} ms`;
       uiLagNode.title = label;
       uiLagNode.setAttribute('aria-label', label);
     }
   }
+  const budgetWarnings = describeBudgetWarnings(goal, runHealthSnapshot);
+  const budgetWarningIcon = el('goal-work-budget-warning-indicator');
+  if (budgetWarningIcon) {
+    const label = t('Resource budget approaching');
+    budgetWarningIcon.hidden = budgetWarnings.length === 0;
+    budgetWarningIcon.title = label;
+    budgetWarningIcon.setAttribute('aria-label', label);
+  }
+  const budgetWarningNode = el('goal-work-budget-warning');
+  if (budgetWarningNode) {
+    budgetWarningNode.hidden = budgetWarnings.length === 0;
+    budgetWarningNode.textContent = budgetWarnings.map(warning => {
+      const resource = t({
+        model_rounds: 'model rounds', model_tokens: 'model tokens',
+        model_requests: 'model requests', wall_seconds: 'elapsed time',
+        tool_calls: 'tool calls', children: 'subagents',
+      }[warning.resource]);
+      return `${t('Resource budget approaching')}: ${resource} ${warning.used}/${warning.limit} (${t('soft threshold')} ${warning.soft_limit})`;
+    }).join(' · ');
+  }
   const indicator = el('goal-work-health-indicator');
   const detail = el('goal-work-health-detail');
   const message = warning
-    ? `${t('No verified progress for')} ${warning.minutes} ${t('minutes')}. ${t(warning.heartbeatAlive ? 'Connection alive; this is not task progress.' : 'No recent connection heartbeat.')}`
+    ? `${t('No verified progress for')} ${warning.minutes} ${t('minutes')}. ${t(warning.heartbeatAlive ? 'Connection alive; this is not task progress.' : 'No recent connection heartbeat.')}${warning.trackingCapacityExhausted ? ` ${t('Progress tracking capacity reached; manual review is needed.')}` : ''}`
     : '';
   if (indicator) {
     indicator.hidden = !warning;
@@ -221,6 +241,8 @@ function renderWait() {
   put('wait-checkpoint', `seq ${Number.isInteger(checkpoint.durable_seq) ? checkpoint.durable_seq : '—'} · rev ${Number.isInteger(checkpoint.context_revision) ? checkpoint.context_revision : '—'} · ${checkpoint.ledger_hash || '—'}`);
   put('wait-recovery', state.wait_reason === 'repeated_premature_stop'
     ? t('Goal stalled after repeated responses; review and resume.')
+    : state.wait_reason === 'repeated_action_observation'
+      ? t('Repeated tool evidence cycle detected; review the blocker before resuming.')
     : state.wait_reason === 'provider_failure'
       ? t('Model endpoint failed repeatedly; check it before resuming the goal.')
       : state.wait_reason === 'context_compaction'
@@ -331,6 +353,7 @@ function handleEvent(event) {
   if (event?.type === 'effect_unknown' || event?.type === 'effect_reconciled') {
     void refreshEffects(sessionId); void refreshWait(sessionId); return;
   }
+  if (event?.type === 'budget_warning') { void refreshRunHealth(sessionId); return; }
   if (event?.type === 'plan_update') { snapshot.plan = event.data || null; render(); return; }
   if (event?.type === 'goal_update') { snapshot.goal = event.data || null; runHealthSnapshot = null; render(); void refreshRunHealth(sessionId); void refreshWait(sessionId); void refreshEffects(sessionId); return; }
   if (event?.type === 'goal_guidance') {

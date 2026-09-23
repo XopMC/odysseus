@@ -530,6 +530,8 @@ def test_parallel_runtime_returns_immediately_and_caps_each_model_at_four(monkey
         assert len(entered) == 4
         assert max(t for _, t in entered) - min(t for _, t in entered) < 0.5
         assert all(row["exit_code"] == 0 for row in children)
+        assert [row["run_children_used"] for row in children] == [1, 2, 3, 4]
+        assert all(row["run_children_limit"] == 5 for row in children)
         fifth = await runtime.spawn(model="worker-a", **common)
         assert fifth["policy"] == "model_capacity_exhausted"
         other = await runtime.spawn(model="worker-b", **common)

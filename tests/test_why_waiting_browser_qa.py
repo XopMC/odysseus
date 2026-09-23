@@ -40,6 +40,7 @@ def test_stalled_model_panel_matches_after_two_client_reload():
             "AUTH_ENABLED": "false",
             "ODYSSEUS_ENABLE_REPLAY_QA": "1",
             "ODYSSEUS_WAIT_QA_STALLED": "1",
+            "ODYSSEUS_WAIT_QA_PROGRESS_CAPACITY": "1",
             "ODYSSEUS_DURABLE_CHAT_REPLAY": "1",
             "ODYSSEUS_DATA_DIR": data_dir,
             "DATABASE_URL": "sqlite:///" + str(Path(data_dir) / "app.db"),
@@ -75,25 +76,25 @@ def test_stalled_model_panel_matches_after_two_client_reload():
                 browser = playwright.chromium.launch(headless=True)
                 try:
                     observed = []
+                    clients = []
                     for viewport in ({"width": 1280, "height": 800},
                                      {"width": 390, "height": 844}):
                         context = browser.new_context(viewport=viewport)
                         page = context.new_page()
                         errors = []
                         http_errors = []
-                        page.on("pageerror", lambda error: errors.append(str(error)))
-                        page.on("console", lambda message: errors.append(message.text)
+                        page.on("pageerror", lambda error, out=errors: out.append(str(error)))
+                        page.on("console", lambda message, out=errors: out.append(message.text)
                                 if message.type == "error" else None)
-                        page.on("response", lambda response: http_errors.append((response.status, response.url))
+                        page.on("response", lambda response, out=http_errors: out.append((response.status, response.url))
                                 if response.status >= 400 else None)
                         # This fixture has no research run. Supply its idle
                         # status so an unrelated expected 404 does not
                         # masquerade as waiting-panel console failures.
-                        for pattern in ("**/api/research/status/*",):
-                            page.route(pattern, lambda route: route.fulfill(
-                                status=200, content_type="application/json",
-                                body='{"status":"idle"}',
-                            ))
+                        page.route("**/api/research/status/*", lambda route: route.fulfill(
+                            status=200, content_type="application/json",
+                            body='{"status":"idle"}',
+                        ))
                         page.goto(base + "/#" + SESSION_ID, wait_until="domcontentloaded")
                         assert "Odysseus" in page.title()
                         assert page.url.startswith(base + "/#" + SESSION_ID)
@@ -106,9 +107,18 @@ def test_stalled_model_panel_matches_after_two_client_reload():
                         assert page.locator("#wait-endpoint").inner_text() == "fixture-endpoint"
                         assert "seq 0" in page.locator("#wait-checkpoint").inner_text()
                         assert page.locator("#wait-action").is_visible()
+                        health_note = page.locator("#goal-work-health-detail").inner_text()
+                        assert ("Progress tracking capacity reached" in health_note
+                                or "Достигнут предел истории прогресса" in health_note)
                         observed.append(tuple(page.locator(selector).inner_text() for selector in (
                             "#wait-run-id", "#wait-model", "#wait-endpoint", "#wait-checkpoint",
                         )))
+                        clients.append((viewport, context, page, errors, http_errors))
+                    assert observed[0] == observed[1]
+                    # Keep both clients open on the same live synthetic run;
+                    # reload each independently and require the durable wait
+                    # diagnosis to reconcile without stopping the run.
+                    for viewport, context, page, errors, http_errors in clients:
                         page.reload(wait_until="domcontentloaded")
                         page.locator("#wait-mode-status").wait_for(state="visible", timeout=15000)
                         page.locator("#wait-toggle").click()
@@ -133,8 +143,8 @@ def test_stalled_model_panel_matches_after_two_client_reload():
                             output = Path(screenshot_dir)
                             output.mkdir(parents=True, exist_ok=True)
                             (output / f"wait-{viewport['width']}.png").write_bytes(screenshot)
+                    for _viewport, context, _page, _errors, _http_errors in clients:
                         context.close()
-                    assert observed[0] == observed[1]
                 finally:
                     browser.close()
         finally:

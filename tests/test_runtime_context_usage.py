@@ -286,9 +286,11 @@ def _client(monkeypatch, history, run=None, owner_error=False, checkpoint=None):
     from src import context_policy_runtime  # noqa: F401
     session = SimpleNamespace(
         model="mac-qwen", endpoint_url="http://mac.test/v1", history=history,
-        context_checkpoint=checkpoint,
+        context_checkpoint=checkpoint, message_count=len(history),
     )
-    session.get_context_messages = lambda: [m.to_dict() for m in history]
+    session.get_context_messages = lambda: [
+        m.to_dict() if hasattr(m, "to_dict") else m for m in history
+    ]
     manager = SimpleNamespace(get_session=lambda _sid: session)
     def check_owner(*_args):
         if owner_error:
@@ -296,6 +298,9 @@ def _client(monkeypatch, history, run=None, owner_error=False, checkpoint=None):
     monkeypatch.setattr(history_routes, "_verify_session_owner", check_owner)
     monkeypatch.setattr(model_context, "estimate_tokens", lambda _messages: 1627)
     monkeypatch.setattr(model_context, "get_context_length", lambda *_args: 262144)
+    from src import endpoint_resolver
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", lambda _kind, owner=None, **kw:
+                        (kw.get("fallback_url"), kw.get("fallback_model"), kw.get("fallback_headers") or {}))
     monkeypatch.setattr(agent_runs, "_RUNS", {"chat": run} if run else {})
     app = FastAPI()
     app.include_router(history_routes.setup_history_routes(manager))
@@ -331,7 +336,39 @@ def test_completed_snapshot_is_explicitly_last_request(monkeypatch):
     assert data["used_tokens"] == 82000
     assert data["context_status"] == "last_request"
     assert data["source"] == "backend"
+    assert data["can_compact"] is False
+    assert data["compaction_preview"]["reason"] == "not_enough_messages"
+
+
+def test_context_route_previews_native_batch_infeasibility_without_enabling_button(monkeypatch):
+    history = [
+        {"role": "user", "content": "latest request"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"call-{i}", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+            for i in range(5)
+        ]},
+        *[{"role": "tool", "tool_call_id": f"call-{i}", "content": "result"}
+          for i in range(5)],
+    ]
+    data = _client(monkeypatch, history).get("/api/session/chat/context").json()
+    assert data["can_compact"] is False
+    assert data["compaction_preview"]["feasible"] is False
+    assert data["compaction_preview"]["reason"] == "native_not_compactable"
+
+
+def test_context_route_exposes_configured_summarizer_and_safe_group_counts(monkeypatch):
+    history = [
+        ChatMessage("user", "request one"), ChatMessage("assistant", "reply one"),
+        ChatMessage("user", "request two"), ChatMessage("assistant", "reply two"),
+        ChatMessage("user", "request three"), ChatMessage("assistant", "reply three"),
+    ]
+    data = _client(monkeypatch, history).get("/api/session/chat/context").json()
+    preview = data["compaction_preview"]
     assert data["can_compact"] is True
+    assert preview["feasible"] is True
+    assert preview["archive_groups"] >= 2
+    assert preview["summarizer_configured"] is True
+    assert preview["summarizer_model"] == "mac-qwen"
 
 
 def test_idle_context_uses_current_loaded_window_after_model_reload(monkeypatch):

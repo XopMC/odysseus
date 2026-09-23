@@ -11,7 +11,9 @@ import re
 import os
 import math
 import random
+from datetime import timezone
 from contextlib import asynccontextmanager
+from email.utils import parsedate_to_datetime
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
@@ -2264,22 +2266,54 @@ def _nonstream_error_status(error: Exception) -> Optional[int]:
 def _model_retry_wait_seconds(
     *, status: int, attempt: int, deadline: float, now: float,
     retry_after: Optional[str] = None, jitter: Optional[float] = None,
+    wall_now: Optional[float] = None, category: Optional[str] = None,
+    pre_request: bool = False,
 ) -> Optional[float]:
-    """Bound pre-content overload retries by time as well as attempt count."""
+    """Bound retries to classified-safe failures and a monotonic time budget.
+
+    Provider replies are retried only when they explicitly identify a rate
+    limit or unloaded model. Connection/pool failures are retryable only when
+    the caller proves no request was delivered.
+    """
     if status not in (429, 503) or now >= deadline:
+        return None
+    if status == 429 and category != "rate_limit":
+        return None
+    if status == 503 and category != "provider_unload" and not (
+        pre_request and category == "transport"
+    ):
         return None
     if jitter is None:
         jitter = random.uniform(0.5, 1.0)
     backoff = min(4.0, LLMConfig.RETRY_DELAY * (2 ** max(0, attempt - 1)))
     delay = backoff * max(0.5, min(1.0, jitter))
-    if retry_after is not None:
-        try:
-            server_delay = float(retry_after.strip())
-        except (TypeError, ValueError, AttributeError):
-            server_delay = 0.0
-        if math.isfinite(server_delay) and server_delay > 0:
-            delay = max(delay, server_delay)
+    server_delay = _retry_after_delay_seconds(retry_after, wall_now=wall_now)
+    if server_delay is not None and server_delay > 0:
+        delay = max(delay, server_delay)
     return delay if now + delay <= deadline else None
+
+
+def _retry_after_delay_seconds(value: Optional[str], *, wall_now: Optional[float] = None) -> Optional[float]:
+    """Parse Retry-After delay-seconds or HTTP-date without trusting its size."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 128:
+        return None
+    try:
+        delay = float(text)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            retry_at = parsedate_to_datetime(text)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            current = time.time() if wall_now is None else float(wall_now)
+            delay = retry_at.timestamp() - current
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return min(delay, float(2**31))
 
 
 def _model_error_category(
@@ -2333,7 +2367,10 @@ def _stream_transport_error_chunk(error: Exception, target_url: str) -> str:
     return f'event: error\ndata: {json.dumps({"error": message, "status": status, "fallback_eligible": fallback_eligible, "error_category": category})}\n\n'
 
 
-def _stream_http_rejection_chunk(status: int, raw: str, *, phase: str = "http_rejected") -> str:
+def _stream_http_rejection_chunk(
+    status: int, raw: str, *, phase: str = "http_rejected",
+    retry_after: Optional[str] = None,
+) -> str:
     """Classify provider errors without echoing provider-controlled data."""
     category = _model_error_category(status, raw)
     if category == "context":
@@ -2360,6 +2397,11 @@ def _stream_http_rejection_chunk(status: int, raw: str, *, phase: str = "http_re
                "error_category": category}
     if phase == "http_rejected":
         payload["retry_phase"] = phase
+        retry_delay = _retry_after_delay_seconds(retry_after)
+        if retry_delay is not None and status in (429, 503):
+            # Forward only a parsed numeric hint; never expose provider headers
+            # or raw error bodies to the browser/model.
+            payload["retry_after_seconds"] = retry_delay
     return f'event: error\ndata: {json.dumps(payload)}\n\n'
 
 
@@ -2616,18 +2658,20 @@ async def llm_call_async(
                 )
                 if r.status_code in (502, 504):
                     raise _FallbackIneligibleHTTPException(r.status_code, friendly)
+                category = _model_error_category(r.status_code, r.text)
                 if attempt < max_retries:
                     wait = _model_retry_wait_seconds(
                         status=r.status_code, attempt=attempt,
                         deadline=retry_deadline, now=time.monotonic(),
                         retry_after=r.headers.get("retry-after"),
+                        category=category,
                     )
                     if wait is not None:
                         await asyncio.sleep(wait)
                         continue
                 raise _ModelHTTPException(
                     r.status_code, friendly,
-                    category=_model_error_category(r.status_code, r.text),
+                    category=category,
                 )
             logger.info(f"LLM async call to {target_url} succeeded in {duration:.2f}s (attempt {attempt})")
             _clear_host_dead(target_url)
@@ -2705,7 +2749,7 @@ async def llm_call_async(
                 raise HTTPException(503, f"Cannot reach {redact_url(_host_key(target_url))}")
             wait = _model_retry_wait_seconds(
                 status=503, attempt=attempt, deadline=retry_deadline,
-                now=time.monotonic(),
+                now=time.monotonic(), category="transport", pre_request=True,
             )
             if wait is None:
                 raise HTTPException(503, f"Cannot reach {redact_url(_host_key(target_url))}")
@@ -2726,7 +2770,7 @@ async def llm_call_async(
                 raise HTTPException(504, f"POST {target_url} timed out after {max_retries} attempts")
             wait = _model_retry_wait_seconds(
                 status=503, attempt=attempt, deadline=retry_deadline,
-                now=time.monotonic(),
+                now=time.monotonic(), category="transport", pre_request=True,
             )
             if wait is None:
                 raise HTTPException(504, "Could not acquire an upstream connection within retry budget")
@@ -2916,7 +2960,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
-                    yield _stream_http_rejection_chunk(r.status_code, raw)
+                    yield _stream_http_rejection_chunk(
+                        r.status_code, raw, retry_after=r.headers.get("retry-after"),
+                    )
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -3030,7 +3076,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
-                    yield _stream_http_rejection_chunk(r.status_code, raw)
+                    yield _stream_http_rejection_chunk(
+                        r.status_code, raw, retry_after=r.headers.get("retry-after"),
+                    )
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -3122,7 +3170,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
-                    yield _stream_http_rejection_chunk(r.status_code, raw)
+                    yield _stream_http_rejection_chunk(
+                        r.status_code, raw, retry_after=r.headers.get("retry-after"),
+                    )
                     return
                 async for line in r.aiter_lines():
                     # SSE allows "data:value" with no space after the colon
@@ -3297,7 +3347,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _clear_host_dead(target_url)
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
-                yield _stream_http_rejection_chunk(r.status_code, raw)
+                yield _stream_http_rejection_chunk(
+                    r.status_code, raw, retry_after=r.headers.get("retry-after"),
+                )
                 return
 
             async for line in r.aiter_lines():
@@ -3373,10 +3425,31 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                     # excluding prefill/network. Pass it through so the UI shows the
                                     # real gen t/s instead of recomputing tokens/wall-clock (which
                                     # includes prefill and reads ~20-40% low). Prefill speed too.
-                                    _tm = j.get("timings")
+                                    _tm = j.get("timings") or u.get("timings") or {}
+                                    _stats = j.get("stats") or u.get("stats") or {}
+                                    if not isinstance(_tm, dict):
+                                        _tm = {}
+                                    if not isinstance(_stats, dict):
+                                        _stats = {}
+                                    _gen_tps = (
+                                        _tm.get("predicted_per_second")
+                                        or _stats.get("tokens_per_second")
+                                        or _stats.get("generation_tokens_per_second")
+                                    )
+                                    if not _gen_tps:
+                                        _predicted_n = _tm.get("predicted_n") or _stats.get("predicted_tokens")
+                                        _predicted_ms = _tm.get("predicted_ms") or _stats.get("generation_time_ms")
+                                        try:
+                                            if float(_predicted_n) > 0 and float(_predicted_ms) > 0:
+                                                _gen_tps = float(_predicted_n) * 1000 / float(_predicted_ms)
+                                        except (TypeError, ValueError, OverflowError):
+                                            _gen_tps = None
+                                    try:
+                                        if _gen_tps is not None and math.isfinite(float(_gen_tps)) and float(_gen_tps) > 0:
+                                            _usage_data["gen_tps"] = round(float(_gen_tps), 2)
+                                    except (TypeError, ValueError, OverflowError):
+                                        pass
                                     if isinstance(_tm, dict):
-                                        if _tm.get("predicted_per_second"):
-                                            _usage_data["gen_tps"] = round(_tm["predicted_per_second"], 2)
                                         if _tm.get("prompt_per_second"):
                                             _usage_data["prefill_tps"] = round(_tm["prompt_per_second"], 2)
                                     if _actual_model:
@@ -3740,6 +3813,13 @@ async def _stream_llm_precontent_retry(url, model, messages, *, headers, **kwarg
                         retry_delay = _model_retry_wait_seconds(
                             status=status, attempt=attempt, deadline=deadline,
                             now=time.monotonic(),
+                            category=detail.get("error_category"),
+                            retry_after=(
+                                str(detail.get("retry_after_seconds"))
+                                if isinstance(detail.get("retry_after_seconds"), (int, float))
+                                and not isinstance(detail.get("retry_after_seconds"), bool)
+                                else None
+                            ),
                         )
                         if retry_delay is not None:
                             break

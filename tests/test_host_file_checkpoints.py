@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import importlib.util
 from pathlib import Path
 import stat
@@ -40,11 +41,27 @@ class FileCheckpointTests(unittest.TestCase):
         result = self.write('a', 'new content')
         self.assertTrue(result['ok'], result)
         identity = result['result']['checkpoint_id']
+        checkpoint = result['result']['file_checkpoint']
+        self.assertEqual(checkpoint['id'], identity)
+        self.assertEqual(checkpoint['status'], 'applied')
+        self.assertEqual(checkpoint['files'][0]['after_sha256'], hashlib.sha256(b'new content').hexdigest())
+        self.assertEqual(checkpoint['files'][0]['before_sha256'], hashlib.sha256(b'original private content').hexdigest())
         self.assertNotIn('original private content', (self.root / 'state/metadata.json').read_text())
         restored = self.call('file.rollback', self.rollback_args(identity))
         self.assertTrue(restored['ok'], restored)
         self.assertEqual(target.read_text(), 'original private content')
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o751)
+
+    def test_agent_goal_run_lineage_is_in_checkpoint_response_and_durable_record(self):
+        result = self.call('file.call', {
+            'cwd': str(self.root), 'tool': 'write_file', 'run_id': 'agent-run-7',
+            'content': {'path': 'agent.txt', 'content': 'agent output'},
+        })
+        self.assertTrue(result['ok'], result)
+        checkpoint = result['result']['file_checkpoint']
+        self.assertEqual(checkpoint['run_id'], 'agent-run-7')
+        record = self.runner.data['file_checkpoints'][checkpoint['id']]
+        self.assertEqual(record['run_id'], 'agent-run-7')
 
     def test_created_file_deleted_only_when_exact_after_sha_matches(self):
         result = self.write('created', 'created once')
@@ -69,7 +86,13 @@ class FileCheckpointTests(unittest.TestCase):
         (self.root / 'update').write_text('old\n')
         (self.root / 'delete').write_text('restore deletion\n')
         patch_text = '*** Begin Patch\n*** Update File: update\n@@\n-old\n+new\n*** Delete File: delete\n*** Add File: created\n+created\n*** End Patch'
-        result = self.call('file.call', {'cwd': str(self.root), 'tool': 'apply_patch', 'content': {'patch_text': patch_text}})
+        hashes = {
+            str(self.root / 'update'): hashlib.sha256(b'old\n').hexdigest(),
+            str(self.root / 'delete'): hashlib.sha256(b'restore deletion\n').hexdigest(),
+            str(self.root / 'created'): 'missing',
+        }
+        result = self.call('file.call', {'cwd': str(self.root), 'tool': 'apply_patch',
+                                        'content': {'patch_text': patch_text, 'expected_sha256_by_path': hashes}})
         self.assertTrue(result['ok'], result)
         identity = result['result']['checkpoint_id']
         args = self.rollback_args(identity)
@@ -99,7 +122,9 @@ class FileCheckpointTests(unittest.TestCase):
         for name in ('a', 'b'):
             (self.root / name).write_text('old\n')
         patch_text = '*** Begin Patch\n*** Update File: a\n@@\n-old\n+new\n*** Update File: b\n@@\n-old\n+new\n*** End Patch'
-        result = self.call('file.call', {'cwd': str(self.root), 'tool': 'apply_patch', 'content': {'patch_text': patch_text}})
+        hashes = {str(self.root / name): hashlib.sha256(b'old\n').hexdigest() for name in ('a', 'b')}
+        result = self.call('file.call', {'cwd': str(self.root), 'tool': 'apply_patch',
+                                        'content': {'patch_text': patch_text, 'expected_sha256_by_path': hashes}})
         args = self.rollback_args(result['result']['checkpoint_id'])
         (self.root / 'b').write_text('later user edit\n')
         response = self.call('file.rollback', args)
@@ -146,7 +171,9 @@ class FileCheckpointTests(unittest.TestCase):
         for name in ('a', 'b'):
             (self.root / name).write_text('old\n')
         patch_text = '*** Begin Patch\n*** Update File: a\n@@\n-old\n+new\n*** Update File: b\n@@\n-old\n+new\n*** End Patch'
-        result = self.call('file.call', {'cwd': str(self.root), 'tool': 'apply_patch', 'content': {'patch_text': patch_text}})
+        hashes = {str(self.root / name): hashlib.sha256(b'old\n').hexdigest() for name in ('a', 'b')}
+        result = self.call('file.call', {'cwd': str(self.root), 'tool': 'apply_patch',
+                                        'content': {'patch_text': patch_text, 'expected_sha256_by_path': hashes}})
         identity = result['result']['checkpoint_id']
         args = self.rollback_args(identity)
         original = self.runner._file_state

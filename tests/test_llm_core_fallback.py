@@ -64,6 +64,7 @@ class _ProviderResponse:
     def __init__(self, lines):
         self._lines = lines
         self.status_code = 200
+        self.headers = {}
 
     async def aiter_lines(self):
         for line in self._lines:
@@ -1265,16 +1266,18 @@ def test_stream_transport_error_is_classified_without_leaking_provider_detail(
     assert "secret-key=do-not-log" not in caplog.text
 
 
-@pytest.mark.parametrize("status,detail,category,may_fallback", [
-    (503, "context length exceeded; token=private-example", "context", False),
-    (503, "model not loaded; token=private-example", "provider_unload", True),
-    (429, "rate limited; token=private-example", "rate_limit", True),
+@pytest.mark.parametrize("status,detail,category,may_fallback,retry_after", [
+    (503, "context length exceeded; token=private-example", "context", False, None),
+    (503, "model not loaded; token=private-example", "provider_unload", True, None),
+    (429, "rate limited; token=private-example", "rate_limit", True, None),
+    (429, "rate limited", "rate_limit", True, "4"),
 ])
 def test_stream_http_rejection_classifies_without_echoing_upstream_body(
-    monkeypatch, status, detail, category, may_fallback,
+    monkeypatch, status, detail, category, may_fallback, retry_after,
 ):
     class _RejectedResponse:
         status_code = status
+        headers = {"retry-after": retry_after} if retry_after is not None else {}
 
         async def aread(self):
             return json.dumps({"error": {"message": detail}}).encode()
@@ -1307,6 +1310,10 @@ def test_stream_http_rejection_classifies_without_echoing_upstream_body(
     assert payload["error_category"] == category
     assert payload["fallback_eligible"] is may_fallback
     assert payload["retry_phase"] == "http_rejected"
+    if retry_after is not None:
+        assert payload["retry_after_seconds"] == float(retry_after)
+    else:
+        assert "retry_after_seconds" not in payload
     assert "private-example" not in "".join(output)
     assert "raw" not in payload
 
@@ -1533,20 +1540,186 @@ def test_nonstream_ambiguous_gateway_status_is_not_retried(monkeypatch, status):
 def test_retry_budget_declines_retry_after_beyond_deadline():
     assert llm_core._model_retry_wait_seconds(
         status=429, attempt=1, deadline=10.0,
-        now=9.5, retry_after="5", jitter=1.0,
+        now=9.5, retry_after="5", jitter=1.0, category="rate_limit",
     ) is None
 
 
 def test_retry_jitter_is_bounded_and_respects_retry_after():
     delay = llm_core._model_retry_wait_seconds(
         status=429, attempt=1, deadline=20.0,
-        now=1.0, retry_after="2", jitter=0.75,
+        now=1.0, retry_after="2", jitter=0.75, category="rate_limit",
     )
     assert delay == 2.0
     assert llm_core._model_retry_wait_seconds(
         status=503, attempt=2, deadline=20.0,
-        now=1.0, retry_after=None, jitter=0.75,
+        now=1.0, retry_after=None, jitter=0.75, category="provider_unload",
     ) == 0.75
+
+
+def test_retry_after_http_date_is_respected_with_retry_budget():
+    # RFC Retry-After permits an HTTP-date as well as delay-seconds.
+    delay = llm_core._model_retry_wait_seconds(
+        status=429, attempt=1, deadline=20.0, now=1.0,
+        retry_after="Thu, 01 Jan 1970 00:00:20 GMT", wall_now=10.0, jitter=0.5,
+        category="rate_limit",
+    )
+    assert delay == 10.0
+    assert llm_core._model_retry_wait_seconds(
+        status=429, attempt=1, deadline=5.0, now=1.0,
+        retry_after="Thu, 01 Jan 1970 00:00:20 GMT", wall_now=10.0, jitter=0.5,
+        category="rate_limit",
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("status", "detail", "category", "expected"),
+    [
+        (503, "service unavailable", "transport", None),
+        (503, "model not loaded", "provider_unload", 0.75),
+        (429, "rate limited", "rate_limit", 0.75),
+        (429, "invalid request", "provider_error", None),
+    ],
+)
+def test_retry_requires_explicit_safe_error_class(status, detail, category, expected):
+    assert llm_core._model_retry_wait_seconds(
+        status=status, attempt=2, deadline=20.0,
+        now=1.0, jitter=0.75, category=category,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected_category"),
+    [
+        ("service unavailable", "transport"),
+        ("context length exceeded", "context"),
+        ("invalid tool JSON schema", "schema_mismatch"),
+    ],
+)
+def test_nonstream_503_is_not_retried_without_explicit_unload_evidence(
+    monkeypatch, detail, expected_category,
+):
+    calls = []
+
+    async def fake_post(client, url, headers, **kwargs):
+        calls.append(1)
+        return httpx.Response(
+            503, request=httpx.Request("POST", url), text=detail,
+        )
+
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(llm_core.llm_call_async(
+            "https://selected.example/v1", "selected",
+            [{"role": "user", "content": "hi"}], max_retries=3,
+        ))
+
+    assert len(calls) == 1
+    assert exc.value.error_category == expected_category
+
+
+def test_stream_http_retry_after_is_normalized_for_internal_retry_only(monkeypatch):
+    monkeypatch.setattr(llm_core.time, "time", lambda: 10.0)
+    chunk = llm_core._stream_http_rejection_chunk(
+        429, "private upstream body", retry_after="Thu, 01 Jan 1970 00:00:20 GMT",
+    )
+    payload = json.loads(chunk.split("data: ", 1)[1])
+    assert payload["retry_after_seconds"] == 10.0
+    assert payload["error_category"] == "rate_limit"
+    assert "private upstream body" not in chunk
+    assert "Thu, 01 Jan" not in chunk
+
+
+def test_stream_precontent_retry_uses_normalized_retry_after(monkeypatch):
+    calls = []
+    waits = []
+
+    async def fake_stream(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            yield llm_core._stream_http_rejection_chunk(429, "limited", retry_after="3.5")
+        else:
+            yield 'data: {"delta":"ok"}\n\n'
+            yield "data: [DONE]\n\n"
+
+    async def fake_sleep(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+    monkeypatch.setattr(llm_core.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm_core.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(llm_core.LLMConfig, "MAX_RETRIES", 2)
+    monkeypatch.setattr(llm_core.LLMConfig, "RETRY_BUDGET_SECONDS", 10.0)
+
+    async def run():
+        return [chunk async for chunk in llm_core._stream_llm_precontent_retry(
+            "https://openai-compatible.example/v1", "m", [], headers=None,
+        )]
+
+    output = asyncio.run(run())
+    assert len(calls) == 2
+    assert waits == [3.5]
+    assert output[-1] == "data: [DONE]\n\n"
+
+
+def test_stream_http_retry_after_reaches_successful_precontent_retry(monkeypatch):
+    calls, waits = [], []
+
+    class Response:
+        def __init__(self, status, headers=None, lines=(), body=b""):
+            self.status_code = status
+            self.headers = headers or {}
+            self._lines = list(lines)
+            self._body = body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aread(self):
+            return self._body
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                yield line
+
+    class Client:
+        def stream(self, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                return Response(429, httpx.Headers({"Retry-After": "3.5"}), body=b"rate limited")
+            return Response(200, lines=[
+                'data: {"choices":[{"delta":{"content":"ok"}}]}',
+                "data: [DONE]",
+            ])
+
+    async def fake_sleep(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: Client())
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda url: None)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm_core.LLMConfig, "MAX_RETRIES", 2)
+    monkeypatch.setattr(llm_core.LLMConfig, "RETRY_BUDGET_SECONDS", 10.0)
+
+    async def run():
+        return [chunk async for chunk in llm_core._stream_llm_precontent_retry(
+            "https://openai-compatible.example/v1", "fixture-model",
+            [{"role": "user", "content": "hi"}], headers=None,
+        )]
+
+    output = asyncio.run(run())
+    assert len(calls) == 2
+    assert waits == [3.5]
+    assert any('"delta": "ok"' in chunk or '"delta":"ok"' in chunk for chunk in output)
+    assert output[-1] == "data: [DONE]\n\n"
 
 
 def test_nonstream_rate_limit_retries_with_server_delay(monkeypatch):

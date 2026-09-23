@@ -188,6 +188,16 @@ def test_atomic_write_text_fully_overwrites_longer_content(tmp_path):
     assert target.read_text(encoding="utf-8") == "short"
 
 
+def test_atomic_write_text_exclusive_never_clobbers_new_arrival(tmp_path):
+    target = tmp_path / "created.py"
+    target.write_text("arrived concurrently", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        atomic_write_text(str(target), "generated content", exclusive=True)
+
+    assert target.read_text(encoding="utf-8") == "arrived concurrently"
+
+
 def test_atomic_write_text_leaves_no_tmp_file(tmp_path):
     target = tmp_path / "note.txt"
 

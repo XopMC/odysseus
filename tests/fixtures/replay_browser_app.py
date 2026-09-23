@@ -75,6 +75,15 @@ async def _qa_lifespan(instance):
             run.progress.started_at = time.time() - 700
             run.wait.phase_since = time.time() - 700
             run.wait.endpoint_id = "fixture-endpoint"
+            if os.getenv("ODYSSEUS_WAIT_QA_PROGRESS_CAPACITY") == "1":
+                run.progress._seen_filter.saturated = True
+                from core.database import ChatGoal, SessionLocal
+                with SessionLocal.begin() as db:
+                    db.add(ChatGoal(
+                        id="wait-capacity-goal", session_id=SESSION_ID,
+                        owner="__odysseus_single_user__", objective="SAFE synthetic watchdog fixture",
+                        status="active", checkpoint={},
+                    ))
             agent_runs._publish(run, 'data: {"type":"agent_step","round":1}\n\n')
         elif os.getenv("ODYSSEUS_REPLAY_QA_START_RUN", "1") == "1":
             qa_run = agent_runs.start(SESSION_ID, _synthetic_run(), initial_model="fixture-model")

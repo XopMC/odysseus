@@ -228,6 +228,7 @@ class SubagentRuntime:
             ordinal = 1
             slot = None
             active_count = 0
+            run_children = 0
             for _attempt in range(model_capacity + 1):
                 db = SessionLocal()
                 try:
@@ -335,6 +336,8 @@ class SubagentRuntime:
             "child_id": child_id, "child_run_id": child_id, "worker_id": f"child-{ordinal}",
             "parent_run_id": parent_run_id, "model": model, "status": "queued",
             "active_for_model": active_count + 1, "max_active_per_model": model_capacity,
+            "run_children_used": run_children + 1 if run_capacity else None,
+            "run_children_limit": run_capacity or None,
             "exit_code": 0,
             "message": "Subagent started asynchronously. Spawn remaining children before waiting.",
         }

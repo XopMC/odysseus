@@ -1,5 +1,6 @@
 import json
 import asyncio
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,10 @@ import pytest
 from src.tool_capabilities import ToolEffect, capabilities_for_action
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 from src.tool_schemas import function_call_to_tool_block
-from src.action_fusion import mutation_paths, remote_fingerprint_command, remote_fenced_verify_command
+from src.action_fusion import (
+    lock_keys, mutation_paths, remote_fingerprint_command,
+    remote_fenced_verify_command,
+)
 import subprocess
 
 
@@ -122,12 +126,59 @@ async def test_ordinary_write_cannot_interleave_before_fused_verification(tmp_pa
     assert path.read_text() == "second"
 
 
+@pytest.mark.parametrize("ordinary_tool", ["edit_file", "apply_patch"])
+@pytest.mark.asyncio
+async def test_all_ordinary_mutation_tools_share_fused_path_queue(tmp_path, monkeypatch, ordinary_tool):
+    monkeypatch.setattr("src.harness_efficiency.get_setting", lambda *a: "performance")
+    monkeypatch.setattr("src.tool_execution._owner_is_admin", lambda owner: True)
+    path = tmp_path / "sample.txt"
+    path.write_text("old\n")
+    fused = _write(path, "first\n", "sleep 0.05; grep -qx first sample.txt")
+    if ordinary_tool == "edit_file":
+        mutation = {"path": str(path), "old_string": "first", "new_string": "second",
+                    "expected_sha256": hashlib.sha256(b"first\n").hexdigest()}
+        content = json.dumps(mutation)
+    else:
+        patch_text = (
+            "*** Begin Patch\n"
+            f"*** Update File: {path}\n"
+            "@@\n"
+            "-first\n"
+            "+second\n"
+            "*** End Patch"
+        )
+        content = json.dumps({
+            "patch_text": patch_text,
+            "expected_sha256_by_path": {str(path): hashlib.sha256(b"first\n").hexdigest()},
+        })
+    ordinary = SimpleNamespace(tool_type=ordinary_tool, content=content)
+
+    fused_result, ordinary_result = await asyncio.gather(
+        execute_tool_block(fused, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
+        execute_tool_block(ordinary, workspace=str(tmp_path), security_context=NO_TOOL_SECURITY_CONTEXT),
+    )
+
+    assert fused_result[1]["exit_code"] == 0, fused_result[1]
+    assert ordinary_result[1]["exit_code"] == 0, ordinary_result[1]
+    assert path.read_text() == "second\n"
+
+
 def test_legacy_mutation_payloads_use_the_same_path_keys(tmp_path):
     path = str(tmp_path / "sample.txt")
     assert mutation_paths("write_file", f"{path}\nnew bytes") == [path]
     patch = f"*** Begin Patch\n*** Update File: {path}\n@@\n-old\n+new\n*** End Patch"
     assert mutation_paths("apply_patch", patch) == [path]
     assert mutation_paths("write_file", '{"unusual":"path"}\nbody') == ['{"unusual":"path"}']
+
+
+def test_path_queue_keys_canonicalize_relative_and_symlink_aliases(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("old")
+    alias = tmp_path / "alias.txt"
+    alias.symlink_to(target)
+
+    assert lock_keys(["target.txt"], str(tmp_path)) == [str(target)]
+    assert lock_keys([str(alias)], str(tmp_path)) == [str(target)]
 
 
 @pytest.mark.asyncio
@@ -166,7 +217,7 @@ async def test_host_fusion_fingerprints_then_runs_guarded_verify(tmp_path, monke
     monkeypatch.setattr("src.host_execution.enabled_for", lambda owner: owner == "alice")
     calls = []
     path = str(tmp_path / "sample.txt")
-    async def fake_execute(tool, content):
+    async def fake_execute(tool, content, **kwargs):
         calls.append((tool, content))
         if tool == "bash" and "print(json.dumps(out" in content:
             return {"output": json.dumps({path: "abc"}), "exit_code": 0}

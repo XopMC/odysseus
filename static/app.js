@@ -10,7 +10,7 @@ import modelsModule from './js/models.js?v=20260922approval1';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260923contextretry1';
+import chatModule from './js/chat.js?v=20260924compactpreview1';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
@@ -22,9 +22,9 @@ import {
   settleSessionHydration
 } from './js/startupShell.js?v=20260922restore1';
 import markdownModule from './js/markdown.js?v=20260923toolprogress1';
-import chatRenderer from './js/chatRenderer.js?v=20260923replaycursor1';
+import chatRenderer from './js/chatRenderer.js?v=20260924actionpreview1';
 import sessionModule from './js/sessions.js?v=20260923countrev1';
-import chatWork from './js/chat-work.js?v=20260923effectinbox1';
+import chatWork from './js/chat-work.js?v=20260924budgetwarn1';
 import chatSubagents from './js/chat-subagents.js?v=20260923runinspector1';
 import chatRunInspector from './js/chat-run-inspector.js?v=20260923runinspector3';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';

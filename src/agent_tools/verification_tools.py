@@ -108,11 +108,14 @@ class RunVerificationTool:
             if not os.path.isdir(root):
                 raise ValueError
             available = discover_profiles(root)
+            allowed = {"pytest", "npm_test"} if self.kind == "test" else {"npm_lint"}
             profile = args.get("profile") or (
                 ("pytest" if "pytest" in available else "npm_test")
                 if self.kind == "test" else "npm_lint"
             )
-            allowed = {"pytest", "npm_test"} if self.kind == "test" else {"npm_lint"}
+            if profile == "list":
+                return {"available_profiles": sorted(set(available) & allowed),
+                        "code": "ok", "exit_code": 0}
             if profile not in allowed:
                 raise ValueError
             if args.get("profile") is None and profile not in available:

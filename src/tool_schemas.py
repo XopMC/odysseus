@@ -137,11 +137,11 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "pattern": {"type": "string", "description": "Regular expression to search for"},
                     "path": {"type": "string", "description": "Allowed project directory or a specific file"},
-                    "mode": {"type": "string", "enum": ["files", "matches"]},
+                    "mode": {"type": "string", "enum": ["files", "matches"], "description": "files (default) returns concise distinct file paths; matches returns exact file:line:match lines"},
                     "glob": {"type": "string", "description": "Optional file glob"},
                     "ignore_case": {"type": "boolean"},
-                    "cursor": {"type": "integer", "minimum": 0},
-                    "page_size": {"type": "integer", "minimum": 1, "maximum": 50}
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Use the exact next_cursor from the previous page; omit on the first page"},
+                    "page_size": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Distinct files or exact matches per page (default 25)"}
                 },
                 "required": ["pattern"]
             }
@@ -180,13 +180,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_tree",
-            "description": "Read a bounded directory hierarchy with file sizes, without opening file bodies. Skips hidden, generated and sensitive paths.",
+            "description": "Read a bounded directory hierarchy with file sizes, without opening file bodies. Honors .gitignore and skips hidden, generated, symlink and sensitive paths. Defaults to depth 2 and 100 entries; maxima are depth 6 and 200 entries.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Directory to inspect; defaults to active workspace"},
-                    "max_depth": {"type": "integer", "minimum": 1, "maximum": 6},
-                    "max_entries": {"type": "integer", "minimum": 1, "maximum": 200}
+                    "max_depth": {"type": "integer", "minimum": 1, "maximum": 6, "description": "Maximum levels below the root (default 2)"},
+                    "max_entries": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum returned files and directories (default 100)"}
                 },
                 "required": []
             }
@@ -196,12 +196,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "file_outline",
-            "description": "Return Python classes, functions and methods with exact line numbers via AST; unsupported languages report unavailable rather than guessing. Does not return source body.",
+            "description": "Return Python/Python-stub classes, functions and methods with exact start/end line numbers via AST; supports regular UTF-8 files up to 2 MiB. Unsupported languages report unavailable rather than guessing. Does not return source body.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Python source file to inspect"},
-                    "max_symbols": {"type": "integer", "minimum": 1, "maximum": 200}
+                    "max_symbols": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum symbols to return (default 100)"}
                 },
                 "required": ["path"]
             }
@@ -270,10 +270,10 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_tests",
-            "description": "Run a discovered, bounded test profile in the allowed workspace. Supported profiles: pytest and npm_test. Executes project code; never accepts arbitrary commands. Returns exact exit code and timeout status.",
+            "description": "Run a discovered, bounded test profile in the allowed workspace. Set profile=list for read-only profile discovery (does not execute project code), otherwise select pytest or npm_test. Test execution is bounded, never accepts arbitrary commands, and returns exact exit code, timeout status and failure artifact when available.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "description": "Project root inside the allowed workspace"},
-                "profile": {"type": "string", "enum": ["pytest", "npm_test"]},
+                "profile": {"type": "string", "enum": ["list", "pytest", "npm_test"]},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
             }, "required": []}
         }
@@ -282,10 +282,10 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_lint",
-            "description": "Run a discovered, bounded npm lint profile in the allowed workspace. Executes project code; never accepts arbitrary commands. Returns exact exit code and timeout status.",
+            "description": "Run a discovered, bounded npm lint profile in the allowed workspace. Set profile=list for read-only discovery, or npm_lint to execute. Never accepts arbitrary commands; returns exact exit code and timeout status.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "description": "Project root inside the allowed workspace"},
-                "profile": {"type": "string", "enum": ["npm_lint"]},
+                "profile": {"type": "string", "enum": ["list", "npm_lint"]},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
             }, "required": []}
         }
@@ -457,7 +457,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Edit a file ON DISK by exact string replacement (home folder, project files, any real path like ~/sweden.txt or /path/to/file). This is the right tool for files on disk — NOT edit_document (that's for editor-panel documents). PREFER this over bash (sed/echo) — it shows a diff. old_string must match the file exactly and be unique (or set replace_all). Use write_file to create a new file.",
+            "description": "Edit one disk file by exact, unique old_string (or replace_all); returns a diff. Pass read_file.sha256 as expected_sha256. Python/JSON/JavaScript syntax is checked before atomic replace. Use write_file to create.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -465,9 +465,11 @@ FUNCTION_TOOL_SCHEMAS = [
                     "old_string": {"type": "string", "description": "Exact text to replace (must match the file, including indentation)"},
                     "new_string": {"type": "string", "description": "Replacement text"},
                     "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"},
+                    "expected_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$", "description": "Full-file SHA-256 from read_file; stale files are rejected"},
+                    "validate_syntax": {"type": "boolean", "enum": [True], "description": "Must be true; supported syntax is always checked"},
                     "verify": {"type": "object", "description": "After a successful edit, run this exact verification command in the same tool action.", "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}, "required": ["command"], "additionalProperties": False}
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["path", "old_string", "new_string", "expected_sha256"]
             }
         }
     },
@@ -475,7 +477,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "apply_patch",
-            "description": "Apply a multi-file source-code patch to disk. Use for real project files in the workspace when several edits belong together. Patch must use *** Begin Patch / *** End Patch with Add File, Update File, or Delete File sections. Prefer this over bash redirects/heredocs/sed.",
+            "description": "Apply exact-context Add/Update/Delete patches. Include expected_sha256_by_path for every target (full-file hash, or 'missing' for Add). Python/JSON/JavaScript is syntax-checked before changes; handled I/O errors roll back earlier paths when hashes still match.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -483,11 +485,36 @@ FUNCTION_TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Patch text beginning with *** Begin Patch and ending with *** End Patch"
                     },
+                    "expected_sha256_by_path": {"type": "object", "description": "Hash for every patch path; use 'missing' for Add File", "additionalProperties": {"type": "string"}},
+                    "validate_syntax": {"type": "boolean", "enum": [True], "description": "Must be true; supported syntax is always checked"},
                     "verify": {"type": "object", "description": "After a successful patch, run this exact verification command in the same tool action.", "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}, "required": ["command"], "additionalProperties": False}
                 },
-                "required": ["patch_text"]
+                "required": ["patch_text", "expected_sha256_by_path"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rollback_file_checkpoint",
+            "description": "Roll back an Agent/Goal/Team file change in the same chat. Copy checkpoint_id and the exact after-hash map from the mutation's file_checkpoint result. Works for local container and registered Jetson host checkpoints; rollback is refused if a file changed, a writer is active, or the snapshot integrity fails.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "expected_sha256": {
+                        "type": "object",
+                        "description": "Exact map of every checkpoint path to its after_sha256; use null for paths that did not exist after the mutation.",
+                        "additionalProperties": {"anyOf": [
+                            {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+                            {"type": "null"},
+                        ]},
+                    },
+                },
+                "required": ["checkpoint_id", "expected_sha256"],
+                "additionalProperties": False,
+            },
+        },
     },
     {
         "type": "function",
@@ -1847,9 +1874,13 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type == "edit_file":
         content = json.dumps(args)
     elif tool_type == "apply_patch":
-        content = json.dumps(args, ensure_ascii=False) if "verify" in args else (
+        content = json.dumps(args, ensure_ascii=False) if any(key in args for key in (
+            "verify", "expected_sha256_by_path", "validate_syntax"
+        )) else (
             args.get("patch_text") or args.get("patchText") or args.get("patch") or ""
         )
+    elif tool_type == "rollback_file_checkpoint":
+        content = json.dumps(args, ensure_ascii=False)
     elif tool_type == "todowrite":
         content = json.dumps(args)
     elif tool_type == "create_document":

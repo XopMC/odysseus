@@ -626,6 +626,64 @@ def agent_cwd() -> str:
     return resolved
 
 
+async def _local_checkpointed_mutation(tool, content, *, owner, session_id, run_id, dispatch):
+    """Run a local Agent file mutation behind a durable owner/chat checkpoint.
+
+    This is called only after the normal policy gates and while the shared
+    canonical-path mutation queue is held. The before-image is committed before
+    dispatch; if it cannot be safely captured, the write is not attempted.
+    """
+    checkpoint = None
+    if owner and session_id:
+        try:
+            from src.action_fusion import lock_keys, mutation_paths
+            raw_paths = mutation_paths(tool, content)
+            if raw_paths:
+                paths = [_resolve_tool_path(path) for path in lock_keys(raw_paths, get_active_workspace())]
+                from src.local_file_checkpoints import begin
+                checkpoint = begin(owner, session_id, paths, run_id=run_id)
+        except (OSError, ValueError, TypeError, ImportError):
+            logger.warning('Local Agent file checkpoint preparation failed; mutation was withheld',
+                           exc_info=True)
+            return f'{tool}: BLOCKED', {
+                'error': 'A durable file checkpoint could not be prepared; no write was run.',
+                'code': 'file_checkpoint_failed', 'exit_code': 1,
+            }
+
+    try:
+        output = await dispatch()
+    except BaseException:
+        if checkpoint is not None:
+            try:
+                from src.local_file_checkpoints import finish
+                finish(checkpoint, False)
+            except Exception:
+                logger.error('Local file checkpoint could not be finalized after tool exception',
+                             exc_info=True)
+        raise
+
+    if isinstance(output, tuple):
+        description, result = output
+    else:
+        description, result = f'registry: {tool}', output or {'error': 'Tool execution failed', 'exit_code': 1}
+    if checkpoint is not None:
+        try:
+            from src.local_file_checkpoints import finish
+            public = finish(checkpoint, result.get('exit_code', 0) == 0 and not result.get('error'))
+            result = dict(result)
+            result['checkpoint_id'] = public['id']
+            result['file_checkpoint'] = public
+        except Exception:
+            logger.error('Local file checkpoint finalization failed after mutation', exc_info=True)
+            result = dict(result)
+            result.update({
+                'error': 'The file action completed, but its durable checkpoint could not be finalized; inspect the affected paths before retrying.',
+                'code': 'unknown_outcome', 'outcome_unknown': True, 'retryable': False,
+                'exit_code': 1,
+            })
+    return description, result
+
+
 def get_mcp_manager():
     from src import agent_tools
     return agent_tools.get_mcp_manager()
@@ -1478,8 +1536,11 @@ async def _execute_tool_block_impl(
     if host_execution.enabled_for(owner) and tool in host_execution.TOOLS:
         is_background, host_content = _split_bg_marker(content) if tool == 'bash' else (False, content)
         if not (is_background and session_id and host_content):
-            if tool in {'read_file', 'run_tests', 'run_lint', 'inspect_process', 'inspect_port', 'tail_log'}:
+            if tool in ({'read_file', 'run_tests', 'run_lint', 'inspect_process', 'inspect_port', 'tail_log'}
+                        | host_execution.FILE_MUTATION_TOOLS | {'rollback_file_checkpoint'}):
                 archive_scope = {'run_id': parent_run_id} if tool in {'read_file', 'run_tests', 'run_lint'} else {}
+                if tool in host_execution.FILE_MUTATION_TOOLS:
+                    archive_scope = {'run_id': parent_run_id}
                 return f'{tool} (Jetson host)', await host_execution.execute(
                     tool, content, owner=owner, session_id=session_id,
                     **archive_scope)
@@ -1519,7 +1580,15 @@ async def _execute_tool_block_impl(
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
-    if tool in _MCP_TOOL_MAP:
+    if tool == "write_file":
+        async def _dispatch_write_file():
+            return await _direct_fallback(
+                tool, content, progress_cb=progress_cb,
+                session_id=session_id, owner=owner, parent_run_id=parent_run_id)
+        desc, result = await _local_checkpointed_mutation(
+            tool, content, owner=owner, session_id=session_id, run_id=parent_run_id,
+            dispatch=_dispatch_write_file)
+    elif tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
         result = await _call_mcp_tool(tool, content, progress_cb=progress_cb,
@@ -1534,8 +1603,15 @@ async def _execute_tool_block_impl(
     elif tool in ("apply_patch", "todowrite"):
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
-            or {"error": f"{tool}: execution failed", "exit_code": 1}
+        if tool == "apply_patch":
+            async def _dispatch_apply_patch():
+                return await _direct_fallback(tool, content, session_id=session_id, owner=owner)
+            desc, result = await _local_checkpointed_mutation(
+                tool, content, owner=owner, session_id=session_id, run_id=parent_run_id,
+                dispatch=_dispatch_apply_patch)
+        else:
+            result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+                or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
         desc = f"manage_bg_jobs: {content.split(chr(10))[0][:80]}"
@@ -1661,8 +1737,11 @@ async def _execute_tool_block_impl(
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)
     elif tool == "edit_file":
-        result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
-        desc = result.get("output") or result.get("error") or "edit_file"
+        async def _dispatch_edit_file():
+            return await _direct_fallback(tool, content)
+        desc, result = await _local_checkpointed_mutation(
+            tool, content, owner=owner, session_id=session_id, run_id=parent_run_id,
+            dispatch=_dispatch_edit_file)
     elif tool == "trigger_research":
         desc = "trigger_research"
         result = await do_trigger_research(content, owner=owner)
@@ -1754,15 +1833,23 @@ async def _execute_tool_block_impl(
         # request identity here made them visible to the model but unusable at
         # runtime ("requires an active owned chat").  Keep the same identity
         # that every preceding policy gate already validated.
-        res = await _direct_fallback(
-            tool,
-            content,
-            progress_cb=progress_cb,
-            session_id=session_id,
-            owner=owner,
-            plan_recovery=plan_recovery,
-            parent_run_id=parent_run_id,
-        )
+        async def _dispatch_registry_tool():
+            return await _direct_fallback(
+                tool,
+                content,
+                progress_cb=progress_cb,
+                session_id=session_id,
+                owner=owner,
+                plan_recovery=plan_recovery,
+                parent_run_id=parent_run_id,
+            )
+
+        if tool in {'write_file', 'apply_patch'}:
+            res = await _local_checkpointed_mutation(
+                tool, content, owner=owner, session_id=session_id, run_id=parent_run_id,
+                dispatch=_dispatch_registry_tool)
+        else:
+            res = await _dispatch_registry_tool()
 
         if isinstance(res, tuple):
             desc, result = res

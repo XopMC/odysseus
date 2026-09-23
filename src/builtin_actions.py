@@ -1343,9 +1343,10 @@ def _memory_context_lines(mems, limit: int = 40) -> list:
     personal context at all. getattr keeps it robust to future schema drift.
     """
     lines: list = []
+    from src.memory_safety import is_sensitive_memory_text
     for m in mems:
         c = (getattr(m, "text", "") or "").strip()
-        if c:
+        if c and not is_sensitive_memory_text(c):
             lines.append(f"- {c[:200]}")
         if len(lines) >= limit:
             break

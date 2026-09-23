@@ -206,8 +206,8 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = {"chat": "20260923contextretry1", "sessions": "20260923countrev1",
-                "models": "20260922approval1", "chatRenderer": "20260923replaycursor1"}
+    expected = {"chat": "20260924compactpreview1", "sessions": "20260923countrev1",
+                "models": "20260922approval1", "chatRenderer": "20260924actionpreview1"}
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"
@@ -237,3 +237,10 @@ def test_stateful_chat_modules_have_one_browser_identity():
     app_versions = set(re.findall(r"/static/app\.js\?v=([A-Za-z0-9_-]+)", index))
     assert len(app_versions) == 1, "preload and script must use the same app.js URL"
     assert f"/static/app.js?v={app_versions.pop()}" in worker
+
+
+def test_manual_compaction_preflight_is_presented_as_unchanged_not_success_or_error():
+    chat = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
+    assert "data.reason !== 'native_not_compactable'" in chat
+    assert "{ status: 'unchanged', reason: String(data.reason || '') }" in chat
+    assert "result.reason === 'native_not_compactable' ? 'No safe cut' : 'Unchanged'" in chat

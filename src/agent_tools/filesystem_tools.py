@@ -1,6 +1,7 @@
 import asyncio
 import ast
 import hashlib
+import hmac
 import heapq
 import json
 import os
@@ -9,6 +10,7 @@ import stat
 import difflib
 import shutil
 import subprocess
+import tempfile
 import time
 from typing import Optional, Dict, Any, Tuple, List
 
@@ -203,6 +205,103 @@ def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
         "file": os.path.basename(path) or (path or "file"),
     }
 
+class _FileMutationError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _validate_expected_sha256(value: Any, raw: bytes, *, label: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        raise _FileMutationError("invalid_arguments", f"{label} must be a 64-character SHA-256")
+    actual = hashlib.sha256(raw).hexdigest()
+    if not hmac.compare_digest(actual, value.lower()):
+        raise _FileMutationError("stale_revision", "File hash changed; read the current file before editing")
+
+
+def _syntax_preflight(path: str, text: str, *, enabled: bool = True) -> dict:
+    if type(enabled) is not bool:
+        raise _FileMutationError("invalid_arguments", "validate_syntax must be boolean")
+    if not enabled:
+        raise _FileMutationError("validation_required", "syntax validation cannot be disabled")
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix in {".py", ".pyi"}:
+        try:
+            ast.parse(text, filename=path)
+        except SyntaxError as exc:
+            raise _FileMutationError(
+                "syntax_error", f"Python syntax error at line {exc.lineno}, column {exc.offset}: {exc.msg}"
+            ) from None
+        return {"status": "passed", "parser": "python_ast"}
+    if suffix == ".json":
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise _FileMutationError(
+                "syntax_error", f"JSON syntax error at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+            ) from None
+        return {"status": "passed", "parser": "json"}
+    if suffix in {".js", ".mjs", ".cjs"}:
+        node = shutil.which("node")
+        if not node:
+            raise _FileMutationError("validation_unavailable", "JavaScript syntax validator (node) is unavailable")
+        temp_suffix = ".mjs" if suffix == ".js" else suffix
+        fd, temporary = tempfile.mkstemp(prefix=".odysseus-syntax-", suffix=temp_suffix)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                result = subprocess.run(
+                    [node, "--check", temporary], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    timeout=8, check=False,
+                )
+            except subprocess.TimeoutExpired:
+                raise _FileMutationError("validation_timeout", "JavaScript syntax check timed out") from None
+            if result.returncode:
+                diagnostic = (result.stderr or result.stdout or "Syntax check failed").strip()[:2000]
+                raise _FileMutationError("syntax_error", diagnostic)
+        finally:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        return {"status": "passed", "parser": "node --check"}
+    return {"status": "not_applicable", "extension": suffix or "(none)"}
+
+
+def _read_mutation_source(path: str) -> tuple[bytes, str, os.stat_result]:
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise _FileMutationError("invalid_arguments", "Edits require regular, non-hard-linked text files")
+        raw = stream.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _FileMutationError("invalid_arguments", "File is not UTF-8 text") from None
+    return raw, text, info
+
+
+def _assert_same_file(path: str, previous: os.stat_result) -> None:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError:
+        raise _FileMutationError("stale_revision", "File changed during edit; read it again") from None
+    if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or (
+        current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns
+    ) != (
+        previous.st_dev, previous.st_ino, previous.st_size, previous.st_mtime_ns, previous.st_ctime_ns
+    ):
+        raise _FileMutationError("stale_revision", "File changed during edit; read it again")
+
+
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -214,8 +313,13 @@ class EditFileTool:
         old = args.get("old_string", "")
         new = args.get("new_string", "")
         replace_all = bool(args.get("replace_all", False))
+        expected_sha256 = args.get("expected_sha256")
+        validate_syntax = args.get("validate_syntax", True)
         if not raw_path:
             return {"error": "edit_file: path required", "exit_code": 1}
+        if expected_sha256 is None:
+            return {"error": "edit_file: read_file first and pass its full-file SHA-256 as expected_sha256",
+                    "code": "precondition_required", "exit_code": 1}
         try:
             path = _resolve_tool_path(raw_path)
         except ValueError as e:
@@ -226,25 +330,28 @@ class EditFileTool:
             return {"error": "edit_file: old_string and new_string are identical", "exit_code": 1}
 
         def _apply():
-            """Helper function that performs the actual string replacement and file writing logic."""
-            with open(path, "r", encoding="utf-8") as f:
-                original = f.read()
+            raw, original, info = _read_mutation_source(path)
+            _validate_expected_sha256(expected_sha256, raw, label="expected_sha256")
             count = original.count(old)
             if count == 0:
-                return original, None, "not_found"
+                return original, None, "not_found", None
             if count > 1 and not replace_all:
-                return original, None, f"not_unique:{count}"
+                return original, None, f"not_unique:{count}", None
             updated = original.replace(old, new) if replace_all else original.replace(old, new, 1)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(updated)
-            return original, updated, "ok"
+            syntax = _syntax_preflight(path, updated, enabled=validate_syntax)
+            _assert_same_file(path, info)
+            from core.atomic_io import atomic_write_text
+            atomic_write_text(path, updated, preserve_mode=True)
+            return original, updated, "ok", syntax
 
         try:
-            original, updated, status = await asyncio.to_thread(_apply)
+            original, updated, status, syntax = await asyncio.to_thread(_apply)
         except FileNotFoundError:
             return {"error": f"edit_file: {path}: not found (use write_file to create it)", "exit_code": 1}
         except (IsADirectoryError, UnicodeDecodeError):
             return {"error": f"edit_file: {path}: not an editable text file", "exit_code": 1}
+        except _FileMutationError as e:
+            return {"error": f"edit_file: {e}", "code": e.code, "exit_code": 1}
         except PermissionError:
             return {"error": f"edit_file: {path}: permission denied", "exit_code": 1}
         except OSError as e:
@@ -258,6 +365,8 @@ class EditFileTool:
 
         n = original.count(old)
         result = {"output": f"Edited {path} ({n} replacement{'s' if n != 1 else ''})", "exit_code": 0}
+        result["syntax_check"] = syntax
+        result["hash_precondition"] = "matched" if expected_sha256 is not None else "not_supplied"
         diff = _unified_diff(original, updated, path)
         if diff:
             result["diff"] = diff
@@ -464,14 +573,30 @@ class ApplyPatchTool:
         from src.tool_execution import _resolve_tool_path
 
         patch_text = content or ""
+        expected_by_path = {}
+        validate_syntax = True
         stripped = patch_text.strip()
         if stripped.startswith("{"):
             try:
                 args = json.loads(stripped)
-                if isinstance(args, dict):
-                    patch_text = str(args.get("patch_text") or args.get("patchText") or args.get("patch") or "")
             except (json.JSONDecodeError, TypeError):
-                pass
+                return {"error": "apply_patch: invalid arguments", "code": "invalid_arguments", "exit_code": 1}
+            if not isinstance(args, dict):
+                return {"error": "apply_patch: invalid arguments", "code": "invalid_arguments", "exit_code": 1}
+            patch_text = str(args.get("patch_text") or args.get("patchText") or args.get("patch") or "")
+            expected_by_path = args.get("expected_sha256_by_path") or {}
+            validate_syntax = args.get("validate_syntax", True)
+            allowed = {"patch_text", "patchText", "patch", "verify", "expected_sha256_by_path", "validate_syntax"}
+            if set(args) - allowed:
+                return {"error": "apply_patch: unsupported arguments", "code": "invalid_arguments", "exit_code": 1}
+            if (not isinstance(expected_by_path, dict) or len(expected_by_path) > 32
+                    or any(not isinstance(key, str) for key in expected_by_path)
+                    or any(not isinstance(value, str) or (
+                        value != "missing" and not re.fullmatch(r"[a-fA-F0-9]{64}", value)
+                    ) for value in expected_by_path.values())):
+                return {"error": "apply_patch: invalid expected_sha256_by_path", "code": "invalid_arguments", "exit_code": 1}
+            if type(validate_syntax) is not bool:
+                return {"error": "apply_patch: validate_syntax must be boolean", "code": "invalid_arguments", "exit_code": 1}
         if not patch_text.strip():
             return {"error": "apply_patch: patch_text required", "exit_code": 1}
 
@@ -480,41 +605,98 @@ class ApplyPatchTool:
             if not ops:
                 return {"error": "apply_patch: no file operations found", "exit_code": 1}
             prepared = []
+            consumed_hashes = set()
             for op in ops:
                 path = _resolve_tool_path(op["path"])
                 kind = op["kind"]
+                expected = expected_by_path.get(op["path"], expected_by_path.get(path))
+                has_expected = op["path"] in expected_by_path or path in expected_by_path
+                if not has_expected:
+                    raise _FileMutationError(
+                        "precondition_required",
+                        f"Read each patch target and include its SHA-256 in expected_sha256_by_path: {op['path']}",
+                    )
+                if op["path"] in expected_by_path:
+                    consumed_hashes.add(op["path"])
+                elif path in expected_by_path:
+                    consumed_hashes.add(path)
                 if kind == "add":
                     if os.path.exists(path):
                         return {"error": f"apply_patch: {op['path']}: already exists", "exit_code": 1}
+                    if has_expected and expected != "missing":
+                        return {"error": f"apply_patch: {op['path']}: expected missing-file precondition",
+                                "code": "stale_revision", "exit_code": 1}
                     old = ""
                     new = op["content"]
+                    info = None
                 elif kind == "delete":
-                    if not os.path.isfile(path):
-                        return {"error": f"apply_patch: {op['path']}: not found", "exit_code": 1}
-                    with open(path, "r", encoding="utf-8") as f:
-                        old = f.read()
+                    try:
+                        raw, old, info = _read_mutation_source(path)
+                    except FileNotFoundError:
+                        return {"error": f"apply_patch: {op['path']}: not found", "code": "not_found", "exit_code": 1}
+                    if has_expected:
+                        _validate_expected_sha256(expected, raw, label=f"expected_sha256_by_path[{op['path']}]")
                     new = ""
                 else:
-                    if not os.path.isfile(path):
-                        return {"error": f"apply_patch: {op['path']}: not found", "exit_code": 1}
-                    with open(path, "r", encoding="utf-8") as f:
-                        old = f.read()
+                    try:
+                        raw, old, info = _read_mutation_source(path)
+                    except FileNotFoundError:
+                        return {"error": f"apply_patch: {op['path']}: not found", "code": "not_found", "exit_code": 1}
+                    if has_expected:
+                        _validate_expected_sha256(expected, raw, label=f"expected_sha256_by_path[{op['path']}]")
                     new = _apply_patch_hunks(old, op["hunks"], op["path"])
-                prepared.append((kind, path, old, new))
+                syntax = None if kind == "delete" else _syntax_preflight(path, new, enabled=validate_syntax)
+                prepared.append((kind, path, old, new, info, syntax))
+            if consumed_hashes != set(expected_by_path):
+                raise _FileMutationError("invalid_arguments", "Hash precondition path is not part of this patch")
 
             diffs = []
-            for kind, path, old, new in prepared:
-                if kind == "delete":
-                    os.remove(path)
-                else:
-                    directory = os.path.dirname(path)
-                    if directory:
-                        os.makedirs(directory, exist_ok=True)
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(new)
-                diff = _unified_diff(old, new, path)
-                if diff:
-                    diffs.append(diff)
+            changed = []
+            from core.atomic_io import atomic_write_text
+            try:
+                for kind, path, old, new, info, _syntax in prepared:
+                    if info is not None:
+                        _assert_same_file(path, info)
+                    if kind == "delete":
+                        os.unlink(path)
+                    else:
+                        atomic_write_text(path, new, preserve_mode=info is not None,
+                                          exclusive=info is None)
+                    changed.append((kind, path, old, new, info))
+                    diff = _unified_diff(old, new, path)
+                    if diff:
+                        diffs.append(diff)
+            except Exception as commit_error:
+                rollback_errors = []
+                for kind, path, old, new, info in reversed(changed):
+                    try:
+                        if kind == "add":
+                            raw_current, _text, _current_info = _read_mutation_source(path)
+                            if not hmac.compare_digest(hashlib.sha256(raw_current).hexdigest(),
+                                                       hashlib.sha256(new.encode("utf-8")).hexdigest()):
+                                raise _FileMutationError("rollback_conflict", "new file changed during rollback")
+                            os.unlink(path)
+                        elif kind == "delete":
+                            if os.path.exists(path):
+                                raise _FileMutationError("rollback_conflict", "deleted file path was recreated")
+                            atomic_write_text(path, old, exclusive=True,
+                                              preserve_metadata_from=info)
+                        else:
+                            raw_current, _text, _current_info = _read_mutation_source(path)
+                            if not hmac.compare_digest(hashlib.sha256(raw_current).hexdigest(),
+                                                       hashlib.sha256(new.encode("utf-8")).hexdigest()):
+                                raise _FileMutationError("rollback_conflict", "updated file changed during rollback")
+                            atomic_write_text(path, old, preserve_mode=True)
+                    except Exception as rollback_error:
+                        rollback_errors.append(f"{path}: {rollback_error}")
+                if rollback_errors:
+                    raise _FileMutationError(
+                        "patch_rollback_failed",
+                        f"patch commit failed; rollback needs inspection: {'; '.join(rollback_errors)[:1500]}",
+                    ) from commit_error
+                raise _FileMutationError("patch_commit_failed", "patch commit failed; all earlier file changes were rolled back") from commit_error
+        except _FileMutationError as exc:
+            return {"error": f"apply_patch: {exc}", "code": exc.code, "exit_code": 1}
         except (ValueError, UnicodeDecodeError, PermissionError, OSError) as e:
             return {"error": f"apply_patch: {e}", "exit_code": 1}
 
@@ -527,6 +709,11 @@ class ApplyPatchTool:
         result = {
             "output": f"Applied patch ({len(prepared)} file{'s' if len(prepared) != 1 else ''}, +{added}/-{removed})",
             "exit_code": 0,
+            "syntax_checks": [
+                {"path": path, **syntax} for _kind, path, _old, _new, _info, syntax in prepared
+                if syntax is not None
+            ],
+            "hash_preconditions": "checked",
         }
         if diffs:
             result["diff"] = {

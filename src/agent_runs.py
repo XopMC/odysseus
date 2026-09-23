@@ -576,7 +576,7 @@ def _publish(run: _Run, ev: str) -> None:
         run.wait.observe(observed_payload)
         run.health_metrics.observe(observed_payload)
     run.buffer.append(ev)
-    if event_type in {"context_usage", "context_checkpoint", "compacted", "context_compaction_failed", "tool_start", "tool_output", "agent_terminal", "agent_step", "ask_user", "goal_update", "plan_update", "generated_image", "doc_update", "model_actual", "tool_inventory", "metrics", "budget_exceeded", "rounds_exhausted"}:
+    if event_type in {"context_usage", "context_checkpoint", "compacted", "context_compaction_failed", "tool_start", "tool_output", "agent_terminal", "agent_step", "ask_user", "goal_update", "plan_update", "generated_image", "doc_update", "model_actual", "tool_inventory", "metrics", "budget_warning", "budget_exceeded", "rounds_exhausted"}:
         _persist_run_state(run)
     for q in list(run.subscribers):
         try:
@@ -1156,10 +1156,13 @@ def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Opt
                     line[5:].lstrip() for line in item["event"].splitlines()
                     if line.startswith("data:")
                 )
-                try:
-                    data = json.loads(raw)
-                except (TypeError, ValueError):
-                    data = {"type": "opaque"}
+                if raw == "[DONE]":
+                    data = {"type": "done"}
+                else:
+                    try:
+                        data = json.loads(raw)
+                    except (TypeError, ValueError):
+                        data = {"type": "opaque"}
                 rows.append({"seq": item["seq"], "data": data})
             return {
                 "run_id": state.run_id,

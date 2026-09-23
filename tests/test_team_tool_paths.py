@@ -26,10 +26,10 @@ class TeamToolPathTests(unittest.TestCase):
             normalize_file_args('write_file', {'path': 'a'}, '/worker', [])
 
     def test_glob_scope_single_star_does_not_cross_directories(self):
-        normalize_file_args('edit_file', {'path': 'src/a.py'}, '/worker', ['src/*.py'])
+        normalize_file_args('edit_file', {'path': 'src/a.py', 'expected_sha256': 'a' * 64}, '/worker', ['src/*.py'])
         with self.assertRaises(PermissionError):
-            normalize_file_args('edit_file', {'path': 'src/nested/a.py'}, '/worker', ['src/*.py'])
-        normalize_file_args('edit_file', {'path': 'src/nested/a.py'}, '/worker', ['src/**/*.py'])
+            normalize_file_args('edit_file', {'path': 'src/nested/a.py', 'expected_sha256': 'a' * 64}, '/worker', ['src/*.py'])
+        normalize_file_args('edit_file', {'path': 'src/nested/a.py', 'expected_sha256': 'a' * 64}, '/worker', ['src/**/*.py'])
 
     def test_known_credentials_denied_for_reads_and_writes(self):
         paths = ['/home/x/.ssh/id_ed25519', '/home/x/.aws/credentials', '/home/x/.config/gcloud/token',
@@ -46,9 +46,29 @@ class TeamToolPathTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             normalize_file_args('apply_patch', {'patch_text': text}, '/worker')
         good = text.replace('../outside', 'src/old.py')
-        result = normalize_file_args('apply_patch', {'patch_text': good}, '/worker', ['src'])
+        result = normalize_file_args('apply_patch', {
+            'patch_text': good,
+            'expected_sha256_by_path': {'src/a.py': 'missing', 'src/old.py': 'a' * 64},
+        }, '/worker', ['src'])
         self.assertIn('*** Add File: /worker/src/a.py', result['patch_text'])
         self.assertIn('*** Delete File: /worker/src/old.py', result['patch_text'])
+
+    def test_patch_hash_preconditions_follow_normalized_paths(self):
+        patch = ('*** Begin Patch\n*** Update File: src/a.py\n@@\n-old\n+new\n*** End Patch')
+        result = normalize_file_args('apply_patch', {
+            'patch_text': patch,
+            'expected_sha256_by_path': {'src/a.py': 'a' * 64},
+        }, '/worker', ['src'])
+        self.assertEqual(result['expected_sha256_by_path'], {'/worker/src/a.py': 'a' * 64})
+        self.assertEqual(result['validate_syntax'], True)
+
+    def test_patch_rejects_hash_precondition_for_unpatched_path(self):
+        patch = ('*** Begin Patch\n*** Update File: src/a.py\n@@\n-old\n+new\n*** End Patch')
+        with self.assertRaises(PermissionError):
+            normalize_file_args('apply_patch', {
+                'patch_text': patch,
+                'expected_sha256_by_path': {'src/missing.py': 'a' * 64},
+            }, '/worker', ['src'])
 
     def test_host_realpath_guard_rejects_outside_and_secret_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,14 +1,18 @@
 """Owner-authorized host filesystem RPC. No sudo or container path policy here.
 
 OS permissions still apply. The caller must authenticate/authorize every request.
-Writes are atomic per file, not transactional across files; special files and
-hard-linked writes are rejected. Search never follows directory symlinks.
+Edit/patch calls require SHA-256 preconditions and validate supported syntax
+before mutation. Each file write is atomic; a handled multi-file commit error
+rolls earlier files back when their after-hashes still match. Process/power loss
+cannot be atomic across multiple paths. Special files and hard-linked writes
+are rejected. Search never follows directory symlinks.
 """
 import base64
 import ast
 import difflib
 import fnmatch
 import hashlib
+import hmac
 from importlib import metadata
 import heapq
 import itertools
@@ -40,6 +44,12 @@ _TOOLCHAIN_PATHS = {
     'typescript-language-server': ('/usr/bin/typescript-language-server',
                                    '/usr/local/bin/typescript-language-server'),
 }
+
+
+class FileMutationError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
 
 
 def _fixed_version(name):
@@ -139,7 +149,10 @@ def _read_bytes(path):
         if info.st_size > MAX_FILE:
             raise ValueError('file exceeds 2 MiB bound; use a bounded shell command')
         data = stream.read(MAX_FILE + 1)
-        if len(data) > MAX_FILE:
+        after = os.fstat(stream.fileno())
+        if _identity(after) != _identity(info):
+            raise ValueError('file changed during read; retry')
+    if len(data) > MAX_FILE:
             raise ValueError('file exceeds 2 MiB bound')
     return data, info
 
@@ -191,6 +204,73 @@ def _write(path, body, previous):
             os.unlink(temporary)
 
 
+def _check_expected_hash(value, old, path):
+    if value is None:
+        return False
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', value):
+        raise FileMutationError('invalid_arguments', f'{path}: expected SHA-256 is invalid')
+    actual = hashlib.sha256(old.encode('utf-8')).hexdigest()
+    if not hmac.compare_digest(actual, value.lower()):
+        raise FileMutationError('stale_revision', f'{path}: file hash changed; read it again')
+    return True
+
+
+def _syntax_preflight(path, text, enabled=True):
+    if type(enabled) is not bool:
+        raise FileMutationError('invalid_arguments', 'validate_syntax must be boolean')
+    if not enabled:
+        raise FileMutationError('validation_required', 'syntax validation cannot be disabled')
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix in {'.py', '.pyi'}:
+        try:
+            ast.parse(text, filename=path)
+        except SyntaxError as exc:
+            raise FileMutationError(
+                'syntax_error', f'Python syntax error at line {exc.lineno}, column {exc.offset}: {exc.msg}') from None
+        return {'status': 'passed', 'parser': 'python_ast'}
+    if suffix == '.json':
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise FileMutationError(
+                'syntax_error', f'JSON syntax error at line {exc.lineno}, column {exc.colno}: {exc.msg}') from None
+        return {'status': 'passed', 'parser': 'json'}
+    if suffix in {'.js', '.mjs', '.cjs'}:
+        node = None
+        for candidate in _TOOLCHAIN_PATHS['node']:
+            resolved = os.path.realpath(candidate)
+            if (any(os.path.commonpath((resolved, root)) == root
+                    for root in ('/usr/bin', '/usr/local/bin', '/bin'))
+                    and os.path.isfile(resolved) and os.access(resolved, os.X_OK)):
+                node = resolved
+                break
+        if node is None:
+            raise FileMutationError('validation_unavailable', 'JavaScript syntax validator (node) is unavailable')
+        temp_suffix = '.mjs' if suffix == '.js' else suffix
+        fd, temporary = tempfile.mkstemp(prefix='.odysseus-syntax-', suffix=temp_suffix)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                result = subprocess.run([node, '--check', temporary], stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                        timeout=8, check=False)
+            except subprocess.TimeoutExpired:
+                raise FileMutationError('validation_timeout', 'JavaScript syntax check timed out') from None
+            if result.returncode:
+                diagnostic = (result.stderr or result.stdout or 'Syntax check failed').strip()[:2000]
+                raise FileMutationError('syntax_error', diagnostic)
+        finally:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        return {'status': 'passed', 'parser': 'node --check'}
+    return {'status': 'not_applicable', 'extension': suffix or '(none)'}
+
+
 def _diff(old, new, path):
     if len(old) + len(new) > 200000:
         return {'text': '[Diff omitted for large file; read the affected range]',
@@ -204,11 +284,17 @@ def _diff(old, new, path):
             'new_file': not old}
 
 
-def _patch(text, cwd):
+def _patch(text, cwd, expected_sha256_by_path=None, validate_syntax=True):
+    expected_sha256_by_path = expected_sha256_by_path or {}
+    if (not isinstance(expected_sha256_by_path, dict) or len(expected_sha256_by_path) > 32
+            or any(not isinstance(k, str) for k in expected_sha256_by_path)
+            or any(not isinstance(v, str) or (v != 'missing' and not re.fullmatch(r'[0-9a-fA-F]{64}', v))
+                   for v in expected_sha256_by_path.values())):
+        raise FileMutationError('invalid_arguments', 'expected_sha256_by_path must be a bounded object')
     lines = text.strip().splitlines()
     if not lines or lines[0] != '*** Begin Patch' or lines[-1] != '*** End Patch':
         raise ValueError('expected *** Begin Patch / *** End Patch')
-    prepared, seen = [], set()
+    prepared, seen, consumed_hashes = [], set(), set()
     i = 1
     while i < len(lines) - 1:
         match = re.fullmatch(r'\*\*\* (Add|Update|Delete) File: (.+)', lines[i])
@@ -226,8 +312,18 @@ def _patch(text, cwd):
         while i < len(lines) - 1 and not lines[i].startswith('*** '):
             body.append(lines[i])
             i += 1
+        has_expected = raw in expected_sha256_by_path or path in expected_sha256_by_path
+        expected_key = raw if raw in expected_sha256_by_path else path
+        expected = expected_sha256_by_path.get(expected_key)
+        if not has_expected:
+            raise FileMutationError('precondition_required',
+                                    f'{path}: include the current SHA-256 or missing marker before editing')
+        if has_expected:
+            consumed_hashes.add(expected_key)
         if kind == 'Add':
             _check(path, None)
+            if has_expected and expected != 'missing':
+                raise FileMutationError('stale_revision', f'{path}: expected missing-file precondition')
             if any(not line.startswith('+') for line in body):
                 raise ValueError('Add lines must start with +')
             old, info = '', None
@@ -235,6 +331,7 @@ def _patch(text, cwd):
         else:
             old, info = _read(path)
             _check(path, info)
+            _check_expected_hash(expected if has_expected else None, old, path)
             new = old
             if kind == 'Delete':
                 if body:
@@ -266,24 +363,61 @@ def _patch(text, cwd):
                     n = hits[0]
                     existing[n:n + len(before)] = after
                     new = '\n'.join(existing) + ('\n' if new.endswith('\n') else '')
-        prepared.append((kind, path, old, new, info))
+        syntax = None if kind == 'Delete' else _syntax_preflight(path, new, validate_syntax)
+        prepared.append((kind, path, old, new, info, syntax, has_expected))
     if not prepared:
         raise ValueError('empty patch')
-    # Validate all paths before any write; runtime OS errors may still leave a
-    # partial patch, reported with exact completed paths instead of false success.
+    if consumed_hashes != set(expected_sha256_by_path):
+        raise FileMutationError('invalid_arguments', 'hash precondition path is not part of this patch')
+    # All patch syntax and hashes have been validated before writes. If an OS
+    # error occurs during the commit, roll earlier paths back only while their
+    # just-written hash still matches; never overwrite an intervening edit.
     changed = []
     try:
-        for kind, path, old, new, info in prepared:
+        for kind, path, old, new, info, _syntax, _hash_checked in prepared:
             _check(path, info)
             if kind == 'Delete':
                 os.unlink(path)
             else:
                 _write(path, new, info)
-            changed.append(path)
+            changed.append((kind, path, old, new, info))
     except (OSError, ValueError) as exc:
-        raise ValueError(f'partial patch; completed paths={changed!r}; {exc}') from exc
-    diffs = [_diff(old, new, path) for _, path, old, new, _ in prepared]
+        rollback_errors = []
+        for kind, path, old, new, info in reversed(changed):
+            try:
+                if kind == 'Add':
+                    raw_current, _ = _read_bytes(path)
+                    if not hmac.compare_digest(hashlib.sha256(raw_current).hexdigest(),
+                                               hashlib.sha256(new.encode('utf-8')).hexdigest()):
+                        raise FileMutationError('rollback_conflict', 'added file changed during rollback')
+                    os.unlink(path)
+                elif kind == 'Delete':
+                    if os.path.lexists(path):
+                        raise FileMutationError('rollback_conflict', 'deleted file path was recreated')
+                    _write(path, old, None)
+                    if info is not None:
+                        os.chown(path, info.st_uid, info.st_gid)
+                        os.chmod(path, stat.S_IMODE(info.st_mode))
+                else:
+                    raw_current, current_info = _read_bytes(path)
+                    if not hmac.compare_digest(hashlib.sha256(raw_current).hexdigest(),
+                                               hashlib.sha256(new.encode('utf-8')).hexdigest()):
+                        raise FileMutationError('rollback_conflict', 'updated file changed during rollback')
+                    _write(path, old, current_info)
+            except Exception as rollback_error:
+                rollback_errors.append(f'{path}: {rollback_error}')
+        if rollback_errors:
+            raise FileMutationError(
+                'patch_rollback_failed',
+                f'patch commit failed; rollback needs inspection: {"; ".join(rollback_errors)[:1500]}',
+            ) from exc
+        raise FileMutationError('patch_commit_failed',
+                                'patch commit failed; all earlier file changes were rolled back') from exc
+    diffs = [_diff(old, new, path) for _, path, old, new, *_rest in prepared]
     return {'output': f'Applied patch to {len(changed)} file(s)', 'exit_code': 0,
+            'syntax_checks': [{'path': path, **syntax} for _, path, _, _, _, syntax, _ in prepared
+                              if syntax is not None],
+            'hash_preconditions': 'checked',
             'diff': {'file': 'patch', 'text': '\n'.join(d['text'] for d in diffs)[:MAX_OUTPUT],
                      'added': sum(d['added'] for d in diffs),
                      'removed': sum(d['removed'] for d in diffs),
@@ -720,7 +854,10 @@ def handle(tool: str, content, cwd: str, path_guard=None) -> dict:
                 raise ValueError('search worker failed: ' + proc.stderr[:1000])
             return json.loads(proc.stdout)
         if tool == 'apply_patch':
-            return _patch(args.get('patch_text') or args.get('patchText') or args.get('patch') or '', cwd)
+            return _patch(
+                args.get('patch_text') or args.get('patchText') or args.get('patch') or '',
+                cwd, args.get('expected_sha256_by_path'), args.get('validate_syntax', True),
+            )
         raw = args.get('path', '')
         if not raw and tool not in {'ls', 'list_tree'}:
             raise ValueError('path required')
@@ -893,12 +1030,26 @@ def handle(tool: str, content, cwd: str, path_guard=None) -> dict:
             before, after = args.get('old_string'), args.get('new_string')
             if not isinstance(before, str) or not before or not isinstance(after, str) or before == after:
                 raise ValueError('distinct old_string and new_string required')
+            if args.get('expected_sha256') is None:
+                raise FileMutationError('precondition_required',
+                                        'read_file first and pass its full-file SHA-256 as expected_sha256')
+            hash_checked = _check_expected_hash(args.get('expected_sha256'), old, path)
             count = old.count(before)
             if not count or (count != 1 and args.get('replace_all') is not True):
                 raise ValueError(f'old_string matched {count} times; use unique context or replace_all=true')
             new = old.replace(before, after)
+            syntax = _syntax_preflight(path, new, args.get('validate_syntax', True))
+        if tool == 'write_file':
+            syntax = {'status': 'not_checked'}
+            hash_checked = False
         _write(path, new, info)
-        return {'output': f'Wrote {path}', 'exit_code': 0, 'diff': _diff(old, new, path)}
+        result = {'output': f'Wrote {path}', 'exit_code': 0, 'diff': _diff(old, new, path)}
+        if tool == 'edit_file':
+            result['syntax_check'] = syntax
+            result['hash_precondition'] = 'matched' if hash_checked else 'not_supplied'
+        return result
+    except FileMutationError as exc:
+        return {'error': f'{tool}: {exc}', 'code': exc.code, 'exit_code': 1}
     except (OSError, ValueError, TypeError, UnicodeError, subprocess.TimeoutExpired) as exc:
         return {'error': f'{tool}: {exc}', 'exit_code': 1}
 

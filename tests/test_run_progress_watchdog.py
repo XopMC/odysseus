@@ -121,6 +121,38 @@ def test_useful_progress_requires_evidence_not_merely_tool_success():
     assert tracker.snapshot("running", now=603)["stalled"] is False
 
 
+def test_plan_progress_uses_the_stable_id_field_emitted_by_plan_store(monkeypatch):
+    from src.run_progress import progress_marker
+
+    first = {"type": "plan_update", "data": {
+        "id": "plan-1", "revision": 2, "current_step_id": "step-current",
+        "steps": [
+            {"id": "step-current", "status": "in_progress"},
+            {"id": "step-alpha", "status": "done"},
+            {"id": "step-beta", "status": "pending"},
+        ],
+    }}
+    later = {"type": "plan_update", "data": {
+        "id": "plan-1", "revision": 3, "current_step_id": "step-current",
+        "steps": [
+            {"id": "step-current", "status": "in_progress"},
+            {"id": "step-beta", "status": "done"},
+            {"id": "step-alpha", "status": "pending"},
+        ],
+    }}
+
+    # The plan store serializes stable step identity as `id`, not `step_id`.
+    # The same status vector with a different completed step is new progress.
+    assert progress_marker(first) != progress_marker(later)
+    run = agent_runs._Run()
+    run.session_id = "plan-progress-fixture"
+    monkeypatch.setitem(agent_runs._RUNS, run.session_id, run)
+    monkeypatch.setattr(agent_runs, "_persist_run_state", lambda *args, **kwargs: None)
+    agent_runs._publish(run, _event(first))
+    agent_runs._publish(run, _event(later))
+    assert agent_runs.describe_run(run.session_id)["progress_health"]["revision"] == 2
+
+
 def test_goal_round_and_repeated_claims_do_not_reset_useful_progress_clock():
     from src.run_progress import ProgressTracker, progress_marker
 
@@ -146,6 +178,51 @@ def test_goal_round_and_repeated_claims_do_not_reset_useful_progress_clock():
     assert tracker.observe(verified, now=801) is True
     assert tracker.observe(same_evidence, now=900) is False
     assert tracker.snapshot("running", now=1402)["stalled"] is True
+
+
+def test_old_duplicate_evidence_does_not_reset_watchdog_after_recent_cache_eviction(monkeypatch):
+    from src import run_progress
+
+    monkeypatch.setattr(run_progress, "_MAX_MARKERS", 2)
+    tracker = run_progress.ProgressTracker(started_at=0)
+    first = {"type": "tool_output", "tool": "run_tests", "exit_code": 0,
+             "output": "distinct verification result 0"}
+    assert tracker.observe(first, now=1) is True
+    for index in range(1, 8):
+        assert tracker.observe({
+            "type": "tool_output", "tool": "run_tests", "exit_code": 0,
+            "output": f"distinct verification result {index}",
+        }, now=index + 1) is True
+
+    # The exact LRU marker has been evicted, but replaying that old evidence
+    # must not masquerade as new task progress and buy another watchdog window.
+    assert tracker.observe(first, now=20) is False
+    assert tracker.snapshot("running", now=610)["stalled"] is True
+
+
+def test_progress_dedup_filter_has_a_hard_memory_cap(monkeypatch):
+    from src import run_progress
+
+    monkeypatch.setattr(run_progress, "_FILTER_CHUNK_INSERTS", 2)
+    monkeypatch.setattr(run_progress, "_FILTER_MAX_CHUNKS", 1)
+    tracker = run_progress.ProgressTracker(started_at=0)
+
+    def verification(index):
+        return {"type": "tool_output", "tool": "run_tests", "exit_code": 0,
+                "output": f"unique bounded verification {index}"}
+
+    assert tracker.observe(verification(0), now=1) is True
+    assert tracker.observe(verification(1), now=2) is True
+    candidate = next(
+        verification(index) for index in range(2, 100)
+        if not tracker._seen_filter.contains(run_progress.progress_marker(verification(index))[1])
+    )
+    assert tracker.observe(candidate, now=3) is False
+    snapshot = tracker.snapshot("running", now=604)
+    assert snapshot["tracking_capacity_exhausted"] is True
+    assert snapshot["stalled"] is True
+    assert len(tracker._seen_filter._chunks) == 1
+    assert len(tracker._seen_filter._chunks[0]) == run_progress._FILTER_CHUNK_BYTES
 
 
 def test_durable_terminal_run_cannot_remain_marked_stalled():

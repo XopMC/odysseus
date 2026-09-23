@@ -93,6 +93,7 @@ def _runtime_diagnostics() -> Dict[str, Any]:
     """Content-free long-run health counters for admin diagnostics."""
     from src.chat_replay_log import MAX_RUN_BYTES, MAX_TOTAL_BYTES
 
+    collection_errors = []
     replay_root = Path(DATA_DIR) / "chat-replay"
     files = [path for path in replay_root.iterdir() if path.is_file()] if replay_root.exists() else []
     total_bytes = sum(path.stat().st_size for path in files)
@@ -113,6 +114,7 @@ def _runtime_diagnostics() -> Dict[str, Any]:
     active_runs = active_subagents = durable_lag_max_events = 0
     child_queue_wait_max_ms = 0
     durable_latency = None
+    database_metrics_available = False
     try:
         from core.database import ChatRunState, ChatSubagentRun, SessionLocal, utcnow_naive
         from src.subagent_runtime import ACTIVE_STATUSES
@@ -141,7 +143,9 @@ def _runtime_diagnostics() -> Dict[str, Any]:
             durable_latency = _durable_run_health_summary(db)
         finally:
             db.close()
+        database_metrics_available = True
     except Exception:
+        collection_errors.append("database_metrics_unavailable")
         logger.debug("runtime diagnostics DB counters unavailable", exc_info=True)
 
     db_path = Path(DATA_DIR) / "app.db"
@@ -153,6 +157,7 @@ def _runtime_diagnostics() -> Dict[str, Any]:
         from src.agent_runs import active_run_health_summary
         latency = active_run_health_summary()
     except Exception:
+        collection_errors.append("local_run_metrics_unavailable")
         latency = {"measured_runs": 0, "max_ttft_ms": 0, "min_prefill_tps": None,
                    "max_tool_latency_ms": 0, "compaction_failures": 0,
                    "max_compaction_ms": 0,
@@ -201,9 +206,13 @@ def _runtime_diagnostics() -> Dict[str, Any]:
     if max(total_percent, largest_percent) >= 90:
         alerts.append({"code": "replay_storage_critical", "observed": max(total_percent, largest_percent),
                        "threshold": 90, "unit": "percent"})
+    if collection_errors:
+        alerts.append({"code": "diagnostics_incomplete", "observed": len(collection_errors),
+                       "threshold": 0, "unit": "unavailable_sources"})
     return {
         "process": {"pid": os.getpid(), "rss_bytes": rss_bytes},
         "runs": {"active": active_runs, "active_subagents": active_subagents,
+                 "database_metrics_available": database_metrics_available,
                  "durable_lag_max_events": durable_lag_max_events,
                  "child_queue_wait_max_ms": child_queue_wait_max_ms,
                  "latency": latency},
@@ -213,6 +222,8 @@ def _runtime_diagnostics() -> Dict[str, Any]:
                 "child_queue_wait_limit_ms": child_queue_limit,
                 "sse_reconnect_limit": reconnect_limit,
                 "compaction_limit_ms": compaction_limit,
+                "collection_status": "partial" if collection_errors else "complete",
+                "collection_errors": collection_errors,
                 "alerts": alerts},
         "storage": {
             "database_bytes": db_path.stat().st_size if db_path.exists() else 0,

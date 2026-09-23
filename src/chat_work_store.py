@@ -159,7 +159,9 @@ class ChatWorkStore:
                     dict(row.checkpoint or {}).get("_wait_reason")
                     if row.status == "waiting_user" or (
                         row.status == "review_required"
-                        and dict(row.checkpoint or {}).get("_wait_reason") == "repeated_premature_stop"
+                        and dict(row.checkpoint or {}).get("_wait_reason") in {
+                            "repeated_premature_stop", "repeated_action_observation",
+                        }
                     ) else None
                 ),
                 "failure_code": (
@@ -512,10 +514,18 @@ class ChatWorkStore:
             return {"goal": _public_goal(row), "guidance": item}
 
     def update_goal(self, owner, session_id, progress, checkpoint=None, *,
-                    waiting_user=False, review_required=False):
+                    waiting_user=False, review_required=False,
+                    expected_goal_id=None, expected_attempt=None):
         progress = _clean_text(progress, "goal progress", 12000)
         if checkpoint is not None and not isinstance(checkpoint, dict):
             raise ValueError("Goal checkpoint must be an object")
+        if (expected_goal_id is None) != (expected_attempt is None):
+            raise ValueError("Goal ID and attempt must be supplied together")
+        if expected_goal_id is not None and (
+            not isinstance(expected_goal_id, str) or type(expected_attempt) is not int
+            or expected_attempt < 1
+        ):
+            raise ValueError("Invalid expected goal attempt")
         if waiting_user and review_required:
             raise ValueError("Goal cannot wait for an answer and require review simultaneously")
         with SessionLocal.begin() as db:
@@ -523,6 +533,11 @@ class ChatWorkStore:
             row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
             if row is None:
                 raise WorkNotFound("Active goal not found")
+            if expected_goal_id is not None and (
+                row.id != expected_goal_id or row.attempt != expected_attempt
+                or row.status != "active"
+            ):
+                raise WorkConflict("Goal attempt changed before progress settlement")
             if row.status == "waiting_user" and waiting_user:
                 previous = dict(row.checkpoint or {})
                 question_id = (checkpoint or {}).get("question_id")
@@ -551,6 +566,7 @@ class ChatWorkStore:
                     **dict(row.checkpoint or {}),
                     "_wait_reason": (
                         "repeated_premature_stop" if reason == "repeated_premature_stop"
+                        else "repeated_action_observation" if reason == "repeated_action_observation"
                         else "unknown_side_effect" if reason == "unknown_side_effect"
                         else "ask_user" if (checkpoint or {}).get("question_id")
                         else "other"

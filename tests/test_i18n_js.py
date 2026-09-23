@@ -175,11 +175,16 @@ def test_full_authored_menu_inventory_and_per_user_browser(tmp_path):
         await page.locator('#styled-confirm-ok').click();await page.waitForFunction(()=>confirmResult===true);
         await page.evaluate(async()=>{
           const renderer=await import('/static/js/chatRenderer.js');window.approvalResult=null;
-          renderer.renderAskUserCard({kind:'tool_approval',approval_id:'locale-only-approval',question:'Approve user content Save?',options:[{label:'Allow once',value:'approve'},{label:'Deny',value:'deny'}]},
+          renderer.renderAskUserCard({kind:'tool_approval',approval_id:'locale-only-approval',question:'Approve user content Save?',action:{tool:'bash',content:'<img src=x onerror=alert(1)>',effects:['execute_code'],digest:'a'.repeat(64),preview:{kind:'shell',working_directory:'/safe/project',execution_target:'Odysseus local runtime',command:'<img src=x onerror=alert(1)>',effect_class:['execute_code'],action_hash:'a'.repeat(64)}},options:[{label:'Allow once',value:'approve'},{label:'Deny',value:'deny'}]},
             {onSubmit:value=>{window.approvalResult={decision:value.decision,label:value.label};return true;}});
         });
         assert.equal(await page.locator('.ask-user-option-label').first().textContent(),'Разрешить один раз');
         assert.equal(await page.locator('.ask-user-question').textContent(),'Approve user content Save?');
+        const actionPreview=await page.locator('.ask-user-action-preview').textContent();
+        assert(actionPreview.includes('Рабочая директория: /safe/project'));
+        assert(actionPreview.includes('Цель выполнения: Локальный runtime Odysseus'));
+        assert(actionPreview.includes('<img src=x onerror=alert(1)>'));
+        assert.equal(await page.locator('.ask-user-action-preview img').count(),0,'untrusted command preview must render as text');
         await page.locator('.ask-user-option').first().click();
         assert.deepEqual(await page.evaluate(()=>approvalResult),{decision:'approve',label:'Allow once'});
         await page.evaluate(async()=>{

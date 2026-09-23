@@ -13,6 +13,7 @@ import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
 import { getTools } from './appConfig.js';
 import { bindUiText, t } from './i18n.js';
+import { safeMemoryRows } from './memorySafety.js?v=20260923memoryredact1';
 
 function bindThinkingLabels(root) {
   root?.querySelectorAll?.('.thinking-header-left span').forEach(
@@ -2049,7 +2050,9 @@ export function createMsgFooter(msgElement) {
   }
 
   // Memory-used indicator pill
-  const mems = msgElement._memoriesUsed;
+  // Old durable metadata may predate server-side credential filtering. Do not
+  // put credential-shaped memories into a tooltip or expandable UI card.
+  const mems = safeMemoryRows(msgElement._memoriesUsed);
   if (mems && mems.length > 0) {
     const pill = document.createElement('button');
     pill.className = 'memory-used-pill';
@@ -2299,6 +2302,9 @@ export function displayMetrics(messageElement, metrics) {
     const costStr = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : '';
     const costRows = costStr ? `<div><span class="ctx-label">Cost</span> ${costStr}</div>` : '';
     const speedStr = tps != null && tps !== 'undefined' ? `${tps} tok/s` : 'n/a';
+    const generationTimeRow = Number.isFinite(Number(metrics.generation_time)) && Number(metrics.generation_time) > 0
+      ? `<div><span class="ctx-label">Generation</span> ${Number(metrics.generation_time).toFixed(2)}s</div>`
+      : '';
     const totalTok = inputTokens + outputTokens;
     const ctxColor = ctxPct >= 85 ? 'var(--red, #e06c75)' : ctxPct >= 70 ? '#ff9900' : 'var(--color-muted-alt, #6b7280)';
     const prepTime = metrics.agent_prep_time;
@@ -2324,6 +2330,7 @@ export function displayMetrics(messageElement, metrics) {
       <div><span class="ctx-label">Output</span> ${outputTokens.toLocaleString()} tokens${isReal ? '' : '~'}</div>
       <div><span class="ctx-label">Total</span> ${totalTok.toLocaleString()} tokens</div>
       <div><span class="ctx-label">Speed</span> ${speedStr}</div>
+      ${generationTimeRow}
       <div><span class="ctx-label">Time</span> ${responseTime}s</div>
       ${prepTime != null ? `<div><span class="ctx-label">Prep</span> ${prepTime}s</div>` : ''}
       ${modelWaitTime != null ? `<div><span class="ctx-label">Model wait</span> ${modelWaitTime}s</div>` : ''}
@@ -2652,6 +2659,41 @@ export function renderAskUserCard(payload, options) {
     ].filter(Boolean).join('\n');
     action.style.whiteSpace = 'pre-wrap';
     card.appendChild(action);
+
+    const preview = aq.action.preview;
+    if (preview && typeof preview === 'object') {
+      const previewNode = document.createElement('div');
+      previewNode.className = 'ask-user-action-preview';
+      previewNode.setAttribute('role', 'note');
+      const previewKind = preview.kind === 'shell' ? 'Shell'
+        : preview.kind === 'file' ? 'File'
+          : preview.kind === 'http_request' ? 'HTTP request' : 'Tool';
+      const previewLines = [`${t('Action preview')}: ${t(previewKind)}`];
+      if (Array.isArray(preview.effect_class) && preview.effect_class.length) {
+        previewLines.push(`${t('Effect class')}: ${preview.effect_class.map(String).join(', ')}`);
+      }
+      if (preview.kind === 'shell') {
+        if (preview.working_directory) previewLines.push(`${t('Working directory')}: ${String(preview.working_directory)}`);
+        if (preview.execution_target) previewLines.push(`${t('Execution target')}: ${t(String(preview.execution_target))}`);
+        previewLines.push(`${t('Command')}:\n${String(preview.command || '').slice(0, 8000)}`);
+      } else if (preview.kind === 'file') {
+        if (preview.execution_target) previewLines.push(`${t('Execution target')}: ${t(String(preview.execution_target))}`);
+        if (preview.path) previewLines.push(`${t('File')}: ${String(preview.path)}`);
+        if (preview.diff_scope) previewLines.push(`${t('Diff scope')}: ${t(String(preview.diff_scope))}`);
+        previewLines.push(`${t('Diff')}:\n${String(preview.diff || '').slice(0, 8000)}`);
+      } else if (preview.kind === 'http_request') {
+        previewLines.push(`${String(preview.method || 'UNKNOWN')} ${String(preview.target || 'target unavailable')}`);
+        if (Array.isArray(preview.payload_keys)) previewLines.push(`${t('Payload fields')}: ${preview.payload_keys.map(String).join(', ') || t('none')}`);
+        if (Number.isFinite(Number(preview.payload_bytes))) previewLines.push(`${t('Payload size')}: ${Math.max(0, Number(preview.payload_bytes))} ${t('bytes')}`);
+      } else if (preview.summary) {
+        if (preview.execution_target) previewLines.push(`${t('Execution target')}: ${t(String(preview.execution_target))}`);
+        previewLines.push(String(preview.summary));
+      }
+      if (preview.action_hash) previewLines.push(`${t('Sealed action SHA-256')}: ${String(preview.action_hash)}`);
+      previewNode.textContent = previewLines.join('\n');
+      previewNode.style.whiteSpace = 'pre-wrap';
+      card.appendChild(previewNode);
+    }
   }
 
   const list = document.createElement('div');

@@ -114,6 +114,44 @@ def test_other_owner_cannot_start_or_receive_runtime_context_stream(stream_clien
     assert "context_usage" not in response.text
 
 
+def test_soft_budget_warning_reaches_clients_without_parking_goal(stream_client, monkeypatch):
+    client, _captured, _events_sent = stream_client
+    from routes import chat_routes
+
+    class ActiveGoalStore:
+        goal = {"id": "soft-goal", "status": "active", "revision": 1,
+                "attempt": 2, "objective": "Harmless fixture", "checkpoint": {}}
+
+        def get(self, owner, session):
+            assert (owner, session) == ("alice", "session-1")
+            return {"plan": None, "goal": dict(self.goal), "cursor": 0}
+
+    work = ActiveGoalStore()
+    monkeypatch.setattr(chat_routes, "chat_work_store", work)
+
+    async def warning_stream(*_args, **_kwargs):
+        run_id = agent_runs.get_run_id("session-1")
+        yield "data: " + json.dumps({
+            "type": "budget_warning", "resource": "model_tokens",
+            "used": 800, "limit": 1000, "soft_limit": 800, "run_id": run_id,
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(chat_routes, "stream_agent_loop", warning_stream)
+    response = client.post("/api/chat_stream", data={
+        "session": "session-1", "message": "safe", "mode": "agent",
+    })
+    assert response.status_code == 200
+    events = [json.loads(line[6:]) for line in response.text.splitlines()
+              if line.startswith("data: ") and line != "data: [DONE]"]
+    warning = next(event for event in events if event.get("type") == "budget_warning")
+    assert (warning["resource"], warning["used"], warning["limit"]) == ("model_tokens", 800, 1000)
+    assert work.goal["status"] == "active"
+    assert not any(event.get("type") == "goal_update"
+                   and event.get("data", {}).get("status") == "waiting_user"
+                   for event in events)
+
+
 @pytest.mark.parametrize("event_type, resource", [
     ("budget_exceeded", "tool_calls"),
     ("budget_exceeded", "model_tokens"),

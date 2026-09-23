@@ -147,7 +147,8 @@ def compose_wait_panel(
     run_id = _label(run.get("run_id"), 200)
     goal_status = goal.get("status")
     wait_reason = goal.get("wait_reason") if goal.get("wait_reason") in {
-        "repeated_premature_stop", "ask_user", "other", "provider_failure", "context_compaction", "unknown_side_effect", "dispatch_failure", "resource_budget",
+        "repeated_premature_stop", "repeated_action_observation", "ask_user", "other",
+        "provider_failure", "context_compaction", "unknown_side_effect", "dispatch_failure", "resource_budget",
     } else None
     run_status = run.get("status")
     if goal_status == "review_required":

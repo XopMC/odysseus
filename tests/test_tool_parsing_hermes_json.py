@@ -22,6 +22,20 @@ def test_issue_5187_payload_parses():
     assert blocks[0].content == "mkdir -p agent-test"
 
 
+def test_local_coder_bbox_tool_name_alias_parses_as_normal_tool_call():
+    # Observed in the SHA-256 production test chat: the model used a vision
+    # schema's bbox_2d_id field for the tool name. It must enter the ordinary
+    # tool policy/approval pipeline instead of leaking as final assistant text.
+    text = (
+        '<tool_call>{"bbox_2d_id":"bash",'
+        '"arguments":{"command":"printf fixture"}}</tool_call>'
+    )
+    blocks = parse_tool_blocks(text)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "bash"
+    assert blocks[0].content == "printf fixture"
+
+
 def test_multiple_sequential_wrappers():
     text = (
         '<tool_call>\n{"name": "bash", "arguments": {"command": "ls"}}\n</tool_call>\n'

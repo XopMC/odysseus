@@ -151,20 +151,51 @@ def normalize_file_args(tool, args, cwd, write_scope=None, realpath=None, protec
             raise PermissionError('valid bounded patch_text required')
         if len(text.encode()) > 2 * 1024 * 1024:
             raise PermissionError('patch exceeds model tool bound')
-        rewritten, count = [], 0
+        expected = result.get('expected_sha256_by_path', {})
+        if (not isinstance(expected, dict) or len(expected) > 32
+                or any(not isinstance(k, str) or not isinstance(v, str) for k, v in expected.items())):
+            raise PermissionError('expected_sha256_by_path must be a bounded path-to-hash object')
+        if any(value != 'missing' and not re.fullmatch(r'[0-9a-fA-F]{64}', value)
+               for value in expected.values()):
+            raise PermissionError('expected_sha256_by_path values must be SHA-256 or missing')
+        validate_syntax = result.get('validate_syntax', True)
+        if validate_syntax is not True:
+            raise PermissionError('validation_required: syntax checks cannot be disabled')
+        rewritten, count, mapped_hashes = [], 0, {}
         for line in text.splitlines():
             match = re.fullmatch(r'(\*\*\* (?:Add File|Update File|Delete File|Move to): )(.+)', line)
             if match:
                 count += 1
-                rewritten.append(match.group(1) + check(match.group(2).strip(), True))
+                raw_path = match.group(2).strip()
+                normalized_path = check(raw_path, True)
+                rewritten.append(match.group(1) + normalized_path)
+                if raw_path in expected:
+                    mapped_hashes[normalized_path] = expected[raw_path]
+                elif normalized_path in expected:
+                    mapped_hashes[normalized_path] = expected[normalized_path]
             else:
                 rewritten.append(line)
         if not 1 <= count <= 32:
             raise PermissionError('patch needs 1..32 validated file paths')
+        if not expected or len(mapped_hashes) != count:
+            raise PermissionError('precondition_required: every patch path needs a current SHA-256 or missing marker')
+        if len(mapped_hashes) != len(expected):
+            raise PermissionError('hash precondition path is not part of this patch')
         result[key] = '\n'.join(rewritten) + ('\n' if text.endswith('\n') else '')
+        if expected:
+            result['expected_sha256_by_path'] = mapped_hashes
+        result['validate_syntax'] = validate_syntax
         return result
     raw = result.get('path', '')
     if not raw and tool in {'read_file', 'write_file', 'edit_file'}:
         raise PermissionError('path required')
     result['path'] = check(raw, tool in WRITE_TOOLS)
+    if tool == 'edit_file':
+        expected = result.get('expected_sha256')
+        if expected is None:
+            raise PermissionError('precondition_required: read_file and pass its sha256 as expected_sha256')
+        if not isinstance(expected, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', expected):
+            raise PermissionError('expected_sha256 must be a SHA-256 digest')
+        if result.get('validate_syntax', True) is not True:
+            raise PermissionError('validation_required: syntax checks cannot be disabled')
     return result

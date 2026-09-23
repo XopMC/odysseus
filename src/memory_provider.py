@@ -177,7 +177,12 @@ class NativeMemoryProvider(MemoryProvider):
         owner: Optional[str] = None,
         top_k: int = 5,
     ) -> List[MemorySearchHit]:
-        memories = self.memory_manager.load(owner=owner)
+        from src.memory_safety import is_sensitive_memory_text
+
+        memories = [
+            entry for entry in self.memory_manager.load(owner=owner)
+            if isinstance(entry, dict) and not is_sensitive_memory_text(entry.get("text"))
+        ]
         by_id = {m.get("id"): m for m in memories}
 
         if self._vector_available():
@@ -186,8 +191,16 @@ class NativeMemoryProvider(MemoryProvider):
                 if not isinstance(result, dict):
                     continue
                 memory_id = result.get("memory_id")
-                entry = by_id.get(memory_id) if memory_id else result
+                if memory_id:
+                    entry = by_id.get(memory_id)
+                else:
+                    # Historical unscoped vector indexes may contain raw
+                    # legacy rows. Never trust them for an owner-scoped query:
+                    # no id means no way to prove owner or recall-safety.
+                    entry = result if owner is None else None
                 if not entry:
+                    continue
+                if is_sensitive_memory_text(entry.get("text")):
                     continue
                 if owner is not None and entry.get("owner") != owner:
                     continue
@@ -221,10 +234,13 @@ class NativeMemoryProvider(MemoryProvider):
         owner: Optional[str] = None,
         limit: int = 100,
     ) -> List[MemoryRecord]:
+        from src.memory_safety import is_sensitive_memory_text
+
         return [
             self._to_record(entry)
-            for entry in self.memory_manager.load(owner=owner)[:limit]
-        ]
+            for entry in self.memory_manager.load(owner=owner)
+            if isinstance(entry, dict) and not is_sensitive_memory_text(entry.get("text"))
+        ][:limit]
 
     async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
         # Strict load for the same reason: `remaining` is derived from this

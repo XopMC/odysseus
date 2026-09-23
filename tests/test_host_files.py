@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -23,10 +24,119 @@ class HostFilesTests(unittest.TestCase):
         self.assertEqual(self.call('write_file', {'path': 'a/x.py', 'content': 'one\ntwo\n'})['exit_code'], 0)
         path = self.root / 'a/x.py'
         path.chmod(0o751)
-        self.assertEqual(self.call('read_file', {'path': str(path), 'offset': 2, 'limit': 1})['output'], 'two\n')
-        self.assertEqual(self.call('edit_file', {'path': str(path), 'old_string': 'two', 'new_string': 'three'})['exit_code'], 0)
+        read = self.call('read_file', {'path': str(path), 'offset': 2, 'limit': 1})
+        self.assertEqual(read['output'], 'two\n')
+        self.assertEqual(self.call('edit_file', {'path': str(path), 'old_string': 'two', 'new_string': 'three',
+                                                 'expected_sha256': read['sha256']})['exit_code'], 0)
         self.assertEqual(path.read_text(), 'one\nthree\n')
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o751)
+
+    def test_host_edit_rejects_stale_hash_and_preserves_original(self):
+        path = self.root / 'stale.py'
+        path.write_text('def f():\n    return 1\n')
+        result = self.call('edit_file', {
+            'path': str(path), 'old_string': 'return 1', 'new_string': 'return 2',
+            'expected_sha256': '0' * 64,
+        })
+        self.assertEqual(result['code'], 'stale_revision')
+        self.assertEqual(path.read_text(), 'def f():\n    return 1\n')
+
+    def test_host_edit_requires_hash_precondition(self):
+        path = self.root / 'no-hash.txt'
+        path.write_text('before\n')
+        result = self.call('edit_file', {'path': str(path), 'old_string': 'before', 'new_string': 'after'})
+        self.assertEqual(result['code'], 'precondition_required')
+        self.assertEqual(path.read_text(), 'before\n')
+
+    def test_host_patch_requires_hash_for_every_path(self):
+        path = self.root / 'no-hash.txt'
+        original = 'before\n'
+        path.write_text(original)
+        patch = f'*** Begin Patch\n*** Update File: {path}\n@@\n-before\n+after\n*** End Patch'
+        result = self.call('apply_patch', {'patch_text': patch})
+        self.assertEqual(result['code'], 'precondition_required')
+        self.assertEqual(path.read_text(), original)
+
+    def test_host_edit_syntax_gate_preserves_original(self):
+        path = self.root / 'syntax.py'
+        original = 'def f():\n    return 1\n'
+        path.write_text(original)
+        import hashlib
+        result = self.call('edit_file', {
+            'path': str(path), 'old_string': 'return 1', 'new_string': 'return )',
+            'expected_sha256': hashlib.sha256(original.encode()).hexdigest(),
+        })
+        self.assertEqual(result['code'], 'syntax_error')
+        self.assertEqual(path.read_text(), original)
+
+    def test_host_edit_cannot_disable_required_syntax_gate(self):
+        path = self.root / 'syntax-disabled.py'
+        original = 'def f():\n    return 1\n'
+        path.write_text(original)
+        result = self.call('edit_file', {
+            'path': str(path), 'old_string': 'return 1', 'new_string': 'return )',
+            'expected_sha256': hashlib.sha256(original.encode()).hexdigest(),
+            'validate_syntax': False,
+        })
+        self.assertEqual(result['code'], 'validation_required')
+        self.assertEqual(path.read_text(), original)
+
+    def test_host_patch_preflights_hashes_and_syntax_before_any_write(self):
+        import hashlib
+        first, second = self.root / 'first.txt', self.root / 'settings.json'
+        first_raw, second_raw = b'old\n', b'{"ok": true}\n'
+        first.write_bytes(first_raw)
+        second.write_bytes(second_raw)
+        patch = (
+            '*** Begin Patch\n'
+            f'*** Update File: {first}\n@@\n-old\n+new\n'
+            f'*** Update File: {second}\n@@\n-{{"ok": true}}\n+{{"ok":\n'
+            '*** End Patch'
+        )
+        result = self.call('apply_patch', {
+            'patch_text': patch,
+            'expected_sha256_by_path': {
+                str(first): hashlib.sha256(first_raw).hexdigest(),
+                str(second): hashlib.sha256(second_raw).hexdigest(),
+            },
+        })
+        self.assertEqual(result['code'], 'syntax_error')
+        self.assertEqual(first.read_bytes(), first_raw)
+        self.assertEqual(second.read_bytes(), second_raw)
+
+    def test_host_patch_io_failure_rolls_back_prior_file(self):
+        first, second = self.root / 'first.txt', self.root / 'second.txt'
+        first_raw, second_raw = b'old-a\n', b'old-b\n'
+        first.write_bytes(first_raw)
+        second.write_bytes(second_raw)
+        patch = (
+            '*** Begin Patch\n'
+            f'*** Update File: {first}\n@@\n-old-a\n+new-a\n'
+            f'*** Update File: {second}\n@@\n-old-b\n+new-b\n'
+            '*** End Patch'
+        )
+        real_write = self.rpc._write
+        calls = 0
+
+        def fail_second(path, text, previous):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError('injected host replace failure')
+            return real_write(path, text, previous)
+
+        self.rpc._write = fail_second
+        result = self.call('apply_patch', {
+            'patch_text': patch,
+            'expected_sha256_by_path': {
+                str(first): hashlib.sha256(first_raw).hexdigest(),
+                str(second): hashlib.sha256(second_raw).hexdigest(),
+            },
+        })
+        self.assertEqual(result['exit_code'], 1)
+        self.assertEqual(result['code'], 'patch_commit_failed')
+        self.assertEqual(first.read_bytes(), first_raw)
+        self.assertEqual(second.read_bytes(), second_raw)
 
     def test_read_file_v2_metadata_line_numbers_and_binary(self):
         import hashlib
@@ -202,10 +312,13 @@ class HostFilesTests(unittest.TestCase):
     def test_ambiguous_edit_and_missing_content_do_not_destroy(self):
         path = self.root / 'a'
         path.write_text('aa aa')
-        self.assertEqual(self.call('edit_file', {'path': 'a', 'old_string': 'aa', 'new_string': 'b'})['exit_code'], 1)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(self.call('edit_file', {'path': 'a', 'old_string': 'aa', 'new_string': 'b',
+                                                 'expected_sha256': digest})['exit_code'], 1)
         self.assertEqual(self.call('write_file', {'path': 'a'})['exit_code'], 1)
         self.assertEqual(path.read_text(), 'aa aa')
-        self.assertEqual(self.call('edit_file', {'path': 'a', 'old_string': 'aa', 'new_string': 'b', 'replace_all': True})['exit_code'], 0)
+        self.assertEqual(self.call('edit_file', {'path': 'a', 'old_string': 'aa', 'new_string': 'b',
+                                                 'replace_all': True, 'expected_sha256': digest})['exit_code'], 0)
         self.assertEqual(path.read_text(), 'b b')
 
     def test_special_files_rejected_without_blocking(self):
@@ -227,20 +340,25 @@ class HostFilesTests(unittest.TestCase):
     def test_patch_prevalidates_all_paths_and_full_line_context(self):
         (self.root / 'a').write_text('foobar\n')
         bad = '*** Begin Patch\n*** Add File: new\n+x\n*** Update File: a\n@@\n-foo\n+bar\n*** End Patch'
-        self.assertEqual(self.call('apply_patch', bad)['exit_code'], 1)
+        original_hash = hashlib.sha256((self.root / 'a').read_bytes()).hexdigest()
+        bad_args = {'patch_text': bad, 'expected_sha256_by_path': {'new': 'missing', 'a': original_hash}}
+        self.assertEqual(self.call('apply_patch', bad_args)['exit_code'], 1)
         self.assertFalse((self.root / 'new').exists())
         good = bad.replace('-foo\n', '-foobar\n')
-        self.assertEqual(self.call('apply_patch', good)['exit_code'], 0)
+        good_args = {'patch_text': good, 'expected_sha256_by_path': {'new': 'missing', 'a': original_hash}}
+        self.assertEqual(self.call('apply_patch', good_args)['exit_code'], 0)
         self.assertEqual((self.root / 'a').read_text(), 'bar\n')
         self.assertEqual((self.root / 'new').read_text(), 'x\n')
 
     def test_patch_delete_and_existing_add_guard(self):
         (self.root / 'a').write_text('a')
         patch = '*** Begin Patch\n*** Add File: a\n+b\n*** End Patch'
-        self.assertEqual(self.call('apply_patch', {'patch_text': patch})['exit_code'], 1)
+        self.assertEqual(self.call('apply_patch', {'patch_text': patch,
+                                                  'expected_sha256_by_path': {'a': 'missing'}})['exit_code'], 1)
         self.assertEqual((self.root / 'a').read_text(), 'a')
         patch = '*** Begin Patch\n*** Delete File: a\n*** End Patch'
-        self.assertEqual(self.call('apply_patch', {'patch': patch})['exit_code'], 0)
+        self.assertEqual(self.call('apply_patch', {'patch': patch,
+                                                  'expected_sha256_by_path': {'a': hashlib.sha256(b'a').hexdigest()}})['exit_code'], 0)
         self.assertFalse((self.root / 'a').exists())
 
     def test_search_real_subprocess_hidden_files_and_caps(self):

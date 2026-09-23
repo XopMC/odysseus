@@ -107,6 +107,134 @@ def test_process_kill_after_tool_start_recovers_without_reexecution(tmp_path):
     assert state["effect_events"][0]["payload"]["status"] == "unknown"
 
 
+def test_process_kill_before_tool_start_recovers_without_inventing_effect(tmp_path):
+    crashed = _run_script("""
+        import asyncio
+        import os
+        from core.database import Base, ChatMessage, ChatRunState, ChatToolIntent, ChatWorkEvent, Session, SessionLocal, engine
+        from src import agent_runs
+
+        Base.metadata.create_all(bind=engine, tables=[
+            Session.__table__, ChatMessage.__table__, ChatRunState.__table__,
+            ChatToolIntent.__table__, ChatWorkEvent.__table__,
+        ])
+        with SessionLocal.begin() as db:
+            db.add(Session(id='before-tool-fixture', name='Before tool fixture', owner='alice',
+                           endpoint_url='http://fixture.invalid/v1', model='fixture'))
+
+        async def source():
+            # A model round has begun, but no tool_start/effect intent has been
+            # durably committed. A process crash here must never synthesize an
+            # unknown external effect or replay a command.
+            yield 'data: {"type":"agent_step","round":1}\\n\\n'
+            os._exit(17)
+
+        async def main():
+            run = agent_runs.start('before-tool-fixture', source(), owner='alice')
+            await run.task
+
+        asyncio.run(main())
+    """, tmp_path)
+    assert crashed.returncode == 17, crashed.stderr
+
+    restarted = _run_script("""
+        import json
+        from core.database import ChatToolIntent, ChatWorkEvent, SessionLocal
+        from src import agent_runs
+        from src.chat_effect_inbox import inbox
+
+        recovered = agent_runs.recover_durable_runs()
+        second = agent_runs.recover_durable_runs()
+        page = agent_runs.event_page('before-tool-fixture', after_seq=-1)
+        with SessionLocal() as db:
+            intents = db.query(ChatToolIntent).filter_by(session_id='before-tool-fixture').count()
+            unknown_events = db.query(ChatWorkEvent).filter_by(
+                session_id='before-tool-fixture', kind='effect_unknown',
+            ).count()
+        print(json.dumps({
+            'recovered': len(recovered), 'second': len(second),
+            'status': agent_runs.describe_run('before-tool-fixture')['status'],
+            'types': [row['data']['type'] for row in page['events']],
+            'intents': intents, 'unknown_events': unknown_events,
+            'unresolved': inbox.unresolved('alice', 'before-tool-fixture'),
+        }))
+    """, tmp_path)
+    assert restarted.returncode == 0, restarted.stderr
+    state = json.loads(restarted.stdout.strip().splitlines()[-1])
+    assert state == {
+        'recovered': 1, 'second': 0, 'status': 'interrupted',
+        'types': ['agent_step'], 'intents': 0, 'unknown_events': 0,
+        'unresolved': [],
+    }
+
+
+def test_process_kill_after_effect_intent_before_tool_start_requires_reconciliation(tmp_path):
+    crashed = _run_script("""
+        import asyncio
+        import os
+        from core.database import Base, ChatMessage, ChatRunState, ChatToolIntent, ChatWorkEvent, Session, SessionLocal, engine
+        from src import agent_runs
+        from src.chat_effect_inbox import inbox
+
+        Base.metadata.create_all(bind=engine, tables=[
+            Session.__table__, ChatMessage.__table__, ChatRunState.__table__,
+            ChatToolIntent.__table__, ChatWorkEvent.__table__,
+        ])
+        with SessionLocal.begin() as db:
+            db.add(Session(id='intent-fixture', name='Intent fixture', owner='alice',
+                           endpoint_url='http://fixture.invalid/v1', model='fixture'))
+
+        async def source():
+            # The exact action is durably fenced, but no tool_start has been
+            # published and the external call has not been dispatched.
+            yield 'data: {"type":"agent_step","round":1}\\n\\n'
+            os._exit(17)
+
+        async def main():
+            run = agent_runs.start('intent-fixture', source(), owner='alice')
+            inbox.record_intent('alice', 'intent-fixture', run.run_id,
+                                'call-before-start', 'bash', 'safe fixture action')
+            await run.task
+
+        asyncio.run(main())
+    """, tmp_path)
+    assert crashed.returncode == 17, crashed.stderr
+
+    restarted = _run_script("""
+        import json
+        from core.database import ChatToolIntent, ChatWorkEvent, SessionLocal
+        from src import agent_runs
+        from src.chat_effect_inbox import inbox
+
+        recovered = agent_runs.recover_durable_runs()
+        second = agent_runs.recover_durable_runs()
+        page = agent_runs.event_page('intent-fixture', after_seq=-1)
+        with SessionLocal() as db:
+            intent = db.query(ChatToolIntent).filter_by(
+                session_id='intent-fixture', tool_call_id='call-before-start',
+            ).one()
+            events = db.query(ChatWorkEvent).filter_by(
+                session_id='intent-fixture', kind='effect_unknown',
+            ).all()
+        unresolved = inbox.unresolved('alice', 'intent-fixture')
+        print(json.dumps({
+            'recovered': len(recovered), 'second': len(second),
+            'status': agent_runs.describe_run('intent-fixture')['status'],
+            'types': [row['data']['type'] for row in page['events']],
+            'intent': intent.status, 'revision': intent.revision,
+            'event_count': len(events),
+            'unresolved': [row['status'] for row in unresolved],
+        }))
+    """, tmp_path)
+    assert restarted.returncode == 0, restarted.stderr
+    state = json.loads(restarted.stdout.strip().splitlines()[-1])
+    assert state == {
+        'recovered': 1, 'second': 0, 'status': 'interrupted',
+        'types': ['agent_step'], 'intent': 'unknown', 'revision': 2,
+        'event_count': 1, 'unresolved': ['unknown'],
+    }
+
+
 def test_process_kill_after_tool_result_keeps_receipt_and_replays_result_once(tmp_path):
     crashed = _run_script("""
         import asyncio
@@ -423,3 +551,108 @@ def test_process_kill_after_child_terminal_commit_preserves_join_result_and_even
     assert state['joined']['subagents'][0]['status'] == 'completed'
     assert state['joined']['subagents'][0]['result'] == 'safe-result'
     assert len(state['terminal_events']) == 1
+
+
+def test_process_kill_after_terminal_snapshot_does_not_recover_completed_run(tmp_path):
+    crashed = _run_script("""
+        import asyncio
+        import os
+        from core.database import Base, ChatMessage, ChatRunState, Session, SessionLocal, engine
+        from src import agent_runs
+
+        Base.metadata.create_all(bind=engine, tables=[
+            Session.__table__, ChatMessage.__table__, ChatRunState.__table__,
+        ])
+        with SessionLocal.begin() as db:
+            db.add(Session(id='terminal-fixture', name='Terminal fixture', owner='alice',
+                           endpoint_url='http://fixture.invalid/v1', model='fixture'))
+
+        async def source():
+            yield 'data: {"type":"agent_step","round":1}\\n\\n'
+            yield 'data: {"type":"agent_terminal","data":{"failed":false}}\\n\\n'
+            yield 'data: [DONE]\\n\\n'
+
+        async def main():
+            run = agent_runs.start('terminal-fixture', source(), owner='alice')
+            await run.task
+            assert agent_runs.get_status('terminal-fixture') == 'done'
+            # Simulate immediate process death after the durable terminal
+            # snapshot and replay checkpoint, before grace eviction.
+            os._exit(17)
+
+        asyncio.run(main())
+    """, tmp_path)
+    assert crashed.returncode == 17, crashed.stderr
+
+    restarted = _run_script("""
+        import json
+        from src import agent_runs
+
+        recovered = agent_runs.recover_durable_runs()
+        second = agent_runs.recover_durable_runs()
+        snapshot = agent_runs.describe_run('terminal-fixture')
+        page = agent_runs.event_page('terminal-fixture', after_seq=-1)
+        print(json.dumps({
+            'recovered': len(recovered), 'second': len(second),
+            'status': snapshot['status'], 'terminal_reason': snapshot['terminal_reason'],
+            'durable_seq': snapshot['durable_seq'], 'page_status': page['status'],
+            'types': [row['data']['type'] for row in page['events']],
+        }))
+    """, tmp_path)
+    assert restarted.returncode == 0, restarted.stderr
+    state = json.loads(restarted.stdout.strip().splitlines()[-1])
+    assert state == {
+        'recovered': 0, 'second': 0, 'status': 'done', 'terminal_reason': None,
+        'durable_seq': 2, 'page_status': 'done',
+        'types': ['agent_step', 'agent_terminal', 'done'],
+    }
+
+
+def test_process_kill_after_budget_warning_preserves_content_free_snapshot(tmp_path):
+    crashed = _run_script("""
+        import asyncio
+        import os
+        from core.database import Base, ChatMessage, ChatRunState, Session, SessionLocal, engine
+        from src import agent_runs
+
+        Base.metadata.create_all(bind=engine, tables=[
+            Session.__table__, ChatMessage.__table__, ChatRunState.__table__,
+        ])
+        with SessionLocal.begin() as db:
+            db.add(Session(id='budget-warning-fixture', name='Budget warning fixture', owner='alice',
+                           endpoint_url='http://fixture.invalid/v1', model='fixture'))
+
+        async def source():
+            yield 'data: {"type":"budget_warning","resource":"model_tokens",' \\
+                  '"used":800,"limit":1000,"soft_limit":800}\\n\\n'
+            os._exit(17)
+
+        async def main():
+            run = agent_runs.start('budget-warning-fixture', source(), owner='alice')
+            await run.task
+
+        asyncio.run(main())
+    """, tmp_path)
+    assert crashed.returncode == 17, crashed.stderr
+
+    restarted = _run_script("""
+        import json
+        from src import agent_runs
+
+        recovered = agent_runs.recover_durable_runs()
+        snapshot = agent_runs.describe_run('budget-warning-fixture')
+        page = agent_runs.event_page('budget-warning-fixture', after_seq=-1)
+        print(json.dumps({
+            'recovered': len(recovered), 'status': snapshot['status'],
+            'warnings': snapshot['health_metrics'].get('budget_warnings'),
+            'types': [row['data']['type'] for row in page['events']],
+        }))
+    """, tmp_path)
+    assert restarted.returncode == 0, restarted.stderr
+    state = json.loads(restarted.stdout.strip().splitlines()[-1])
+    assert state == {
+        'recovered': 1, 'status': 'interrupted',
+        'warnings': [{"resource": "model_tokens", "used": 800,
+                      "limit": 1000, "soft_limit": 800}],
+        'types': ['budget_warning'],
+    }

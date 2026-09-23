@@ -73,6 +73,58 @@ def test_native_provider_recall_filters_vector_hits_by_owner(tmp_path):
     assert hits[0].score == 0.75
 
 
+def test_native_provider_recall_filters_credential_memories_and_unowned_vector_rows(tmp_path):
+    from src.memory import MemoryManager
+    from src.memory_provider import NativeMemoryProvider
+
+    manager = MemoryManager(str(tmp_path))
+    vector = FakeVectorStore()
+    provider = NativeMemoryProvider(manager, vector)
+    secret = run(provider.remember(
+        "Jetson host sudo password: QA_SECRET_SENTINEL_NEVER_USE", owner="alice"))
+    safe = run(provider.remember("Alice prefers concise technical answers", owner="alice"))
+    vector.results = [
+        {"memory_id": secret.id, "score": 1.0},
+        {"memory_id": safe.id, "score": 0.8},
+        {"text": "Access token: QA_VECTOR_SECRET_SENTINEL", "score": 1.0},
+    ]
+
+    hits = run(provider.recall("Jetson sudo password concise technical", owner="alice", top_k=5))
+
+    assert [hit.memory.id for hit in hits] == [safe.id]
+    assert "QA_SECRET_SENTINEL_NEVER_USE" not in repr(hits)
+    assert "QA_VECTOR_SECRET_SENTINEL" not in repr(hits)
+
+
+def test_native_provider_recall_drops_unowned_legacy_vector_rows_for_scoped_query(tmp_path):
+    from src.memory import MemoryManager
+    from src.memory_provider import NativeMemoryProvider
+
+    manager = MemoryManager(str(tmp_path))
+    vector = FakeVectorStore()
+    provider = NativeMemoryProvider(manager, vector)
+    vector.results = [{"id": "legacy-1", "text": "private ownerless result", "timestamp": 5}]
+
+    assert run(provider.recall("anything", owner="alice", top_k=5)) == []
+
+
+def test_native_provider_list_omits_credential_rows_without_deleting_them(tmp_path):
+    from src.memory import MemoryManager
+    from src.memory_provider import NativeMemoryProvider
+
+    manager = MemoryManager(str(tmp_path))
+    provider = NativeMemoryProvider(manager)
+    secret = run(provider.remember(
+        "Jetson host sudo password: QA_SECRET_SENTINEL_NEVER_USE", owner="alice"))
+    safe = run(provider.remember("Alice prefers concise technical answers", owner="alice"))
+
+    listed = run(provider.list_memories(owner="alice"))
+
+    assert [memory.id for memory in listed] == [safe.id]
+    assert "QA_SECRET_SENTINEL_NEVER_USE" not in repr(listed)
+    assert any(entry["id"] == secret.id for entry in manager.load(owner="alice"))
+
+
 def test_native_provider_recall_accepts_legacy_vector_rows(tmp_path):
     from src.memory import MemoryManager
     from src.memory_provider import NativeMemoryProvider

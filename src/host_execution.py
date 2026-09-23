@@ -17,6 +17,8 @@ import sys
 
 TOOLS = frozenset({'bash', 'python', 'read_file', 'write_file', 'edit_file',
                    'apply_patch', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'compare_files', 'verify_hashes', 'inspect_toolchain', 'run_tests', 'run_lint', 'inspect_process', 'inspect_port', 'tail_log', 'get_workspace'})
+FILE_MUTATION_TOOLS = frozenset({'write_file', 'edit_file', 'apply_patch'})
+TOOLS = TOOLS | {'rollback_file_checkpoint'}
 
 
 def enabled_for(owner):
@@ -35,8 +37,9 @@ def adapt_schemas(schemas, owner):
         'python': 'Execute Python on the Jetson HOST, not in Docker. Use absolute host paths. Foreground timeout 120 seconds. Never send credentials or a sudo password.',
         'read_file': 'Read a bounded window of a regular file on the Jetson HOST using an absolute path. Supports line or byte ranges, line numbers, SHA-256 and binary detection. For large UTF-8 files, returns a short preview plus an owner-scoped artifact handle. Not confined to the container workspace; Unix permissions apply. Maximum file size 2 MiB.',
         'write_file': 'Write a UTF-8 regular file on the Jetson HOST, using an absolute path. Unix permissions apply; not confined to the container workspace. Maximum 2 MiB. Existing symlink/hardlink writes are rejected.',
-        'edit_file': 'Edit a unique exact string in a regular file on the Jetson HOST. Use an absolute path. Not confined to the container workspace; Unix permissions apply.',
-        'apply_patch': 'Apply *** Begin Patch / *** End Patch with Add File, Update File, Delete File sections to absolute paths on the Jetson HOST. Unix permissions apply; not confined to the container workspace. No Move support. Atomic per file, not across files.',
+        'edit_file': 'Edit a unique exact string in a regular file on the Jetson HOST. Use an absolute path. Pass read_file.sha256 as expected_sha256 to reject stale content. Supported Python/JSON/JavaScript syntax is checked before the atomic replacement. Not confined to the container workspace; Unix permissions apply.',
+        'apply_patch': 'Apply *** Begin Patch / *** End Patch with Add File, Update File, Delete File sections to absolute paths on the Jetson HOST. Pass full-file SHA-256 values in expected_sha256_by_path (use missing for Add File) to fence stale changes. All patch hunks and supported syntax are checked before any file is changed; a handled later commit error rolls back earlier files if their after-hashes still match. Unix permissions apply; not confined to the container workspace. No Move support.',
+        'rollback_file_checkpoint': 'Roll back an Agent/Goal/Team file mutation checkpoint by exact checkpoint_id and expected_sha256 map copied from the returned file_checkpoint. Server rechecks owner, chat scope, file identity, every after-hash, active writers and original snapshot integrity; if any file changed, rollback is refused and user edits are preserved.',
         'ls': 'List a directory on the Jetson HOST. Absolute paths are allowed subject to Unix permissions; not confined to the container workspace.',
         'glob': 'Find matching file paths on the Jetson HOST with a bounded directory search. Absolute host paths are allowed; Unix permissions apply. Does not follow directory symlinks.',
         'grep': 'Search file contents on the Jetson HOST using a bounded regex search. Absolute host paths are allowed; Unix permissions apply. Does not follow directory symlinks.',
@@ -174,6 +177,51 @@ def _archive_host_read(request, first, owner, session_id, run_id=None):
 
 
 async def execute(tool, content, *, owner=None, session_id=None, run_id=None):
+    # Agent/Goal host mutations use the same durable checkpoint transaction as
+    # Team. Scope is the authenticated chat session; rollback remains fenced to
+    # this owner + scope and the exact after-hash map returned by the mutation.
+    if tool in FILE_MUTATION_TOOLS or tool == 'rollback_file_checkpoint':
+        if not owner or not session_id:
+            return {'error': 'Durable file checkpoints require an owner and chat scope',
+                    'code': 'file_checkpoint_scope_required', 'exit_code': 1}
+        try:
+            if tool == 'rollback_file_checkpoint':
+                args = json.loads(content) if isinstance(content, str) else content
+                if (not isinstance(args, dict) or set(args) != {'checkpoint_id', 'expected_sha256'}
+                        or not isinstance(args.get('checkpoint_id'), str)
+                        or not isinstance(args.get('expected_sha256'), dict)):
+                    raise ValueError('invalid checkpoint rollback arguments')
+                if args['checkpoint_id'].startswith('local_'):
+                    from src.local_file_checkpoints import rollback_scoped
+                    return await rollback_scoped(owner, session_id, args['checkpoint_id'], args['expected_sha256'])
+                runner_args = args
+                op = 'file.rollback'
+            else:
+                request = request_for(tool, content)
+                runner_args = {'cwd': request['cwd'], 'tool': tool, 'content': content}
+                if isinstance(run_id, str) and run_id:
+                    runner_args['run_id'] = run_id[:200]
+                op = 'file.call'
+            from src.team_host import call as runner_call
+            response = await runner_call(op, runner_args, owner, session_id)
+            if not response.get('ok'):
+                if tool in FILE_MUTATION_TOOLS or tool == 'rollback_file_checkpoint':
+                    # The runner may have committed a write or rollback before
+                    # the SSH response was lost. Never invite an automatic replay.
+                    return {'error': 'Host file checkpoint acknowledgement was not verified; inspect the exact file before retrying',
+                            'code': 'unknown_outcome', 'outcome_unknown': True,
+                            'retryable': False, 'exit_code': 1}
+                return {'error': response.get('error') or 'Durable file checkpoint operation failed',
+                        'code': response.get('code') or 'file_checkpoint_unavailable',
+                        'exit_code': 1}
+            result = response.get('result')
+            if not isinstance(result, dict):
+                return {'error': 'Durable file checkpoint service returned an invalid result',
+                        'code': 'transport_unavailable', 'exit_code': 1}
+            return result
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return {'error': 'Invalid durable file checkpoint arguments',
+                    'code': 'invalid_arguments', 'exit_code': 1}
     try:
         request = request_for(tool, content)
     except (ValueError, TypeError, json.JSONDecodeError):

@@ -41356,6 +41356,19 @@ body.theme-frosted .modal {
   font-size: 10px !important;
   line-height: 1.25;
 }
+.ask-user-action-preview {
+  margin-top: 8px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 3%, var(--panel));
+  color: var(--fg);
+  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 /* Free-text "Other" row: input + send, on one line. */
 .ask-user-other {
   display: flex;

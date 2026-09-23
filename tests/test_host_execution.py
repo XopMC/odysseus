@@ -59,16 +59,90 @@ class HostExecutionTests(unittest.TestCase):
 
     def test_lost_host_reply_is_unknown_outcome_and_never_replayed(self):
         calls = []
-        def lost(request):
-            calls.append(request['tool'])
-            raise subprocess.TimeoutExpired('ssh private detail', 1)
-        with patch.object(self.host, 'run_request', side_effect=lost):
-            result = asyncio.run(self.host.execute('write_file', 'safe.txt\ncontent'))
-        self.assertEqual(calls, ['write_file'])
+        async def lost(op, args, owner, scope):
+            calls.append(op)
+            return {'ok': False, 'error': 'ssh private detail'}
+        with patch.dict(os.environ, {'ODYSSEUS_HOST_ENABLED': '1', 'ODYSSEUS_HOST_OWNER': 'alice'}), \
+             patch('src.team_host.call', side_effect=lost):
+            result = asyncio.run(self.host.execute(
+                'write_file', '{"path":"safe.txt","content":"content"}',
+                owner='alice', session_id='session-1'))
+        self.assertEqual(calls, ['file.call'])
         self.assertEqual(result['code'], 'unknown_outcome')
         self.assertTrue(result['outcome_unknown'])
         self.assertFalse(result['retryable'])
         self.assertNotIn('private detail', result['error'])
+
+    def test_agent_file_mutations_use_durable_owner_session_checkpoint_route(self):
+        calls = []
+
+        async def checkpointed(op, args, owner, scope):
+            calls.append((op, args, owner, scope))
+            return {'ok': True, 'result': {
+                'output': 'Edited safely', 'exit_code': 0, 'checkpoint_id': 'cp-1',
+                'file_checkpoint': {'id': 'cp-1', 'status': 'applied', 'files': []},
+            }}
+
+        with patch.dict(os.environ, {'ODYSSEUS_HOST_ENABLED': '1', 'ODYSSEUS_HOST_OWNER': 'alice'}), \
+             patch('src.team_host.call', side_effect=checkpointed):
+            result = asyncio.run(self.host.execute(
+                'edit_file', '{"path":"/work/a.py","old_string":"a","new_string":"b",'
+                '"expected_sha256":"' + 'a' * 64 + '"}',
+                owner='alice', session_id='session-1', run_id='run-1'))
+
+        self.assertEqual(result['checkpoint_id'], 'cp-1')
+        self.assertEqual(calls[0][0:1], ('file.call',))
+        self.assertEqual(calls[0][2:], ('alice', 'session-1'))
+        self.assertEqual(calls[0][1]['tool'], 'edit_file')
+        self.assertEqual(calls[0][1]['run_id'], 'run-1')
+        self.assertEqual(calls[0][1]['content'], '{"path":"/work/a.py","old_string":"a","new_string":"b",'
+                         '"expected_sha256":"' + 'a' * 64 + '"}')
+
+    def test_agent_checkpoint_rollback_uses_same_owner_session_scope(self):
+        calls = []
+
+        async def rollback(op, args, owner, scope):
+            calls.append((op, args, owner, scope))
+            return {'ok': True, 'result': {'status': 'rolled_back', 'files': ['/work/a.py']}}
+
+        with patch.dict(os.environ, {'ODYSSEUS_HOST_ENABLED': '1', 'ODYSSEUS_HOST_OWNER': 'alice'}), \
+             patch('src.team_host.call', side_effect=rollback):
+            result = asyncio.run(self.host.execute(
+                'rollback_file_checkpoint', '{"checkpoint_id":"cp-1",'
+                '"expected_sha256":{"/work/a.py":"' + 'b' * 64 + '"}}',
+                owner='alice', session_id='session-1'))
+
+        self.assertEqual(result['status'], 'rolled_back')
+        self.assertEqual(calls[0][0], 'file.rollback')
+        self.assertEqual(calls[0][2:], ('alice', 'session-1'))
+
+    def test_native_rollback_tool_arguments_survive_schema_conversion(self):
+        from src.tool_parsing import TOOL_TAGS
+        from src.tool_schemas import function_call_to_tool_block
+
+        args = {'checkpoint_id': 'cp-1', 'expected_sha256': {'/work/a.py': 'b' * 64}}
+        block = function_call_to_tool_block('rollback_file_checkpoint', json.dumps(args))
+
+        self.assertIn('rollback_file_checkpoint', TOOL_TAGS)
+        self.assertIsNotNone(block)
+        self.assertEqual(block.tool_type, 'rollback_file_checkpoint')
+        self.assertEqual(json.loads(block.content), args)
+
+    def test_lost_rollback_ack_is_unknown_outcome_and_not_retryable(self):
+        async def lost(_op, _args, _owner, _scope):
+            return {'ok': False, 'error': 'private ssh detail'}
+
+        with patch.dict(os.environ, {'ODYSSEUS_HOST_ENABLED': '1', 'ODYSSEUS_HOST_OWNER': 'alice'}), \
+             patch('src.team_host.call', side_effect=lost):
+            result = asyncio.run(self.host.execute(
+                'rollback_file_checkpoint', json.dumps({
+                    'checkpoint_id': 'cp-1', 'expected_sha256': {'/work/a': 'a' * 64}}),
+                owner='alice', session_id='session-1'))
+
+        self.assertEqual(result['code'], 'unknown_outcome')
+        self.assertTrue(result['outcome_unknown'])
+        self.assertFalse(result['retryable'])
+        self.assertNotIn('private ssh detail', result['error'])
 
     def test_host_schema_scope_is_truthful_and_not_global(self):
         schemas = [{'type': 'function', 'function': {'name': 'get_workspace', 'description': 'File tools are confined to it', 'parameters': {}}}]
@@ -144,6 +218,13 @@ class HostExecutionTests(unittest.TestCase):
         }}))
         bad = self.helper('run_tests', json.dumps({'profile': 'other'}))
         self.assertEqual(bad['code'], 'not_found')
+        discovered = self.helper('run_tests', json.dumps({'profile': 'list'}))
+        self.assertEqual(discovered['available_profiles'], ['npm_test'])
+        self.assertEqual(discovered['code'], 'ok')
+        self.assertEqual(discovered['exit_code'], 0)
+        lint_profiles = self.helper('run_lint', json.dumps({'profile': 'list'}))
+        self.assertEqual(lint_profiles['available_profiles'], ['npm_lint'])
+        self.assertEqual(lint_profiles['exit_code'], 0)
         failed = self.helper('run_tests', json.dumps({'profile': 'npm_test'}))
         self.assertEqual(failed['exit_code'], 7)
         self.assertEqual(failed['code'], 'failed')

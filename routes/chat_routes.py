@@ -2253,6 +2253,7 @@ def setup_chat_routes(
                 return
             elif chat_mode == "chat":
                 _chat_start = time.time()
+                _chat_generation_started_at = None
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
@@ -2290,6 +2291,8 @@ def setup_chat_routes(
                             try:
                                 data = json.loads(chunk[6:])
                                 if "delta" in data:
+                                    if data.get("delta") and _chat_generation_started_at is None:
+                                        _chat_generation_started_at = time.monotonic()
                                     if _commit_chat_compaction(_actual_candidate_index):
                                         _compacted_length = _chat_request_state["context_lengths"].get(
                                             _actual_candidate_index,
@@ -2394,6 +2397,17 @@ def setup_chat_routes(
                                     if last_metrics.get("gen_tps") and not last_metrics.get("tokens_per_second"):
                                         last_metrics["tokens_per_second"] = last_metrics["gen_tps"]
                                         last_metrics["tps_source"] = "backend"
+                                    elif last_metrics.get("output_tokens") and _chat_generation_started_at is not None:
+                                        _generation_time = max(
+                                            0.001,
+                                            time.monotonic() - _chat_generation_started_at,
+                                        )
+                                        last_metrics["generation_time"] = round(_generation_time, 2)
+                                        last_metrics["tokens_per_second"] = round(
+                                            last_metrics["output_tokens"] / _generation_time,
+                                            2,
+                                        )
+                                        last_metrics["tps_source"] = "stream_elapsed"
                                     # Wall-clock response time for the stats popup ("Time").
                                     last_metrics.setdefault("response_time", round(time.time() - _chat_start, 2))
                                     yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
@@ -2505,7 +2519,12 @@ def setup_chat_routes(
                             if not last_metrics and full_response:
                                 _elapsed = time.time() - _chat_start
                                 _est_out = len(full_response) // 4
-                                _tps = round(_est_out / _elapsed, 2) if _elapsed > 0 else 0
+                                _generation_time = (
+                                    max(0.001, time.monotonic() - _chat_generation_started_at)
+                                    if _chat_generation_started_at is not None
+                                    else _elapsed
+                                )
+                                _tps = round(_est_out / _generation_time, 2) if _generation_time > 0 else 0
                                 _actual_context_length = _chat_request_state["context_lengths"].get(
                                     _actual_candidate_index,
                                     _selected_context_length,
@@ -2521,6 +2540,8 @@ def setup_chat_routes(
                                     "input_tokens": _est_in,
                                     "output_tokens": _est_out,
                                     "tokens_per_second": _tps,
+                                    "generation_time": round(_generation_time, 2),
+                                    "tps_source": "stream_elapsed" if _chat_generation_started_at is not None else "computed",
                                     "request_context_tokens": _est_in,
                                     "context_percent": _ctx_pct,
                                     "context_length": _actual_context_length,
@@ -2726,7 +2747,7 @@ def setup_chat_routes(
                                     "tool_start", "tool_progress", "tool_output", "agent_step",
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "ui_control",
-                                    "rounds_exhausted", "budget_exceeded",
+                                    "rounds_exhausted", "budget_warning", "budget_exceeded",
                                     "loop_breaker_triggered",
                                     "intent_nudge_exhausted",
                                     "ask_user",
