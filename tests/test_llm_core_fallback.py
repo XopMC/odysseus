@@ -15,6 +15,51 @@ from fastapi import HTTPException
 from src import llm_core
 
 
+@pytest.mark.parametrize("status,category,retry_phase,first_delta,expected_calls", [
+    (429, "rate_limit", "http_rejected", False, 2),
+    (503, "provider_unload", "http_rejected", False, 2),
+    (503, "context", "http_rejected", False, 1),
+    (503, "provider_unload", None, False, 1),
+    (429, "rate_limit", "http_rejected", True, 1),
+])
+def test_stream_retry_only_explicit_precontent_http_rejection(
+    monkeypatch, status, category, retry_phase, first_delta, expected_calls,
+):
+    calls = []
+    error = {
+        "status": status, "error_category": category,
+        "fallback_eligible": True, "retry_phase": retry_phase,
+    }
+
+    async def fake_stream(url, model, messages, **kwargs):
+        calls.append(model)
+        if len(calls) == 1:
+            if first_delta:
+                yield 'data: {"delta": "first"}\n\n'
+            yield 'event: error\ndata: ' + json.dumps(error) + '\n\n'
+        else:
+            yield 'data: {"delta": "second"}\n\n'
+            yield 'data: [DONE]\n\n'
+
+    async def no_wait(_):
+        return None
+
+    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+    monkeypatch.setattr(llm_core, "_model_retry_wait_seconds", lambda **kwargs: 0.0)
+    monkeypatch.setattr(llm_core.asyncio, "sleep", no_wait)
+
+    async def run():
+        return [chunk async for chunk in llm_core.stream_llm_with_fallback(
+            [("https://example.test/v1", "primary", {})],
+            [{"role": "user", "content": "hi"}],
+        )]
+
+    output = asyncio.run(run())
+    assert len(calls) == expected_calls
+    assert ('"delta": "second"' in "".join(output)) is (expected_calls == 2)
+    assert ('"delta": "first"' in "".join(output)) is first_delta
+
+
 class _ProviderResponse:
     def __init__(self, lines):
         self._lines = lines

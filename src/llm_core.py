@@ -2864,7 +2864,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_chatgpt_subscription_error(r.status_code, raw)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -2989,7 +2989,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -3092,7 +3092,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     # SSE allows "data:value" with no space after the colon
@@ -3278,7 +3278,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
                 friendly = _format_upstream_error(r.status_code, raw, target_url)
-                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw)})}\n\n'
+                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500], "fallback_eligible": r.status_code in (429, 503), "error_category": _model_error_category(r.status_code, raw), "retry_phase": "http_rejected"})}\n\n'
                 return
 
             async for line in r.aiter_lines():
@@ -3703,6 +3703,58 @@ def _provider_stream_error_status(error, *, default: int = 400) -> int:
     return default
 
 
+async def _stream_llm_precontent_retry(url, model, messages, *, headers, **kwargs):
+    """Retry only explicit, pre-output HTTP overload rejections.
+
+    A transport failure or an SSE error has an unknown outcome; repeating it
+    could duplicate provider work or an effectful tool call.
+    """
+    deadline = time.monotonic() + LLMConfig.RETRY_BUDGET_SECONDS
+    for attempt in range(1, LLMConfig.MAX_RETRIES + 1):
+        stream = stream_llm(url, model, messages, headers=headers, **kwargs)
+        emitted = False
+        retry_delay = None
+        try:
+            async for chunk in stream:
+                if chunk.startswith("event: error") and not emitted and attempt < LLMConfig.MAX_RETRIES:
+                    try:
+                        detail = json.loads(chunk.split("data:", 1)[1].strip())
+                    except (IndexError, ValueError):
+                        detail = {}
+                    status = detail.get("status")
+                    if (
+                        detail.get("retry_phase") == "http_rejected"
+                        and detail.get("fallback_eligible") is True
+                        and status in (429, 503)
+                        and detail.get("error_category") in ("rate_limit", "provider_unload")
+                    ):
+                        retry_delay = _model_retry_wait_seconds(
+                            status=status, attempt=attempt, deadline=deadline,
+                            now=time.monotonic(),
+                        )
+                        if retry_delay is not None:
+                            break
+                yield chunk
+                if chunk.startswith("event: error"):
+                    return
+                if chunk.startswith("data:") and not chunk.startswith("data: [DONE]"):
+                    try:
+                        payload = json.loads(chunk.split("data:", 1)[1].strip())
+                    except (IndexError, ValueError):
+                        payload = {}
+                    if isinstance(payload, dict) and (
+                        payload.get("delta") or payload.get("type") == "tool_calls"
+                    ):
+                        emitted = True
+            else:
+                return
+        finally:
+            await stream.aclose()
+        if retry_delay is None:
+            return
+        await asyncio.sleep(retry_delay)
+
+
 async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
@@ -3785,7 +3837,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                     continue
                 yield error_chunk
                 return
-        candidate_stream = stream_llm(
+        candidate_stream = _stream_llm_precontent_retry(
             url,
             model,
             candidate_messages,
