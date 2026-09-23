@@ -333,6 +333,8 @@ def test_tool_approval_card_has_same_waiting_and_denied_states_live_and_replay()
     assert "node.dataset.approvalId !== approvalId" in live
     assert "node.classList.toggle('error', denied)" in live
     assert "if (ev.ask_user?.approval_id) node.dataset.approvalId" in replay
+    assert "if (!currentToolBubble && json.ask_user?.approval_id)" in live
+    assert "no command was executed" in live
 
 
 def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():

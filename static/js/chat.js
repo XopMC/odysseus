@@ -4075,6 +4075,23 @@ import { bindUiText, t } from './i18n.js';
 
               } else if (json.type === 'tool_output') {
                 if (_isBg) continue;
+                // A gated action has no tool_start: no command was executed.
+                // Still render its durable approval event now, so the live
+                // client has the same waiting/denied card as replay.
+                if (!currentToolBubble && json.ask_user?.approval_id) {
+                  _cancelThinkingTimer();
+                  _removeThinkingSpinner();
+                  if (spinner && spinner.element) spinner.destroy();
+                  _finalizeRoundRender();
+                  const chatBox = document.getElementById('chat-history');
+                  if (chatBox) {
+                    const thread = document.createElement('div');
+                    thread.className = 'agent-thread has-top';
+                    currentToolBubble = document.createElement('div');
+                    thread.appendChild(currentToolBubble);
+                    chatBox.appendChild(thread);
+                  }
+                }
                 // --- Update the current thread node ---
                 if (currentToolBubble) {
                   // Stop wave animation + the per-second cooking ticker
