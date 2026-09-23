@@ -39,7 +39,7 @@ async def _synthetic_run():
                     "round": round_number}
         elif phase == 3:
             data = {"type": "tool_output", "tool": "fixture_tool", "tool_call_id": tool_id,
-                    "exit_code": 0, "round": round_number}
+                    "exit_code": 0, "round": round_number, "output": "[tool result fixture]"}
         else:
             data = {"delta": "[answer fixture]", "round": round_number}
         yield "data: " + json.dumps(data, separators=(",", ":")) + "\n\n"

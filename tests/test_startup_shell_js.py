@@ -377,8 +377,8 @@ def test_session_restore_markup_and_asset_versions_are_present():
     assert 'role="status" aria-live="polite" hidden>Loading chat…' in html
     assert 'body.session-target-hydrating #welcome-screen { display:none; }' in css
     assert 'body.session-target-hydrating #chat-context-pill { visibility:hidden; }' in css
-    assert "/static/style.css?v=20260923runinspector2" in html
-    assert "/static/style.css?v=20260923runinspector2" in sw
+    assert "/static/style.css?v=20260923runinspector3" in html
+    assert "/static/style.css?v=20260923runinspector3" in sw
     assert "/static/js/startupShell.js?v=20260922restore1" in sw
 
 

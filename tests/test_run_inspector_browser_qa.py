@@ -113,6 +113,11 @@ def test_inspector_exact_events_two_clients_and_reload():
                         seq = first.get_attribute("data-event-seq")
                         first.click()
                         assert f"#{seq}" in page.locator("#run-inspector-event-detail").inner_text()
+                        assert "[tool result fixture]" not in dialog.inner_text()
+                        page.locator("#run-inspector-event-list button[data-event-kind='tool_output']").first.click()
+                        page.locator("#run-inspector-load-tool-output").click()
+                        page.locator("#run-inspector-artifact-body").get_by_text("[tool result fixture]").wait_for(state="visible", timeout=15000)
+                        assert page.locator("#run-inspector-artifact-body").inner_text() == "[tool result fixture]"
                         page.locator("#run-inspector-close").click()
                         page.locator("#goal-mode-status").wait_for(state="visible", timeout=15000)
                         page.locator("#goal-mode-status .chat-work-card-toggle").click()

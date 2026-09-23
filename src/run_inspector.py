@@ -229,6 +229,7 @@ def event_refs(owner: str | None, session_id: str, run_id: str, *,
                 re.escape(run_id) + r":[0-9]{1,12}", segment_id) else None,
             "tool_call_id": tool_call_id if isinstance(tool_call_id, str) and _SAFE_CALL_ID.fullmatch(tool_call_id) else None,
             "tool_name": tool if isinstance(tool, str) and _SAFE_TOOL.fullmatch(tool) else None,
+            "artifact_seq": item["seq"] if kind in {"tool_output", "tool_progress"} else None,
         })
     return {"run_id": run_id, "events": events,
             "previous_cursor": page["previous_cursor"],

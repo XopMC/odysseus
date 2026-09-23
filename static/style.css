@@ -2705,7 +2705,7 @@ body.bg-pattern-sparkles {
 	    }
 	    .run-inspector-dialog::backdrop { background:#0009; }
 	    .run-inspector-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
-	    .run-inspector-head button,.run-inspector-run button,#run-inspector-event-list button,#run-inspector-older,#run-inspector-older-runs,#subagent-run-inspector {
+	    .run-inspector-head button,.run-inspector-run button,#run-inspector-event-list button,#run-inspector-older,#run-inspector-older-runs,#run-inspector-load-tool-output,#subagent-run-inspector {
 	      border:1px solid color-mix(in srgb,var(--accent) 45%,transparent); border-radius:8px;
 	      color:inherit; background:transparent; cursor:pointer; padding:5px 8px;
 	    }
@@ -2721,6 +2721,8 @@ body.bg-pattern-sparkles {
 	    #run-inspector-events { margin-top:14px; border-top:1px solid var(--border); }
 	    #run-inspector-event-list button { text-align:left; overflow-wrap:anywhere; }
 	    #run-inspector-event-detail { margin-top:8px; padding:8px; border:1px solid var(--accent,var(--red)); border-radius:8px; overflow-wrap:anywhere; }
+	    #run-inspector-load-tool-output { display:block; margin-top:7px; }
+	    #run-inspector-load-tool-output[hidden] { display:none !important; }
 	    #run-inspector-artifact { margin-top:12px; border-top:1px solid var(--border); }
 	    #run-inspector-artifact-body { max-height:240px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
 	    @media (max-width:520px) { .run-inspector-field { grid-template-columns:78px minmax(0,1fr); } }

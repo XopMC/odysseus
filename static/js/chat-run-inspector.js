@@ -82,7 +82,9 @@ function renderEvents(events, append = false) {
     button.dataset.eventKind = event.kind;
     button.dataset.eventTime = event.created_at == null ? '' : String(event.created_at);
     button.dataset.segmentId = event.segment_id || '';
-    button.textContent = `#${event.seq} · ${event.kind}${event.tool_name ? ` · ${event.tool_name}` : ''}`;
+    button.dataset.artifactSeq = Number.isSafeInteger(event.artifact_seq) ? String(event.artifact_seq) : '';
+    button.textContent = `#${event.seq} · ${event.kind}${event.tool_name ? ` · ${event.tool_name}` : ''}`
+      + (event.tool_call_id ? ` · ${event.tool_call_id}` : '');
     fragment.appendChild(button);
   }
   if (append) list.insertBefore(fragment, list.firstChild);
@@ -107,10 +109,14 @@ async function loadEvents(append = false) {
 function showEventDetail(event) {
   const detail = el('run-inspector-event-detail');
   const stamp = Number(event.created_at);
-  detail.textContent = `${t('Run')} ${runId} · ${t('Event')} #${event.seq} · ${event.kind}`
+  el('run-inspector-event-detail-text').textContent = `${t('Run')} ${runId} · ${t('Event')} #${event.seq} · ${event.kind}`
     + (event.tool_call_id ? ` · ${t('Tool call')} ${event.tool_call_id}` : '')
     + (event.segment_id ? ` · ${t('Segment')} ${event.segment_id}` : '')
     + (event.created_at != null && Number.isFinite(stamp) ? ` · ${new Date(stamp * 1000).toLocaleString()}` : '');
+  const toolOutput = el('run-inspector-load-tool-output');
+  toolOutput.hidden = !Number.isSafeInteger(event.artifact_seq);
+  toolOutput.dataset.seq = toolOutput.hidden ? '' : String(event.artifact_seq);
+  toolOutput.dataset.callId = event.tool_call_id || '';
   detail.hidden = false; detail.focus();
   const rendered = event.tool_call_id && [...document.querySelectorAll('.agent-thread-node[data-tool-call-id]')]
     .find(node => node.dataset.toolCallId === event.tool_call_id);
@@ -166,6 +172,7 @@ function bind() {
     if (el(id)) el(id).textContent = t('Run inspector');
   }
   if (el('run-inspector-older')) el('run-inspector-older').textContent = t('Load earlier events');
+  if (el('run-inspector-load-tool-output')) el('run-inspector-load-tool-output').textContent = t('Load tool output');
   if (el('run-inspector-older-runs')) el('run-inspector-older-runs').textContent = t('Load older runs');
   if (el('run-inspector-unlinked')) el('run-inspector-unlinked').querySelector('h3').textContent = t('Children outside loaded runs');
   el('run-inspector-close')?.setAttribute('aria-label', t('Close'));
@@ -219,6 +226,23 @@ function bind() {
   el('run-inspector-older')?.addEventListener('click', () => {
     void loadEvents(true).catch(error => { el('run-inspector-status').textContent = error.message; });
   });
+  el('run-inspector-load-tool-output')?.addEventListener('click', () => {
+    const button = el('run-inspector-load-tool-output');
+    const seq = Number(button.dataset.seq);
+    if (!sessionId || !runId || !Number.isSafeInteger(seq) || seq < 0) return;
+    const targetSession = sessionId, targetRun = runId, myGeneration = generation;
+    void get(`/api/chat/run/${encodeURIComponent(targetSession)}/artifacts/${encodeURIComponent(targetRun)}/${seq}`)
+      .then(data => {
+        if (generation !== myGeneration || sessionId !== targetSession || runId !== targetRun
+            || data.run_id !== targetRun || data.seq !== seq
+            || (button.dataset.callId && data.tool_call_id && data.tool_call_id !== button.dataset.callId)) return;
+        el('run-inspector-artifact-title').textContent = `${t('Tool output')} · ${data.tool || 'Tool'} · #${seq}`;
+        el('run-inspector-artifact-body').textContent = data.output || '';
+        el('run-inspector-artifact').hidden = false;
+        el('run-inspector-artifact').scrollIntoView?.({ block: 'nearest' });
+      })
+      .catch(error => { el('run-inspector-status').textContent = error.message; });
+  });
   el('run-inspector-event-list')?.addEventListener('click', event => {
     const button = event.target.closest('button[data-event-seq]');
     if (!button) return;
@@ -227,6 +251,7 @@ function bind() {
       tool_call_id: button.dataset.toolCallId || null,
       segment_id: button.dataset.segmentId || null,
       created_at: button.dataset.eventTime ? Number(button.dataset.eventTime) : null,
+      artifact_seq: button.dataset.artifactSeq ? Number(button.dataset.artifactSeq) : null,
     });
   });
 }

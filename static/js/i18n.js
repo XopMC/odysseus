@@ -6,6 +6,7 @@ const RU = Object.freeze({
   'Run':'Запуск', 'Tool call':'Вызов инструмента', 'Segment':'Сегмент',
   'Event cursor':'Курсор событий',
   'Parent run':'Родительский запуск', 'Children outside loaded runs':'Сабагенты вне загруженных запусков',
+  'Load tool output':'Загрузить вывод инструмента', 'Tool output':'Вывод инструмента',
   'Load earlier events':'Загрузить ранние события', 'No runs':'Запусков нет',
   'Load older runs':'Загрузить старые запуски',
   'Replay unavailable':'История событий недоступна',

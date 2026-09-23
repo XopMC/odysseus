@@ -123,6 +123,8 @@ def test_run_inspector_event_page_has_exact_cursor_without_frame_content(monkeyp
     assert recent.json()["previous_cursor"] == 1
     assert recent.json()["has_more_before"] is True
     assert recent.json()["events"][0]["tool_call_id"] == "call-1"
+    assert recent.json()["events"][0]["artifact_seq"] is None
+    assert recent.json()["events"][1]["artifact_seq"] == 2
     assert [row["seq"] for row in older.json()["events"]] == [0]
     assert foreign.status_code == 403 and invalid.status_code == 400
     assert "PRIVATE_COMMAND" not in recent.text and "PRIVATE_OUTPUT" not in recent.text

@@ -245,10 +245,10 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260923runinspector2">
+  <link rel="stylesheet" href="/static/style.css?v=20260923runinspector3">
   <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260921livefix18">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260923runinspector2">
+  <link rel="modulepreload" href="/static/app.js?v=20260923runinspector3">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260923contextwindow1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js?v=20260923countrev1">
@@ -1135,7 +1135,10 @@
         <h3 id="run-inspector-event-title"></h3>
         <div id="run-inspector-event-list"></div>
         <button type="button" id="run-inspector-older" hidden>Load earlier events</button>
-        <div id="run-inspector-event-detail" tabindex="-1" hidden></div>
+        <div id="run-inspector-event-detail" tabindex="-1" hidden>
+          <span id="run-inspector-event-detail-text"></span>
+          <button type="button" id="run-inspector-load-tool-output" hidden>Load tool output</button>
+        </div>
       </div>
       <section id="run-inspector-artifact" hidden>
         <h3 id="run-inspector-artifact-title"></h3>
@@ -2840,7 +2843,7 @@
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260922batch2"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260923runinspector2"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260923runinspector3"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260923approvalrev1"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
