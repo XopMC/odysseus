@@ -278,6 +278,8 @@ def test_message_count_reuses_aggregate_until_session_revision_changes(monkeypat
 
     assert client.get("/api/session/session-1/message-count").status_code == 200
     assert client.get("/api/session/session-1/message-count").status_code == 200
+    assert client.get("/api/history/session-1?limit=1").status_code == 200
+    assert client.get("/api/history/session-1?limit=1").status_code == 200
     aggregate_reads = [value for value in statements if "json_extract" in value.lower()]
     assert len(aggregate_reads) == 1
 

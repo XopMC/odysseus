@@ -361,6 +361,17 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         ).filter(DbChatMessage.session_id == session_id).one()
         return int(total or 0), int(canonical_visible or 0), int(rendered or 0)
 
+    def _cached_rendered_message_totals(db, row: DbSession) -> tuple[int, int, int]:
+        signature = _session_count_signature(row)
+        cached = _rendered_totals_cache.get(row.id)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        totals = _rendered_message_totals(db, row.id)
+        if len(_rendered_totals_cache) >= 2048:
+            _rendered_totals_cache.clear()
+        _rendered_totals_cache[row.id] = (signature, totals)
+        return totals
+
     @router.get("/api/session/{session_id}/message-count")
     async def get_session_message_count(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
@@ -371,17 +382,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 raise HTTPException(404, f"Session '{session_id}' not found")
             from src import agent_runs
             run = agent_runs.describe_run(session_id)
-            signature = _session_count_signature(db_session)
-            cached = _rendered_totals_cache.get(session_id)
-            if cached is not None and cached[0] == signature:
-                total, canonical_visible, rendered = cached[1]
-            else:
-                total, canonical_visible, rendered = _rendered_message_totals(db, session_id)
-                if len(_rendered_totals_cache) >= 2048:
-                    _rendered_totals_cache.clear()
-                _rendered_totals_cache[session_id] = (
-                    signature, (total, canonical_visible, rendered),
-                )
+            total, canonical_visible, rendered = _cached_rendered_message_totals(db, db_session)
             live_units = (
                 int(run.get("live_rendered_units") or 0)
                 if run and run.get("status") == "running" else 0
@@ -415,7 +416,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 if db_session is None:
                     raise HTTPException(404, f"Session '{session_id}' not found")
 
-                total, canonical_visible_total, rendered_total = _rendered_message_totals(db, session_id)
+                total, canonical_visible_total, rendered_total = _cached_rendered_message_totals(db, db_session)
                 # The header count is server-authoritative and counts exactly
                 # what history can render. Hidden compaction/checkpoint rows
                 # remain in raw ``total`` for legacy cursor compatibility but
