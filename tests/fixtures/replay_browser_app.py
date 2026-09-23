@@ -23,7 +23,9 @@ _original_lifespan = app.router.lifespan_context
 
 
 async def _synthetic_run():
-    for seq in range(205):
+    event_count = min(100000, max(1, int(os.getenv("ODYSSEUS_REPLAY_QA_EVENTS", "205"))))
+    delay_seconds = max(0.0, min(0.1, float(os.getenv("ODYSSEUS_REPLAY_QA_DELAY_MS", "0")) / 1000.0))
+    for seq in range(event_count):
         round_number = seq // 5 + 1
         tool_id = f"fixture-tool-{round_number}"
         phase = seq % 5
@@ -40,6 +42,8 @@ async def _synthetic_run():
         else:
             data = {"delta": "[answer fixture]", "round": round_number}
         yield "data: " + json.dumps(data, separators=(",", ":")) + "\n\n"
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
     await asyncio.Event().wait()
 
 

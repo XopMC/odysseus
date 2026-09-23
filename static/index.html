@@ -248,8 +248,8 @@
   <link rel="stylesheet" href="/static/style.css?v=20260923replaywindow1">
   <link rel="stylesheet" href="/static/css/team-workspace.css?v=20260921livefix18">
   <link rel="stylesheet" href="/static/css/engineering-workspace.css?v=20260914engineering1">
-  <link rel="modulepreload" href="/static/app.js?v=20260923replaywindow1">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260923replaywindow1">
+  <link rel="modulepreload" href="/static/app.js?v=20260923replaywindow2">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260923replaywindow2">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js?v=20260923approvalrev1">
   <link rel="modulepreload" href="/static/js/markdown.js?v=20260923toolprogress1">
@@ -1441,9 +1441,6 @@
       }
     }
 
-    let _scrollRaf = null;
-    let _scrollTimeout = null;
-    let _scrollingToBottom = false;
     let _updateRaf = null;
 
     // Live markdown replaces child nodes in bursts. WebKit delivers those
@@ -1460,29 +1457,14 @@
       });
     }
 
-    function cancelAutoScroll() {
-      if (_scrollRaf) { cancelAnimationFrame(_scrollRaf); _scrollRaf = null; }
-      if (_scrollTimeout) { clearTimeout(_scrollTimeout); _scrollTimeout = null; }
-      _scrollingToBottom = false;
-    }
-
     container.addEventListener('scroll', update, {passive:true});
-    container.addEventListener('wheel', () => { if (_scrollingToBottom) cancelAutoScroll(); }, {passive:true});
-    container.addEventListener('touchstart', () => { if (_scrollingToBottom) cancelAutoScroll(); }, {passive:true});
 
     bottomBtn.addEventListener('click', () => {
-      cancelAutoScroll();
-      const target = container.scrollHeight - container.clientHeight;
-      _scrollingToBottom = true;
-      function step() {
-        if (!_scrollingToBottom) return;
-        const diff = target - container.scrollTop;
-        if (diff <= 8) { container.scrollTop = target; _scrollingToBottom = false; return; }
-        container.scrollTop += diff * 0.2;
-        _scrollRaf = requestAnimationFrame(step);
-      }
-      step();
-      _scrollTimeout = setTimeout(() => { if (_scrollingToBottom) { container.scrollTop = target; _scrollingToBottom = false; } }, 1500);
+      // A growing live stream invalidates a captured smooth-scroll target.
+      // One clamped write reaches the current tail without a per-frame layout
+      // read across a long chat; the live replay follower maintains it after.
+      container.scrollTop = 2147483647;
+      scheduleUpdate();
     });
     const geometryObserver = new ResizeObserver(reposition);
     geometryObserver.observe(chatBar);
@@ -2829,7 +2811,7 @@
 <script type="module" src="/static/js/chatRenderer.js?v=20260923replaycursor1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260819approvalcontrol1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260923replaywindow1"></script>
+  <script type="module" src="/static/js/chat.js?v=20260923replaywindow2"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
@@ -2837,7 +2819,7 @@
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260922batch2"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260923replaywindow1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260923replaywindow2"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260923approvalrev1"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

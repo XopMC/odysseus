@@ -94,6 +94,7 @@ def test_cross_device_subscription_lifecycle(scenario):
         querySelectorAll(){return [];} addEventListener(key,fn){this.listeners[key]=fn;} removeEventListener(){} setAttribute(){} focus(){}
       }
       const box=new Element(),composer=new Element(),body=new Element(),listeners={},timers=[];
+      box.scrollHeight=0;box.scrollTop=0;box.clientHeight=0;
       const document={body,visibilityState:'visible',hidden:false,readyState:'loading',
         getElementById:id=>id==='chat-history'?box:id==='message'?composer:null,
         querySelector:()=>null,querySelectorAll:()=>[],createElement:()=>new Element(),

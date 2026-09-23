@@ -5513,6 +5513,11 @@ import { bindUiText, t } from './i18n.js';
       try { await res.body.cancel(); } catch (_) {}
       return false;
     }
+    // Capture the reader's position before replay cards increase scrollHeight.
+    // scrollHistory() may schedule its actual scroll on the next animation
+    // frame, so measuring after the first holder has been appended can mistake
+    // an ordinary bottom-following attach for a user reading old history.
+    const followBeforeReplay = box.scrollHeight - box.scrollTop - box.clientHeight < 160;
     if (replaceHolder && replaceHolder.parentNode) replaceHolder.remove();
 
     const meta = sessionModule.getSessions().find(s => s.id === sessionId);
@@ -5697,17 +5702,45 @@ import { bindUiText, t } from './i18n.js';
 
     const liveReader = res.body.getReader();
     let snapshotIndex = 0;
-    const shouldFollowSnapshot = box.scrollHeight - box.scrollTop - box.clientHeight < 160;
+    const shouldFollowSnapshot = followBeforeReplay;
     let snapshotUserScrolledUp = false;
     let snapshotTailPlaced = false;
+    let lastReplayScrollTop = box.scrollTop;
+    let replayPointerDown = false;
     const onSnapshotWheel = event => {
       if (event.isTrusted !== false && event.deltaY < 0) snapshotUserScrolledUp = true;
     };
     const onSnapshotTouchMove = event => {
       if (event.isTrusted !== false) snapshotUserScrolledUp = true;
     };
+    const onSnapshotPointerDown = event => {
+      if (event.isTrusted !== false) replayPointerDown = true;
+    };
+    const onSnapshotPointerUp = () => { replayPointerDown = false; };
+    const onSnapshotKeyDown = event => {
+      if (event.isTrusted !== false && ['ArrowUp', 'PageUp', 'Home'].includes(event.key)) {
+        snapshotUserScrolledUp = true;
+      }
+    };
+    const onSnapshotScroll = event => {
+      const current = box.scrollTop;
+      if (replayPointerDown && event.isTrusted !== false && current < lastReplayScrollTop - 8) {
+        snapshotUserScrolledUp = true;
+      }
+      if (current > lastReplayScrollTop + 8
+          && box.scrollHeight - current - box.clientHeight < 160) {
+        // Returning to the live tail re-enables the bounded follow window.
+        snapshotUserScrolledUp = false;
+      }
+      lastReplayScrollTop = current;
+    };
     box.addEventListener?.('wheel', onSnapshotWheel, { passive: true });
     box.addEventListener?.('touchmove', onSnapshotTouchMove, { passive: true });
+    box.addEventListener?.('pointerdown', onSnapshotPointerDown, { passive: true });
+    box.addEventListener?.('pointerup', onSnapshotPointerUp, { passive: true });
+    box.addEventListener?.('pointercancel', onSnapshotPointerUp, { passive: true });
+    box.addEventListener?.('keydown', onSnapshotKeyDown);
+    box.addEventListener?.('scroll', onSnapshotScroll, { passive: true });
     const reader = {
       async read() {
         if (snapshotIndex < snapshotEvents.length) {
@@ -5758,12 +5791,24 @@ import { bindUiText, t } from './i18n.js';
       : { apply: () => ({ accepted: true }) };
     const MAX_LIVE_REPLAY_ROOTS = 300;
     let acceptedReplayEvents = 0;
+    let replayFollowTimer = null;
+    const scheduleReplayFollow = () => {
+      if (!shouldFollowSnapshot || snapshotUserScrolledUp || replayFollowTimer) return;
+      // Follow at most four times per second; an outstanding timer also brings
+      // the final partial batch into view when the stream becomes quiet.
+      replayFollowTimer = setTimeout(() => {
+        replayFollowTimer = null;
+        if (shouldFollowSnapshot && !snapshotUserScrolledUp && isCurrentView()) {
+          box.scrollTop = 2147483647;
+        }
+      }, 250);
+    };
     const trimReplayWindow = () => {
       if (!olderReplayButton || loadingOlderReplay) return;
-      const distanceFromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
       // Never remove a card the user is currently reading. When following
       // live output, older frames are durable and can be paged back on demand.
-      if (Number.isFinite(distanceFromBottom) && distanceFromBottom > 200) return;
+      if (!shouldFollowSnapshot || snapshotUserScrolledUp) return;
+      box.scrollTop = box.scrollHeight;
       const liveRoots = replayNodes.filter(node => node.parentNode === box
         && String(node.className || '').split(/\s+/).includes('streaming'));
       if (liveRoots.length <= MAX_LIVE_REPLAY_ROOTS) return;
@@ -5802,8 +5847,15 @@ import { bindUiText, t } from './i18n.js';
       try { spinner.destroy(); } catch (_) {}
       if (replayThinkingTimer !== null) clearInterval(replayThinkingTimer);
       replayThinkingTimer = null;
+      if (replayFollowTimer !== null) clearTimeout(replayFollowTimer);
+      replayFollowTimer = null;
       box.removeEventListener?.('wheel', onSnapshotWheel);
       box.removeEventListener?.('touchmove', onSnapshotTouchMove);
+      box.removeEventListener?.('pointerdown', onSnapshotPointerDown);
+      box.removeEventListener?.('pointerup', onSnapshotPointerUp);
+      box.removeEventListener?.('pointercancel', onSnapshotPointerUp);
+      box.removeEventListener?.('keydown', onSnapshotKeyDown);
+      box.removeEventListener?.('scroll', onSnapshotScroll);
     };
 
     const ensureReplayThinkingSection = () => {
@@ -6015,6 +6067,7 @@ import { bindUiText, t } from './i18n.js';
           }
           if (!timelineReducer.apply(json, eventId == null ? null : Number(eventId)).accepted) continue;
           if (++acceptedReplayEvents % 100 === 0) trimReplayWindow();
+          scheduleReplayFollow();
           if (eventIsError) {
             replayError = createTerminalStreamError(json);
           } else if (json.delta) {

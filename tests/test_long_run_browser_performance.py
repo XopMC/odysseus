@@ -54,7 +54,7 @@ def test_live_history_mutation_observer_defers_scroll_layout_and_never_reanchors
     end = source.index("</script>", start)
     implementation = source[start:end]
     update = implementation[implementation.index("function update()"):
-                            implementation.index("let _scrollRaf")]
+                            implementation.index("let _updateRaf")]
 
     assert "new MutationObserver(scheduleUpdate)" in implementation
     assert "requestAnimationFrame(() =>" in implementation
@@ -206,7 +206,7 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = {"chat": "20260923replaywindow1", "sessions": "20260923approvalrev1",
+    expected = {"chat": "20260923replaywindow2", "sessions": "20260923approvalrev1",
                 "models": "20260922approval1", "chatRenderer": "20260923replaycursor1"}
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
