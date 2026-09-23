@@ -10,6 +10,17 @@
 Каждый чекбокс ниже остаётся открытым до проверки всех частей требования на
 реальном runtime. Локальные тесты сами по себе не закрывают пункт.
 
+- 2026-09-23 05:39–05:41 +05: в `cf5c226` добавлен `history_revision` к
+  дешёвому message-count probe; metadata-only Deny повышает ревизию сессии,
+  а второй клиент точечно обновляет уже показанную карточку, не перерисовывая
+  большой чат. На изолированном Jetson `:7131`, safe chat
+  `0fcf9640-e1ee-402d-b7d0-dc188faa68fe`: две вкладки одновременно
+  показывали тот же approval ID и `PYTHON waiting`; Deny во второй вкладке
+  перевёл обе в `PYTHON failed` без reload, контекст остался 6.5%.
+  Candidate logs без ERROR/Traceback; кандидат остановлен, production
+  `c0f36f5` healthy. Адресные тесты: 51 passed. Пункт №50 остаётся открыт
+  до полной матрицы reconnect/active tools/long-run и шестичасового gate.
+
 - 2026-09-23 05:22–05:27 +05: после релиза `c0f36f5` обнаружено расхождение
   approval-карточки: при gated `python print(2+2)` live-клиент не создавал
   tool node, хотя reload показывал `PYTHON failed`. Причина: approval branch
