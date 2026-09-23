@@ -2230,6 +2230,7 @@ body.bg-pattern-sparkles {
     }
     .replay-older-button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
     .replay-older-button:disabled { opacity: .55; cursor: wait; }
+    .replay-older-button[hidden] { display: none; }
     /* Preserve the complete timeline while letting the browser skip layout and
        paint work for old off-screen turns during long agent sessions. `auto`
        remembers the measured height, so scrolling back keeps the full content. */

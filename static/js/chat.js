@@ -5498,6 +5498,7 @@ import { bindUiText, t } from './i18n.js';
       try { await res.body.cancel(); } catch (_) {}
       return false;
     }
+    if (!snapshotRunId && /^[0-9a-f]{32}$/.test(resumeRunId)) snapshotRunId = resumeRunId;
     if (resumeRunId) _streamRunIds.set(sessionId, resumeRunId);
 
     // A detached run belongs to the chat, not to the tab that started it.
@@ -5521,14 +5522,20 @@ import { bindUiText, t } from './i18n.js';
     let nextRoundTimestamp = 0;
     const replayHolders = [];
     const replayNodes = [];
+    let olderReplayButton = null;
+    let olderInsertAnchor = null;
+    let olderPendingPrefix = [];
+    let loadingOlderReplay = false;
     let cleanupOlderListener = null;
     // Tool results often arrive tens of thousands of events after reconnect.
     // Scanning every rendered replay card for each result made a 100K-event
     // trajectory quadratic and froze the second client's UI.
     const replayToolsByCallId = new Map();
-    const createReplayHolder = (previous = null, timestampSeconds = 0) => {
+    const createReplayHolder = (previous = null, timestampSeconds = 0, firstSeq = null) => {
       const holder = document.createElement('div');
       holder.className = replayHolders.length ? 'msg msg-ai msg-continuation streaming' : 'msg msg-ai streaming';
+      const replaySeq = Number(firstSeq ?? snapshotEvents[0]?.seq ?? snapshotCursor + 1);
+      if (holder.dataset && Number.isSafeInteger(replaySeq) && replaySeq >= 0) holder.dataset.replaySeq = String(replaySeq);
       const stamp = Number(timestampSeconds) > 0
         ? new Date(Number(timestampSeconds) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         : roleTs;
@@ -5568,24 +5575,24 @@ import { bindUiText, t } from './i18n.js';
     };
     let holder = createReplayHolder();
     let contentDiv = holder.querySelector('.stream-content');
+    olderInsertAnchor = holder;
 
     // A long active run attaches at its newest complete rounds. Older durable
     // rounds stay accessible through an explicit backward page instead of
     // forcing hundreds of sequential fetches and thousands of DOM cards
     // before the second device can show the current model activity.
-    if (olderReplayCursor !== null && snapshotRunId) {
+    if (snapshotRunId) {
       const olderButton = document.createElement('button');
       olderButton.type = 'button';
       olderButton.className = 'replay-older-button';
       olderButton.textContent = t('Load earlier run activity');
+      olderButton.hidden = olderReplayCursor === null;
       box.insertBefore(olderButton, holder);
       replayNodes.push(olderButton);
-      let insertAnchor = holder;
-      let pendingPrefix = [];
-      let loadingOlder = false;
+      olderReplayButton = olderButton;
       olderButton.addEventListener('click', async () => {
-        if (loadingOlder || olderReplayCursor === null || !isCurrentView()) return;
-        loadingOlder = true;
+        if (loadingOlderReplay || olderReplayCursor === null || !isCurrentView()) return;
+        loadingOlderReplay = true;
         olderButton.disabled = true;
         const beforeSeq = olderReplayCursor;
         try {
@@ -5600,11 +5607,11 @@ import { bindUiText, t } from './i18n.js';
           if (events.length && Number(events[events.length - 1].seq) !== beforeSeq - 1) {
             throw new Error('Older replay cursor gap');
           }
-          const combined = [...events, ...pendingPrefix];
+          const combined = [...events, ...olderPendingPrefix];
           const split = splitReplayPageAtRoundBoundary(combined);
           const hasEarlier = Boolean(page.has_more_before);
           const complete = hasEarlier ? split.completeRounds : combined;
-          pendingPrefix = hasEarlier ? split.incompletePrefix : [];
+          olderPendingPrefix = hasEarlier ? split.incompletePrefix : [];
           const oldTop = box.scrollTop;
           const oldHeight = box.scrollHeight;
           if (complete.length) {
@@ -5618,8 +5625,11 @@ import { bindUiText, t } from './i18n.js';
               for (let node = previousLast?.nextElementSibling; node; node = node.nextElementSibling) {
                 added.push(node);
               }
-              for (const node of added) box.insertBefore(node, insertAnchor);
-              if (added.length) insertAnchor = added[0];
+              for (const node of added) {
+                node.dataset.replayPreview = 'true';
+                box.insertBefore(node, olderInsertAnchor);
+              }
+              if (added.length) olderInsertAnchor = added[0];
               replayNodes.push(...added);
             }
           }
@@ -5628,7 +5638,7 @@ import { bindUiText, t } from './i18n.js';
             throw new Error('Invalid older replay cursor');
           }
           olderReplayCursor = hasEarlier ? next : null;
-          if (olderReplayCursor === null) olderButton.remove();
+          if (olderReplayCursor === null) olderButton.hidden = true;
           else olderButton.textContent = t('Load earlier run activity');
           if (oldTop > 0) box.scrollTop = oldTop + box.scrollHeight - oldHeight;
         } catch (error) {
@@ -5637,7 +5647,7 @@ import { bindUiText, t } from './i18n.js';
             console.warn('[chat-replay] older page unavailable', error);
           }
         } finally {
-          loadingOlder = false;
+          loadingOlderReplay = false;
           olderButton.disabled = false;
         }
       });
@@ -5647,7 +5657,7 @@ import { bindUiText, t } from './i18n.js';
       let requestedOlder = false;
       let touchY = null;
       const loadIfNear = () => {
-        if (!requestedOlder || !olderButton.parentNode || loadingOlder) return;
+        if (!requestedOlder || !olderButton.parentNode || loadingOlderReplay) return;
         const buttonRect = olderButton.getBoundingClientRect?.();
         const boxRect = box.getBoundingClientRect?.();
         if (buttonRect && boxRect && buttonRect.bottom >= boxRect.top
@@ -5746,6 +5756,47 @@ import { bindUiText, t } from './i18n.js';
     const timelineReducer = typeof createTimelineReducer === 'function'
       ? (createTimelineReducer() || { apply: () => ({ accepted: true }) })
       : { apply: () => ({ accepted: true }) };
+    const MAX_LIVE_REPLAY_ROOTS = 300;
+    let acceptedReplayEvents = 0;
+    const trimReplayWindow = () => {
+      if (!olderReplayButton || loadingOlderReplay) return;
+      const distanceFromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+      // Never remove a card the user is currently reading. When following
+      // live output, older frames are durable and can be paged back on demand.
+      if (Number.isFinite(distanceFromBottom) && distanceFromBottom > 200) return;
+      const liveRoots = replayNodes.filter(node => node.parentNode === box
+        && String(node.className || '').split(/\s+/).includes('streaming'));
+      if (liveRoots.length <= MAX_LIVE_REPLAY_ROOTS) return;
+      const dropCount = liveRoots.length - MAX_LIVE_REPLAY_ROOTS;
+      const retained = liveRoots[dropCount];
+      const retainedSeq = Number(retained?.dataset?.replaySeq);
+      if (!Number.isSafeInteger(retainedSeq) || retainedSeq <= 0
+          || liveRoots.slice(0, dropCount).includes(holder)
+          || liveRoots.slice(0, dropCount).includes(replayThread)) return;
+      const dropNodes = [
+        ...replayNodes.filter(node => node.parentNode === box && node.dataset?.replayPreview === 'true'),
+        ...liveRoots.slice(0, dropCount),
+      ];
+      for (const node of dropNodes) {
+        _cancelIncrementalStreamTree(node);
+        for (const id of node._replayToolIds || []) {
+          const tool = replayToolsByCallId.get(id);
+          if (tool?._elapsedTicker) clearInterval(tool._elapsedTicker);
+          if (tool?._waveInterval) clearInterval(tool._waveInterval);
+          replayToolsByCallId.delete(id);
+        }
+        node.remove();
+        const nodeIndex = replayNodes.indexOf(node);
+        if (nodeIndex >= 0) replayNodes.splice(nodeIndex, 1);
+        const holderIndex = replayHolders.indexOf(node);
+        if (holderIndex >= 0) replayHolders.splice(holderIndex, 1);
+      }
+      olderReplayCursor = Math.max(olderReplayCursor || 0, retainedSeq);
+      olderPendingPrefix = [];
+      olderInsertAnchor = retained;
+      olderReplayButton.hidden = false;
+      box.scrollTop = box.scrollHeight;
+    };
 
     const cleanup = () => {
       try { spinner.destroy(); } catch (_) {}
@@ -5859,13 +5910,19 @@ import { bindUiText, t } from './i18n.js';
 
     const startReplayTool = (json) => {
       const thread = ensureReplayThread();
+      if (!thread.dataset.replaySeq && Number.isSafeInteger(Number(json._replay?.seq))) {
+        thread.dataset.replaySeq = String(json._replay.seq);
+      }
       const node = document.createElement('div');
       node.className = 'agent-thread-node running';
       const name = String(json.tool || 'Tool');
       const command = json.command ? `<pre class="agent-thread-cmd">${uiModule.esc(String(json.command))}</pre>` : '';
       node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">▶</span><span class="agent-thread-tool">${uiModule.esc(name)}</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${command}</div>`;
       node.dataset.toolCallId = String(json.tool_call_id || json._replay?.tool_call_id || '');
-      if (node.dataset.toolCallId) replayToolsByCallId.set(node.dataset.toolCallId, node);
+      if (node.dataset.toolCallId) {
+        replayToolsByCallId.set(node.dataset.toolCallId, node);
+        (thread._replayToolIds ||= []).push(node.dataset.toolCallId);
+      }
       thread.appendChild(node);
       const started = Number(json._replay?.created_at || json._replay?.started_at || 0) * 1000;
       node._startTime = started || Date.now();
@@ -5950,7 +6007,14 @@ import { bindUiText, t } from './i18n.js';
           }
           let json;
           try { json = JSON.parse(payload); } catch (_) { continue; }
+          if (olderReplayButton && olderReplayCursor === null && acceptedReplayEvents === 0
+              && snapshotEvents.length === 0 && Number.isSafeInteger(Number(eventId))
+              && Number(eventId) > 0) {
+            olderReplayCursor = Number(eventId);
+            olderReplayButton.hidden = false;
+          }
           if (!timelineReducer.apply(json, eventId == null ? null : Number(eventId)).accepted) continue;
+          if (++acceptedReplayEvents % 100 === 0) trimReplayWindow();
           if (eventIsError) {
             replayError = createTerminalStreamError(json);
           } else if (json.delta) {
@@ -5962,7 +6026,7 @@ import { bindUiText, t } from './i18n.js';
                 _flushIncrementalStreamRender(contentDiv);
                 finishReplayThinking(Number(json._replay?.created_at || 0) * 1000);
                 if (replayThread) replayThread.classList.add('has-bottom');
-                holder = createReplayHolder(holder, nextRoundTimestamp);
+                holder = createReplayHolder(holder, nextRoundTimestamp, eventId);
                 nextRoundTimestamp = 0;
                 contentDiv = holder.querySelector('.stream-content');
                 roundText = '';
@@ -5992,7 +6056,7 @@ import { bindUiText, t } from './i18n.js';
               _flushIncrementalStreamRender(contentDiv);
               finishReplayThinking(Number(json._replay?.created_at || 0) * 1000);
               if (replayThread) replayThread.classList.add('has-bottom');
-              holder = createReplayHolder(holder, nextRoundTimestamp);
+              holder = createReplayHolder(holder, nextRoundTimestamp, eventId);
               nextRoundTimestamp = 0;
               contentDiv = holder.querySelector('.stream-content');
               roundText = '';

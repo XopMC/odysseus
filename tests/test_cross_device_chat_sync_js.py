@@ -114,7 +114,7 @@ def test_cross_device_subscription_lifecycle(scenario):
       let remoteRunning=false,attached=0,remoteHistory=[];
       window.chatModule={hasActiveStream:()=>false,resumeStream:async id=>{assert.equal(id,'chat-a');attached++;return true;}};
       const reader={read:()=>pendingRead.promise,cancel:async()=>{cancelled++;pendingRead.resolve({done:true});}};
-      const response={ok:true,headers:{get:()=>scenario==='replay_lazy_older'?'a'.repeat(32):'remote-run'},body:{getReader:()=>reader,cancel:reader.cancel}};
+      const response={ok:true,headers:{get:()=>scenario==='replay_lazy_older'?'a'.repeat(32):scenario==='replay_corpus_100k'?'e'.repeat(32):'remote-run'},body:{getReader:()=>reader,cancel:reader.cancel}};
       const fixtureEvents=[];
       if(scenario==='replay_lazy_older')for(let seq=0;seq<205;seq++){
         const round=Math.floor(seq/5)+1,tool_call_id=`fixture-tool-${round}`;
@@ -135,6 +135,12 @@ def test_cross_device_subscription_lifecycle(scenario):
         MutationObserver:class{observe(){}},setTimeout:()=>0,clearTimeout:noop,
         setInterval:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearInterval:noop,
         fetch:async(url,options={})=>{requests.push({url:String(url),options});
+          if(scenario==='replay_corpus_100k'){
+            const path=String(url);
+            if(path.endsWith('/api/chat/run/chat-a'))return {ok:true,json:async()=>({run_id:'e'.repeat(32),last_seq:-1,started_at:1000})};
+            if(path.includes('/events?'))return {ok:true,json:async()=>({run_id:'e'.repeat(32),events:[],next_cursor:-1,has_more:false})};
+            if(path.includes('/api/chat/resume/'))return pendingHeaders.promise;
+          }
           if(scenario==='replay_lazy_older'){
             const path=String(url);
             if(path.endsWith('/api/chat/run/chat-a'))return {ok:true,json:async()=>({run_id:'a'.repeat(32),last_seq:204,started_at:1000})};
@@ -221,8 +227,8 @@ def test_cross_device_subscription_lifecycle(scenario):
           assert.equal(appended[0][3].round_reasonings[0],'[thinking fixture]');
           assert.equal(appended[0][3].tool_events[0].tool_call_id,'fixture-tool-1');
           assert.equal(appended[0][3].replay_preview,true,'old activity is read-only');
-          assert.equal(button.parentNode,null,'older button disappears after the first page reaches seq zero');
-          assert.equal(box.children[0].className,'msg msg-ai','old round is prepended before current activity');
+          assert.equal(button.hidden,true,'older button hides after the first page reaches seq zero');
+          assert.equal(box.children[1].className,'msg msg-ai','old round is prepended before current activity');
           selected='chat-b';pendingRead.resolve({done:true});await first;
         }else if(scenario.startsWith('replay_corpus_')){
           const count=scenario==='replay_corpus_1k'?1000:scenario==='replay_corpus_10k'?10000:100000;
@@ -237,6 +243,7 @@ def test_cross_device_subscription_lifecycle(scenario):
               case 3:event={type:'tool_output',tool:'fixture_tool',tool_call_id,exit_code:0,round};break;
               default:event={delta:'[answer fixture]',round};
             }
+            event._replay={run_id:'e'.repeat(32),seq,round};
             frames.push(`id: ${seq}\ndata: ${JSON.stringify(event)}`);
           }
           const encoded=new TextEncoder().encode(frames.join('\n\n')+'\n\n');
@@ -244,7 +251,13 @@ def test_cross_device_subscription_lifecycle(scenario):
           reader.read=()=>firstChunk?(firstChunk=false,Promise.resolve({done:false,value:encoded})):pendingRead.promise;
           pendingHeaders.resolve(response);await flush();
           const expectedRounds=count/5;
-          assert.equal(box.children.length,expectedRounds*3,'each round keeps thinking, tool and answer cards');
+          if(count===100000){
+            assert(box.children.length<=361,'a long live replay keeps a bounded DOM window');
+            assert(box.children.some(node=>node.className==='replay-older-button'&&!node.hidden),
+              'evicted run history remains reachable by backward cursor: '+JSON.stringify({count:box.children.length,head:box.children.slice(0,3).map(x=>({name:x.className,hidden:x.hidden})),firstResult}));
+          }else{
+            assert.equal(box.children.length,expectedRounds*3,'each round keeps thinking, tool and answer cards');
+          }
           const lastAnswer=box.children[box.children.length-1].querySelector('.stream-content');
           assert.equal(lastAnswer.innerHTML,'[answer fixture]','the newest replayed answer remains visible');
           assert.equal(canonicalRefreshes,0,'a live replay must not force history refresh mid-run');
