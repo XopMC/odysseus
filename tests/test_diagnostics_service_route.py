@@ -93,3 +93,96 @@ def test_process_slo_reports_lag_and_memory_without_chat_content(monkeypatch):
         "event_loop_lag", "process_rss_high",
     ]
     assert "chat" not in str(runtime).lower()
+
+
+def test_durable_health_reads_only_bounded_numeric_scalars(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from core.database import Session, ChatRunState
+
+    secret = "PRIVATE_PROMPT_DO_NOT_REPORT"
+    engine = create_engine(f"sqlite:///{tmp_path / 'health.db'}")
+    for table in (Session.__table__, ChatRunState.__table__):
+        table.create(engine)
+    local = sessionmaker(bind=engine)
+    with local.begin() as db:
+        db.add(Session(id="health", name="health", endpoint_url="http://example.invalid/v1",
+                       model="fixture-model", owner="alice"))
+        db.flush()
+        db.add(ChatRunState(
+            run_id="a" * 32, session_id="health", owner="alice", status="running",
+            continuation={"prompt": secret, "health_metrics": {
+                "ttft_max_ms": 250.5, "tool_latency_max_ms": 1500,
+                "prefill_tps_last": secret, "compaction_failures": 1,
+                "compaction_max_ms": 3000, "sse_reconnects": 2,
+            }},
+            context_snapshot={"messages": [secret]},
+        ))
+    with local() as db:
+        result = diag._durable_run_health_summary(db)
+    assert result == {
+        "measured_runs": 1, "max_ttft_ms": 250.5,
+        "max_tool_latency_ms": 1500, "min_prefill_tps": None,
+        "compaction_failures": 1, "max_compaction_ms": 3000,
+        "sse_reconnects": 2,
+    }
+    assert secret not in str(result)
+    assert diag._durable_health_number(secret, 1000) is None
+    assert diag._durable_health_number(float("inf"), 1000) is None
+    assert diag._durable_health_number(True, 1000) is None
+
+
+def test_durable_health_json_projection_compiles_for_postgresql():
+    from sqlalchemy import select
+    from sqlalchemy.dialects import postgresql
+    from core.database import ChatRunState
+
+    statement = select(*(
+        ChatRunState.continuation["health_metrics"][key].as_string()
+        for key in diag._DURABLE_HEALTH_LIMITS
+    )).where(ChatRunState.status == "running")
+    compiled = statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "health_metrics" in compiled.params.values()
+    assert "context_snapshot" not in sql
+    assert "SELECT chat_run_states.continuation" not in sql
+
+
+def test_runtime_slo_uses_durable_metrics_when_local_run_is_absent(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from core import database
+    from src import agent_runs
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
+    for table in (database.Session.__table__, database.ChatRunState.__table__,
+                  database.ChatSubagentRun.__table__):
+        table.create(engine)
+    local = sessionmaker(bind=engine)
+    with local.begin() as db:
+        db.add(database.Session(id="health", name="health", endpoint_url="http://example.invalid/v1",
+                                model="fixture-model", owner="alice"))
+        db.flush()
+        db.add(database.ChatRunState(
+            run_id="b" * 32, session_id="health", owner="alice", status="running",
+            last_seq=7, durable_seq=7,
+            continuation={"prompt": "SECRET_NOT_FOR_ADMIN", "health_metrics": {
+                "ttft_max_ms": 70000, "tool_latency_max_ms": 130000,
+                "prefill_tps_last": 5, "compaction_failures": 1,
+                "compaction_max_ms": 130000, "sse_reconnects": 21,
+            }},
+        ))
+    monkeypatch.setattr(database, "SessionLocal", local)
+    monkeypatch.setattr(diag, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(agent_runs, "active_run_health_summary", lambda: {
+        "measured_runs": 0, "max_ttft_ms": 0, "min_prefill_tps": None,
+        "max_tool_latency_ms": 0, "compaction_failures": 0,
+        "max_compaction_ms": 0, "sse_reconnects": 0,
+    })
+    runtime = diag._runtime_diagnostics()
+    assert runtime["runs"]["latency"]["measured_runs"] == 1
+    assert {item["code"] for item in runtime["slo"]["alerts"]} >= {
+        "model_ttft_high", "tool_latency_high", "prefill_slow",
+        "compaction_failed", "compaction_slow", "sse_reconnects_high",
+    }
+    assert "SECRET_NOT_FOR_ADMIN" not in str(runtime)

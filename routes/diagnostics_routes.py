@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import math
 import os
 from pathlib import Path
+import re
 from typing import Dict, Any
 from sqlalchemy import func
 
@@ -43,6 +45,50 @@ def _attach_process_slo(runtime: Dict[str, Any]) -> Dict[str, Any]:
     return runtime
 
 
+_DURABLE_HEALTH_LIMITS = {
+    "ttft_max_ms": 3_600_000,
+    "tool_latency_max_ms": 3_600_000,
+    "prefill_tps_last": 1_000_000,
+    "compaction_failures": 1_000_000,
+    "compaction_max_ms": 3_600_000,
+    "sse_reconnects": 1_000_000,
+}
+
+
+def _durable_health_number(value: Any, limit: int) -> float | None:
+    if isinstance(value, str):
+        if len(value) > 32 or not re.fullmatch(r"[0-9]{1,10}(?:\.[0-9]{1,4})?", value):
+            return None
+        value = float(value)
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= limit:
+        return None
+    return float(value)
+
+
+def _durable_run_health_summary(db: Any) -> Dict[str, Any]:
+    """Read only allowlisted numeric JSON scalars, never full continuations."""
+    from core.database import ChatRunState
+
+    columns = [ChatRunState.continuation["health_metrics"][key].as_string().label(key)
+               for key in _DURABLE_HEALTH_LIMITS]
+    rows = db.query(*columns).filter(ChatRunState.status == "running").all()
+    values = {
+        key: [_durable_health_number(getattr(row, key), limit) for row in rows]
+        for key, limit in _DURABLE_HEALTH_LIMITS.items()
+    }
+    def valid(key):
+        return [value for value in values[key] if value is not None]
+    return {
+        "measured_runs": len(rows),
+        "max_ttft_ms": max(valid("ttft_max_ms"), default=0),
+        "max_tool_latency_ms": max(valid("tool_latency_max_ms"), default=0),
+        "min_prefill_tps": min(valid("prefill_tps_last"), default=None),
+        "compaction_failures": sum(valid("compaction_failures")),
+        "max_compaction_ms": max(valid("compaction_max_ms"), default=0),
+        "sse_reconnects": sum(valid("sse_reconnects")),
+    }
+
+
 def _runtime_diagnostics() -> Dict[str, Any]:
     """Content-free long-run health counters for admin diagnostics."""
     from src.chat_replay_log import MAX_RUN_BYTES, MAX_TOTAL_BYTES
@@ -66,6 +112,7 @@ def _runtime_diagnostics() -> Dict[str, Any]:
 
     active_runs = active_subagents = durable_lag_max_events = 0
     child_queue_wait_max_ms = 0
+    durable_latency = None
     try:
         from core.database import ChatRunState, ChatSubagentRun, SessionLocal, utcnow_naive
         from src.subagent_runtime import ACTIVE_STATUSES
@@ -91,6 +138,7 @@ def _runtime_diagnostics() -> Dict[str, Any]:
                 max(0, int(((row.started_at or now) - row.created_at).total_seconds() * 1000))
                 for row in child_times if row.created_at
             ), default=0)
+            durable_latency = _durable_run_health_summary(db)
         finally:
             db.close()
     except Exception:
@@ -110,6 +158,16 @@ def _runtime_diagnostics() -> Dict[str, Any]:
                    "max_compaction_ms": 0,
                    "sse_reconnects": 0}
         logger.debug("run latency diagnostics unavailable", exc_info=True)
+    if durable_latency is not None:
+        for key in ("measured_runs", "max_ttft_ms", "max_tool_latency_ms",
+                    "compaction_failures", "max_compaction_ms", "sse_reconnects"):
+            latency[key] = max(latency[key], durable_latency[key])
+        durable_prefill = durable_latency["min_prefill_tps"]
+        if durable_prefill is not None:
+            latency["min_prefill_tps"] = min(
+                value for value in (latency["min_prefill_tps"], durable_prefill)
+                if value is not None
+            )
     ttft_limit = _slo_threshold("ODYSSEUS_SLO_TTFT_MS", 60_000)
     tool_limit = _slo_threshold("ODYSSEUS_SLO_TOOL_LATENCY_MS", 120_000)
     prefill_min = _slo_threshold("ODYSSEUS_SLO_PREFILL_MIN_TPS", 10)
