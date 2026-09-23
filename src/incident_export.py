@@ -5,8 +5,11 @@ details, tool arguments, receipts, or context snapshots into this archive.
 """
 import io
 import json
+import math
 import re
 import zipfile
+
+from sqlalchemy import func
 
 from core.database import ChatRunState, ChatToolIntent, SessionLocal
 from core.constants import APP_VERSION
@@ -20,10 +23,30 @@ def _json(value):
 
 _RUN_STATUSES = frozenset({"running", "done", "error", "stopped", "interrupted"})
 _EFFECT_STATUSES = frozenset({"intent", "unknown", "done", "no_retry"})
+_TERMINAL_REASONS = frozenset({
+    "process_restarted", "cancelled", "superseded_by_new_run", "user_stop",
+})
+_METRIC_LIMITS = {
+    "ttft_last_ms": 3_600_000,
+    "ttft_max_ms": 3_600_000,
+    "prefill_tps_last": 1_000_000,
+    "tool_latency_mean_ms": 3_600_000,
+    "tool_latency_max_ms": 3_600_000,
+    "compaction_last_ms": 3_600_000,
+    "compaction_max_ms": 3_600_000,
+    "sse_reconnects": 1_000_000,
+    "compaction_failures": 1_000_000,
+}
 
 
 def _status(value, allowed):
     return value if value in allowed else "unrecognized"
+
+
+def _safe_metric(value, maximum):
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= maximum:
+        return None
+    return round(value, 2)
 
 
 def build_incident_archive(session_id: str, owner: str | None) -> bytes:
@@ -34,12 +57,25 @@ def build_incident_archive(session_id: str, owner: str | None) -> bytes:
     """
     db = SessionLocal()
     try:
+        dialect = getattr(getattr(getattr(db, "bind", None), "dialect", None), "name", "sqlite")
+        # SQL-level scalar projection keeps arbitrary continuation JSON out of
+        # Python. json_extract is SQLite-specific; other configured backends
+        # retain the safe status/cursor export until an equivalent projection
+        # is implemented and tested for that dialect.
+        safe_json_columns = (
+            [func.json_extract(ChatRunState.continuation, "$.terminal_reason").label("terminal_reason_code"),
+             *(func.json_extract(
+                 ChatRunState.continuation, f"$.health_metrics.{key}",
+             ).label(key) for key in _METRIC_LIMITS)]
+            if dialect == "sqlite" else []
+        )
         # Select only allowlisted columns. Loading ORM rows would hydrate
         # context snapshots and effect receipts containing sensitive data.
         runs_query = db.query(
             ChatRunState.run_id, ChatRunState.status, ChatRunState.started_at,
             ChatRunState.terminal_at, ChatRunState.last_seq,
             ChatRunState.durable_seq, ChatRunState.context_revision,
+            *safe_json_columns,
         ).filter(ChatRunState.session_id == session_id)
         intents_query = db.query(
             ChatToolIntent.run_id, ChatToolIntent.status,
@@ -74,6 +110,13 @@ def build_incident_archive(session_id: str, owner: str | None) -> bytes:
                 "last_seq": run.last_seq,
                 "durable_seq": run.durable_seq,
                 "context_revision": run.context_revision,
+                "terminal_reason_code": _status(
+                    getattr(run, "terminal_reason_code", None), _TERMINAL_REASONS,
+                ),
+                "health_metrics": {
+                    key: _safe_metric(getattr(run, key, None), limit)
+                    for key, limit in _METRIC_LIMITS.items()
+                },
                 "replay_event_count": replay_count,
                 "replay_status": replay_status,
                 "effect_status_counts": intent_counts.get(run.run_id, {}),
@@ -86,6 +129,7 @@ def build_incident_archive(session_id: str, owner: str | None) -> bytes:
         "app_version": APP_VERSION,
         "privacy": "allowlist-only; no chat content, prompts, paths, endpoint details or secrets",
         "run_count": len(records),
+        "health_metrics_available": dialect == "sqlite",
         "files": ["manifest.json", "summary.json", "runs.json", "event-schema.json", "replay-fixture.json"],
     }
     status_counts = {}
@@ -101,11 +145,24 @@ def build_incident_archive(session_id: str, owner: str | None) -> bytes:
         "unknown_effect_count": sum(
             record["effect_status_counts"].get("unknown", 0) for record in records
         ),
+        "max_ttft_ms": max(
+            (record["health_metrics"]["ttft_max_ms"] or 0 for record in records), default=0,
+        ),
+        "max_tool_latency_ms": max(
+            (record["health_metrics"]["tool_latency_max_ms"] or 0 for record in records), default=0,
+        ),
+        "total_sse_reconnects": sum(
+            record["health_metrics"]["sse_reconnects"] or 0 for record in records
+        ),
+        "total_compaction_failures": sum(
+            record["health_metrics"]["compaction_failures"] or 0 for record in records
+        ),
     }
     event_schema = {
         "schema": "odysseus.incident.events.v1",
         "identity": ["run_id", "seq", "segment_id", "tool_call_id"],
-        "safe_status_fields": ["status", "last_seq", "durable_seq", "context_revision"],
+        "safe_status_fields": ["status", "last_seq", "durable_seq", "context_revision",
+                               "terminal_reason_code", "health_metrics"],
         "excluded": ["content", "reasoning", "tool_arguments", "tool_result", "receipt", "context_snapshot"],
         "note": "This archive records counts and cursor state, not original replay frames.",
     }

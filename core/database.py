@@ -75,7 +75,7 @@ DATABASE_URL = _normalize_sqlite_url(os.getenv("DATABASE_URL", _default_database
 # Create engine
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+    connect_args={"check_same_thread": False, "timeout": 30} if "sqlite" in DATABASE_URL else {}
 )
 
 
@@ -144,6 +144,11 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     if isinstance(dbapi_connection, sqlite3.Connection):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        # Long Agent runs commit checkpoints and effect intents on separate
+        # handles. Wait for the current writer instead of failing an effect
+        # intent at SQLite's five-second default. This does not retry or
+        # execute an effectful action after an uncertain commit.
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
 
 
