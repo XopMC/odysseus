@@ -11,6 +11,10 @@ _MAX_MARKERS = 512
 _VERIFICATION_TOOLS = frozenset({
     "run_tests", "run_lint", "verify_hashes", "compare_files",
 })
+_GOAL_EVIDENCE_KEYS = frozenset({
+    "verification", "files_changed", "artifact_id", "artifacts", "diff",
+    "file_hashes", "tool_outcomes", "decisions",
+})
 
 
 def _digest(value) -> str:
@@ -50,7 +54,19 @@ def progress_marker(payload: dict) -> Optional[tuple[str, str]]:
             and isinstance(data.get("progress"), str) and data["progress"].strip()
             and isinstance(data.get("checkpoint"), dict) and data["checkpoint"]
         ):
-            return "evidence", _digest((data["id"], data["progress"], data["checkpoint"]))
+            # A Goal continuation may update its round number, prose and
+            # response excerpt without changing any work product. Hash only
+            # recognized evidence; metadata and repeated claims cannot keep
+            # the useful-progress watchdog alive.
+            evidence = {
+                key: value for key, value in data["checkpoint"].items()
+                if key in _GOAL_EVIDENCE_KEYS and (
+                    isinstance(value, str) and value.strip()
+                    or isinstance(value, (list, dict)) and bool(value)
+                )
+            }
+            if evidence:
+                return "evidence", _digest((data["id"], evidence))
     if kind == "tool_output" and type(payload.get("exit_code")) is int:
         if payload.get("tool") in _VERIFICATION_TOOLS and payload.get("output"):
             return "verification", _digest((payload["tool"], payload["exit_code"], payload["output"]))

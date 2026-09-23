@@ -24,6 +24,12 @@ def test_run_snapshot_separates_activity_from_useful_progress(monkeypatch):
     agent_runs._publish(run, _event({"type": "agent_step", "round": 2}))
     agent_runs._publish(run, _event({"delta": "reasoning stream", "thinking": True}))
     agent_runs._publish(run, _event({"type": "tool_progress", "tool": "bash", "tail": "still running"}))
+    for round_number in (2, 3):
+        agent_runs._publish(run, _event({"type": "goal_update", "data": {
+            "id": "goal-1", "status": "active", "revision": round_number,
+            "progress": "Goal is still active; continuing from checkpoint.",
+            "checkpoint": {"round": round_number, "response_excerpt": "same plan"},
+        }}))
     health = agent_runs.describe_run(run.session_id)["progress_health"]
     assert health["revision"] == 0
     assert health["last_progress_at"] is None
@@ -113,6 +119,33 @@ def test_useful_progress_requires_evidence_not_merely_tool_success():
         "output": "3 passed",
     }, now=602)
     assert tracker.snapshot("running", now=603)["stalled"] is False
+
+
+def test_goal_round_and_repeated_claims_do_not_reset_useful_progress_clock():
+    from src.run_progress import ProgressTracker, progress_marker
+
+    tracker = ProgressTracker(started_at=0)
+    for round_number in range(1, 9):
+        claim = {"type": "goal_update", "data": {
+            "id": "goal-1", "status": "active", "revision": round_number,
+            "progress": "Goal is still active; continuing from checkpoint.",
+            "checkpoint": {"round": round_number, "response_excerpt": "same plan again"},
+        }}
+        assert progress_marker(claim) is None
+        assert tracker.observe(claim, now=round_number * 100) is False
+    assert tracker.snapshot("running", now=800)["stalled"] is True
+
+    verified = {"type": "goal_update", "data": {
+        "id": "goal-1", "status": "active", "revision": 9,
+        "progress": "Tests finished", "checkpoint": {"round": 9, "verification": "3 passed"},
+    }}
+    same_evidence = {"type": "goal_update", "data": {
+        **verified["data"], "revision": 10, "progress": "Restated completion",
+        "checkpoint": {"round": 10, "verification": "3 passed"},
+    }}
+    assert tracker.observe(verified, now=801) is True
+    assert tracker.observe(same_evidence, now=900) is False
+    assert tracker.snapshot("running", now=1402)["stalled"] is True
 
 
 def test_durable_terminal_run_cannot_remain_marked_stalled():
