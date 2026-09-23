@@ -66,6 +66,9 @@ import { bindUiText, t } from './i18n.js';
   let _contextEndpointRefresh = null;
   let _contextHeaderData = null;
   let _contextHeaderBound = false;
+  let _contextRetryTimer = null;
+  let _contextRetryAttempt = 0;
+  let _contextRetrySession = null;
   let _pendingToolApproval = null;
 
   function _submitToolApprovalWhenIdle(approvalId) {
@@ -335,6 +338,30 @@ import { bindUiText, t } from './i18n.js';
       e.stopPropagation();
       _showContextHeaderPopup();
     });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible'
+          && (pill.classList.contains('stale') || pill.hidden)) {
+        _contextRetryAttempt = 0;
+        void refreshChatContextHeader('visible-after-failure');
+      }
+    });
+  }
+
+  function _clearContextRetry(reset = false) {
+    if (_contextRetryTimer !== null) clearTimeout(_contextRetryTimer);
+    _contextRetryTimer = null;
+    if (reset) _contextRetryAttempt = 0;
+  }
+
+  function _scheduleContextRetry(sid) {
+    if (document.visibilityState === 'hidden' || _contextRetryTimer !== null
+        || _contextRetryAttempt >= 5) return;
+    const delay = Math.min(16000, 1000 * (2 ** _contextRetryAttempt++));
+    _contextRetryTimer = setTimeout(() => {
+      _contextRetryTimer = null;
+      if (_liveSessionModule()?.getCurrentSessionId?.() !== sid) return;
+      return refreshChatContextHeader('retry-after-failure');
+    }, delay);
   }
 
   export async function compactCurrentChatContext() {
@@ -456,9 +483,15 @@ import { bindUiText, t } from './i18n.js';
     if (!pill) return;
     const sm = _liveSessionModule();
     const sid = sm && sm.getCurrentSessionId && sm.getCurrentSessionId();
+    _clearContextRetry();
+    if (_contextRetrySession !== sid) {
+      _contextRetrySession = sid;
+      _contextRetryAttempt = 0;
+    }
     const seq = ++_contextHeaderSeq;
     if (!sid) {
       _contextHeaderData = null;
+      _clearContextRetry(true);
       pill.hidden = true;
       _closeContextHeaderPopup();
       return;
@@ -476,6 +509,7 @@ import { bindUiText, t } from './i18n.js';
       if (selected?.endpoint_url && data.endpoint_url && selected.endpoint_url !== data.endpoint_url) return;
       if (selected?.model && data.model && selected.model !== data.model) return;
       _applyContextHeaderData(data);
+      _clearContextRetry(true);
     } catch (err) {
       if (seq !== _contextHeaderSeq) return;
       // A transient reload/second-device request must not erase the last
@@ -484,7 +518,10 @@ import { bindUiText, t } from './i18n.js';
       // authoritative snapshot arrives.
       const previous = _contextHeaderData;
       if (previous && previous.session_id === sid) {
-        _applyContextHeaderData({ ...previous, context_status: 'stale' });
+        // Staleness is a UI flag, not a different measurement scope. Keep
+        // "Last request"/"Working checkpoint" instead of relabeling the same
+        // tokens as the much smaller stored-chat estimate after a restart.
+        _applyContextHeaderData(previous);
         pill.classList.add('stale');
         pill.title = `${pill.title || ''} · ${t('Context measurement temporarily unavailable')}`;
       } else {
@@ -493,6 +530,7 @@ import { bindUiText, t } from './i18n.js';
       }
       pill.classList.remove('loading', 'warn', 'danger');
       console.warn('context header refresh failed:', reason, err);
+      _scheduleContextRetry(sid);
     }
   }
   try { window.refreshChatContextHeader = refreshChatContextHeader; } catch (_) {}

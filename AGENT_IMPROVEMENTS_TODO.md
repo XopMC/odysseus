@@ -1264,6 +1264,14 @@
 - [ ] **21. Deferred tool discovery.** Стабильное ядро маленьких tool schemas плюс поиск/загрузка нужной capability группы по запросу; измерять точность вызовов и сэкономленные schema tokens.
 - [ ] **22. Версионированный tool registry.** Инвокация захватывает точную схему/политику; обновление registry применяется к следующему раунду без потери `bash`/`read_file` посреди Goal.
 - [ ] **23. Контекстный budget waterfall.** UI отдельно показывает window, output/safety/schema reserve, trigger basis, protected messages, recent tail, summary, actual model-visible tokens и причину compaction.
+  - 2026-09-23: live Safari показал зависший `stale` индикатор после
+    рестарта сервиса при уже восстановленном API. Локально добавлен
+    bounded read-only retry (не более пяти, backoff 1–16 с), повтор при
+    возврате вкладки на экран и fence по session ID. При сбое сохраняются
+    процент и истинная область измерения, а не ложная метка `stored_chat`.
+    Failing-first Node VM и rendered Chromium desktop/mobile доказали
+    ошибку и восстановление после искусственного 503. Полный pytest:
+    7,178 passed/23 skipped/109 subtests. Полный waterfall ещё открыт.
 - [ ] **24. Feasibility preview перед compaction.** Проверить protected groups, native tool pairs, минимальный целевой размер и доступность summarizer до расхода модели; если безопасного среза нет — не объявлять сжатие успешным.
 - [ ] **25. Summary quality checks.** После сжатия машинно проверить сохранение Goal, критичных constraints, решений, незавершённых работ, file hashes и tool outcomes; сравнить hash/revision до и после.
 - [ ] **26. Prompt-cache observability.** Измерять hit/miss и стабильность префикса по provider/model; не вставлять динамические поля в начало prompt без необходимости.
@@ -1313,6 +1321,11 @@
 - [ ] **57. Trajectory inspector.** Просмотр одного run как последовательности decisions/tool/result/diff/checkpoint с фильтрами, ссылками на artifact и сравнением двух траекторий.
 - [ ] **58. Evaluation workbench.** Frozen задачи и acceptance criteria, A/B по моделям/профилям, held-out проверки, статистика неудач; никакого автодеплоя победителя.
 - [ ] **59. Accessibility/reduced-motion профиль.** Плавающие панели и раскрытие блоков должны быть управляемы клавиатурой, не перекрывать друг друга и не грузить GPU в фоне.
+  - 2026-09-23: rendered mobile 390×844 обнаружил обрезанный третий action
+    в раскрытой панели «Почему агент ждёт?»: x=282.5 + width=175.9 > 390.
+    Мобильный action row теперь переносит кнопки; геометрический регресс
+    и скриншот подтверждают полный доступ к Resume. Остальные требования
+    accessibility/reduced-motion остаются открытыми.
 - [ ] **60. Documented capability inventory.** Машинно формируемая страница «работает / experimental / unavailable на этом хосте» для LSP, DAP, browser, worktree, sandbox, MCP и моделей.
   - 2026-09-22: в общем batch добавлены консервативный owner-scoped JSON
     `/api/codex/inventory` и карточка в Settings → Tools. Источники —

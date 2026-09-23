@@ -2778,8 +2778,8 @@ body.bg-pattern-sparkles {
 	      .plan-work-card { top: 58px; right: 10px; }
 	      .subagents-work-card { top:100px; right:10px; }
 	      .plan-work-card:not(.expanded) { width:36px; }
-	      .chat-work-actions { overflow-x: auto; flex-wrap: nowrap; }
-	      .chat-work-actions button { white-space: nowrap; }
+	      .chat-work-actions { overflow-x: visible; flex-wrap: wrap; }
+	      .chat-work-actions button { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 	    }
     .project-sidebar-head { width: 100%; text-align: left; display:flex; align-items:center; gap:5px; }
     .project-toggle { flex:1; min-width:0; display:flex; align-items:center; gap:5px; border:0; background:transparent; color:inherit; text-align:left; padding:0; cursor:pointer; font:inherit; }

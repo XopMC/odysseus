@@ -125,6 +125,12 @@ def test_inspector_exact_events_two_clients_and_reload():
                         page.locator("#wait-toggle").click()
                         assert page.locator("#wait-phase").inner_text() == "Review required"
                         assert "Goal stalled" in page.locator("#wait-recovery").inner_text()
+                        if viewport["width"] == 390:
+                            if not page.locator("#wait-action").is_visible():
+                                page.locator("#wait-toggle").click()
+                            page.locator("#wait-action").wait_for(state="visible", timeout=5000)
+                            action_box = page.locator("#wait-action").bounding_box()
+                            assert action_box and action_box["x"] + action_box["width"] <= 390 - 4, action_box
                         page.locator("#goal-mode-status .chat-work-card-toggle").click()
                         page.locator("#goal-run-inspector").click()
                         page.locator("#run-inspector-runs button[data-run-id]").first.wait_for(state="visible", timeout=15000)
@@ -157,6 +163,25 @@ def test_inspector_exact_events_two_clients_and_reload():
                         page.locator("#run-inspector-runs button[data-run-id]").first.wait_for(state="visible", timeout=15000)
                         assert page.locator("#run-inspector-runs button[data-run-id]").first.get_attribute("data-run-id") == run_id
                         assert "[thinking fixture]" not in dialog.inner_text()
+                        page.locator("#run-inspector-close").click()
+                        context_calls = 0
+
+                        def context_restart_once(route):
+                            nonlocal context_calls
+                            context_calls += 1
+                            if context_calls == 1:
+                                route.fulfill(status=503, content_type="text/plain", body="service restarting")
+                            else:
+                                route.continue_()
+
+                        page.route(f"**/api/session/{SESSION_ID}/context", context_restart_once)
+                        page.evaluate("window.refreshChatContextHeader('qa-restart')")
+                        page.locator("#chat-context-pill.stale").wait_for(state="visible", timeout=5000)
+                        page.locator("#chat-context-pill:not(.stale)").wait_for(state="visible", timeout=7000)
+                        assert context_calls >= 2, "context header must retry after a transient restart"
+                        expected_503 = [error for error in errors if "status of 503" in error]
+                        assert len(expected_503) == 1, errors
+                        errors.remove(expected_503[0])
                         assert not errors, errors
                         screenshot_dir = os.getenv("ODYSSEUS_INSPECTOR_BROWSER_SCREENSHOT_DIR")
                         if screenshot_dir:

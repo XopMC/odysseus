@@ -108,3 +108,68 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"passed": True}
+
+
+def test_stale_context_header_retries_after_service_restart_without_cross_chat_paint():
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    module_path = Path(__file__).resolve().parents[1] / "static/js/chat.js"
+    script = r"""
+      const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+      const code=fs.readFileSync(process.argv[1],'utf8'),noop=()=>{},classes=new Set(),timers=[];
+      const pill={hidden:true,title:'',innerHTML:'',style:{setProperty:noop},addEventListener:noop,
+        classList:{add:x=>classes.add(x),remove:(...xs)=>xs.forEach(x=>classes.delete(x)),contains:x=>classes.has(x)}};
+      let sid='chat-a',responses=[
+        {ok:true,json:async()=>({session_id:'chat-a',model:'model-a',used_tokens:20,context_length:100,context_percent:20,source:'estimated',context_status:'last_request'})},
+        {ok:false,text:async()=> 'service restarting'},
+        {ok:true,json:async()=>({session_id:'chat-a',model:'model-a',used_tokens:30,context_length:100,context_percent:30,source:'estimated'})},
+      ];
+      const sm={getCurrentSessionId:()=>sid,getSessions:()=>[{id:sid,model:sid==='chat-a'?'model-a':'model-b'}]};
+      const document={visibilityState:'visible',body:{querySelectorAll:()=>[],addEventListener:noop},
+        addEventListener:noop,querySelectorAll:()=>[],querySelector:()=>null,
+        getElementById:id=>id==='chat-context-pill'?pill:null};
+      const context=vm.createContext({console,document,window:{sessionModule:sm},MutationObserver:class{observe(){}},
+        setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length},clearTimeout:noop,
+        fetch:async()=>responses.shift()});
+      const mod=new vm.SourceTextModule(code,{context});
+      const names=new Set(['default']);
+      for(const match of code.matchAll(/import(?:\s+\w+\s*,)?\s*\{([\s\S]*?)\}\s+from/g))
+        for(const name of match[1].split(',')){const clean=name.trim().split(/\s+as\s+/)[0];if(clean)names.add(clean)}
+      await mod.link(async()=>new vm.SyntheticModule([...names],function(){for(const name of names)this.setExport(name,noop)},{context}));
+      await mod.evaluate();
+      await mod.namespace.refreshChatContextHeader('initial');
+      assert.match(pill.title,/20 \/ 100/);
+      await mod.namespace.refreshChatContextHeader('restart');
+      assert.equal(classes.has('stale'),true);
+      assert.match(pill.title,/Last request/,'temporary failure must preserve measurement scope');
+      assert.equal(timers.length,1,'stale header must schedule a bounded read-only retry');
+      assert.ok(timers[0].ms>=1000);
+      await timers.shift().fn();
+      await Promise.resolve();await Promise.resolve();
+      assert.match(pill.title,/30 \/ 100/);
+      assert.equal(classes.has('stale'),false);
+      responses=[{ok:false,text:async()=> 'service restarting'}];
+      await mod.namespace.refreshChatContextHeader('next-restart');
+      assert.equal(timers.length,1);
+      sid='chat-b';
+      const previous=pill.title;
+      await timers.shift().fn();
+      await Promise.resolve();
+      assert.equal(pill.title,previous,'old retry must not paint another session');
+      sid='chat-a';
+      responses=[{ok:true,json:async()=>({session_id:'chat-a',model:'model-a',used_tokens:30,context_length:100,context_percent:30,source:'estimated'})}];
+      await mod.namespace.refreshChatContextHeader('restore');
+      responses=Array.from({length:6},()=>({ok:false,text:async()=> 'service restarting'}));
+      await mod.namespace.refreshChatContextHeader('prolonged-outage');
+      let retries=0;
+      while(timers.length && retries<10){retries++;await timers.shift().fn()}
+      assert.equal(retries,5,'outage must not create unbounded polling');
+      assert.equal(timers.length,0);
+      console.log(JSON.stringify({passed:true}));
+    """
+    result = subprocess.run(
+        ["node", "--experimental-vm-modules", "-e", "(async () => {" + script + "})().catch(e => {console.error(e); process.exit(1);});", str(module_path)],
+        text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"passed": True}
