@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v454-approvalcard1';
+const CACHE_NAME = 'odysseus-v455-approvalcard2';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -68,7 +68,7 @@ const PRECACHE = [
   '/static/js/chatRenderer.js?v=20260923approvalcard1',
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js?v=20260819approvalcontrol1',
-  '/static/js/chat.js?v=20260923approvalcard1',
+  '/static/js/chat.js?v=20260923approvalcard2',
   '/static/js/context-settings-dialog.js?v=20260923context1',
   '/static/js/engineering-workspace.js?v=20260923context1',
   '/static/js/timelineReducer.js',
