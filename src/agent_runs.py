@@ -1031,7 +1031,7 @@ def describe_run(session_id: str) -> Optional[dict]:
     }
 
 
-def recover_durable_runs() -> list[dict]:
+def recover_durable_runs(*, before_started_at: Optional[float] = None) -> list[dict]:
     """Materialize interrupted replay runs after a web-process restart.
 
     Tool calls are never re-executed.  The persisted frames are attached to
@@ -1061,7 +1061,13 @@ def recover_durable_runs() -> list[dict]:
                     payload={"intent_id": intent.id, "status": "unknown"},
                 ))
 
+        cutoff = None
+        if type(before_started_at) in (int, float) and math.isfinite(before_started_at):
+            cutoff = datetime.fromtimestamp(before_started_at, timezone.utc).replace(tzinfo=None)
         with SessionLocal() as db:
+            query = db.query(ChatRunState).filter(ChatRunState.status == "running")
+            if cutoff is not None:
+                query = query.filter(ChatRunState.started_at < cutoff)
             rows = [
                 {
                     "run_id": row.run_id,
@@ -1072,9 +1078,12 @@ def recover_durable_runs() -> list[dict]:
                     "context_snapshot": dict(row.context_snapshot or {}) or None,
                     "continuation": dict(row.continuation or {}),
                 }
-                for row in db.query(ChatRunState).filter(ChatRunState.status == "running").all()
+                for row in query.all()
             ]
         for state in rows:
+            current = _RUNS.get(state["session_id"])
+            if current is not None and current.run_id == state["run_id"] and current.status == "running":
+                continue
             try:
                 log = ReplayLog(replay_root(), state["run_id"], state["session_id"])
                 run = _Run()

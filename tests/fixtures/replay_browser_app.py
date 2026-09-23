@@ -8,6 +8,7 @@ browser can exercise the newest-first attach and backward replay cursor.
 import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 
 if os.getenv("ODYSSEUS_ENABLE_REPLAY_QA") != "1":
@@ -47,6 +48,13 @@ async def _synthetic_run():
     await asyncio.Event().wait()
 
 
+async def _stalled_model_run():
+    """A real detached run task waiting on a model-like boundary, no provider I/O."""
+    await asyncio.Event().wait()
+    if False:  # pragma: no cover - makes this an async generator
+        yield ""
+
+
 @asynccontextmanager
 async def _qa_lifespan(instance):
     async with _original_lifespan(instance):
@@ -60,7 +68,13 @@ async def _qa_lifespan(instance):
             for index in range(50):
                 session.add_message(ChatMessage("assistant", f"[synthetic prior message {index + 1}]"))
             manager.save_sessions()
-        if os.getenv("ODYSSEUS_REPLAY_QA_START_RUN", "1") == "1":
+        if os.getenv("ODYSSEUS_WAIT_QA_STALLED") == "1":
+            run = agent_runs.start(SESSION_ID, _stalled_model_run(), initial_model="fixture-model")
+            run.progress.started_at = time.time() - 700
+            run.wait.phase_since = time.time() - 700
+            run.wait.endpoint_id = "fixture-endpoint"
+            agent_runs._publish(run, 'data: {"type":"agent_step","round":1}\n\n')
+        elif os.getenv("ODYSSEUS_REPLAY_QA_START_RUN", "1") == "1":
             agent_runs.start(SESSION_ID, _synthetic_run(), initial_model="fixture-model")
         yield
 

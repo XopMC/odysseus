@@ -510,6 +510,19 @@
   отсутствие page/console ошибок и отсутствие обрезания на мобильной ширине.
   Реальный зависший provider request и Team-specific phase ещё не проверены;
   пункт остаётся открытым.
+  Затем browser fixture усилена: вместо подмены `/why-waiting` два клиента
+  читают настоящий маршрут для server-owned detached run, заблокированного
+  на безопасной model-like границе без provider I/O. Повторный opt-in
+  Chromium desktop/mobile smoke после reload прошёл. Настоящий зависший
+  provider и Team phase по-прежнему открыты.
+  Усиленный reload-тест затем выявил реальный startup race: отложенное на
+  0,5 с восстановление ошибочно объявляло новый run этого же процесса
+  прерванным и ставило `[Cancelled by user]` на последнее сохранённое
+  сообщение, хотя detached run продолжал `running`. Recovery теперь
+  ограничено состояниями, существовавшими до process-start cutoff, и
+  дополнительно пропускает run с совпадающим активным in-memory ID.
+  Failing-first browser regression с настоящим durable event и unit-тест
+  обоих fences прошли. Production release/smoke ещё требуются.
 
 - 2026-09-22 ~08:40 +05: №04 начат. `ProgressTracker` отделяет транспортный
   heartbeat и обычные SSE tokens/round/tool_progress от доказанных изменений.

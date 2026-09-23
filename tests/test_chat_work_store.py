@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import uuid
@@ -579,7 +579,9 @@ def test_restart_recovery_fences_run_and_replays_once(owned_chat, canonical_run_
     monkeypatch.setattr(agent_runs, "replay_root", lambda: str(tmp_path))
     monkeypatch.delitem(agent_runs._RUNS, owned_chat, raising=False)
 
-    recovered = agent_runs.recover_durable_runs()
+    recovered = agent_runs.recover_durable_runs(
+        before_started_at=datetime.now(timezone.utc).timestamp() + 60,
+    )
     assert [state["run_id"] for state in recovered] == [run_id]
     snapshot = agent_runs.describe_run(owned_chat)
     assert snapshot["status"] == "interrupted"
@@ -594,6 +596,33 @@ def test_restart_recovery_fences_run_and_replays_once(owned_chat, canonical_run_
     assert agent_runs.recover_durable_runs() == []
     with SessionLocal() as db:
         assert db.query(DbChatMessage).filter_by(session_id=owned_chat, role="assistant").count() == first_count
+
+
+def test_startup_recovery_never_interrupts_a_new_process_run(owned_chat, canonical_run_db, monkeypatch):
+    from core.database import ChatRunState
+
+    cutoff = agent_runs.time.time()
+    run_id = uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(
+            run_id=run_id, session_id=owned_chat, owner="alice", status="running",
+            started_at=datetime.fromtimestamp(cutoff + 5, timezone.utc).replace(tzinfo=None),
+            last_seq=0, durable_seq=0,
+        ))
+    monkeypatch.delitem(agent_runs._RUNS, owned_chat, raising=False)
+    assert agent_runs.recover_durable_runs(before_started_at=cutoff) == []
+    with SessionLocal() as db:
+        assert db.get(ChatRunState, run_id).status == "running"
+
+    # Even a manually invoked recovery with a later cutoff must not claim a
+    # run that is still owned by this process's in-memory registry.
+    current = agent_runs._Run()
+    current.run_id = run_id
+    current.session_id = owned_chat
+    monkeypatch.setitem(agent_runs._RUNS, owned_chat, current)
+    assert agent_runs.recover_durable_runs(before_started_at=cutoff + 10) == []
+    with SessionLocal() as db:
+        assert db.get(ChatRunState, run_id).status == "running"
 
 
 def test_non_durable_checkpoint_never_rolls_zero_durable_cursor_back(owned_chat, canonical_run_db):

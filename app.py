@@ -1143,6 +1143,11 @@ async def _startup_event():
             from src.engineering_operations import get_manager
             _startup_tasks.append(get_manager(get_runtime().store).start())
 
+    # Recovery runs after the listener is ready. Fence it to rows that existed
+    # before this process's startup work: a new request in the delay window is
+    # not an interrupted predecessor and must never be marked cancelled.
+    chat_recovery_cutoff = time.time()
+
     async def _recover_detached_chat_work():
         """Rehydrate interrupted replay and resume active Goals server-side."""
         try:
@@ -1156,7 +1161,10 @@ async def _startup_event():
             stale_children = await asyncio.to_thread(subagent_runtime.recover_stale)
             if stale_children:
                 logger.info("[startup] fenced %d stale subagent run(s)", stale_children)
-            recovered = await asyncio.to_thread(agent_runs.recover_durable_runs)
+            recovered = await asyncio.to_thread(
+                agent_runs.recover_durable_runs,
+                before_started_at=chat_recovery_cutoff,
+            )
             recovered_by_session = {
                 str(item.get("session_id")): item.get("continuation") or {}
                 for item in recovered
