@@ -2713,6 +2713,8 @@ body.bg-pattern-sparkles {
 	    .run-inspector-run,.run-inspector-child { padding:8px; border:1px solid color-mix(in srgb,var(--accent) 25%,transparent); border-radius:8px; min-width:0; overflow-wrap:anywhere; }
 	    .run-inspector-child { margin:5px 0 0 12px; }
 	    .run-inspector-child.selected { border-color:var(--accent,var(--red)); }
+	    #run-inspector-unlinked { margin-top:10px; padding-top:8px; border-top:1px solid var(--border); }
+	    #run-inspector-unlinked-list { display:grid; gap:6px; }
 	    .run-inspector-run > button,#run-inspector-event-title { max-width:100%; overflow-wrap:anywhere; white-space:normal; }
 	    .run-inspector-field { display:grid; grid-template-columns:110px minmax(0,1fr); gap:6px; margin-top:4px; font-size:11px; }
 	    .run-inspector-field span:first-child { opacity:.7; }

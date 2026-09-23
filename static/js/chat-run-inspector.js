@@ -21,7 +21,38 @@ function field(parent, label, value) {
   row.append(name, data); parent.appendChild(row);
 }
 
-function renderRuns(runs, preferredChildId = '', append = false) {
+function childRow(child) {
+  const row = document.createElement('div'); row.className = 'run-inspector-child';
+  row.dataset.childId = child.child_run_id;
+  row.dataset.parentRunId = child.parent_run_id || '';
+  row.textContent = `${t('Child')} ${child.child_run_id} · ${t(child.status)} · ${child.model || '—'}`;
+  field(row, 'Parent run', child.parent_run_id);
+  field(row, 'Started', child.started_at); field(row, 'Finished', child.finished_at);
+  field(row, 'Event cursor', child.event_cursor);
+  for (const artifact of child.artifacts || []) {
+    const button = document.createElement('button'); button.type = 'button';
+    button.dataset.artifactId = artifact.id;
+    button.textContent = `${t('Artifact')} ${artifact.id} · ${artifact.kind} · ${t(artifact.status)} · ${artifact.created_at || '—'}`;
+    row.appendChild(button);
+  }
+  return row;
+}
+
+function highlightChild(childId) {
+  if (!childId) return;
+  const child = [...el('run-inspector-dialog').querySelectorAll('[data-child-id]')]
+    .find(node => node.dataset.childId === childId);
+  child?.classList.add('selected'); child?.scrollIntoView?.({ block: 'nearest' });
+}
+
+function renderUnlinked(children) {
+  const section = el('run-inspector-unlinked');
+  const list = el('run-inspector-unlinked-list'); list.replaceChildren();
+  for (const child of children || []) list.appendChild(childRow(child));
+  section.hidden = !list.childElementCount;
+}
+
+function renderRuns(runs, append = false) {
   const list = el('run-inspector-runs');
   if (!append) list.replaceChildren();
   for (const run of runs) {
@@ -32,28 +63,11 @@ function renderRuns(runs, preferredChildId = '', append = false) {
     section.appendChild(select);
     field(section, 'Started', run.started_at);
     field(section, 'Finished', run.terminal_at);
-    for (const child of run.children || []) {
-      const row = document.createElement('div'); row.className = 'run-inspector-child';
-      row.dataset.childId = child.child_run_id;
-      row.textContent = `${t('Child')} ${child.child_run_id} · ${t(child.status)} · ${child.model || '—'}`;
-      field(row, 'Started', child.started_at); field(row, 'Finished', child.finished_at);
-      field(row, 'Event cursor', child.event_cursor);
-      for (const artifact of child.artifacts || []) {
-        const button = document.createElement('button'); button.type = 'button';
-        button.dataset.artifactId = artifact.id;
-        button.textContent = `${t('Artifact')} ${artifact.id} · ${artifact.kind} · ${t(artifact.status)} · ${artifact.created_at || '—'}`;
-        row.appendChild(button);
-      }
-      section.appendChild(row);
-    }
+    for (const child of run.children || []) section.appendChild(childRow(child));
     for (const tool of run.tool_calls || []) {
       field(section, 'Tool', `${tool.tool_name} · ${tool.tool_call_id} · ${t(tool.status)} · ${tool.created_at || '—'}`);
     }
     list.appendChild(section);
-  }
-  if (preferredChildId) {
-    const child = [...list.querySelectorAll('[data-child-id]')].find(node => node.dataset.childId === preferredChildId);
-    child?.classList.add('selected'); child?.scrollIntoView?.({ block: 'nearest' });
   }
 }
 
@@ -111,6 +125,7 @@ async function open({ childId = '', runId: preferredRunId = '', eventSeq = null 
   sessionId = targetSession; runId = ''; beforeSeq = null; beforeRunId = null;
   const myGeneration = ++generation;
   el('run-inspector-runs').replaceChildren();
+  renderUnlinked([]);
   el('run-inspector-events').hidden = true;
   el('run-inspector-artifact').hidden = true;
   el('run-inspector-event-detail').hidden = true;
@@ -120,10 +135,12 @@ async function open({ childId = '', runId: preferredRunId = '', eventSeq = null 
   try {
     const data = await get(`/api/chat/work/${encodeURIComponent(targetSession)}/run-inspector`);
     if (generation !== myGeneration || sessionId !== targetSession) return;
-    renderRuns(data.runs || [], childId);
+    renderRuns(data.runs || []);
+    renderUnlinked(data.unlinked_children || []);
+    highlightChild(childId);
     beforeRunId = data.next_cursor || null;
     el('run-inspector-older-runs').hidden = !beforeRunId;
-    el('run-inspector-status').textContent = data.runs?.length ? '' : t('No runs');
+    el('run-inspector-status').textContent = data.runs?.length || data.unlinked_children?.length ? '' : t('No runs');
     const selected = (data.runs || []).find(run => run.run_id === preferredRunId)
       || (data.runs || []).find(run => (run.children || []).some(child => child.child_run_id === childId))
       || data.runs?.[0];
@@ -150,6 +167,7 @@ function bind() {
   }
   if (el('run-inspector-older')) el('run-inspector-older').textContent = t('Load earlier events');
   if (el('run-inspector-older-runs')) el('run-inspector-older-runs').textContent = t('Load older runs');
+  if (el('run-inspector-unlinked')) el('run-inspector-unlinked').querySelector('h3').textContent = t('Children outside loaded runs');
   el('run-inspector-close')?.setAttribute('aria-label', t('Close'));
   el('run-inspector-close')?.addEventListener('click', () => el('run-inspector-dialog')?.close());
   el('run-inspector-dialog')?.addEventListener('close', () => { ++generation; });
@@ -162,14 +180,20 @@ function bind() {
     void get(`/api/chat/work/${encodeURIComponent(targetSession)}/run-inspector?before_run_id=${encodeURIComponent(beforeRunId)}`)
       .then(data => {
         if (generation !== myGeneration || sessionId !== targetSession) return;
-        renderRuns(data.runs || [], '', true);
+        renderRuns(data.runs || [], true);
+        const linkedIds = new Set([...el('run-inspector-runs').querySelectorAll('[data-child-id]')]
+          .map(node => node.dataset.childId));
+        for (const row of el('run-inspector-unlinked-list').querySelectorAll('[data-child-id]')) {
+          if (linkedIds.has(row.dataset.childId)) row.remove();
+        }
+        el('run-inspector-unlinked').hidden = !el('run-inspector-unlinked-list').childElementCount;
         beforeRunId = data.next_cursor || null;
         button.hidden = !beforeRunId;
       })
       .catch(error => { el('run-inspector-status').textContent = error.message; })
       .finally(() => { button.disabled = false; });
   });
-  el('run-inspector-runs')?.addEventListener('click', event => {
+  el('run-inspector-dialog')?.addEventListener('click', event => {
     const artifact = event.target.closest('button[data-artifact-id]');
     if (artifact) {
       const targetSession = sessionId;

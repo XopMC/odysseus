@@ -92,6 +92,9 @@ async def _qa_lifespan(instance):
                 db.add(ChatSubagentRun(id="fixture-child", parent_session_id=SESSION_ID,
                                        parent_run_id=qa_run.run_id, owner="", objective="SAFE child",
                                        assigned_context="", model="fixture-model", status="done"))
+                db.add(ChatSubagentRun(id="orphan-child", parent_session_id=SESSION_ID,
+                                       parent_run_id="f" * 32, owner="", objective="SAFE prior child",
+                                       assigned_context="", model="fixture-model", status="done"))
                 db.flush()
                 db.add(ChatSubagentEvent(child_id="fixture-child", parent_session_id=SESSION_ID,
                                          owner="", kind="status", payload={"status": "done"}))

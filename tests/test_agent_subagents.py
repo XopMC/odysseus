@@ -413,6 +413,37 @@ def test_subagent_dispatch_preserves_current_route_parent_and_budget(monkeypatch
     assert captured["tool"] == "delegate_subagent"
 
 
+def test_subagent_parent_is_durable_run_not_security_nonce(monkeypatch):
+    captured = {}
+
+    async def dispatch(tool, content, session_id=None, owner=None, **ctx):
+        captured.update(ctx)
+        return {"output": "ok", "exit_code": 0}
+
+    monkeypatch.setattr(tool_execution, "_document_tool_dispatch", dispatch)
+    security = ToolRunSecurityContext(run_id="security-nonce")
+    description, result = asyncio.run(tool_execution.execute_tool_block(
+        SimpleNamespace(tool_type="delegate_subagent", content='{"objective":"safe"}'),
+        session_id="chat-1", owner="alice", security_context=security,
+        durable_run_id="d" * 32,
+    ))
+    assert result["exit_code"] == 0
+    assert description.startswith("delegate_subagent:")
+    assert captured["parent_run_id"] == "d" * 32
+    assert security.run_id == "security-nonce"
+
+
+def test_tool_lineage_captures_detached_or_child_run(monkeypatch):
+    from src import agent_loop
+    calls = []
+    monkeypatch.setattr("src.agent_runs.get_run_id", lambda session_id: calls.append(session_id) or "d" * 32)
+    assert agent_loop._canonical_tool_lineage_run_id("chat-1", None) == "d" * 32
+    assert calls == ["chat-1"]
+    assert agent_loop._canonical_tool_lineage_run_id("chat-1", "c" * 32) == "c" * 32
+    assert calls == ["chat-1"]
+    assert agent_loop._canonical_tool_lineage_run_id(None, None) is None
+
+
 def test_subagent_timeout_fails_closed(monkeypatch):
     monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: "same_model" if key == "agent_subagents_mode" else default)
     ctx = {

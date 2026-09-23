@@ -128,10 +128,13 @@ def test_inspector_exact_events_two_clients_and_reload():
                         page.locator("#run-inspector-close").click()
                         page.locator("#subagents-status").wait_for(state="visible", timeout=15000)
                         page.locator("#subagents-toggle").click()
-                        page.locator("#subagents-list button[data-action='view']").click()
+                        page.locator("#subagents-list button[data-action='view']").first.click()
                         page.locator("#subagent-run-inspector").click()
                         page.locator("#run-inspector-runs .run-inspector-child.selected").wait_for(state="visible", timeout=15000)
                         assert page.locator("#run-inspector-runs .run-inspector-child.selected").get_attribute("data-child-id") == "fixture-child"
+                        orphan = page.locator("#run-inspector-unlinked [data-child-id='orphan-child']")
+                        orphan.wait_for(state="visible", timeout=15000)
+                        assert "f" * 32 in orphan.inner_text()
                         page.locator("#run-inspector-runs button[data-artifact-id]").click()
                         page.locator("#run-inspector-artifact-body").get_by_text("SAFE synthetic evidence").wait_for(state="visible", timeout=15000)
                         assert page.locator("#run-inspector-artifact-body").inner_text() == "SAFE synthetic evidence"

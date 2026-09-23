@@ -1060,6 +1060,19 @@
     1280×800/390×844, переход из Why waiting/Goal/Plan/Subagents, старые
     страницы и reload. Боевой Jetson и реальный Agent-run на выбранной модели
     ещё не проверены; пункт остаётся открытым до релизного smoke.
+  - 2026-09-23: первый боевой smoke `release-b792136` подтвердил открытие
+    инспектора из Goal и точную replay-страницу, но выявил, что два старых
+    сабагента имеют parent_run_id без durable ChatRunState и поэтому не
+    отображались в дереве. Следующая локальная правка показывает такие
+    записи отдельно с исходным parent ID; unit и двухклиентный browser QA
+    прошли. Требуется повторный полный suite и боевой smoke новой ревизии.
+  - 2026-09-23: первопричина старой разорванной связи —
+    `ToolRunSecurityContext.run_id` ошибочно передавался как parent ID, хотя
+    durable `ChatRunState.run_id` другой. Новые tool/child lineage захватывают
+    exact detached run ID отдельно от security nonce; child-budget fence
+    сравнивает тот же ID. Старые записи остаются без опасной эвристической
+    перепривязки. Полный локальный pytest: 7,160 passed, 23 skipped,
+    109 subtests; нужен живой child-spawn smoke после выпуска.
 - [ ] **03. Классификация ошибок и retry policy.** Разделить timeout, rate limit, provider unload, schema mismatch, transport, context, unknown side effect; повторять только доказанно безопасные запросы с jitter и budget.
 - [ ] **04. Watchdog полезного прогресса.** Отдельно отслеживать heartbeat и реальные изменения: step, artifact, тест, diff, evidence. Оживший SSE не должен считаться прогрессом задачи.
 - [ ] **05. Детектор зацикливания.** Ловить одинаковые action→observation, повторные ошибки, A↔B циклы, монолог, бессмысленное повторное сжатие; сначала диагностический nudge, затем bounded escalation, не бесконечный автоповтор.

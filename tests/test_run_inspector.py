@@ -139,11 +139,13 @@ def test_run_inspector_auth_disabled_uses_existing_durable_owner_keys(monkeypatc
         db.flush()
         db.add(ChatRunState(run_id="b" * 32, session_id="chat",
                             owner="__odysseus_single_user__", status="done"))
-        db.add(ChatSubagentRun(id="child", parent_session_id="chat", parent_run_id="b" * 32,
+        db.add(ChatSubagentRun(id="child", parent_session_id="chat", parent_run_id="c" * 32,
                                owner="", objective="PRIVATE", model="m", status="done"))
     monkeypatch.setattr(run_inspector, "SessionLocal", factory)
     result = run_inspector.snapshot(None, "chat")
     assert len(result["runs"]) == 1
-    assert result["runs"][0]["children"][0]["child_run_id"] == "child"
+    assert result["runs"][0]["children"] == []
+    assert result["unlinked_children"][0]["child_run_id"] == "child"
+    assert result["unlinked_children"][0]["parent_run_id"] == "c" * 32
     assert "PRIVATE" not in str(result)
     engine.dispose()

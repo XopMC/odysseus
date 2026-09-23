@@ -56,8 +56,6 @@ def snapshot(owner: str | None, session_id: str, *, limit: int = 20,
         has_more = len(runs) > limit
         runs = runs[:limit]
         run_ids = [row.run_id for row in runs]
-        if not run_ids:
-            return {"runs": [], "limit": limit, "has_more": False, "next_cursor": None}
         children = db.query(
             ChatSubagentRun.id, ChatSubagentRun.parent_run_id,
             ChatSubagentRun.status, ChatSubagentRun.model,
@@ -66,7 +64,6 @@ def snapshot(owner: str | None, session_id: str, *, limit: int = 20,
         ).filter(
             ChatSubagentRun.owner == child_scope,
             ChatSubagentRun.parent_session_id == session_id,
-            ChatSubagentRun.parent_run_id.in_(run_ids),
         ).order_by(ChatSubagentRun.created_at.desc()).limit(200).all()
         intents = db.query(
             ChatToolIntent.id, ChatToolIntent.run_id,
@@ -108,7 +105,8 @@ def snapshot(owner: str | None, session_id: str, *, limit: int = 20,
     children_by_run = {}
     for row in children:
         children_by_run.setdefault(row.parent_run_id, []).append({
-            "child_run_id": row.id, "worker_id": row.worker_id,
+            "child_run_id": row.id, "parent_run_id": row.parent_run_id,
+            "worker_id": row.worker_id,
             "status": row.status, "model": row.model,
             "endpoint_id": row.endpoint_id,
             "started_at": _stamp(row.started_at),
@@ -124,6 +122,8 @@ def snapshot(owner: str | None, session_id: str, *, limit: int = 20,
             "created_at": _stamp(row.created_at),
             "updated_at": _stamp(row.updated_at),
         })
+    unlinked_children = [child for parent, items in children_by_run.items()
+                         if parent not in run_ids for child in items]
     return {"runs": [{
         "run_id": row.run_id, "status": row.status,
         "started_at": _stamp(row.started_at),
@@ -132,7 +132,8 @@ def snapshot(owner: str | None, session_id: str, *, limit: int = 20,
         "context_revision": row.context_revision,
         "children": children_by_run.get(row.run_id, []),
             "tool_calls": intents_by_run.get(row.run_id, []),
-    } for row in runs], "limit": limit, "has_more": has_more,
+    } for row in runs], "unlinked_children": unlinked_children,
+            "limit": limit, "has_more": has_more,
             "next_cursor": runs[-1].run_id if has_more else None,
             "truncated": {"children": len(children) == 200,
                           "tool_calls": len(intents) == 500,

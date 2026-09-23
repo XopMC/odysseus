@@ -5,6 +5,7 @@ const RU = Object.freeze({
   'Child':'Сабагент', 'Artifact':'Артефакт', 'Events':'События', 'Event':'Событие',
   'Run':'Запуск', 'Tool call':'Вызов инструмента', 'Segment':'Сегмент',
   'Event cursor':'Курсор событий',
+  'Parent run':'Родительский запуск', 'Children outside loaded runs':'Сабагенты вне загруженных запусков',
   'Load earlier events':'Загрузить ранние события', 'No runs':'Запусков нет',
   'Load older runs':'Загрузить старые запуски',
   'Replay unavailable':'История событий недоступна',

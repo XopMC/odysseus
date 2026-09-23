@@ -3691,6 +3691,15 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
+def _canonical_tool_lineage_run_id(session_id: Optional[str], child_run_id: Optional[str]) -> Optional[str]:
+    if child_run_id:
+        return child_run_id
+    if not session_id:
+        return None
+    from src import agent_runs
+    return agent_runs.get_run_id(session_id)
+
+
 async def stream_agent_loop(
     endpoint_url: str,
     model: str,
@@ -3765,6 +3774,10 @@ async def stream_agent_loop(
         access_mode=access_mode,
         delegated_credential=bool(delegated_credential),
     )
+    # Capture once, before any tool dispatch. The security nonce above serves
+    # approval/taint integrity but is not the durable replay run ID. A later
+    # replacement run must not reparent children created by this attempt.
+    lineage_run_id = _canonical_tool_lineage_run_id(session_id, child_run_id)
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
@@ -5147,6 +5160,7 @@ async def stream_agent_loop(
                     progress_cb=_push_approved_progress,
                     workspace=workspace,
                     security_context=run_security,
+                    durable_run_id=lineage_run_id,
                     exact_approval=exact_approval,
                     current_endpoint_url=_last_route_endpoint_url,
                     current_model=model,
@@ -7347,6 +7361,7 @@ async def stream_agent_loop(
                             progress_cb=_push_progress,
                             workspace=workspace,
                             security_context=run_security,
+                            durable_run_id=lineage_run_id,
                             current_endpoint_url=_last_route_endpoint_url,
                             current_model=model,
                             current_headers=headers,
@@ -7972,7 +7987,7 @@ async def stream_agent_loop(
                 _child_used = result.get("used")
                 _child_limit = result.get("limit")
                 if (type(_child_used) is int and type(_child_limit) is int
-                        and result.get("run_id") == run_security.run_id):
+                        and result.get("run_id") == (lineage_run_id or run_security.run_id)):
                     from src import agent_runs as _child_budget_runs
                     _child_run_id = _child_budget_runs.get_run_id(session_id) if session_id else None
                     yield f'data: {json.dumps({"type": "budget_exceeded", "resource": "children", "used": _child_used, "limit": _child_limit, "run_id": _child_run_id or run_security.run_id})}\n\n'

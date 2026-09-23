@@ -998,6 +998,7 @@ async def execute_tool_block(
     registry_access_provider: Optional[Callable[[], ToolAccess]] = None,
     allowed_tools: Optional[set] = None,
     plan_recovery: bool = False,
+    durable_run_id: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1150,7 +1151,10 @@ async def execute_tool_block(
             current_endpoint_url=current_endpoint_url,
             current_model=current_model,
             current_headers=current_headers,
-            parent_run_id=getattr(security_context, "run_id", None),
+            # The tool security nonce is not the detached replay run ID. Keep
+            # authorization bound to security_context, but record child and
+            # artifact lineage against the durable parent when available.
+            parent_run_id=durable_run_id or getattr(security_context, "run_id", None),
             subagent_state=subagent_state,
             workspace=workspace,
             access_mode=(security_context.access_mode if isinstance(security_context, ToolRunSecurityContext) else ""),
