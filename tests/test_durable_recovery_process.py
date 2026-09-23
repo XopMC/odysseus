@@ -107,6 +107,79 @@ def test_process_kill_after_tool_start_recovers_without_reexecution(tmp_path):
     assert state["effect_events"][0]["payload"]["status"] == "unknown"
 
 
+def test_process_kill_after_tool_result_keeps_receipt_and_replays_result_once(tmp_path):
+    crashed = _run_script("""
+        import asyncio
+        import os
+        from core.database import Base, ChatMessage, ChatRunState, ChatToolIntent, ChatWorkEvent, Session, SessionLocal, engine
+        from src import agent_runs
+        from src.chat_effect_inbox import inbox
+
+        Base.metadata.create_all(bind=engine, tables=[
+            Session.__table__, ChatMessage.__table__, ChatRunState.__table__,
+            ChatToolIntent.__table__, ChatWorkEvent.__table__,
+        ])
+        with SessionLocal.begin() as db:
+            db.add(Session(id='tool-result-fixture', name='Safe tool result fixture', owner='alice',
+                           endpoint_url='http://fixture.invalid/v1', model='fixture'))
+
+        async def source():
+            yield 'data: {"type":"agent_step","round":1}\\n\\n'
+            yield 'data: {"type":"tool_start","tool":"write_file","tool_call_id":"call-safe","round":1}\\n\\n'
+            yield 'data: {"type":"tool_output","tool":"write_file","tool_call_id":"call-safe","exit_code":0,"output":"safe-fixture-result"}\\n\\n'
+            os._exit(17)
+
+        async def main():
+            run = agent_runs.start('tool-result-fixture', source(), owner='alice')
+            intent = inbox.record_intent(
+                'alice', 'tool-result-fixture', run.run_id, 'call-safe',
+                'write_file', '{"path":"fixture.txt","content":"safe"}',
+            )
+            inbox.record_result('alice', 'tool-result-fixture', intent['id'], {
+                'exit_code': 0, 'outcome_unknown': False,
+            })
+            await run.task
+
+        asyncio.run(main())
+    """, tmp_path)
+    assert crashed.returncode == 17, crashed.stderr
+
+    restarted = _run_script("""
+        import json
+        from core.database import ChatMessage, ChatToolIntent, SessionLocal
+        from src import agent_runs
+        from src.chat_effect_inbox import inbox
+
+        recovered = agent_runs.recover_durable_runs()
+        second = agent_runs.recover_durable_runs()
+        page = agent_runs.event_page('tool-result-fixture', after_seq=-1)
+        with SessionLocal() as db:
+            intent = db.query(ChatToolIntent).filter_by(
+                session_id='tool-result-fixture', tool_call_id='call-safe',
+            ).one()
+            assistants = db.query(ChatMessage).filter_by(
+                session_id='tool-result-fixture', role='assistant',
+            ).count()
+        print(json.dumps({
+            'recovered': len(recovered), 'second': len(second),
+            'status': agent_runs.describe_run('tool-result-fixture')['status'],
+            'types': [row['data']['type'] for row in page['events']],
+            'intent_status': intent.status, 'intent_revision': intent.revision,
+            'unresolved': [row['status'] for row in inbox.unresolved('alice', 'tool-result-fixture')],
+            'assistants': assistants,
+        }))
+    """, tmp_path)
+    assert restarted.returncode == 0, restarted.stderr
+    state = json.loads(restarted.stdout.strip().splitlines()[-1])
+    assert state['recovered'] == 1
+    assert state['second'] == 0
+    assert state['status'] == 'interrupted'
+    assert state['types'] == ['agent_step', 'tool_start', 'tool_output']
+    assert (state['intent_status'], state['intent_revision']) == ('done', 2)
+    assert state['unresolved'] == []
+    assert state['assistants'] == 1
+
+
 def test_missing_replay_still_fences_effect_and_notifies_once(tmp_path):
     created = _run_script("""
         from core.database import Base, ChatRunState, ChatToolIntent, ChatWorkEvent, Session, SessionLocal, engine
