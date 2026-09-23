@@ -1140,6 +1140,10 @@
     fencing, затем 33 теста store/stream прошли; полный pytest — 6999 passed,
     20 skipped, 109 subtests passed. Live race пока не проверен.
 - [ ] **09. Run health SLO.** Метрики TTFT, prefill, tool latency, durable lag, SSE reconnect, UI long tasks, compaction time/failure, child queue wait; алерты на нарушение заданных порогов.
+  - 2026-09-23: bounded tool-start telemetry: в длительном run незавершённые
+    замеры latency ограничены 256 ключами и сроком 1 час; старые или потерянные
+    результаты не создают ложную latency. Regression test покрывает 300 вызовов
+    и поздний output. Сам пункт остаётся открытым до проверки всех SLO/алертов.
 - [x] **10. Экспорт технического инцидента.** Один owner-scoped архив со схемой событий, версиями, обезличенными метриками и ошибками без содержимого чата/секретов; воспроизводимый test fixture.
 
 ## P0 — безопасные изменения и выпуск

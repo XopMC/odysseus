@@ -4,6 +4,9 @@ import time
 
 
 class RunHealthTelemetry:
+    _MAX_PENDING_TOOLS = 256
+    _MAX_TOOL_AGE_SECONDS = 3600
+
     def __init__(self, started_at: float) -> None:
         self.round_started_at = started_at
         self.round_first_token_seen = False
@@ -40,9 +43,14 @@ class RunHealthTelemetry:
         elif kind == "tool_start":
             key = payload.get("tool_call_id") or payload.get("tool")
             if isinstance(key, str) and len(key) <= 200:
+                self._prune_tool_starts(now)
+                self.tool_started.pop(key, None)
                 self.tool_started[key] = now
+                while len(self.tool_started) > self._MAX_PENDING_TOOLS:
+                    self.tool_started.pop(next(iter(self.tool_started)))
         elif kind == "tool_output":
             key = payload.get("tool_call_id") or payload.get("tool")
+            self._prune_tool_starts(now)
             started = self.tool_started.pop(key, None) if isinstance(key, str) else None
             if started is not None:
                 elapsed = max(0.0, now - started) * 1000
@@ -59,6 +67,12 @@ class RunHealthTelemetry:
             value = data.get("prefill_tps") if isinstance(data, dict) else None
             if type(value) in (int, float) and 0 < value < 1_000_000:
                 self.prefill_tps_last = round(value, 2)
+
+    def _prune_tool_starts(self, now: float) -> None:
+        cutoff = now - self._MAX_TOOL_AGE_SECONDS
+        for key, started in tuple(self.tool_started.items()):
+            if started < cutoff:
+                self.tool_started.pop(key, None)
 
     def _compaction_duration(self, payload: dict) -> None:
         value = payload.get("duration_ms")

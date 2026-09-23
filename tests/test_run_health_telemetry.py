@@ -35,6 +35,21 @@ def test_tool_latency_without_start_is_not_invented():
     assert metrics.snapshot()["tool_latency_count"] == 0
 
 
+def test_pending_tool_latency_tracking_is_bounded_for_long_runs():
+    metrics = RunHealthTelemetry(100.0)
+    for index in range(300):
+        metrics.observe({"type": "tool_start", "tool_call_id": f"call-{index}"},
+                        now=100.0 + index)
+    assert len(metrics.tool_started) == 256
+    assert "call-0" not in metrics.tool_started
+    metrics.observe({"type": "tool_output", "tool_call_id": "call-299"}, now=400.0)
+    assert metrics.snapshot()["tool_latency_count"] == 1
+    metrics.observe({"type": "tool_start", "tool_call_id": "fresh"}, now=4000.0)
+    assert list(metrics.tool_started) == ["fresh"]
+    metrics.observe({"type": "tool_output", "tool_call_id": "call-298"}, now=4001.0)
+    assert metrics.snapshot()["tool_latency_count"] == 1
+
+
 def test_active_run_summary_has_only_numeric_latency(monkeypatch):
     from src import agent_runs
 
