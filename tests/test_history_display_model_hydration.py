@@ -333,6 +333,64 @@ def test_idle_checkpoint_context_does_not_hydrate_archived_timeline(monkeypatch)
     engine.dispose()
 
 
+def test_active_checkpoint_archive_stays_compact_but_full_history_and_rewrite_preserve_metadata(monkeypatch):
+    engine, db_factory = _database()
+    _seed_session(db_factory, message_count=5)
+    from src import tool_approval_scopes
+    monkeypatch.setattr(tool_approval_scopes, "_grant_key", lambda: b"test-key")
+    signature = tool_approval_scopes.sign_chat_session_grant("session-1", "approval-1", "approve")
+    original = {
+        "timeline_v2": {"events": [{"type": "delta", "text": "old reasoning" * 500}]},
+        "tool_events": [
+            {"tool": "bash", "output": "old output"},
+            {"ask_user": {"kind": "tool_approval", "approval_id": "approval-1",
+                          "session_id": "session-1", "resolved": "approve", "_server_grant": signature}},
+        ],
+        "hidden": False,
+    }
+    with db_factory.begin() as db:
+        row = db.query(DbSession).filter_by(id="session-1").one()
+        row.context_checkpoint = {"role": "system", "content": "short summary", "metadata": {}}
+        row.context_checkpoint_count = 3
+        db.query(DbChatMessage).filter_by(id="message-0").one().meta_data = json.dumps(original)
+        db.query(DbChatMessage).filter_by(id="message-3").one().meta_data = json.dumps({"round_reasonings": ["latest reasoning"]})
+
+    manager = _manager(db_factory, monkeypatch)
+    session = manager.get_session("session-1")
+    assert len(session.history) == 5
+    assert hasattr(session.history[0], "_archived_metadata_zlib")
+    assert "timeline_v2" not in session.history[0].metadata
+    assert len(session.history[0].metadata["tool_events"]) == 1
+    assert session.history[3].metadata["round_reasonings"] == ["latest reasoning"]
+    context = session.get_context_messages()
+    assert [item["content"] for item in context] == ["short summary", "content-3", "content-4"]
+    assert context[-1]["metadata"]["_tool_approval_chat_session_granted"] is True
+
+    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(manager))
+    full = TestClient(app).get("/api/history/session-1")
+    assert full.status_code == 200
+    assert full.json()["history"][0]["metadata"]["timeline_v2"]["event_count"] == 1
+
+    packed = session.history[0]._archived_metadata_zlib
+    session.history[0]._archived_metadata_zlib = b"corrupt"
+    assert manager.replace_messages("session-1", session.history) is False
+    with db_factory() as db:
+        assert db.query(DbChatMessage).filter_by(session_id="session-1").count() == 5
+        assert json.loads(db.query(DbChatMessage).filter_by(id="message-0").one().meta_data)["timeline_v2"] == original["timeline_v2"]
+    session.history[0]._archived_metadata_zlib = packed
+    assert manager.replace_messages("session-1", session.history) is True
+    with db_factory() as db:
+        first = db.query(DbChatMessage).filter_by(session_id="session-1").order_by(DbChatMessage.timestamp).first()
+        meta = json.loads(first.meta_data)
+        assert meta["timeline_v2"] == original["timeline_v2"]
+        assert len(meta["tool_events"]) == 2
+    assert not hasattr(session.history[0], "_archived_metadata_zlib")
+    engine.dispose()
+
+
 def test_stale_checkpoint_offset_falls_back_to_full_session(monkeypatch):
     engine, db_factory = _database()
     _seed_session(db_factory, message_count=2)

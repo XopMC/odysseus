@@ -11,6 +11,7 @@ This is the single place that handles:
 import json
 import uuid
 import logging
+import zlib
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 
@@ -60,6 +61,45 @@ def _parse_msg_content(raw):
         except (json.JSONDecodeError, ValueError):
             pass
     return raw
+
+
+def _archived_message_metadata(raw: Optional[str], db_id: str, timestamp) -> tuple[dict, Optional[bytes]]:
+    """Keep only runtime markers for checkpoint-covered history in RAM.
+
+    The complete metadata stays durable in SQLite and in a compressed fallback
+    for operations that explicitly rewrite the whole transcript. This avoids
+    expanding old timeline/tool arrays for every active model request.
+    """
+    meta = json.loads(raw) if raw else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    slim = {key: meta[key] for key in ("hidden", "compacted", "source") if key in meta}
+    approvals = [
+        event for event in meta.get("tool_events", [])
+        if isinstance(event, dict)
+        and isinstance(event.get("ask_user"), dict)
+        and event["ask_user"].get("kind") == "tool_approval"
+    ] if isinstance(meta.get("tool_events"), list) else []
+    if approvals:
+        slim["tool_events"] = approvals
+    slim["_db_id"] = db_id
+    if timestamp:
+        slim["timestamp"] = _message_timestamp_iso(timestamp)
+    return slim, zlib.compress(raw.encode("utf-8"), 6) if raw else None
+
+
+def _full_message_metadata(message: ChatMessage) -> dict:
+    """Reconstitute a checkpoint-covered row before any full-history rewrite."""
+    archived = getattr(message, "_archived_metadata_zlib", None)
+    if archived is None:
+        return dict(message.metadata or {})
+    original = json.loads(zlib.decompress(archived).decode("utf-8"))
+    if not isinstance(original, dict):
+        raise ValueError("Archived message metadata is not an object")
+    for key, value in (message.metadata or {}).items():
+        if key not in {"tool_events", "_db_id", "timestamp"}:
+            original[key] = value
+    return original
 
 
 class SessionManager:
@@ -162,36 +202,40 @@ class SessionManager:
     def _db_to_session(self, db_session: DbSession, db) -> Optional[Session]:
         """Convert a database session to a Session object."""
         history = []
-
-        # Try relationship first, then direct query
-        if db_session.messages:
-            for db_msg in db_session.messages:
+        raw_checkpoint = getattr(db_session, "context_checkpoint", None)
+        stored_count = db.query(func.count(DbChatMessage.id)).filter(
+            DbChatMessage.session_id == db_session.id,
+        ).scalar() or 0
+        covered = int(getattr(db_session, "context_checkpoint_count", 0) or 0)
+        archive_prefix = bool(
+            isinstance(raw_checkpoint, dict) and raw_checkpoint.get("role")
+            and 0 < covered <= stored_count
+        )
+        db_messages = (db.query(DbChatMessage)
+                       .filter(DbChatMessage.session_id == db_session.id)
+                       .order_by(DbChatMessage.timestamp, DbChatMessage.id)
+                       .yield_per(100))
+        for index, db_msg in enumerate(db_messages):
+            if archive_prefix and index < covered:
+                meta, packed = _archived_message_metadata(
+                    db_msg.meta_data, db_msg.id, db_msg.timestamp,
+                )
+            else:
                 meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}
-                if meta is None: meta = {}
-                meta['_db_id'] = db_msg.id
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["_db_id"] = db_msg.id
                 if db_msg.timestamp:
-                    meta['timestamp'] = _message_timestamp_iso(db_msg.timestamp)
-                history.append(ChatMessage(
-                    role=db_msg.role,
-                    content=_parse_msg_content(db_msg.content),
-                    metadata=meta,
-                ))
-        else:
-            db_messages = db.query(DbChatMessage).filter(
-                DbChatMessage.session_id == db_session.id
-            ).order_by(DbChatMessage.timestamp).all()
-
-            for db_msg in db_messages:
-                meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}
-                if meta is None: meta = {}
-                meta['_db_id'] = db_msg.id
-                if db_msg.timestamp:
-                    meta['timestamp'] = _message_timestamp_iso(db_msg.timestamp)
-                history.append(ChatMessage(
-                    role=db_msg.role,
-                    content=_parse_msg_content(db_msg.content),
-                    metadata=meta,
-                ))
+                    meta["timestamp"] = _message_timestamp_iso(db_msg.timestamp)
+                packed = None
+            message = ChatMessage(
+                role=db_msg.role,
+                content=_parse_msg_content(db_msg.content),
+                metadata=meta,
+            )
+            if packed is not None:
+                message._archived_metadata_zlib = packed
+            history.append(message)
 
         if not history:
             return None
@@ -224,7 +268,6 @@ class SessionManager:
         # number; seeding it from a drifted column would ask for a reload that
         # can never close the gap.
         session.message_count = len(history)
-        raw_checkpoint = getattr(db_session, "context_checkpoint", None)
         if isinstance(raw_checkpoint, dict) and raw_checkpoint.get("role"):
             session.context_checkpoint = ChatMessage(raw_checkpoint["role"], raw_checkpoint.get("content", ""), raw_checkpoint.get("metadata"))
             session.context_checkpoint_count = int(getattr(db_session, "context_checkpoint_count", 0) or 0)
@@ -377,12 +420,13 @@ class SessionManager:
             # with cleanup, so an upload cannot be deleted between this
             # ownership check/access touch and the replacement transaction.
             # A failed reservation must leave the existing transcript intact.
-            for message in messages:
+            full_metadata = [_full_message_metadata(message) for message in messages]
+            for message, metadata in zip(messages, full_metadata):
                 missing_upload_id = reserve_message_upload_references(
                     getattr(self, "upload_handler", None),
                     getattr(db_session, "owner", None),
                     message.content,
-                    message.metadata,
+                    metadata,
                 )
                 if missing_upload_id:
                     raise ValueError(
@@ -398,22 +442,21 @@ class SessionManager:
             except Exception:
                 logger.debug("Run-state cleanup skipped for %s", session_id, exc_info=True)
             now = datetime.now(timezone.utc)
-            for i, message in enumerate(messages):
+            new_ids = []
+            for i, (message, metadata) in enumerate(zip(messages, full_metadata)):
                 msg_id = str(uuid.uuid4())
+                new_ids.append(msg_id)
                 db_message = DbChatMessage(
                     id=msg_id,
                     session_id=session_id,
                     role=message.role,
                     # Mirrors _persist_message: keep raw media bytes out of the
                     # persisted transcript and search index.
-                    content=persistable_message_content(message.content, message.metadata),
-                    meta_data=json.dumps(message.metadata) if message.metadata else None,
+                    content=persistable_message_content(message.content, metadata),
+                    meta_data=json.dumps(metadata) if metadata else None,
                     timestamp=now + timedelta(microseconds=i),
                 )
                 db.add(db_message)
-                if message.metadata is None:
-                    message.metadata = {}
-                message.metadata["_db_id"] = msg_id
 
             db_session.message_count = len(messages)
             db_session.updated_at = now
@@ -421,6 +464,11 @@ class SessionManager:
             db_session.last_message_at = now
 
             db.commit()
+            for message, metadata, msg_id in zip(messages, full_metadata, new_ids):
+                message.metadata = metadata
+                message.metadata["_db_id"] = msg_id
+                if hasattr(message, "_archived_metadata_zlib"):
+                    delattr(message, "_archived_metadata_zlib")
             session.history = list(messages)
             session._history = session.history
             session.message_count = len(messages)

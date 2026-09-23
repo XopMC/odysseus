@@ -610,7 +610,25 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, f"Session '{session_id}' not found")
 
         history_dict = []
-        for msg in session.history:
+        archived_metadata_elided = any(
+            hasattr(msg, "_archived_metadata_zlib") for msg in session.history
+        )
+        if archived_metadata_elided:
+            # The model cache retains a compact checkpoint-covered prefix.
+            # Explicit legacy full-history export must still return original
+            # thinking/tool metadata, just like the paginated DB-backed path.
+            db = SessionLocal()
+            try:
+                db_messages = (db.query(DbChatMessage)
+                               .filter(DbChatMessage.session_id == session_id)
+                               .order_by(DbChatMessage.timestamp, DbChatMessage.id).all())
+                history_dict = [
+                    entry for entry in (_db_history_entry(m) for m in db_messages)
+                    if not (entry.get("metadata") or {}).get("hidden")
+                ]
+            finally:
+                db.close()
+        for msg in ([] if archived_metadata_elided else session.history):
             if isinstance(msg, ChatMessage):
                 # Skip hidden messages (e.g. compaction summaries for AI context)
                 if msg.metadata and msg.metadata.get("hidden"):
