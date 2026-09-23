@@ -26,6 +26,7 @@ from src.llm_core import (
 )
 from src.agent_loop import stream_agent_loop
 from src import agent_runs
+from src.run_wait_state import selected_endpoint_host
 from src.model_context import estimate_tokens
 from src.agent_context import context_endpoint_key
 from src.context_compactor import (
@@ -3093,6 +3094,8 @@ def setup_chat_routes(
             _safe_stream(),
             on_terminal=_goal_terminal_controller,
             owner=_user,
+            initial_model=sess.model,
+            initial_endpoint_label=selected_endpoint_host(sess.endpoint_url),
             continuation={
                 "allow_bash": str(allow_bash).lower() == "true",
                 "allow_web_search": bool(_search_enabled),

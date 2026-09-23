@@ -41,6 +41,44 @@ def test_wait_phase_tracks_model_tool_and_user_boundaries(monkeypatch):
     assert agent_runs.describe_run(run.session_id)["wait_state"]["phase"] == "approval"
 
 
+@pytest.mark.asyncio
+async def test_detached_run_seeds_safe_route_and_fallback_replaces_it(monkeypatch):
+    from src.run_wait_state import RunWaitTracker
+
+    monkeypatch.setattr(agent_runs, "_RUNS", {})
+    monkeypatch.setattr(agent_runs, "_persist_run_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_runs, "continuation_for_session", lambda *_a: {})
+    monkeypatch.delenv("ODYSSEUS_DURABLE_CHAT_REPLAY", raising=False)
+
+    async def source():
+        yield "data: [DONE]\n\n"
+
+    run = agent_runs.start(
+        "safe-route-fixture", source(), initial_model="requested-model",
+        initial_endpoint_label="192.168.50.4:1234",
+    )
+    assert run.wait.snapshot("running")["endpoint_label"] == "192.168.50.4:1234"
+    assert run.wait.snapshot("running")["model"] == "requested-model"
+    await run.task
+
+    tracker = RunWaitTracker(100)
+    tracker.endpoint_label = "192.168.50.4:1234"
+    tracker.observe({"type": "model_actual", "model": "fallback-model",
+                     "endpoint_id": "fallback-route", "endpoint_label": "Selected route"}, now=101)
+    assert tracker.snapshot("running", now=102)["endpoint_id"] == "fallback-route"
+    assert tracker.snapshot("running", now=102)["endpoint_label"] is None
+    tracker.observe({"type": "model_actual", "model": "fallback-model",
+                     "endpoint_id": "fallback-route", "endpoint_label": "Worker GPU"}, now=103)
+    assert tracker.snapshot("running", now=104)["endpoint_label"] == "Worker GPU"
+
+    unsafe = agent_runs.start(
+        "unsafe-route-fixture", source(),
+        initial_endpoint_label="https://user:secret@model.example:1234/v1?key=private",
+    )
+    assert unsafe.wait.snapshot("running")["endpoint_label"] is None
+    await unsafe.task
+
+
 def test_selected_endpoint_fallback_is_redacted_and_not_actual_route():
     from src.run_wait_state import compose_wait_panel, selected_endpoint_host
 

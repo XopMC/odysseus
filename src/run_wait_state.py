@@ -63,8 +63,15 @@ class RunWaitTracker:
         kind = payload.get("type")
         if kind == "model_actual":
             self.model = _label(payload.get("model"), 200) or self.model
-            self.endpoint_id = _label(payload.get("endpoint_id"), 200) or self.endpoint_id
-            self.endpoint_label = _label(payload.get("endpoint_label"), 120) or self.endpoint_label
+            actual_id = _label(payload.get("endpoint_id"), 200)
+            actual_label = _label(payload.get("endpoint_label"), 120)
+            if actual_id and actual_id != self.endpoint_id:
+                self.endpoint_id = actual_id
+                # A fallback with no useful label must show its actual ID,
+                # never the previous route's host as if it answered.
+                self.endpoint_label = ""
+            if actual_label and actual_label != "Selected route":
+                self.endpoint_label = actual_label
         elif kind == "context_usage":
             data = payload.get("data")
             if isinstance(data, dict):

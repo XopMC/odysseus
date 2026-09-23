@@ -1461,6 +1461,8 @@ def start(
     on_terminal: Optional[Callable[[str], Awaitable[None]]] = None,
     owner: Optional[str] = None,
     continuation: Optional[dict] = None,
+    initial_model: Optional[str] = None,
+    initial_endpoint_label: Optional[str] = None,
 ) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
@@ -1470,6 +1472,14 @@ def start(
     run.on_terminal = on_terminal
     run.session_id = str(session_id)
     run.owner = str(owner or "").strip() or None
+    # The model_actual event later replaces this with the actual route, even
+    # after fallback. Seed the requested route so the wait inspector is useful
+    # before TTFT and after a terminal run that emitted no model_actual event.
+    run.wait.model = str(initial_model or "").replace("\r", " ").replace("\n", " ")[:200]
+    endpoint_label = str(initial_endpoint_label or "")
+    run.wait.endpoint_label = (
+        endpoint_label if re.fullmatch(r"[A-Za-z0-9.:[\]-]{1,120}", endpoint_label) else ""
+    )
     prior_continuation = continuation_for_session(session_id)
     run.continuation = {
         **({"working_checkpoint": prior_continuation["working_checkpoint"]}
