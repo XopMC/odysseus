@@ -145,7 +145,12 @@ def create_clone(*, source_session_id: str, owner: str, model: str,
             clone.project_id = None
             clone.headers = {}
             clone.message_count = generated + (len(existing) if destination_session_id else 0)
-            clone.context_checkpoint = None
+            clone.context_checkpoint = {
+                "role": "system",
+                "content": "Synthetic test archive. Earlier rows are UI-only fixture data; no source conversation is available.",
+                "metadata": {"synthetic_soak_fixture": True},
+            }
+            clone.context_checkpoint_count = max(0, generated + (len(existing) if destination_session_id else 0) - 50)
             clone.last_message_at = now
             clone.updated_at = now
             db.flush()
@@ -185,12 +190,31 @@ def create_clone(*, source_session_id: str, owner: str, model: str,
         "visible_rows": visible,
         "source_chars": original_chars,
         "synthetic_chars": synthetic_chars,
+        "working_tail_rows": min(50, generated),
     }
+
+
+def checkpoint_existing_fixture(*, session_id: str, owner: str) -> dict[str, Any]:
+    """Repair only a synthetic fixture; never mutate a normal conversation."""
+    with SessionLocal.begin() as db:
+        clone = db.query(Session).filter_by(id=session_id, owner=owner).first()
+        if clone is None or clone.folder != "Safe soak" or clone.project_id is not None:
+            raise ValueError("not an owner-scoped safe soak fixture")
+        count = db.query(ChatMessage).filter_by(session_id=session_id).count()
+        if count < 50:
+            raise ValueError("fixture is too small for an archive checkpoint")
+        clone.context_checkpoint = {
+            "role": "system",
+            "content": "Synthetic test archive. Earlier rows are UI-only fixture data; no source conversation is available.",
+            "metadata": {"synthetic_soak_fixture": True},
+        }
+        clone.context_checkpoint_count = count - 50
+    return {"session_id": session_id, "rows": count, "working_tail_rows": 50}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-session-id", required=True)
+    parser.add_argument("--source-session-id")
     parser.add_argument("--owner", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--endpoint-url", required=True)
@@ -199,7 +223,15 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Only report safe counts and generated sizes; make no writes")
     parser.add_argument("--max-source-rows", type=int, default=10000)
     parser.add_argument("--target-rows", type=int, help="Expand sanitized shapes to a bounded larger synthetic history")
+    parser.add_argument("--checkpoint-existing-fixture", action="store_true")
     args = parser.parse_args()
+    if args.checkpoint_existing_fixture:
+        if not args.destination_session_id:
+            parser.error("--destination-session-id is required for checkpoint repair")
+        print(json.dumps(checkpoint_existing_fixture(session_id=args.destination_session_id, owner=args.owner), sort_keys=True))
+        return
+    if not args.source_session_id:
+        parser.error("--source-session-id is required")
     print(json.dumps(create_clone(
         source_session_id=args.source_session_id, owner=args.owner,
         model=args.model, endpoint_url=args.endpoint_url, name=args.name,

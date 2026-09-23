@@ -38,7 +38,7 @@ def test_sanitized_clone_has_no_source_text_goal_or_workspace(monkeypatch):
         clone = db.query(Session).filter_by(id=result["clone_id"]).one()
         messages = db.query(ChatMessage).filter_by(session_id=clone.id).all()
         assert clone.owner == "alice"
-        assert clone.project_id is None and clone.context_checkpoint is None
+        assert clone.project_id is None and clone.context_checkpoint["metadata"]["synthetic_soak_fixture"] is True
         assert clone.model == "safe-model" and clone.endpoint_url == "http://safe"
         assert len(messages) == result["synthetic_rows"] == 2
         for message in messages:
@@ -48,6 +48,24 @@ def test_sanitized_clone_has_no_source_text_goal_or_workspace(monkeypatch):
         assert len(metadata["round_reasonings"]) == 1
         assert len(metadata["tool_events"]) == 1
         assert metadata["tool_events"][0]["tool"] == "synthetic_check"
+    engine.dispose()
+
+
+def test_fixture_checkpoint_keeps_large_archive_out_of_working_context(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[Session.__table__, ChatMessage.__table__])
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(soak, "SessionLocal", factory)
+    with factory.begin() as db:
+        db.add(Session(id="source", owner="alice", name="source", model="old", endpoint_url="http://old"))
+        db.add(ChatMessage(id="m1", session_id="source", role="user", content="private"))
+    result = soak.create_clone(source_session_id="source", owner="alice", model="safe",
+                               endpoint_url="http://safe", target_rows=6000)
+    with factory() as db:
+        clone = db.query(Session).filter_by(id=result["clone_id"]).one()
+        assert clone.context_checkpoint_count == 5950
+    repaired = soak.checkpoint_existing_fixture(session_id=result["clone_id"], owner="alice")
+    assert repaired["working_tail_rows"] == 50
     engine.dispose()
 
 
