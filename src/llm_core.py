@@ -2310,6 +2310,29 @@ def _model_error_category(
     return "provider_error"
 
 
+def _stream_transport_error_chunk(error: Exception, target_url: str) -> str:
+    """Expose a stable category, never an exception string or URL credentials.
+
+    Once a POST may have reached the provider, a transport failure has an
+    unknown outcome. A caller must not infer that replaying it is safe.
+    """
+    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+        status, category = 503, "transport"
+        message = f"Cannot reach {redact_url(_host_key(target_url))}"
+    elif isinstance(error, httpx.PoolTimeout):
+        status, category, message = 504, "timeout", "Connection pool timeout"
+    elif isinstance(error, (httpx.ReadTimeout, httpx.WriteTimeout)):
+        status, category, message = 504, "unknown_outcome", "Upstream timeout"
+    elif isinstance(error, (httpx.ProtocolError, httpx.NetworkError)):
+        status, category, message = 502, "unknown_outcome", "Upstream transport error"
+    else:
+        status, category, message = 502, "unknown_outcome", "Model stream failed"
+    # Pool acquisition failed before a connection/request existed, so another
+    # configured route is safe. All other transport outcomes remain fenced.
+    fallback_eligible = isinstance(error, httpx.PoolTimeout)
+    return f'event: error\ndata: {json.dumps({"error": message, "status": status, "fallback_eligible": fallback_eligible, "error_category": category})}\n\n'
+
+
 async def llm_call_async_with_route_fallback(
     candidates,
     messages,
@@ -2841,7 +2864,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         return f'data: {json.dumps(denial)}\n\n'
 
     if _is_host_dead(target_url):
-        yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
+        yield f'event: error\ndata: {json.dumps({"error": f"Upstream {redact_url(_host_key(target_url))} unreachable (cooldown active)", "status": 503, "fallback_eligible": False, "error_category": "transport"})}\n\n'
         return
     note_model_activity(target_url, model)
     degenerate_guard = _DegenerateStreamGuard(model)
@@ -2955,21 +2978,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"ChatGPT Subscription stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
-        except httpx.PoolTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-        except httpx.WriteTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-        except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
+            logger.warning("ChatGPT Subscription stream connect to %s failed (%s)%s", redact_url(target_url), type(e).__name__, _tail)
+            yield _stream_transport_error_chunk(e, target_url)
         except Exception as e:
-            logger.error(f"ChatGPT Subscription stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
+            logger.error("ChatGPT Subscription stream error (%s)", type(e).__name__)
+            yield _stream_transport_error_chunk(e, target_url)
         return
 
     # ── Native Ollama streaming ──
@@ -3053,21 +3066,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"Ollama stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
-        except httpx.PoolTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-        except httpx.WriteTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-        except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
+            logger.warning("Ollama stream connect to %s failed (%s)%s", redact_url(target_url), type(e).__name__, _tail)
+            yield _stream_transport_error_chunk(e, target_url)
         except Exception as e:
-            logger.error(f"Ollama stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
+            logger.error("Ollama stream error (%s)", type(e).__name__)
+            yield _stream_transport_error_chunk(e, target_url)
         return
 
     # ── Anthropic streaming ──
@@ -3210,21 +3213,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
-        except httpx.PoolTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-        except httpx.WriteTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-        except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
+            logger.warning("Anthropic stream connect to %s failed (%s)%s", redact_url(target_url), type(e).__name__, _tail)
+            yield _stream_transport_error_chunk(e, target_url)
         except Exception as e:
-            logger.error(f"Anthropic stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
+            logger.error("Anthropic stream error (%s)", type(e).__name__)
+            yield _stream_transport_error_chunk(e, target_url)
         return
 
     # ── OpenAI-compatible streaming ──
@@ -3540,21 +3533,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         _cooled = _mark_host_dead(target_url)
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-        logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
-        yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-    except httpx.ReadTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504, "fallback_eligible": False, "error_category": "unknown_outcome"})}\n\n'
-    except httpx.PoolTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-    except httpx.WriteTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-    except httpx.ProtocolError:
-        yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-    except httpx.NetworkError:
-        yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
+        logger.warning("Stream connect to %s failed (%s)%s", redact_url(target_url), type(e).__name__, _tail)
+        yield _stream_transport_error_chunk(e, target_url)
     except Exception as e:
-        logger.error(f"Stream error: {e}")
-        yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
+        logger.error("Stream error (%s)", type(e).__name__)
+        yield _stream_transport_error_chunk(e, target_url)
 
 
 def _summarize_stream_error(err_chunk: Optional[str]) -> str:

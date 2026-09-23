@@ -1234,6 +1234,37 @@ def test_ambiguous_transport_failures_are_not_availability_evidence(monkeypatch,
         assert payload["error_category"] == "unknown_outcome"
 
 
+@pytest.mark.parametrize("error,category", [
+    (httpx.ConnectError("secret-key=do-not-log"), "transport"),
+    (httpx.WriteTimeout("secret-key=do-not-log"), "unknown_outcome"),
+    (httpx.RemoteProtocolError("secret-key=do-not-log"), "unknown_outcome"),
+    (RuntimeError("secret-key=do-not-log"), "unknown_outcome"),
+])
+def test_stream_transport_error_is_classified_without_leaking_provider_detail(
+    monkeypatch, caplog, error, category,
+):
+    class _RaisingClient:
+        def stream(self, *args, **kwargs):
+            raise error
+
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _RaisingClient())
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+
+    async def run():
+        return [chunk async for chunk in llm_core._stream_llm_inner(
+            "https://user:secret-key=do-not-log@openai-compatible.example/v1",
+            "configured-model", [{"role": "user", "content": "hi"}],
+        )]
+
+    output = asyncio.run(run())
+    payload = json.loads(output[0].split("data: ", 1)[1])
+    assert payload["error_category"] == category
+    assert payload["fallback_eligible"] is False
+    assert "secret-key=do-not-log" not in "".join(output)
+    assert "secret-key=do-not-log" not in caplog.text
+
+
 @pytest.mark.parametrize("error", [
     httpx.WriteTimeout("write timed out"),
     httpx.RemoteProtocolError("peer disconnected"),

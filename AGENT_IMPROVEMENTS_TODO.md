@@ -1053,7 +1053,7 @@
   passed. Live build ещё не проверен.
 
 - [ ] **01. Панель «Почему агент ждёт?»** Показывать текущий run/child, lease, модель и endpoint, фазу (`model`, `tool`, `approval`, `user`, `queue`, `reconnect`), длительность, последний durable checkpoint и безопасное действие восстановления. Проверить на зависшем запросе и двух клиентах.
-- [ ] **02. Unified run inspector.** Дерево parent → children → tool calls → artifacts с точными ID, временами, статусами и cursor; переход из Goal/Plan/Subagent UI к конкретному событию.
+- [x] **02. Unified run inspector.** Дерево parent → children → tool calls → artifacts с точными ID, временами, статусами и cursor; переход из Goal/Plan/Subagent UI к конкретному событию.
   - 2026-09-23: локально добавлен owner-scoped bounded inspector с курсорами
     parent run, child event, replay event и ленивым раскрытием child evidence.
     В изолированном браузерном fixture с 205 событиями проверены два клиента,
@@ -1073,6 +1073,17 @@
     сравнивает тот же ID. Старые записи остаются без опасной эвристической
     перепривязки. Полный локальный pytest: 7,160 passed, 23 skipped,
     109 subtests; нужен живой child-spawn smoke после выпуска.
+  - 2026-09-23: после релиза `68ffe81` реальный Safari на безопасном
+    арифметическом Goal открыл инспектор через «Почему агент ждёт?», показал
+    точный run ID, cursor, tool call и событие `tool_output #4496`. Полный
+    вывод `update_plan` загрузился только по кнопке для того же event ID.
+    Второй авторизованный клиент восстановил те же Goal/Plan/context и
+    открыл тот же run; Safari reload сохранил состояние. На отдельном
+    реальном Agent-run модель qwen3-vl создала child с точным durable parent
+    ID; инспектор показал 1 linked/0 unlinked после reload. Изолированный
+    браузерный тест подтвердил входы из Goal, Plan, Subagents, older cursor,
+    точный tool-output и owner isolation. 7,165 локальных тестов и 118
+    профильных Jetson candidate-тестов прошли; production healthy/0 restarts.
 - [ ] **03. Классификация ошибок и retry policy.** Разделить timeout, rate limit, provider unload, schema mismatch, transport, context, unknown side effect; повторять только доказанно безопасные запросы с jitter и budget.
 - [ ] **04. Watchdog полезного прогресса.** Отдельно отслеживать heartbeat и реальные изменения: step, artifact, тест, diff, evidence. Оживший SSE не должен считаться прогрессом задачи.
 - [ ] **05. Детектор зацикливания.** Ловить одинаковые action→observation, повторные ошибки, A↔B циклы, монолог, бессмысленное повторное сжатие; сначала диагностический nudge, затем bounded escalation, не бесконечный автоповтор.
