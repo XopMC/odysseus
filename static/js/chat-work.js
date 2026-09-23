@@ -203,7 +203,9 @@ function renderWait() {
   put('wait-run-id', state.run_id);
   put('wait-child-id', state.current_child?.child_id);
   put('wait-model', state.current_child?.model || state.model);
-  put('wait-endpoint', state.current_child?.endpoint_id || state.endpoint_label || state.endpoint_id);
+  const actualEndpoint = state.current_child?.endpoint_id || state.endpoint_label || state.endpoint_id;
+  put('wait-endpoint', actualEndpoint || (state.selected_endpoint_label
+    ? `${t('Selected now')}: ${state.selected_endpoint_label}` : null));
   put('wait-tool', state.tool);
   put('wait-lease', state.lease?.held ? `${t('Held until')} ${state.lease.expires_at || '—'}` : t('No active lease'));
   const checkpoint = state.checkpoint || {};

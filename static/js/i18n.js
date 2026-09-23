@@ -33,6 +33,7 @@ const RU = Object.freeze({
   'Child ID':'ID сабагента', 'Lease':'Аренда контроллера', 'Checkpoint':'Контрольная точка',
   'Recovery':'Восстановление', 'Tool':'Инструмент', 'seconds':'сек.',
   'Held until':'Удерживается до', 'No active lease':'Нет активной аренды',
+  'Selected now':'Выбрано сейчас',
   'model':'модель', 'tool':'инструмент', 'approval':'подтверждение',
   'user':'пользователь', 'queue':'очередь', 'reconnect':'переподключение',
   'idle':'нет работы', 'unavailable':'статус недоступен',

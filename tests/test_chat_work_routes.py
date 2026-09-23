@@ -2,6 +2,11 @@
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from core.database import Base, Session as DbSession
 
 from routes import chat_work_routes
 from src.chat_work_store import WorkNotFound
@@ -42,6 +47,13 @@ def test_goal_cancel_accepts_authenticated_owner_from_any_browser(monkeypatch):
 
 
 def test_why_waiting_is_same_for_two_owner_clients_and_denies_foreign_owner(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[DbSession.__table__])
+    factory = sessionmaker(bind=engine)
+    with factory.begin() as db:
+        db.add(DbSession(id="chat-1", owner="alice", name="Safe test", model="fixture-model",
+                         endpoint_url="https://user:secret@model.example:1234/v1?token=private"))
+    monkeypatch.setattr("core.database.SessionLocal", factory)
     class WaitStore:
         def wait_metadata(self, owner, session_id):
             assert (owner, session_id) == ("alice", "chat-1")
@@ -81,8 +93,11 @@ def test_why_waiting_is_same_for_two_owner_clients_and_denies_foreign_owner(monk
         assert response.json()["phase"] == "user"
         assert response.json()["run_id"] == "run-1"
         assert response.json()["checkpoint"]["durable_seq"] == 7
+        assert response.json()["selected_endpoint_label"] == "model.example:1234"
+        assert "secret" not in response.text and "private" not in response.text
         assert "Cache-Control" in response.headers
     assert foreign.status_code == 403
+    engine.dispose()
 
 
 def test_unknown_effect_inbox_is_identical_across_clients_and_owner_scoped(monkeypatch):

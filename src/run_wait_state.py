@@ -2,6 +2,8 @@
 
 import time
 from typing import Optional
+from urllib.parse import urlsplit
+import re
 
 
 CONTEXT_FAILURE_CODES = frozenset({
@@ -18,6 +20,22 @@ def _label(value, limit: int) -> str:
     if not isinstance(value, str):
         return ""
     return value.replace("\r", " ").replace("\n", " ")[:limit]
+
+
+def selected_endpoint_host(url: str) -> Optional[str]:
+    """Expose only a safe host:port, never URL credentials, path or query."""
+    try:
+        parts = urlsplit(str(url or ""))
+        host = parts.hostname
+        port = parts.port
+    except (TypeError, ValueError):
+        return None
+    if parts.scheme not in {"http", "https"} or not host or len(host) > 253:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9.:-]+", host):
+        return None
+    display = f"[{host}]" if ":" in host else host
+    return f"{display}:{port}" if port is not None else display
 
 
 class RunWaitTracker:
@@ -105,6 +123,7 @@ def compose_wait_panel(
     *, run: Optional[dict], goal: Optional[dict],
     children: Optional[list[dict]] = None, now: Optional[float] = None,
     unknown_effects: Optional[int] = None,
+    selected_endpoint_label: Optional[str] = None,
 ) -> dict:
     """Merge owner-gated records into one content-free waiting diagnosis."""
     now = time.time() if now is None else now
@@ -184,6 +203,7 @@ def compose_wait_panel(
         "model": _label(state.get("model"), 200) or None,
         "endpoint_id": _label(state.get("endpoint_id"), 200) or None,
         "endpoint_label": _label(state.get("endpoint_label"), 120) or None,
+        "selected_endpoint_label": _label(selected_endpoint_label, 120) or None,
         "tool": _label(state.get("tool"), 100) or None,
         "tool_call_id": _label(state.get("tool_call_id"), 200) or None,
         "current_child": current_child,

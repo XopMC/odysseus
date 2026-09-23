@@ -64,8 +64,9 @@ def setup_chat_work_routes():
         owner = _owner(request, session_id)
         from src import agent_runs
         from src.chat_effect_inbox import inbox
-        from src.run_wait_state import compose_wait_panel
+        from src.run_wait_state import compose_wait_panel, selected_endpoint_host
         from src.subagent_runtime import runtime
+        from core.database import SessionLocal, Session as DbSession
 
         goal = store.wait_metadata(owner, session_id)
         run = agent_runs.describe_run(session_id)
@@ -73,8 +74,19 @@ def setup_chat_work_routes():
             owner, session_id,
             parent_run_id=run.get("run_id") if run else None,
         )
+        selected_endpoint_label = None
+        if not ((run or {}).get("wait_state") or {}).get("endpoint_label"):
+            try:
+                with SessionLocal() as db:
+                    endpoint_url = db.query(DbSession.endpoint_url).filter(
+                        DbSession.id == session_id,
+                    ).scalar()
+                selected_endpoint_label = selected_endpoint_host(endpoint_url)
+            except Exception:
+                selected_endpoint_label = None
         return compose_wait_panel(
             run=run, goal=goal, children=children,
+            selected_endpoint_label=selected_endpoint_label,
             unknown_effects=(
                 len(inbox.unknown(owner, session_id))
                 if goal.get("wait_reason") == "unknown_side_effect" else None

@@ -41,6 +41,23 @@ def test_wait_phase_tracks_model_tool_and_user_boundaries(monkeypatch):
     assert agent_runs.describe_run(run.session_id)["wait_state"]["phase"] == "approval"
 
 
+def test_selected_endpoint_fallback_is_redacted_and_not_actual_route():
+    from src.run_wait_state import compose_wait_panel, selected_endpoint_host
+
+    host = selected_endpoint_host("https://user:secret@model.example:1234/v1/chat?token=private")
+    assert host == "model.example:1234"
+    assert selected_endpoint_host("file:///etc/passwd") is None
+    assert selected_endpoint_host("https://user:secret@model.example:invalid/x") is None
+    panel = compose_wait_panel(
+        run={"run_id": "run-1", "status": "done", "wait_state": {"phase": "user"}},
+        goal={"status": "waiting_user", "wait_reason": "ask_user"},
+        selected_endpoint_label=host,
+    )
+    assert panel["endpoint_label"] is None
+    assert panel["selected_endpoint_label"] == "model.example:1234"
+    assert "secret" not in json.dumps(panel)
+
+
 def test_wait_state_does_not_expose_question_or_tool_output(monkeypatch):
     run = agent_runs._Run()
     run.session_id = "wait-redaction-fixture"

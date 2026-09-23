@@ -146,6 +146,9 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       assert.equal(ids['wait-run-id'].textContent,'run-1');
       assert.equal(ids['wait-child-id'].textContent,'child-1');
       assert.equal(ids['wait-phase'].textContent,'tool');
+      wait={...wait,endpoint_id:null,endpoint_label:null,selected_endpoint_label:'model.example:1234'};
+      await api.refreshWait('chat-1');
+      assert.equal(ids['wait-endpoint'].textContent,'Selected now: model.example:1234');
       assert.equal(ids['wait-checkpoint'].textContent.includes('secret-marker'),false);
       assert.equal(ids['goal-work-health-indicator'].hidden,false);
       assert.match(ids['goal-work-health-detail'].textContent,/No verified progress/);
