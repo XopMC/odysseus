@@ -73,7 +73,7 @@ def test_metadata_only_approval_revision_reconciles_without_count_change():
     assert "node.dataset.approvalId !== key" in renderer
 
 
-@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity"])
+@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):
         pytest.skip("node is not installed")
@@ -99,7 +99,7 @@ def test_cross_device_subscription_lifecycle(scenario):
       const pendingHeaders=deferred(),pendingRead=deferred();
       const sm={getCurrentSessionId:()=>selected,getSessionViewToken:()=>viewToken,getSessions:()=>[{id:'chat-a',model:'qwen'}],
         selectSession:async id=>reloads.push(id),loadSessions:noop};
-      if(scenario==='replay_canonical'||scenario==='replay_activity')sm.refreshSessionHistory=async id=>{assert.equal(id,'chat-a');canonicalRefreshes++;};
+      if(scenario==='replay_canonical'||scenario==='replay_activity'||scenario.startsWith('replay_corpus_'))sm.refreshSessionHistory=async id=>{assert.equal(id,'chat-a');canonicalRefreshes++;};
       const proxy=extras=>new Proxy(extras||{},{get:(o,k)=>k in o?o[k]:noop});
       const ui=proxy({el:document.getElementById,esc:x=>x});
       const modules={'sessions.js':sm,'storage.js':proxy({get:(key,fallback)=>fallback,getJSON:(key,fallback)=>fallback}),
@@ -179,6 +179,35 @@ def test_cross_device_subscription_lifecycle(scenario):
           assert(cancelled>0,'watchdog must release reader');
           assert.equal(box.children.length,0,'dead replay placeholder must not duplicate the retry');
           assert.equal(requests.filter(x=>/\/stop\//.test(x.url)).length,0,'stall recovery must not stop remote run');
+        }else if(scenario.startsWith('replay_corpus_')){
+          const count=scenario==='replay_corpus_1k'?1000:scenario==='replay_corpus_10k'?10000:100000;
+          const frames=[];
+          for(let seq=0;seq<count;seq++){
+            const round=Math.floor(seq/5)+1,tool_call_id=`fixture-tool-${round}`;
+            let event;
+            switch(seq%5){
+              case 0:event={type:'agent_step',round};break;
+              case 1:event={delta:'[thinking fixture]',thinking:true,round};break;
+              case 2:event={type:'tool_start',tool:'fixture_tool',tool_call_id,round};break;
+              case 3:event={type:'tool_output',tool:'fixture_tool',tool_call_id,exit_code:0,round};break;
+              default:event={delta:'[answer fixture]',round};
+            }
+            frames.push(`id: ${seq}\ndata: ${JSON.stringify(event)}`);
+          }
+          const encoded=new TextEncoder().encode(frames.join('\n\n')+'\n\n');
+          let firstChunk=true;
+          reader.read=()=>firstChunk?(firstChunk=false,Promise.resolve({done:false,value:encoded})):pendingRead.promise;
+          pendingHeaders.resolve(response);await flush();
+          const expectedRounds=count/5;
+          assert.equal(box.children.length,expectedRounds*3,'each round keeps thinking, tool and answer cards');
+          const lastAnswer=box.children[box.children.length-1].querySelector('.stream-content');
+          assert.equal(lastAnswer.innerHTML,'[answer fixture]','the newest replayed answer remains visible');
+          assert.equal(canonicalRefreshes,0,'a live replay must not force history refresh mid-run');
+          if(count<100000){
+            pendingRead.resolve({done:true});await first;
+            assert.equal(canonicalRefreshes,1);
+            assert.equal(box.children.length,0,'completed replay reconciles canonical history');
+          }
         }else if(scenario==='replay_activity'){
           const events=[
             'id: 0\ndata: {"delta":"private chain of thought","thinking":true}',
@@ -240,7 +269,7 @@ def test_cross_device_subscription_lifecycle(scenario):
     """
     result = subprocess.run(
         ["node", "--experimental-vm-modules", "-e", "(async()=>{" + script + "})().catch(e=>{console.error(e);process.exit(1);});", str(root), scenario],
-        text=True, capture_output=True, timeout=20,
+        text=True, capture_output=True, timeout=90 if scenario == "replay_corpus_100k" else 20,
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"passed": scenario}

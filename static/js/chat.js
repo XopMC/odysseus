@@ -5479,6 +5479,10 @@ import { bindUiText, t } from './i18n.js';
     let nextRoundTimestamp = 0;
     const replayHolders = [];
     const replayNodes = [];
+    // Tool results often arrive tens of thousands of events after reconnect.
+    // Scanning every rendered replay card for each result made a 100K-event
+    // trajectory quadratic and froze the second client's UI.
+    const replayToolsByCallId = new Map();
     const createReplayHolder = (previous = null, timestampSeconds = 0) => {
       const holder = document.createElement('div');
       holder.className = replayHolders.length ? 'msg msg-ai msg-continuation streaming' : 'msg msg-ai streaming';
@@ -5685,6 +5689,7 @@ import { bindUiText, t } from './i18n.js';
       const command = json.command ? `<pre class="agent-thread-cmd">${uiModule.esc(String(json.command))}</pre>` : '';
       node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">▶</span><span class="agent-thread-tool">${uiModule.esc(name)}</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${command}</div>`;
       node.dataset.toolCallId = String(json.tool_call_id || json._replay?.tool_call_id || '');
+      if (node.dataset.toolCallId) replayToolsByCallId.set(node.dataset.toolCallId, node);
       thread.appendChild(node);
       const started = Number(json._replay?.created_at || json._replay?.started_at || 0) * 1000;
       node._startTime = started || Date.now();
@@ -5707,8 +5712,7 @@ import { bindUiText, t } from './i18n.js';
     const findReplayTool = (json) => {
       const id = String(json.tool_call_id || json._replay?.tool_call_id || '');
       if (id) {
-        const found = replayNodes.flatMap(n => Array.from(n.querySelectorAll?.('.agent-thread-node') || []))
-          .find(n => n.dataset.toolCallId === id);
+        const found = replayToolsByCallId.get(id);
         if (found) return { node: found, name: String(json.tool || found.querySelector('.agent-thread-tool')?.textContent || 'Tool') };
       }
       return replayTool;
