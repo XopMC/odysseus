@@ -1306,7 +1306,15 @@ class TeamRuntime:
     async def execute_tool(self, owner, team_id, worker, name, args, call_id, cwd, lease_token=None):
         self.assert_task_runtime(owner, team_id)
         if name in team_collaboration.TEAM_TOOLS:
-            return self.execute_collaboration(owner, team_id, worker, name, args, call_id)
+            from src.team_store import NotFound
+            try:
+                return self.execute_collaboration(owner, team_id, worker, name, args, call_id)
+            except NotFound:
+                # A model may invent a peer ID. This read-only call did not
+                # execute, so close its intent and let the model inspect the
+                # owner-scoped worker list instead of expiring its lease.
+                return {'error': 'Worker not found in this team. Call team_status for valid worker IDs.',
+                        'exit_code': 1, 'not_executed': True}
         team_tools.validate_action(name, args, worker_tool_role(worker['profile']),
                                   self.store.get_task(owner, team_id)['metadata']['config'], owner=owner, store=self.store)
         if name.startswith('mcp__'):

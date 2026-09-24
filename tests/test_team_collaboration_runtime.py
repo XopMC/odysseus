@@ -163,6 +163,32 @@ class CollaborationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(NotFound):
                 self.runtime.execute_collaboration('owner', self.task['id'], actor, name, args, 'foreign')
 
+    async def test_unknown_peer_is_recoverable_model_tool_error(self):
+        actor = self.worker()
+        claim = self.claim(actor)
+        result = await self.runtime.execute_tool('owner', self.task['id'], claim,
+            'team_result', {'worker_id': 'not-a-worker'}, 'bad-peer', '/project', claim['lease_token'])
+        self.assertEqual(result['exit_code'], 1)
+        self.assertTrue(result['not_executed'])
+        self.assertIn('team_status', result['error'])
+        self.assertNotIn('not-a-worker', json.dumps(result))
+
+    async def test_unknown_peer_intent_closes_and_worker_can_finish(self):
+        actor = self.worker(objective='Return 42',
+            acceptance='The result must be exactly "42".', write_scope=[])
+        claim = self.claim(actor)
+        final = {'completed': True, 'acceptance_met': True, 'result': '42',
+                 'verification': {'expected': '42', 'actual': '42', 'match': True},
+                 'paths_touched': [], 'files_modified': False,
+                 'network_used': False, 'host_tools_used': False, 'unresolved_issues': []}
+        self.responses = [answer('', native('team_result', {'worker_id': 'not-a-worker'}, 'bad-peer')),
+                          answer(json.dumps(final))]
+        result = await self.runtime.execute_worker('owner', self.task['id'], claim, claim['lease_token'])
+        self.assertTrue(result['completed'])
+        intents = self.store.list_tool_intents('owner', self.task['id'], actor['id'])
+        self.assertEqual([(item['name'], item['status']) for item in intents], [('team_result', 'done')])
+        self.assertEqual(intents[0]['result']['exit_code'], 1)
+
     async def test_peer_message_replay_delivers_one_untrusted_event(self):
         actor, target = self.worker(), self.worker()
         self.claim(actor)
