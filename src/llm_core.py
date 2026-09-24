@@ -3400,6 +3400,52 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 # based on delta content loses true backend TPS and
                                 # forces the UI to show a lower wall-clock estimate.
                                 u = j.get("usage")
+                                # LM Studio may flush usage and its `stats` in
+                                # distinct terminal SSE frames. Read backend
+                                # phase metrics independently so they are not
+                                # lost merely because this frame has no token
+                                # counts (or no choices).
+                                _tm = j.get("timings") or (u.get("timings") if isinstance(u, dict) else {}) or {}
+                                _stats = j.get("stats") or (u.get("stats") if isinstance(u, dict) else {}) or {}
+                                if not isinstance(_tm, dict):
+                                    _tm = {}
+                                if not isinstance(_stats, dict):
+                                    _stats = {}
+                                _gen_tps = (
+                                    _tm.get("predicted_per_second")
+                                    or _stats.get("tokens_per_second")
+                                    or _stats.get("generation_tokens_per_second")
+                                )
+                                if not _gen_tps:
+                                    _predicted_n = _tm.get("predicted_n") or _stats.get("predicted_tokens")
+                                    _predicted_ms = _tm.get("predicted_ms") or _stats.get("generation_time_ms")
+                                    try:
+                                        if float(_predicted_n) > 0 and float(_predicted_ms) > 0:
+                                            _gen_tps = float(_predicted_n) * 1000 / float(_predicted_ms)
+                                    except (TypeError, ValueError, OverflowError):
+                                        _gen_tps = None
+                                _backend_metrics = {}
+                                try:
+                                    if _gen_tps is not None and math.isfinite(float(_gen_tps)) and float(_gen_tps) > 0:
+                                        _backend_metrics["gen_tps"] = round(float(_gen_tps), 2)
+                                except (TypeError, ValueError, OverflowError):
+                                    pass
+                                _prefill_tps = _tm.get("prompt_per_second")
+                                try:
+                                    if _prefill_tps is not None and math.isfinite(float(_prefill_tps)) and float(_prefill_tps) > 0:
+                                        _backend_metrics["prefill_tps"] = round(float(_prefill_tps), 2)
+                                except (TypeError, ValueError, OverflowError):
+                                    pass
+                                _generation_time = _stats.get("generation_time")
+                                try:
+                                    if _generation_time is not None and math.isfinite(float(_generation_time)) and float(_generation_time) > 0:
+                                        _backend_metrics["generation_time"] = round(float(_generation_time), 4)
+                                except (TypeError, ValueError, OverflowError):
+                                    pass
+                                if _actual_model:
+                                    _backend_metrics["model"] = _actual_model
+                                if _backend_metrics:
+                                    yield f'data: {json.dumps({"type": "backend_metrics", "data": _backend_metrics})}\n\n'
                                 _has_genuine_usage = (
                                     isinstance(u, dict)
                                     and (
@@ -3414,38 +3460,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                     )
                                     if _usage_data is None:
                                         continue
-                                    # llama.cpp puts a `timings` block alongside `usage` with the
-                                    # TRUE generation speed (predicted_per_second) — pure decode,
-                                    # excluding prefill/network. Pass it through so the UI shows the
-                                    # real gen t/s instead of recomputing tokens/wall-clock (which
-                                    # includes prefill and reads ~20-40% low). Prefill speed too.
-                                    _tm = j.get("timings") or u.get("timings") or {}
-                                    _stats = j.get("stats") or u.get("stats") or {}
-                                    if not isinstance(_tm, dict):
-                                        _tm = {}
-                                    if not isinstance(_stats, dict):
-                                        _stats = {}
-                                    _gen_tps = (
-                                        _tm.get("predicted_per_second")
-                                        or _stats.get("tokens_per_second")
-                                        or _stats.get("generation_tokens_per_second")
-                                    )
-                                    if not _gen_tps:
-                                        _predicted_n = _tm.get("predicted_n") or _stats.get("predicted_tokens")
-                                        _predicted_ms = _tm.get("predicted_ms") or _stats.get("generation_time_ms")
-                                        try:
-                                            if float(_predicted_n) > 0 and float(_predicted_ms) > 0:
-                                                _gen_tps = float(_predicted_n) * 1000 / float(_predicted_ms)
-                                        except (TypeError, ValueError, OverflowError):
-                                            _gen_tps = None
-                                    try:
-                                        if _gen_tps is not None and math.isfinite(float(_gen_tps)) and float(_gen_tps) > 0:
-                                            _usage_data["gen_tps"] = round(float(_gen_tps), 2)
-                                    except (TypeError, ValueError, OverflowError):
-                                        pass
-                                    if isinstance(_tm, dict):
-                                        if _tm.get("prompt_per_second"):
-                                            _usage_data["prefill_tps"] = round(_tm["prompt_per_second"], 2)
+                                    if "gen_tps" in _backend_metrics:
+                                        _usage_data["gen_tps"] = _backend_metrics["gen_tps"]
+                                    if "prefill_tps" in _backend_metrics:
+                                        _usage_data["prefill_tps"] = _backend_metrics["prefill_tps"]
                                     if _actual_model:
                                         _usage_data["model"] = _actual_model
                                         if not _same_model_identity(_actual_model, model):

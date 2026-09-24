@@ -6427,6 +6427,23 @@ async def stream_agent_loop(
                             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
                         native_tool_calls = data.get("calls", [])
                         logger.info(f"Agent round {round_num}: received {len(native_tool_calls)} native tool call(s)")
+                    elif data.get("type") == "backend_metrics":
+                        # Provider stats can arrive separately from the usage
+                        # chunk; retain the authoritative decode rate instead
+                        # of falling back to end-to-end stream elapsed time.
+                        provider_metrics = data.get("data") or {}
+                        try:
+                            gen_tps = float(provider_metrics.get("gen_tps") or 0)
+                            if math.isfinite(gen_tps) and gen_tps > 0:
+                                backend_gen_tps = gen_tps
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                        try:
+                            prefill_tps = float(provider_metrics.get("prefill_tps") or 0)
+                            if math.isfinite(prefill_tps) and prefill_tps > 0:
+                                backend_prefill_tps = prefill_tps
+                        except (TypeError, ValueError, OverflowError):
+                            pass
                     elif data.get("type") == "usage":
                         u = data.get("data", {})
                         actual_model = u.get("model") or actual_model

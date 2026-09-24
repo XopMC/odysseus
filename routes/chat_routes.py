@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import math
 import os
 import re
 import time
@@ -2082,6 +2083,7 @@ def setup_chat_routes(
             full_response = ""
             thinking_response = ""
             last_metrics = None
+            backend_generation_metrics = {}
 
             # Foreground Chat and Agent requests share one explicit owner-aware
             # policy. Strict mode is the default; legacy values are unrelated.
@@ -2341,6 +2343,26 @@ def setup_chat_routes(
                                     data["endpoint_id"] = _actual_route.get("endpoint_id")
                                     data["endpoint_label"] = _actual_route.get("endpoint_label")
                                     yield f'data: {json.dumps(data)}\n\n'
+                                elif data.get("type") == "backend_metrics":
+                                    incoming = data.get("data") or {}
+                                    for key in ("gen_tps", "prefill_tps", "generation_time"):
+                                        try:
+                                            value = float(incoming.get(key) or 0)
+                                            if math.isfinite(value) and value > 0:
+                                                backend_generation_metrics[key] = value
+                                        except (TypeError, ValueError, OverflowError):
+                                            continue
+                                    # Usage may have arrived in a prior SSE frame
+                                    # and already caused an estimated metric to
+                                    # be rendered. Send a correction in-place
+                                    # when the backend's authoritative stats land.
+                                    if last_metrics and backend_generation_metrics.get("gen_tps"):
+                                        last_metrics["gen_tps"] = backend_generation_metrics["gen_tps"]
+                                        last_metrics["tokens_per_second"] = backend_generation_metrics["gen_tps"]
+                                        last_metrics["tps_source"] = "backend"
+                                        if backend_generation_metrics.get("generation_time"):
+                                            last_metrics["generation_time"] = backend_generation_metrics["generation_time"]
+                                        yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                                 elif data.get("type") == "usage":
                                     if _commit_chat_compaction(_actual_candidate_index):
                                         _compacted_length = _chat_request_state["context_lengths"].get(
@@ -2349,6 +2371,7 @@ def setup_chat_routes(
                                         )
                                         yield f'data: {json.dumps({"type": "compacted", "context_length": _compacted_length})}\n\n'
                                     last_metrics = data.get("data", {})
+                                    last_metrics.update(backend_generation_metrics)
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -2390,10 +2413,9 @@ def setup_chat_routes(
                                         pct = min(round((last_metrics["input_tokens"] / _actual_context_length) * 100, 1), 100.0)
                                         last_metrics["context_percent"] = pct
                                         last_metrics["context_length"] = _actual_context_length
-                                    # The frontend reads `tokens_per_second`; the raw usage event
-                                    # carries the backend's true gen speed as `gen_tps` (llama.cpp
-                                    # timings). Map it through so this direct-chat path shows real
-                                    # t/s instead of "n/a" → falling back to a bare token count.
+                                    # The frontend reads `tokens_per_second`; map the backend's
+                                    # true decode speed through, whether it arrived in this usage
+                                    # frame or an adjacent stats-only frame.
                                     if last_metrics.get("gen_tps") and not last_metrics.get("tokens_per_second"):
                                         last_metrics["tokens_per_second"] = last_metrics["gen_tps"]
                                         last_metrics["tps_source"] = "backend"

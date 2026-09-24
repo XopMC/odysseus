@@ -187,6 +187,42 @@ def test_stream_llm_keeps_lm_studio_timings_when_usage_shares_final_delta(monkey
     assert any(event.get("delta") == "Final answer" for event in events)
 
 
+def test_stream_llm_keeps_lm_studio_stats_when_stats_arrive_after_usage(monkeypatch):
+    # Some OpenAI-compatible streams send usage and backend stats as separate
+    # terminal frames. Neither frame is guaranteed to contain the other.
+    events = _stream_events(monkeypatch, [
+        'data: ' + json.dumps({
+            "choices": [{"index": 0, "delta": {"content": "Final answer"}}],
+        }),
+        'data: ' + json.dumps({
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 120},
+        }),
+        'data: ' + json.dumps({
+            "choices": [],
+            "stats": {"tokens_per_second": 123.45, "generation_time": 0.97},
+        }),
+        'data: [DONE]',
+    ])
+    usage = next(e["data"] for e in events if e.get("type") == "usage")
+    backend = next(e["data"] for e in events if e.get("type") == "backend_metrics")
+    assert usage["output_tokens"] == 120
+    assert backend["gen_tps"] == 123.45
+    assert backend["generation_time"] == 0.97
+
+
+def test_stream_llm_reads_lm_studio_stats_on_final_delta_without_usage(monkeypatch):
+    events = _stream_events(monkeypatch, [
+        'data: ' + json.dumps({
+            "choices": [{"index": 0, "delta": {"content": "Answer"}, "finish_reason": "stop"}],
+            "stats": {"tokens_per_second": 121.8},
+        }),
+        'data: [DONE]',
+    ])
+    backend = next(e["data"] for e in events if e.get("type") == "backend_metrics")
+    assert backend["gen_tps"] == 121.8
+
+
 def test_stream_llm_surfaces_provider_resolved_model(monkeypatch):
     events = _stream_events(monkeypatch, [
         'data: ' + json.dumps({
