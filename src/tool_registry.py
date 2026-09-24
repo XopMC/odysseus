@@ -29,6 +29,7 @@ WRITE_TOOLS = frozenset({'write_file', 'edit_file', 'apply_patch', 'rollback_fil
 WEB_TOOLS = frozenset({'web_search', 'web_fetch'})
 EXECUTE_TOOLS = frozenset({'bash', 'python'})
 _TEAM_HOST_TOOLS = READ_TOOLS | WRITE_TOOLS | EXECUTE_TOOLS
+_PLANNER_INTERACTION_TOOLS = frozenset({'ask_user', 'create_plan', 'update_plan'})
 _SHELL_NAMES = frozenset({'bash', 'Shell', 'shell'})
 _ROLES = {'agent': frozenset({'agent', 'reviewer', 'researcher', 'planner'}),
           'team': frozenset({'lead', 'executor', 'reviewer', 'researcher', 'planner'})}
@@ -312,7 +313,13 @@ class ToolRegistry:
                 return 'Host access is disabled for this task'
             if spec.id in WEB_TOOLS and access.config.get('web') is not True:
                 return 'Web access is disabled for this task'
-        if access.role in _READONLY_ROLES and spec.id not in WEB_TOOLS and not spec.effects <= _READ_EFFECTS:
+        planner_interaction = (
+            access.mode == 'agent'
+            and access.role == 'planner'
+            and spec.id in _PLANNER_INTERACTION_TOOLS
+        )
+        if (access.role in _READONLY_ROLES and spec.id not in WEB_TOOLS
+                and not spec.effects <= _READ_EFFECTS and not planner_interaction):
             return 'Tool has effects forbidden for a read-only role'
         return None
 

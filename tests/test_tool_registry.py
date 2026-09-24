@@ -127,6 +127,24 @@ class RegistryCoreTests(unittest.TestCase):
                 with self.subTest(role=role, name=name), self.assertRaises(PermissionError):
                     self.registry.require(name, access)
 
+    def test_agent_planner_can_persist_plan_without_gaining_other_write_tools(self):
+        names = ('read_file', 'ask_user', 'create_plan', 'update_plan', 'write_file', 'manage_settings')
+        registry = ToolRegistry.from_schemas([schema(name) for name in names])
+        access = ToolAccess(
+            mode='agent', role='planner', config={'mcp': False},
+            adapters=frozenset({'agent'}), allowed_tools=frozenset(names),
+        )
+
+        # Planner's UI-only interactions are intentionally safe: asking for a
+        # user decision or persisting a proposal cannot mutate project state.
+        self.assertEqual(
+            {item['function']['name'] for item in registry.schemas(access)},
+            {'read_file', 'ask_user', 'create_plan', 'update_plan'},
+        )
+        for name in ('write_file', 'manage_settings'):
+            with self.subTest(name=name), self.assertRaises(PermissionError):
+                registry.require(name, access)
+
     def test_team_readonly_roles_can_compare_and_verify_without_write_authority(self):
         registry = ToolRegistry.from_schemas([
             schema('compare_files'), schema('verify_hashes'), schema('inspect_toolchain'), schema('write_file')])
