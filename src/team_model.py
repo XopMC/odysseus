@@ -19,6 +19,38 @@ _TEXT_CALL_RE = re.compile(
 _TEXT_PARAMETER_RE = re.compile(
     r"<parameter=([A-Za-z_][\w.-]{0,127})>([\s\S]*?)</parameter>", re.IGNORECASE,
 )
+_BARE_JSON_CALL_RE = re.compile(
+    r"^\s*(?:```\s*)?([A-Za-z_][\w.-]{0,127})(?![\w.-])\s*", re.IGNORECASE,
+)
+
+
+def _parse_bare_json_tool_call(text, offered):
+    """Recover one whole-answer ``name{JSON}`` call, never prose/examples.
+
+    Only the exact schemas advertised to this request can be called. A closed
+    Markdown fence remains an inert example for native-function models.
+    """
+    match = _BARE_JSON_CALL_RE.match(text)
+    if match is None:
+        return []
+    function_schema = offered.get(match.group(1).casefold())
+    if function_schema is None:
+        return []
+    try:
+        args, end = json.JSONDecoder().raw_decode(text, match.end())
+    except (ValueError, TypeError):
+        return []
+    remainder = text[end:].strip()
+    if remainder not in {"", "```"} or not isinstance(args, dict):
+        return []
+    if text.lstrip().startswith("```") and remainder == "```":
+        return []
+    required = (function_schema.get('parameters') or {}).get('required') or []
+    if any(key not in args or args[key] in (None, '') for key in required):
+        return []
+    return [{'id': 'team_text_0', 'type': 'function', 'function': {
+        'name': function_schema['name'], 'arguments': json.dumps(args, ensure_ascii=False),
+    }}]
 
 
 def _parse_text_tool_calls(text, tools):
@@ -72,7 +104,39 @@ def _parse_text_tool_calls(text, tools):
         })
         if len(calls) == 16:
             break
-    return calls
+    return calls or _parse_bare_json_tool_call(text, offered)
+
+
+def _visible_stream_prefix(text, tools):
+    """Hold possible textual control syntax until it is classified.
+
+    A live Team subscriber must not see arguments that disappear from the
+    durable assistant message after a text call is adapted. Ordinary content
+    remains incremental; closed native-model Markdown examples remain inert.
+    """
+    from src.tool_parsing import strip_tool_blocks_streaming
+
+    visible = strip_tool_blocks_streaming(text, skip_fenced=True)
+    prefix = text.lstrip()[:160].casefold()
+    if "```".startswith(prefix):
+        return ""
+    if prefix.startswith("```"):
+        if text.rstrip().endswith("```") and len(text.strip()) > 6:
+            return visible
+        prefix = prefix[3:].lstrip()
+    names = sorted((str((item.get('function') or {}).get('name') or '').casefold()
+                    for item in tools or [] if isinstance(item, dict)), key=len, reverse=True)
+    for name in names:
+        if not name:
+            continue
+        if name.startswith(prefix):
+            return ""
+        if prefix.startswith(name):
+            suffix = prefix[len(name):].lstrip()
+            if not suffix or suffix.startswith('{'):
+                return ""
+            break
+    return visible
 
 
 async def complete(route, messages, tools, *, max_tokens=4096, on_delta=None):
@@ -99,6 +163,7 @@ async def _complete_once(route, messages, tools, *, max_tokens=4096, on_delta=No
     text, calls, usage, size = [], {}, {}, 0
     first, finished = None, False
     pending_delta, last_delta = [], started
+    visible_text = ''
     # Shared process lock is also used for normal model traffic once wired into
     # llm_core; independent host groups do not serialize each other.
     async with resource_slot(route['resource_group'] if route['local'] else None):
@@ -131,8 +196,13 @@ async def _complete_once(route, messages, tools, *, max_tokens=4096, on_delta=No
                             first = first or time.monotonic()
                             text.append(piece)
                             if on_delta:
-                                pending_delta.append(piece)
-                                if time.monotonic() - last_delta >= .08:
+                                safe = _visible_stream_prefix(''.join(text), tools)
+                                if safe.startswith(visible_text):
+                                    new_visible = safe[len(visible_text):]
+                                    if new_visible:
+                                        pending_delta.append(new_visible)
+                                    visible_text = safe
+                                if pending_delta and time.monotonic() - last_delta >= .08:
                                     await on_delta(''.join(pending_delta))
                                     pending_delta.clear()
                                     last_delta = time.monotonic()
@@ -148,8 +218,6 @@ async def _complete_once(route, messages, tools, *, max_tokens=4096, on_delta=No
                             call['function']['arguments'] += function.get('arguments') or ''
     if not finished:
         raise RuntimeError('Model stream disconnected before completion')
-    if on_delta and pending_delta:
-        await on_delta(''.join(pending_delta))
     if not text and not calls:
         raise RuntimeError('Model returned neither an answer nor a tool call')
     message = {'role': 'assistant', 'content': ''.join(text)}
@@ -166,6 +234,23 @@ async def _complete_once(route, messages, tools, *, max_tokens=4096, on_delta=No
         text_calls = _parse_text_tool_calls(message['content'], tools)
         if text_calls:
             message['tool_calls'] = text_calls
+            # The control syntax belongs in the tool event, never the public
+            # answer or the next model-visible assistant prose turn.
+            message['content'] = None
+    if message.get('tool_calls') and not message.get('content'):
+        # OpenAI-compatible backends including Gemini/Ollama reject an
+        # assistant tool_calls message carrying an empty-string content field.
+        message['content'] = None
+    if on_delta:
+        # Failed-to-convert text stays visible and inert. Successful textual
+        # control syntax was held back and is represented by the tool event.
+        final_content = message.get('content') or ''
+        if final_content.startswith(visible_text):
+            remaining = final_content[len(visible_text):]
+            if remaining:
+                pending_delta.append(remaining)
+        if pending_delta:
+            await on_delta(''.join(pending_delta))
     elapsed = time.monotonic() - started
     return {'message': message, 'usage': usage, 'duration': elapsed,
             'ttft': first - started if first else None,

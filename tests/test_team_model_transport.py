@@ -201,6 +201,40 @@ class TeamModelTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn('tool_calls', result['message'])
 
+    async def test_bare_json_tool_call_uses_only_currently_advertised_schema(self):
+        self.response = [
+            sse({'choices': [{'delta': {'content': 'python{"code":"print(6*7)"}'}}]}),
+            sse('[DONE]'),
+        ]
+        tools = [{'type': 'function', 'function': {'name': 'python', 'parameters': {
+            'type': 'object', 'properties': {'code': {'type': 'string'}}, 'required': ['code']}}}]
+        deltas = []
+        async def on_delta(piece):
+            deltas.append(piece)
+
+        result = await team_model.complete(self.route, self.messages, tools, on_delta=on_delta)
+
+        assert result['message']['content'] is None
+        assert deltas == [], 'tool arguments must never flash in the live Team stream'
+        assert len(result['message']['tool_calls']) == 1
+        assert result['message']['tool_calls'][0]['function']['name'] == 'python'
+        assert json.loads(result['message']['tool_calls'][0]['function']['arguments']) == {'code': 'print(6*7)'}
+
+    async def test_bare_json_tool_adapter_keeps_prose_and_closed_examples_inert(self):
+        tools = [{'type': 'function', 'function': {'name': 'python', 'parameters': {
+            'type': 'object', 'properties': {'code': {'type': 'string'}}, 'required': ['code']}}}]
+        for content in (
+            'Example: python{"code":"print(6*7)"}',
+            'python{"code":"print(6*7)"} then continue',
+            'python{"other":"print(6*7)"}',
+            '```python{"code":"print(6*7)"}```',
+            'bash{"command":"echo unsupported"}',
+        ):
+            self.response = [sse({'choices': [{'delta': {'content': content}}]}), sse('[DONE]')]
+            result = await team_model.complete(self.route, self.messages, tools)
+            assert 'tool_calls' not in result['message'], content
+            assert result['message']['content'] == content
+
     async def test_truncated_stream_never_becomes_success(self):
         self.response = [sse({'choices': [{'delta': {'content': 'Only partial'}}]})]
         with self.assertRaisesRegex(RuntimeError, 'disconnected before completion'):

@@ -163,6 +163,24 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('without any verified tool result', result['result']['error'])
         self.assertEqual(self.host_calls, [])
 
+    async def test_manual_resume_after_unverified_prose_gets_fresh_tool_chance(self):
+        worker = self.worker(objective='Inspect example using read_file')
+        self.responses = [answer('I inspected the file and it is correct')] * 3
+        failed = await self.execute(worker)
+        self.assertEqual(failed['status'], 'failed')
+        self.assertEqual(self.host_calls, [])
+
+        self.store.update_worker('owner', self.task['id'], worker['id'], status='pending')
+        self.responses = [answer('', [tool('read_file', {'path': '/project/example.py'}, 'read-1')]),
+                          answer('Verified from the file result')]
+        resumed = await self.execute(worker)
+
+        self.assertEqual(resumed['status'], 'done')
+        self.assertEqual(resumed['result']['successful_tools'], 1)
+        self.assertTrue(any(op == 'file.call' for op, *_ in self.host_calls))
+        self.assertTrue(any('explicitly resumed' in str(message.get('content'))
+                            for request in self.messages for message in request))
+
     async def test_repeated_failed_read_stops_without_false_success(self):
         worker = self.worker()
         self.host_result = {'error': 'No such file', 'exit_code': 1}

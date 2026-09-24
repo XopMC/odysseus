@@ -976,7 +976,28 @@ class TeamRuntime:
             messages = [{'role': 'system', 'content': instructions},
                         {'role': 'user', 'content': 'Overall goal: ' + meta['goal'] + '\nAssigned objective: ' + str(profile.get('objective', '')) + '\nAcceptance: ' + str(profile.get('acceptance', ''))}]
             saved = {'messages': messages, 'round': 0, 'compactions': 0, 'cwd': cwd,
-                     'successful_tools': 0, 'failures': {}}
+                     'successful_tools': 0, 'failures': {},
+                     'attempt_id': worker['attempt_id'], 'no_tool_nudges': 0}
+        elif saved.get('attempt_id') != worker['attempt_id']:
+            # Manual resume receives a new lease/attempt, but keeps the exact
+            # model/tool ledger. A stale no-progress breaker must not make the
+            # new attempt fail on its first model answer, especially after a
+            # human changes this task's permissions or adds guidance. Unknown
+            # effectful tool intents are still fenced independently by store.
+            prior_no_tool = int(saved.get('no_tool_nudges', 0)) > 0 or bool(saved.get('force_final'))
+            saved['attempt_id'] = worker['attempt_id']
+            saved['no_tool_nudges'] = 0
+            saved.pop('force_final', None)
+            saved.pop('unchanged_reads', None)
+            if prior_no_tool:
+                saved.setdefault('pending_guidance', []).append({
+                    'role': 'user',
+                    'content': ('This worker was explicitly resumed. Previous prose '
+                                'claims without a successful tool result are not verified. '
+                                'Use an actually available tool for the assigned task '
+                                'and inspect its returned result; if none is permitted, '
+                                'report the precise blocker instead of claiming success.'),
+                })
         messages = saved['messages']
         tools = team_tools.schemas(owner, worker_tool_role(profile), meta['config'].get('web', False), config=meta['config'], store=self.store) + team_collaboration.schemas()
         from src.agent_context import compact_working_context
@@ -1097,8 +1118,19 @@ class TeamRuntime:
                         return {'summary': answer['content'], 'completed': True, 'cwd': saved['cwd'],
                                 'successful_tools': 0, 'compactions': saved['compactions'],
                                 'completion_validation': 'exact_read_only_acceptance'}
-                    messages.append({'role': 'user', 'content': 'Do not finish with an intention or unsupported claim. Use the allowed tools to inspect or verify the assigned work, or state a concrete blocker.'})
-                    if round_num >= 2:
+                    saved['no_tool_nudges'] = int(saved.get('no_tool_nudges', 0)) + 1
+                    offered = {str((item.get('function') or {}).get('name') or '') for item in tools}
+                    host_hint = (' For a computed result, call the advertised python function '
+                                 'with code that prints the value, then inspect its real output.'
+                                 if 'python' in offered else '')
+                    messages.append({'role': 'user', 'content': (
+                        'Do not finish with an intention or unsupported claim. '
+                        'A self-reported command is not a verified tool result.'
+                        + host_hint +
+                        ' Use the allowed tools to inspect or verify the assigned work, '
+                        'or state the precise permission/transport blocker.'
+                    )})
+                    if saved['no_tool_nudges'] >= 3:
                         raise RuntimeError('Worker stopped without any verified tool result')
                     continue
                 return {'summary': answer['content'], 'completed': True, 'cwd': saved['cwd'],
@@ -1178,6 +1210,13 @@ class TeamRuntime:
                                 'error': 'Earlier tool outcome is unknown; this action was not dispatched.'})})
                     self.store.save_checkpoint(owner, team_id, worker['id'], token, saved)
                     raise UnknownToolOutcome('Uncertain tool outcome saved; explicit reconciliation required before continuing this worker')
+            if saved['successful_tools'] == 0 and calls and all(
+                team_tools.canonical_name(call['function']['name']) in {'team_status', 'team_result'}
+                for call in calls
+            ):
+                # Polling team state is useful coordination, but it is not
+                # independent verification of the assigned work.
+                saved['no_tool_nudges'] = int(saved.get('no_tool_nudges', 0)) + 1
             messages.extend(saved.pop('pending_guidance', []))
             if saved.get('force_final'):
                 if kind == 'verification':
