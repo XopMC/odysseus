@@ -5240,6 +5240,8 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    _reasoning_only_nudges = 0
+    _MAX_REASONING_ONLY_NUDGES = 2
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -7371,6 +7373,25 @@ async def stream_agent_loop(
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
         if not tool_blocks:
+            # Some local models end a round after reasoning_content without
+            # emitting either the promised function call or public content.
+            # Give the same run a bounded chance to finish, rather than
+            # treating the private reasoning as a completed agent turn.
+            if (
+                not cleaned_round and _round_reasoning_saved.strip()
+                and _reasoning_only_nudges < _MAX_REASONING_ONLY_NUDGES
+                and not _force_answer
+            ):
+                _reasoning_only_nudges += 1
+                messages.append({"role": "system", "content": (
+                    "Your previous round ended with internal reasoning only: no "
+                    "user-visible answer and no completed tool call. Continue "
+                    "the same request now. If a tool is needed, emit its actual "
+                    "function call; otherwise provide the final answer in "
+                    "normal content. Do not repeat private reasoning alone."
+                )})
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -7551,6 +7572,8 @@ async def stream_agent_loop(
                     yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                     continue
             break  # no tools — done
+
+        _reasoning_only_nudges = 0
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
         # Stall detector for repeated no-progress tool loops.

@@ -3028,6 +3028,62 @@ def test_reasoning_only_agent_error_emits_terminal_history(monkeypatch):
     assert "data: [DONE]\n\n" not in chunks
 
 
+def test_reasoning_only_agent_round_retries_until_public_answer(monkeypatch):
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    attempts = []
+
+    async def fake_stream(candidates, messages, **kwargs):
+        attempts.append([dict(item) for item in messages])
+        if len(attempts) == 1:
+            yield 'data: {"delta": "I should call python", "thinking": true}\n\n'
+        else:
+            yield 'data: {"delta": "42"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Compute 6 times 7."}],
+        relevant_tools={"python"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False,
+        _is_teacher_run=True,
+    ))
+
+    assert len(attempts) == 2
+    assert any("internal reasoning only" in item.get("content", "")
+               for item in attempts[1] if item.get("role") == "system")
+    assert any('"delta": "42"' in chunk for chunk in chunks)
+    assert not any("The model returned internal reasoning" in chunk for chunk in chunks)
+
+
+def test_reasoning_only_agent_round_is_bounded(monkeypatch):
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    attempts = []
+
+    async def fake_stream(candidates, messages, **kwargs):
+        attempts.append(1)
+        yield 'data: {"delta": "private partial", "thinking": true}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Compute 6 times 7."}],
+        relevant_tools={"python"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False,
+        _is_teacher_run=True,
+    ))
+
+    assert len(attempts) == 3
+    assert any("The model returned internal reasoning" in chunk for chunk in chunks)
+
+
 def test_agent_emits_live_context_growth_during_generation(monkeypatch):
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
