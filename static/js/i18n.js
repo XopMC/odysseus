@@ -135,6 +135,8 @@ const RU = Object.freeze({
   'attempt':'попытка', 'starting':'запускается', 'active':'активна', 'paused':'на паузе', 'waiting_user':'ожидает пользователя', 'Review required':'Нужна проверка', 'completed':'завершена', 'cancelled':'отменена',
   'draft':'черновик', 'approved':'утверждён', 'executing':'выполняется', 'done':'готов', 'Edit plan':'Изменить план',
   'Execute the approved plan and update each step after verification.':'Выполни утверждённый план и обновляй каждый шаг после проверки.',
+  'Continue the current approved plan. Use only its latest durable steps and update each step after verification.':'Продолжи текущий утверждённый план. Используй только его последнюю сохранённую редакцию и обновляй каждый шаг после проверки.',
+  'A run is already active.':'Задача уже выполняется.',
   'Projects':'Проекты', 'Create project':'Создать проект', 'Project name':'Название проекта',
   'Execution host':'Машина выполнения', 'Project folder':'Папка проекта', 'Browse':'Обзор', 'Access mode':'Режим доступа',
   'Read-only':'Только чтение', 'Trusted host':'Доверенный хост', 'Isolation':'Изоляция', 'Create':'Создать',

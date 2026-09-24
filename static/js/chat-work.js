@@ -68,7 +68,8 @@ function renderPlan() {
     li.textContent = `${step.status === 'done' ? '✓ ' : step.status === 'blocked' ? '! ' : ''}${step.text}`;
     list.appendChild(li);
   }
-  el('plan-work-execute').hidden = !['draft', 'approved'].includes(plan.status);
+  el('plan-work-execute').hidden = !['draft', 'approved', 'executing'].includes(plan.status);
+  el('plan-work-execute').textContent = plan.status === 'executing' ? t('Continue') : t('Execute');
   el('plan-work-edit').hidden = ['executing', 'done', 'cancelled'].includes(plan.status);
   el('plan-work-cancel').hidden = ['done', 'cancelled'].includes(plan.status);
   el('plan-mode-status-toggle').hidden = true;
@@ -396,6 +397,28 @@ function prepareNewGoal() {
 async function mutate(kind, action) {
   const record = snapshot[kind];
   if (!sessionId || !record) return;
+  if (kind === 'plan' && action === 'execute' && record.status === 'executing') {
+    // A model can exhaust its run budget while a durable plan remains in
+    // progress. Do not POST /execute again (that transition already happened),
+    // and never replace a run still generating in another browser.
+    try {
+      if (window.chatModule?.hasActiveStream?.(sessionId)) {
+        toast(t('A run is already active.'));
+        return;
+      }
+      const status = await fetch(`${api}/api/chat/stream_status/${encodeURIComponent(sessionId)}`, {
+        credentials: 'same-origin', cache: 'no-store',
+      });
+      if (status.ok) { toast(t('A run is already active.')); return; }
+      if (status.status !== 404) throw new Error(`Run status HTTP ${status.status}`);
+      const input = el('message');
+      if (!input) return;
+      input.value = t('Continue the current approved plan. Use only its latest durable steps and update each step after verification.');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      el('chat-form')?.requestSubmit?.();
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
   try {
     snapshot[kind] = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/${kind}/${action}`, { expected_revision: record.revision });
     if (kind === 'goal') { runHealthSnapshot = null; void refreshWait(sessionId); }

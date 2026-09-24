@@ -97,8 +97,8 @@ def test_goal_health_is_owner_snapshot_driven_and_hidden_without_active_goal():
     assert "describeBudgetWarnings(goal, runHealthSnapshot)" in work
     assert "./runHealth.js?v=20260924budgetwarn1" in work
     assert "/static/js/runHealth.js?v=20260924budgetwarn1" in sw
-    assert "./js/chat-work.js?v=20260924budgetwarn1" in app
-    assert "/static/js/chat-work.js?v=20260924budgetwarn1" in sw
+    assert "./js/chat-work.js?v=20260924planresume1" in app
+    assert "/static/js/chat-work.js?v=20260924planresume1" in sw
 
 
 def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
