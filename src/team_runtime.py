@@ -791,6 +791,15 @@ class TeamRuntime:
         meta = self.store.get_task(owner, team_id)['metadata']
         pool = [{'index': index, 'model': item['model'], 'role': item.get('role', 'executor')}
                 for index, item in enumerate(meta['participants'] or [meta['leader']])]
+        # Planning precedes dispatch: until team_finish_plan returns and the
+        # coordinator creates the proposed workers, the planner has no peers to
+        # query or message. Advertising collaboration tools during that phase
+        # let models target not-yet-created worker IDs, which raised NotFound,
+        # lost the lease and replayed the same pending intent indefinitely.
+        peers_available = any(
+            item['id'] != worker['id'] and item['status'] not in {'cancelled', 'failed'}
+            for item in self.store.list_workers(owner, team_id)
+        )
         plan = team_collaboration.PlanAccumulator(len(pool), plan=saved.get('planner_plan'))
         if saved.get('planner_finished'):
             return {'plan': plan.finish_plan(), 'completed': True}
@@ -816,11 +825,13 @@ class TeamRuntime:
             if current['status'] in {'paused', 'cancelled'}:
                 raise PermissionError('Task paused or cancelled')
             tools = team_collaboration.schemas(planner=True)
-            peers_allowed = True
-            try:
-                self.collaboration_allowed(owner, team_id, worker)
-            except PermissionError:
-                peers_allowed = False
+            peers_allowed = peers_available
+            if peers_allowed:
+                try:
+                    self.collaboration_allowed(owner, team_id, worker)
+                except PermissionError:
+                    peers_allowed = False
+            if not peers_allowed:
                 tools = [s for s in tools if s['function']['name'] in team_collaboration.PLANNER_TOOLS]
             async def summarize(prompt):
                 return (await self.model_call(owner, team_id, worker, token, prompt, []))['content']
@@ -881,6 +892,14 @@ class TeamRuntime:
                     self.store.save_checkpoint(owner, team_id, worker['id'], token, saved)
                     continue
                 if name in team_collaboration.COMMON_TOOLS:
+                    if not peers_allowed:
+                        messages.append({'role': 'tool', 'tool_call_id': call['id'],
+                            'content': json.dumps({
+                                'error': 'No dispatched teammate is available before the plan is finished.',
+                                'not_executed': True, 'exit_code': 1,
+                            })})
+                        self.store.save_checkpoint(owner, team_id, worker['id'], token, saved)
+                        continue
                     self.collaboration_allowed(owner, team_id, worker)
                 intent = self.store.record_tool_intent(owner, team_id, worker['id'], token,
                     name, args, effectful=False, idempotency_key=call['id'])

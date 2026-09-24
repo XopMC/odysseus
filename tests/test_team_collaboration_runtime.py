@@ -72,9 +72,43 @@ class CollaborationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result['plan']['tasks']), 2)
         self.assertEqual(result['plan']['tasks'][1]['depends_on'], [0])
         self.assertEqual(len(self.store.list_workers('owner', self.task['id'])), 1)
-        self.assertIn('team_create_subtask', {s['function']['name'] for s in self.sent[0][1]})
+        self.assertEqual(
+            {s['function']['name'] for s in self.sent[0][1]},
+            {'team_create_subtask', 'team_finish_plan'},
+            'before dispatch, the planner has no peers to query or message',
+        )
         self.assertEqual(len(self.store.list_tool_intents('owner', self.task['id'])), 3)
         self.assertTrue(all(i['status'] == 'done' for i in self.store.list_tool_intents('owner', self.task['id'])))
+
+    async def test_planner_cannot_message_a_peer_before_dispatch(self):
+        worker = self.worker('planner')
+        claim = self.claim(worker)
+        missing_peer_id = 'future-worker-not-dispatched'
+        self.responses = [
+            answer('', native('team_message', {
+                'worker_id': missing_peer_id, 'text': 'Status check before dispatch',
+            }), native('team_create_subtask', proposal())),
+            answer('', native('team_finish_plan', {})),
+        ]
+
+        result = await self.runtime.execute_worker(
+            'owner', self.task['id'], claim, claim['lease_token'],
+        )
+
+        self.assertEqual(result['plan']['tasks'], [proposal()])
+        self.assertEqual(len(self.store.list_workers('owner', self.task['id'])), 1)
+        self.assertEqual(
+            sorted(intent['name'] for intent in self.store.list_tool_intents('owner', self.task['id'])),
+            ['team_create_subtask', 'team_finish_plan'],
+        )
+        self.assertFalse(any(event['type'] == 'peer_message'
+                             for event in self.store.events('owner', self.task['id'])))
+        tool_results = [message for message in self.sent[1][0] if message.get('role') == 'tool']
+        self.assertTrue(any(
+            json.loads(message['content']).get('not_executed') is True
+            and json.loads(message['content']).get('exit_code') != 0
+            for message in tool_results
+        ))
 
     async def test_json_plan_fallback_remains_validated(self):
         worker = self.worker('planner')
