@@ -3341,11 +3341,17 @@ def setup_chat_routes(
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         _expected_run_id = request.headers.get("X-Odysseus-Run-Id")
+        _requested_stop_reason = request.headers.get("X-Odysseus-Stop-Reason")
+        _stop_reason = (
+            _requested_stop_reason
+            if _requested_stop_reason in {"user_stop", "timeout"}
+            else "user_stop"
+        )
         # Acknowledge only after the partial transcript and replay timeline are
         # durable. This prevents a history poll from repainting the pre-run
         # snapshot while cancellation is still saving the model's output.
         stopped = await agent_runs.stop_and_wait(
-            session_id, _expected_run_id, reason="user_stop",
+            session_id, _expected_run_id, reason=_stop_reason,
         )
         goal = None
         owner = effective_user(request)

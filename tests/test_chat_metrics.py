@@ -18,7 +18,7 @@ import asyncio
 import pytest
 
 from src import llm_core
-from src.agent_loop import _compute_final_metrics
+from src.agent_loop import _agent_round_tps_measurement, _compute_final_metrics
 
 
 # --- captured-stream harness (mirrors test_llm_core_streaming.py) -----------
@@ -300,6 +300,31 @@ def test_metrics_prefer_backend_gen_tps_over_wallclock():
     assert m["tokens_per_second"] == 78.91
     assert m["tps_source"] == "backend"
     assert m["prefill_tps"] == 512.34
+
+
+def test_agent_round_prefers_explicit_lm_studio_decode_tps_over_generation_time():
+    tps, duration, source = _agent_round_tps_measurement(
+        120,
+        backend_gen_tps=123.45,
+        backend_generation_time=4.26,
+        stream_duration=4.5,
+    )
+    assert tps == 123.45
+    assert duration == pytest.approx(120 / 123.45)
+    assert source == "backend"
+
+    metrics = _metrics(
+        real_output_tokens=120,
+        round_generation_metrics=[{
+            "round": 1,
+            "output_tokens": 120,
+            "generation_time": duration,
+            "tokens_per_second": tps,
+            "tps_source": source,
+        }],
+    )
+    assert metrics["tokens_per_second"] == 123.45
+    assert metrics["tps_source"] == "backend"
 
 
 def test_metrics_fall_back_to_wallclock_without_backend_timings():

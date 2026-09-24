@@ -120,3 +120,14 @@ def test_streaming_thinking_filter_holds_split_tool_marker_and_hides_arguments()
     assert "Thinking normally." in filtered
     assert "Unverified same-round claim." not in filtered
     assert strip_tool_blocks_streaming(prefix + "<tool_ca", final=True) == prefix
+
+
+def test_streaming_filter_preserves_fenced_example_when_requested_but_hides_markup():
+    example = "Example follows:\n```bash\nprintf safe-fixture\n```"
+    assert strip_tool_blocks_streaming(example, skip_fenced=True) == example
+    protocol = example + '\n<tool_call>{"name":"bash"}</tool_call>'
+    visible = strip_tool_blocks_streaming(protocol, skip_fenced=True)
+    assert "Example follows:" in visible
+    assert "```bash" in visible
+    assert "<tool_call>" not in visible
+    assert '"name"' not in visible

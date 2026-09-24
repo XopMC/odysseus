@@ -3203,6 +3203,7 @@ export function addMessage(role, content, modelName, metadata) {
             : reason === 'plan_cancelled' ? '[Plan cancelled]'
             : reason === 'superseded_by_new_run' ? '[Run superseded by a newer request]'
             : reason === 'session_deleted' ? '[Chat deleted]'
+            : reason === 'timeout' ? '[Timed out before completion]'
             : reason === 'user_stop' ? '[Stopped by user]'
             : '[Message interrupted]';
           indicator.appendChild(label);
@@ -3399,6 +3400,7 @@ export function addMessage(role, content, modelName, metadata) {
         : reason === 'plan_cancelled' ? '[Plan cancelled]'
         : reason === 'superseded_by_new_run' ? '[Run superseded by a newer request]'
         : reason === 'session_deleted' ? '[Chat deleted]'
+        : reason === 'timeout' ? '[Timed out before completion]'
         : reason === 'user_stop' ? '[Stopped by user]'
         : '[Message interrupted]';
       stoppedIndicator.appendChild(stoppedLabel);

@@ -82,8 +82,14 @@ from src.agent_tools import (
     ToolBlock,
     MAX_AGENT_ROUNDS,
 )
+from src.tool_parsing import strip_tool_blocks_streaming
 
 logger = logging.getLogger(__name__)
+
+# Local reasoning models may spend a substantial portion of their completion
+# budget on thinking before returning a final answer or a structured tool call.
+# Never let an implicit provider default (commonly 2K) truncate an Agent round.
+MIN_AGENT_OUTPUT_TOKENS = 4096
 
 
 def _trim_context_compat(trim_fn, messages, context_length, **kwargs):
@@ -3291,6 +3297,7 @@ def _append_tool_results(
     round_num: int,
     round_reasoning: str = "",
     tool_result_records: Optional[list] = None,
+    skip_fenced: bool = False,
 ):
     """Append tool execution results back into the message history for the next LLM round.
 
@@ -3308,6 +3315,12 @@ def _append_tool_results(
     without the per-round accumulation.
     """
     tool_result_records = tool_result_records or []
+    # A model may return native tool_calls and repeat the same request as
+    # textual protocol markup in content. Do not feed that duplicate control
+    # text back to the next model round: it reinforces tool-call loops.
+    round_response = strip_tool_blocks_streaming(
+        round_response, final=True, skip_fenced=skip_fenced,
+    ).strip()
     # Strip reasoning_content from earlier assistant turns; only the newest keeps it.
     for _m in messages:
         if _m.get("role") == "assistant":
@@ -3412,6 +3425,47 @@ def _append_tool_results(
             "tool_call_id": f"text-round-{round_num}",
         }
         messages.append(untrusted_result)
+
+
+def _agent_round_tps_measurement(
+    output_tokens: int,
+    *,
+    backend_gen_tps: float = 0,
+    backend_generation_time: float = 0,
+    stream_duration: float = 0,
+    generation_started: bool = False,
+):
+    """Return the most authoritative decode-rate evidence for one model round.
+
+    Some local OpenAI-compatible servers expose both an explicit decode TPS
+    (LM Studio ``timings.predicted_per_second``) and a broader/ambiguous
+    ``stats.generation_time``. The explicit rate wins; using the latter as a
+    denominator can turn 120+ backend tok/s into a much lower UI estimate.
+    """
+    try:
+        tokens = max(int(output_tokens or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        tokens = 0
+
+    def positive_finite(value):
+        try:
+            number = float(value or 0)
+            return number if math.isfinite(number) and number > 0 else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    backend_rate = positive_finite(backend_gen_tps)
+    backend_time = positive_finite(backend_generation_time)
+    stream_time = positive_finite(stream_duration)
+    if tokens and backend_rate:
+        return round(backend_rate, 2), tokens / backend_rate, "backend"
+    if tokens and backend_time:
+        return round(tokens / backend_time, 2), backend_time, "backend"
+    if tokens and stream_time:
+        return round(tokens / stream_time, 2), stream_time, "stream_elapsed"
+    if tokens:
+        return None, None, "unavailable_single_delta" if generation_started else "unavailable_buffered"
+    return None, None, "unavailable"
 
 
 def _aggregate_agent_round_tps(round_metrics: list, total_output_tokens: int) -> dict:
@@ -3723,7 +3777,11 @@ def _empty_response_fallback(
     if full_response.strip() or tool_events:
         return full_response, None
     if round_reasoning.strip():
-        return round_reasoning, None
+        _notice = (
+            "The model returned internal reasoning but no final answer or completed tool action. "
+            "Continue or switch models; no tool action was inferred from the reasoning."
+        )
+        return _notice, f'data: {json.dumps({"delta": _notice})}\n\n'
     _error_msg = "The model returned an empty response. Please try again or switch to a different model."
     return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
 
@@ -3874,6 +3932,10 @@ async def stream_agent_loop(
     """
 
     wall_started = time.monotonic()
+    try:
+        _caller_requested_output_tokens = int(max_tokens or 0)
+    except (TypeError, ValueError):
+        _caller_requested_output_tokens = 0
 
     run_security = ToolRunSecurityContext(
         external_untrusted_context_seen=(
@@ -5631,6 +5693,7 @@ async def stream_agent_loop(
                 break
         round_started_at = time.time()
         round_response = ""
+        _round_response_visible = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         _round_reasoning_visible = ""
         _round_reasoning_saved = ""
@@ -5803,7 +5866,37 @@ async def stream_agent_loop(
             }
             yield f'data: {json.dumps(_invalid_context_terminal)}\n\n'
             return
+        _context_profile_for_generation = _context_profile
         _configured_policy = ContextPolicy.from_dict(_context_profile['effective']) if _context_profile else None
+        if _configured_policy:
+            # Existing chat/owner profiles may reserve less than the minimum
+            # completion budget. Raise only the effective per-request reserve;
+            # the saved preference stays intact and every budget calculation
+            # (including fallbacks) sees the same effective value.
+            _effective_output_reserve = max(
+                MIN_AGENT_OUTPUT_TOKENS, _configured_policy.output_reserve,
+            )
+            if _effective_output_reserve != _configured_policy.output_reserve:
+                from dataclasses import replace as _replace_policy
+                _configured_policy = _replace_policy(
+                    _configured_policy, output_reserve=_effective_output_reserve,
+                )
+                _context_profile_for_generation = {
+                    **_context_profile,
+                    'effective': {
+                        **_context_profile['effective'],
+                        'output_reserve': _effective_output_reserve,
+                    },
+                }
+            max_tokens = min(
+                max(
+                    MIN_AGENT_OUTPUT_TOKENS,
+                    _caller_requested_output_tokens or _configured_policy.output_reserve,
+                ),
+                _configured_policy.output_reserve,
+            )
+        else:
+            max_tokens = max(MIN_AGENT_OUTPUT_TOKENS, _caller_requested_output_tokens)
         # Shape the growing WORKING history on every round, not only at the
         # beginning of a chat turn. The full transcript remains untouched.
         _schema_tokens = schema_token_estimate(all_tool_schemas)
@@ -5984,8 +6077,11 @@ async def stream_agent_loop(
                 from src.model_context import budget_context_for_model
                 _policy_window = await asyncio.to_thread(budget_context_for_model, endpoint_url, model, fallback=0)
                 _compacted_messages, _configured_telemetry = await shape_request(
-                    messages, all_tool_schemas, _context_profile, _policy_window,
+                    messages, all_tool_schemas, _context_profile_for_generation, _policy_window,
                     _summarize_working_context, calibration=_context_calibration, hard_input_max=max(1, _hard_cap))
+                _configured_telemetry['configured_output_reserve'] = int(
+                    _context_profile['effective']['output_reserve']
+                )
                 if owner_policy(owner) != _context_profile:
                     raise ValueError('Context policy changed during compaction')
                 _compact_status = _configured_telemetry['status']
@@ -6115,6 +6211,7 @@ async def stream_agent_loop(
         if _configured_telemetry:
             _working_context['context_policy'] = _configured_telemetry
             _working_context['auto_compact_enabled'] = _configured_policy.auto_compact
+        _working_context['generation_budget_tokens'] = max_tokens
         _working_context['harness_profile'] = _efficiency_profile_name()
         if _economic_decision:
             _working_context['economic_compaction'] = _economic_decision.to_dict()
@@ -6216,7 +6313,7 @@ async def stream_agent_loop(
                         max_retries=1, session_id=session_id, require_answer_content=True)
                 candidate_window = await asyncio.to_thread(budget_context_for_model, candidate_url, candidate_model, fallback=0)
                 candidate_messages, info = await shape_request(state['messages'], _tool_schemas_for_route(state),
-                    _context_profile, candidate_window, configured_summary, hard_input_max=max(1, _hard_cap))
+                    _context_profile_for_generation, candidate_window, configured_summary, hard_input_max=max(1, _hard_cap))
                 state.update(messages=candidate_messages, working_limit=info['trigger_messages'],
                     schema_tokens=schema_token_estimate(_tool_schemas_for_route(state)),
                     working_compacted=info['status'] == 'compacted', before_tokens=info['before_tokens'])
@@ -6455,7 +6552,6 @@ async def stream_agent_loop(
                 ).strip()
                 if _ody_qwen_finetune_model:
                     partial_round = _strip_doc_model_artifacts(partial_round).strip()
-                from src.tool_parsing import strip_tool_blocks_streaming
                 _safe_failed_reasoning = strip_tool_blocks_streaming(
                     round_reasoning, final=True
                 ).strip()
@@ -6748,8 +6844,9 @@ async def stream_agent_loop(
                         # round_response unchanged.
                         if data.get("thinking"):
                             round_reasoning += data["delta"]
-                            from src.tool_parsing import strip_tool_blocks_streaming
-                            _safe_reasoning = strip_tool_blocks_streaming(round_reasoning)
+                            _safe_reasoning = strip_tool_blocks_streaming(
+                                round_reasoning, skip_fenced=True,
+                            )
                             if _safe_reasoning.startswith(_round_reasoning_visible):
                                 _reasoning_delta = _safe_reasoning[len(_round_reasoning_visible):]
                                 if _reasoning_delta:
@@ -6765,9 +6862,31 @@ async def stream_agent_loop(
                             if _ody_qwen_finetune_model:
                                 _delta_text = _normalize_ody_qwen_text_artifacts(_delta_text)
                             round_response += _delta_text
-                            full_response += _delta_text
-                            data["delta"] = _delta_text
-                        if not data.get("thinking") and not _ody_qwen_finetune_model:
+                            if not _ody_qwen_finetune_model:
+                                _skip_fenced_live = bool(
+                                    _is_api_model and not guide_only
+                                    and not _ody_doc_finetune_mode
+                                    and not (
+                                        _engineering_registry is not None
+                                        and _ody_qwen_finetune_model
+                                    )
+                                )
+                                _safe_response = strip_tool_blocks_streaming(
+                                    round_response, skip_fenced=_skip_fenced_live,
+                                )
+                                if _safe_response.startswith(_round_response_visible):
+                                    _response_delta = _safe_response[len(_round_response_visible):]
+                                    if _response_delta:
+                                        _round_response_visible = _safe_response
+                                    data["delta"] = _response_delta
+                                else:
+                                    data["delta"] = ""
+                                full_response += data["delta"]
+                            else:
+                                data["delta"] = _delta_text
+                                full_response += _delta_text
+                        if (not data.get("thinking") and not _ody_qwen_finetune_model
+                                and data.get("delta")):
                             yield f"data: {json.dumps(data)}\n\n"
                         # Prompt occupancy is fixed at dispatch, but the
                         # generated reasoning/answer occupies the same model
@@ -6809,8 +6928,9 @@ async def stream_agent_loop(
 
         # Flush safe thinking text delayed while checking for split tool
         # markers. Partial markers and complete tool blocks are dropped at EOF.
-        from src.tool_parsing import strip_tool_blocks_streaming
-        _round_reasoning_saved = strip_tool_blocks_streaming(round_reasoning, final=True).strip()
+        _round_reasoning_saved = strip_tool_blocks_streaming(
+            round_reasoning, final=True, skip_fenced=True,
+        ).strip()
         if _round_reasoning_saved.startswith(_round_reasoning_visible):
             _reasoning_tail = _round_reasoning_saved[len(_round_reasoning_visible):]
             if _reasoning_tail:
@@ -6853,25 +6973,13 @@ async def stream_agent_loop(
             int(_round_usage_bucket.get("output_tokens") or 0)
             if _round_usage_bucket else max(_round_real_output_tokens, 0)
         )
-        _round_tps_source = "unavailable_buffered"
-        _round_tps = None
-        _round_tps_duration = None
-        if _round_backend_generation_time > 0 and _round_output_tokens_for_tps > 0:
-            _round_tps_duration = _round_backend_generation_time
-            _round_tps = round(_round_output_tokens_for_tps / _round_tps_duration, 2)
-            _round_tps_source = "backend"
-        elif _round_backend_gen_tps > 0 and _round_output_tokens_for_tps > 0:
-            _round_tps = round(_round_backend_gen_tps, 2)
-            _round_tps_duration = _round_output_tokens_for_tps / _round_backend_gen_tps
-            _round_tps_source = "backend"
-        elif _round_stream_duration > 0 and _round_output_tokens_for_tps > 0:
-            _round_tps_duration = _round_stream_duration
-            _round_tps = round(_round_output_tokens_for_tps / _round_stream_duration, 2)
-            _round_tps_source = "stream_elapsed"
-        elif _round_generation_started_at is not None and _round_output_tokens_for_tps > 0:
-            _round_tps_source = "unavailable_single_delta"
-        elif _round_generation_started_at is None and _round_output_tokens_for_tps > 0:
-            _round_tps_source = "unavailable_buffered"
+        _round_tps, _round_tps_duration, _round_tps_source = _agent_round_tps_measurement(
+            _round_output_tokens_for_tps,
+            backend_gen_tps=_round_backend_gen_tps,
+            backend_generation_time=_round_backend_generation_time,
+            stream_duration=_round_stream_duration,
+            generation_started=_round_generation_started_at is not None,
+        )
         if _round_usage_bucket or native_tool_calls or round_response or round_reasoning:
             round_generation_metrics.append({
                 "round": round_num,
@@ -7248,7 +7356,11 @@ async def stream_agent_loop(
         # model with no real native_tool_calls) must not be stripped from the
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
-        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_round_native_builtins and not used_native)).strip()
+        cleaned_round = strip_tool_blocks_streaming(
+            round_response,
+            final=True,
+            skip_fenced=(_round_native_builtins and not used_native),
+        ).strip()
         round_texts.append(cleaned_round)
         round_reasonings.append(_round_reasoning_saved)
         round_timestamps.append(round_started_at)
@@ -8495,7 +8607,8 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=_round_reasoning_saved,
-                             tool_result_records=tool_result_records)
+                             tool_result_records=tool_result_records,
+                             skip_fenced=(_round_native_builtins and not used_native))
 
         # Persist the exact model-visible ledger after every completed tool
         # round. agent_runs strips the bulky payload from public replay after

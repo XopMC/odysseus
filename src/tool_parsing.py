@@ -1544,7 +1544,9 @@ _STREAM_TOOL_MARKERS = (
 )
 
 
-def strip_tool_blocks_streaming(text: str, *, final: bool = False) -> str:
+def strip_tool_blocks_streaming(
+    text: str, *, final: bool = False, skip_fenced: bool = False,
+) -> str:
     """Return the safe, user-visible prefix of an accumulating model stream.
 
     Tool markup can arrive in the reasoning channel, one delta at a time. A
@@ -1570,7 +1572,7 @@ def strip_tool_blocks_streaming(text: str, *, final: bool = False) -> str:
     if cut_at is not None:
         source = source[:cut_at]
 
-    cleaned = strip_tool_blocks(source)
+    cleaned = strip_tool_blocks(source, skip_fenced=skip_fenced)
 
     # If the latest delta ends in a partial control marker (for example
     # ``<tool_ca``), hold only that suffix until the next delta disambiguates

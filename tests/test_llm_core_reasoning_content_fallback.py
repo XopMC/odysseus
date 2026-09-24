@@ -4,8 +4,8 @@ Covers the five cases requested during PR review:
   1. llm_call (sync): content="" + reasoning_content="..." → returns reasoning text
   2. llm_call_async (async): same
   3. Normal content wins over reasoning_content when both present
-  4. Streaming agent path: reasoning-only round does NOT emit the generic error
-  5. Streaming agent path: reasoning tokens are NOT duplicated as normal answer text
+  4. Streaming agent path: reasoning-only round emits a visible no-answer notice
+  5. Streaming agent path: internal reasoning is NOT duplicated as the answer
 """
 import asyncio
 import json
@@ -112,22 +112,24 @@ from src.agent_loop import _empty_response_fallback  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# 4. Reasoning-only round: generic error is suppressed
+# 4. Reasoning-only round: show a useful notice, not an empty assistant bubble
 # ---------------------------------------------------------------------------
 
-def test_stream_agent_reasoning_only_does_not_emit_error():
+def test_stream_agent_reasoning_only_emits_visible_notice():
     final_response, chunk = _empty_response_fallback(
         full_response="",
         round_reasoning="I reasoned carefully",
         tool_events=[],
     )
-    assert chunk is None, "Must not emit any SSE chunk when reasoning is present"
-    assert "The model returned an empty response" not in (chunk or "")
-    assert final_response == "I reasoned carefully"
+    assert chunk is not None
+    assert "internal reasoning" in final_response
+    assert "final answer" in final_response
+    assert "I reasoned carefully" not in final_response
+    assert "I reasoned carefully" not in chunk
 
 
 # ---------------------------------------------------------------------------
-# 5. Reasoning tokens are NOT re-emitted as a normal answer delta
+# 5. Internal reasoning is NOT re-emitted as a normal answer delta
 # ---------------------------------------------------------------------------
 
 def test_stream_agent_reasoning_not_duplicated_as_normal_delta():
@@ -137,7 +139,7 @@ def test_stream_agent_reasoning_not_duplicated_as_normal_delta():
         round_reasoning=reasoning_text,
         tool_events=[],
     )
-    # chunk must be None — the reasoning was already sent as {thinking:true}
-    assert chunk is None, (
-        f"reasoning text was re-emitted as a normal delta chunk: {chunk!r}"
-    )
+    # A short safe diagnostic is emitted, never the internal reasoning itself.
+    assert chunk is not None
+    assert "my internal reasoning" not in chunk
+    assert "final answer" in chunk

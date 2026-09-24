@@ -997,13 +997,17 @@ function appendStreamErrorGuidance(container, error) {
   }
 
   /** POST the exact Stop for one observed run identity. */
-  async function _postExactStop(sessionId, runId) {
+  async function _postExactStop(sessionId, runId, requestedReason = 'user_stop') {
     const currentLocation = (typeof location !== 'undefined' && location)
       || (typeof window !== 'undefined' && window.location) || { protocol: 'http:' };
     const cookie = typeof document !== 'undefined' ? String(document.cookie || '') : '';
     const csrfName = currentLocation.protocol === 'https:' ? 'odysseus_csrf_https' : 'odysseus_csrf_http';
     const csrfPart = cookie.split('; ').find(value => value.startsWith(`${csrfName}=`));
-    const headers = { 'X-Odysseus-Run-Id': runId };
+    const stopReason = requestedReason === 'timeout' ? 'timeout' : 'user_stop';
+    const headers = {
+      'X-Odysseus-Run-Id': runId,
+      'X-Odysseus-Stop-Reason': stopReason,
+    };
     if (csrfPart) headers['X-Odysseus-CSRF'] = decodeURIComponent(csrfPart.slice(csrfName.length + 1));
     let response = await fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
       method: 'POST', credentials: 'same-origin', headers,
@@ -1045,8 +1049,11 @@ function appendStreamErrorGuidance(container, error) {
   }
 
   /** Stop only the exact detached run whose identity this browser observed. */
-  function _stopExactRun(sessionId, abortCtrl = null) {
+  function _stopExactRun(sessionId, abortCtrl = null, requestedReason = null) {
     if (!sessionId) return false;
+    const stopReason = requestedReason === 'timeout' || abortCtrl?._reason === 'timeout'
+      ? 'timeout'
+      : 'user_stop';
     const runId = _streamRunIds.get(sessionId);
     if (!runId) {
       // A reload/second device may have an active detached run before this
@@ -1061,7 +1068,7 @@ function appendStreamErrorGuidance(container, error) {
         if (!resolved || info?.status !== 'streaming') return;
         if (_streamGenerations.get(sessionId) !== generation) return;
         _streamRunIds.set(sessionId, resolved);
-        void _postExactStop(sessionId, resolved);
+        void _postExactStop(sessionId, resolved, stopReason);
         if (abortCtrl && !abortCtrl.signal.aborted) {
           abortCtrl._reason = 'user-stop';
           abortCtrl.abort();
@@ -1077,7 +1084,7 @@ function appendStreamErrorGuidance(container, error) {
       }
       return false;
     }
-    _postExactStop(sessionId, runId);
+    _postExactStop(sessionId, runId, stopReason);
     return true;
   }
 
@@ -1094,7 +1101,11 @@ function appendStreamErrorGuidance(container, error) {
     if (!_pendingRunStops.has(pendingKey)) return;
     const pendingAbort = _pendingRunStops.get(pendingKey);
     _pendingRunStops.delete(pendingKey);
-    _postExactStop(sessionId, runId);
+    _postExactStop(
+      sessionId,
+      runId,
+      pendingAbort?._reason === 'timeout' ? 'timeout' : 'user_stop',
+    );
     if (pendingAbort && !pendingAbort.signal.aborted) {
       pendingAbort._reason = 'user-stop';
       pendingAbort.abort();
@@ -2436,9 +2447,7 @@ function appendStreamErrorGuidance(container, error) {
           }
           let abortNow = true;
           try {
-            abortNow = _streamRunIds.has(streamSessionId)
-              ? _stopExactRun(streamSessionId)
-              : _stopExactRun(streamSessionId, abortCtrl);
+            abortNow = _stopExactRun(streamSessionId, abortCtrl, 'timeout');
           } catch (_) {}
           if (abortNow) {
             abortCtrl.abort();

@@ -47,7 +47,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             expected_revisions=self.store.get('owner')['revisions'])
 
     async def run_agent(self, messages=None, *, window=65536, fallback=False, change_before_dispatch=False, session_id=None,
-                        summary_impl=None, utility_route=None, window_error=None):
+                        summary_impl=None, utility_route=None, window_error=None, request_max_tokens=4096):
         from src import agent_loop, tool_execution, team_runtime
         sent, summaries = [], []
         async def summary(*args, **kwargs):
@@ -59,7 +59,9 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             index = 1 if fallback else 0
             url, model, headers = candidates[index]
             shaped = await kwargs['candidate_request_factory'](index, url, model, headers)
-            sent.append(copy.deepcopy(shaped))
+            sent_request = copy.deepcopy(shaped)
+            sent_request['_stream_max_tokens'] = kwargs.get('max_tokens')
+            sent.append(sent_request)
             yield 'data: ' + json.dumps({'delta': 'Verified reply'}) + '\n\n'
             yield 'data: [DONE]\n\n'
         with ExitStack() as stack:
@@ -84,18 +86,30 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             chunks = [chunk async for chunk in agent_loop.stream_agent_loop(
                 'http://fixture.invalid/v1', 'fixture-model', messages or [{'role':'user','content':'Reply briefly with your status'}],
                 owner='owner', session_id=session_id, relevant_tools={'read_file'}, context_length=65536,
-                max_tokens=4096, max_rounds=1, _is_teacher_run=True,
+                max_tokens=request_max_tokens, max_rounds=1, _is_teacher_run=True,
                 fallbacks=[('http://second.invalid/v1', 'second-model', {})] if fallback else None)]
         return sent, summaries, ''.join(chunks)
 
-    async def test_saved_owner_profile_caps_actual_primary_and_fallback_dispatch(self):
+    async def test_saved_owner_profile_enforces_minimum_generation_budget_on_primary_and_fallback(self):
         self.save({'output_reserve': 768})
         for fallback in (False, True):
             with self.subTest(fallback=fallback):
                 sent, summaries, chunks = await self.run_agent(fallback=fallback)
-                self.assertEqual(sent[0]['kwargs']['max_tokens'], 768)
+                self.assertEqual(sent[0]['kwargs']['max_tokens'], 4096)
+                self.assertEqual(sent[0]['_stream_max_tokens'], 4096)
                 self.assertFalse(summaries)
                 self.assertIn('context_policy', chunks)
+
+    async def test_unconfigured_agent_does_not_inherit_small_or_implicit_provider_limit(self):
+        sent, _summaries, chunks = await self.run_agent(request_max_tokens=0)
+        self.assertEqual(sent[0]['_stream_max_tokens'], 4096)
+        self.assertIn('"generation_budget_tokens": 4096', chunks)
+
+    async def test_agent_preserves_explicit_budget_above_minimum_with_profile_reserve(self):
+        self.save({'output_reserve': 8192})
+        sent, _summaries, _chunks = await self.run_agent(request_max_tokens=6000)
+        self.assertEqual(sent[0]['kwargs']['max_tokens'], 6000)
+        self.assertEqual(sent[0]['_stream_max_tokens'], 6000)
 
     async def test_chat_policy_shapes_agent_without_changing_other_chats(self):
         from contextlib import contextmanager
@@ -116,17 +130,17 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
                 db.add(Session(id=identity, name=identity, owner=owner, endpoint_url='http://fixture.invalid/v1', model='fixture-model'))
             db.commit()
         with patch('core.database.get_db_session', database):
-            self.save({'output_reserve': 1024})
+            self.save({'output_reserve': 8192})
             initial = self.store.get('owner', session_id='chat-a')
             self.store.save('owner', session_id='chat-a', overrides={'output_reserve': 512}, expected_revisions=initial['revisions'])
             with self.assertRaises(NotFound):
                 self.store.get('owner', session_id='private')
             with self.assertRaises(ValueError):
                 self.store.get('owner', session_id='chat-a', task_id='task')
-            for identity, expected in [('chat-a', 512), ('chat-b', 1024)]:
-                sent, _, _ = await self.run_agent(session_id=identity)
+            for identity, expected in [('chat-a', 4096), ('chat-b', 8192)]:
+                sent, _, _ = await self.run_agent(session_id=identity, request_max_tokens=0)
                 self.assertEqual(sent[0]['kwargs']['max_tokens'], expected)
-            self.assertEqual(self.store.get('owner')['effective']['output_reserve'], 1024)
+            self.assertEqual(self.store.get('owner')['effective']['output_reserve'], 8192)
 
     async def test_unknown_window_never_uses_user_requested_capacity(self):
         self.save({'requested_window': 131072})
@@ -157,8 +171,8 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         # Thinking-capable local models need generation headroom before their
         # bounded final summary. The compacted answer is still validated
         # against summary_tokens=256.
-        self.assertEqual(summaries[0][1]['max_tokens'], 1024)
-        self.assertEqual(sent[0]['kwargs']['max_tokens'], 1024)
+        self.assertEqual(summaries[0][1]['max_tokens'], 1280)
+        self.assertEqual(sent[0]['kwargs']['max_tokens'], 4096)
         self.assertIn('Original requirement', str(sent[0]['messages']))
         self.assertIn('Continue verification', str(sent[0]['messages']))
         self.assertLess(len(str(sent[0]['messages'])), len(str(history)))

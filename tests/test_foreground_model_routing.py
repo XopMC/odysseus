@@ -3872,7 +3872,11 @@ def test_agent_fallback_checkpoint_preserves_goal_without_rewriting_history(monk
     assert metrics["working_context"]["model"] == "backup-model"
     assert metrics["working_context"]["context_length"] == 65536
     assert metrics["working_context"]["compactions"] == 1
-    expected_limit = int(65536 * .85) - 1024 - agent_loop.schema_token_estimate(requests[2]["kwargs"]["tools"])
+    expected_limit = (
+        int(65536 * .85)
+        - max(1024, agent_loop.MIN_AGENT_OUTPUT_TOKENS)
+        - agent_loop.schema_token_estimate(requests[2]["kwargs"]["tools"])
+    )
     assert metrics["working_context"]["auto_compact_threshold"] == round(100 * expected_limit / 65536, 1)
     snapshots = [json.loads(chunk[6:])["data"] for chunk in chunks if '"type": "context_usage"' in chunk]
     assert not any(s["model"] == "failed-backup-model" for s in snapshots)
