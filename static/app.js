@@ -1944,7 +1944,12 @@ function initializeEventListeners() {
   }
   function setGoalMode(active, options = {}) {
     const on = !!active;
-    const st = loadToggleState(); st.goal_mode = on; saveToggleState(st);
+    const st = loadToggleState();
+    if (st.goal_mode === on) {
+      syncGoalToggle(on);
+      return;
+    }
+    st.goal_mode = on; saveToggleState(st);
     if (on) chatWork.prepareNewGoal?.();
     syncGoalToggle(on);
     if (!options.silent && uiModule?.showToast) uiModule.showToast(active ? 'Goal mode: work until verified completion' : 'Goal mode off', 1800);

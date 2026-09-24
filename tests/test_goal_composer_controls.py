@@ -108,6 +108,49 @@ try { for (const viewport of [{width:1280,height:900},{width:390,height:844}]) {
     assert result.returncode == 0, result.stderr
 
 
+def test_goal_mode_completion_render_is_idempotent():
+    if not shutil.which("node"):
+        pytest.skip("node is unavailable")
+    app = Path(__file__).resolve().parents[1] / "static/app.js"
+    script = r"""
+      const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+      const source=fs.readFileSync(process.argv[1],'utf8');
+      const start=source.indexOf('function setGoalMode(active, options = {}) {');
+      assert.notEqual(start,-1,'setGoalMode implementation is present');
+      const bodyStart=source.indexOf(') {',start)+2;
+      let depth=0,end=-1,opened=false;
+      for(let i=bodyStart;i<source.length;i++){
+        if(source[i]==='{'){depth++;opened=true;}
+        else if(source[i]==='}'&&opened&&--depth===0){end=i;break;}
+      }
+      assert.notEqual(end,-1,'setGoalMode function closes');
+      const implementation=source.slice(start,end+1);
+      const context=vm.createContext({});
+      vm.runInContext(`
+        let toggleState={goal_mode:true},renderCalls=0,syncCalls=0;
+        const loadToggleState=()=>({...toggleState});
+        const saveToggleState=state=>{toggleState=state;};
+        const syncGoalToggle=()=>{syncCalls++;};
+        const uiModule=null,t=x=>x;
+        const chatWork={prepareNewGoal(){},render(){
+          renderCalls++;
+          if(renderCalls===1) setGoalMode(false,{silent:true});
+        }};
+        ${implementation}
+        setGoalMode(false,{silent:true});
+        globalThis.result={toggleState,renderCalls,syncCalls};
+      `,context);
+      assert.equal(context.result.toggleState.goal_mode,false);
+      assert.equal(context.result.renderCalls,1,'same-state Goal reset from render must not re-enter render');
+      assert.equal(context.result.syncCalls,2,'idempotent reset still syncs the visible toggle');
+    """
+    result = subprocess.run(
+        ["node", "-e", script, str(app)],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_waiting_goal_reply_does_not_preview_a_new_objective():
     if not shutil.which("node"):
         pytest.skip("node is unavailable")
