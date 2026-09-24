@@ -399,6 +399,11 @@ def setup_team_routes():
             raise HTTPException(409, 'Completed or cancelled tasks cannot be resumed; start a new task')
         workers = runtime.store.list_workers(owner, team_id)
         if action == 'resume':
+            retryable = [w for w in workers if w['status'] in {'failed', 'blocked', 'paused'}]
+            unresolved = {i['worker_id'] for i in runtime.store.list_tool_intents(owner, team_id)
+                          if i['status'] == 'unknown'}
+            if any(w['id'] in unresolved for w in retryable):
+                raise HTTPException(409, 'Reconcile unknown tool effects before resuming workers')
             runtime.store.update_task_metadata(owner, team_id, {'manual_resume': {
                 w['id']: w.get('attempt_id') for w in workers}})
         if action in {'pause', 'cancel'}:
@@ -418,9 +423,8 @@ def setup_team_routes():
                 await stop_jobs(owner, team_id)
         else:
             runtime.store.set_task_status(owner, team_id, 'running')
-            for worker in workers:
-                if worker['status'] == 'paused':
-                    runtime.store.update_worker(owner, team_id, worker['id'], status='pending')
+            for worker in retryable:
+                runtime.store.update_worker(owner, team_id, worker['id'], status='pending')
             runtime.start()
         return runtime.snapshot(owner, team_id)
 

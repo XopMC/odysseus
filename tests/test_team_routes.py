@@ -122,6 +122,23 @@ def test_cancelled_task_and_worker_cannot_reopen_closed_host_scope(team_client):
     assert env.store.get_task('alice', env.task['id'])['status'] == 'cancelled'
 
 
+def test_resume_blocked_task_retries_failed_worker_without_reopening_accepted_work(team_client):
+    env = team_client
+    accepted = env.store.claim_worker('alice', env.task['id'])
+    env.store.finish_worker('alice', env.task['id'], accepted['id'], accepted['lease_token'], {'output': 'verified'})
+    env.store.accept_worker('alice', env.task['id'], accepted['id'])
+    failed = env.store.add_worker('alice', env.task['id'], 'Failed worker', profile=env.task['metadata']['leader'])
+    env.store.update_worker('alice', env.task['id'], failed['id'], status='failed')
+    env.store.set_task_status('alice', env.task['id'], 'blocked')
+
+    response = env.client.post(f"/api/team/{env.task['id']}/resume", json={}, headers=ORIGIN)
+    assert response.status_code == 200
+    assert response.json()['status'] == 'running'
+    assert env.store.get_worker('alice', env.task['id'], failed['id'])['status'] == 'pending'
+    assert env.store.get_worker('alice', env.task['id'], accepted['id'])['status'] == 'accepted'
+    assert env.runtime.calls[-1] == ('start',)
+
+
 def test_feature_off_hides_discovery_and_never_constructs_runtime(team_client, monkeypatch):
     env = team_client
     monkeypatch.setattr(team_config, "enabled", lambda: False)
