@@ -5,11 +5,72 @@ task metadata. Reservations/leases are enforced by the caller before this runs.
 """
 import asyncio
 import json
+import re
 import time
 
 import httpx
 
 _locks = {}
+
+_TEXT_CALL_RE = re.compile(
+    r"<tool_call>\s*<function=([A-Za-z_][\w.-]{0,127})>"
+    r"([\s\S]*?)</function>\s*</tool_call>", re.IGNORECASE,
+)
+_TEXT_PARAMETER_RE = re.compile(
+    r"<parameter=([A-Za-z_][\w.-]{0,127})>([\s\S]*?)</parameter>", re.IGNORECASE,
+)
+
+
+def _parse_text_tool_calls(text, tools):
+    """Adapt the explicit Qwen/Hermes ``<function=...>`` dialect to OpenAI calls.
+
+    This deliberately does not parse code fences, prose, or unknown functions.
+    A name must have been advertised in this exact request's tool schema; normal
+    Team authorization/argument validation still runs before any tool dispatch.
+    """
+    offered = {}
+    for item in tools or []:
+        name = ((item.get('function') or {}).get('name') if isinstance(item, dict) else None)
+        if isinstance(name, str) and name:
+            offered[name.casefold()] = item['function']
+    if not offered or not isinstance(text, str):
+        return []
+
+    calls = []
+    for match in _TEXT_CALL_RE.finditer(text):
+        name = match.group(1)
+        function_schema = offered.get(name.casefold())
+        if function_schema is None:
+            continue
+        properties = ((function_schema.get('parameters') or {}).get('properties') or {})
+        args = {}
+        valid = True
+        for parameter in _TEXT_PARAMETER_RE.finditer(match.group(2)):
+            key, raw = parameter.group(1), parameter.group(2).strip()
+            if key in args:
+                valid = False
+                break
+            schema = properties.get(key) or {}
+            expected_type = schema.get('type')
+            if expected_type == 'string':
+                value = raw
+            else:
+                try:
+                    value = json.loads(raw)
+                except (ValueError, TypeError):
+                    value = raw
+            args[key] = value
+        if not valid or not args:
+            continue
+        calls.append({
+            'id': f'team_text_{len(calls)}',
+            'type': 'function',
+            'function': {'name': function_schema['name'],
+                         'arguments': json.dumps(args, ensure_ascii=False)},
+        })
+        if len(calls) == 16:
+            break
+    return calls
 
 
 async def complete(route, messages, tools, *, max_tokens=4096, on_delta=None):
@@ -95,6 +156,14 @@ async def _complete_once(route, messages, tools, *, max_tokens=4096, on_delta=No
         if any(not call['id'] or not call['function']['name'] for call in ordered):
             raise RuntimeError('Incomplete native tool call')
         message['tool_calls'] = ordered
+    elif tools:
+        # Some OpenAI-compatible local endpoints put Qwen's explicit tool syntax
+        # in content instead of populating delta.tool_calls. Reconcile only the
+        # bounded, allowlisted structured dialect above; arbitrary prose remains
+        # inert and existing runtime policy validation remains authoritative.
+        text_calls = _parse_text_tool_calls(message['content'], tools)
+        if text_calls:
+            message['tool_calls'] = text_calls
     elapsed = time.monotonic() - started
     return {'message': message, 'usage': usage, 'duration': elapsed,
             'ttft': first - started if first else None,

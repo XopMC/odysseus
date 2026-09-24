@@ -144,6 +144,34 @@ class TeamModelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request['body']['tools'], tools)
         self.assertEqual(request['body']['stream_options'], {'include_usage': True})
 
+    async def test_qwen_text_tool_markup_is_adapted_only_for_advertised_tools(self):
+        self.response = [
+            sse({'choices': [{'delta': {'content': '<tool_call><function=python>'
+                '<parameter=code>print(99991 * 317)</parameter></function></tool_call>'}}]}),
+            sse('[DONE]'),
+        ]
+        tools = [{'type': 'function', 'function': {'name': 'python', 'parameters': {
+            'type': 'object', 'properties': {'code': {'type': 'string'}}}}}]
+
+        result = await team_model.complete(self.route, self.messages, tools)
+
+        self.assertEqual(len(result['message']['tool_calls']), 1)
+        call = result['message']['tool_calls'][0]
+        self.assertEqual(call['function']['name'], 'python')
+        self.assertEqual(json.loads(call['function']['arguments']), {'code': 'print(99991 * 317)'})
+
+    async def test_qwen_text_markup_never_calls_a_tool_not_advertised(self):
+        self.response = [
+            sse({'choices': [{'delta': {'content': '<tool_call><function=python>'
+                '<parameter=code>print(1)</parameter></function></tool_call>'}}]}),
+            sse('[DONE]'),
+        ]
+        tools = [{'type': 'function', 'function': {'name': 'read_file', 'parameters': {
+            'type': 'object', 'properties': {'path': {'type': 'string'}}}}}]
+        result = await team_model.complete(self.route, self.messages, tools)
+        self.assertNotIn('tool_calls', result['message'])
+        self.assertIn('<tool_call>', result['message']['content'])
+
     async def test_truncated_stream_never_becomes_success(self):
         self.response = [sse({'choices': [{'delta': {'content': 'Only partial'}}]})]
         with self.assertRaisesRegex(RuntimeError, 'disconnected before completion'):
