@@ -135,6 +135,20 @@ def _exact_read_only_acceptance(profile, text, goal=''):
     )
 
 
+def _exact_read_only_instruction():
+    return (
+        'This is a tool-free exact-result task. Do not call or claim to have used '
+        'host, network, file, or team tools. Return ONLY JSON with '
+        'completed=true, acceptance_met=true, result=<exact value>, '
+        'verification={expected:<exact value>,actual:<exact value>,match:true}, '
+        'paths_touched=[], files_modified=false, network_used=false, '
+        'host_tools_used=false, unresolved_issues=[]. If you cannot satisfy '
+        'the exact acceptance criterion, return completed=false with a concrete '
+        'unresolved issue. Do not return the bare value: the structured result '
+        'is required for durable acceptance.'
+    )
+
+
 def pending_calls(messages):
     completed = set()
     for message in reversed(messages):
@@ -1012,6 +1026,9 @@ class TeamRuntime:
                 instructions += (' You are read-only. Inspect the result against acceptance and available files. '
                                  'Finish with ONLY JSON {"verdict":"pass" or "fail","reason":"..."}. '
                                  'Do not accept an unsupported claim of successful tests.')
+            elif (_exact_acceptance_target(profile) is not None
+                  and not requires_python):
+                instructions += ' ' + _exact_read_only_instruction()
             messages = [{'role': 'system', 'content': instructions},
                         {'role': 'user', 'content': 'Overall goal: ' + meta['goal'] + '\nAssigned objective: ' + str(profile.get('objective', '')) + '\nAcceptance: ' + str(profile.get('acceptance', ''))}]
             saved = {'messages': messages, 'round': 0, 'compactions': 0, 'cwd': cwd,
@@ -1029,9 +1046,13 @@ class TeamRuntime:
             saved.pop('force_final', None)
             saved.pop('unchanged_reads', None)
             if prior_no_tool:
+                exact_read_only_task = (_exact_acceptance_target(profile) is not None
+                                        and not requires_python)
                 saved.setdefault('pending_guidance', []).append({
                     'role': 'user',
-                    'content': ('This worker was explicitly resumed. Previous prose '
+                    'content': ('This worker was explicitly resumed. '
+                                + _exact_read_only_instruction() if exact_read_only_task else
+                                'This worker was explicitly resumed. Previous prose '
                                 'claims without a successful tool result are not verified. '
                                 'Use an actually available tool for the assigned task '
                                 'and inspect its returned result; if none is permitted, '
@@ -1183,6 +1204,13 @@ class TeamRuntime:
                                 'successful_tools': 0, 'compactions': saved['compactions'],
                                 'completion_validation': 'exact_read_only_acceptance'}
                     saved['no_tool_nudges'] = int(saved.get('no_tool_nudges', 0)) + 1
+                    if exact_read_only_task:
+                        messages.append({'role': 'user', 'content': (
+                            'The previous answer did not satisfy the required exact-result '
+                            'JSON contract. ' + _exact_read_only_instruction())})
+                        if saved['no_tool_nudges'] >= 3:
+                            raise RuntimeError('Worker did not return a verifiable exact result')
+                        continue
                     offered = {str((item.get('function') or {}).get('name') or '') for item in tools}
                     host_hint = (' For a computed result, call the advertised python function '
                                  'with code that prints the value, then inspect its real output.'

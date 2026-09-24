@@ -250,6 +250,49 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tool_schemas, [[]], 'exact-value read-only workers must not receive tools')
         self.assertEqual(self.host_calls, [])
 
+    async def test_exact_read_only_worker_corrects_bare_value_without_suggesting_tools(self):
+        worker = self.worker(objective='Return exactly 42 using only reasoning.',
+                             acceptance='The result must be exactly "42".', write_scope=[])
+        final = {
+            'completed': True, 'result': '42', 'acceptance_met': True,
+            'verification': {'expected': '42', 'actual': '42', 'match': True},
+            'paths_touched': [], 'files_modified': False, 'network_used': False,
+            'host_tools_used': False, 'unresolved_issues': [],
+        }
+        self.responses = [answer('42'), answer(json.dumps(final))]
+
+        result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['completion_validation'], 'exact_read_only_acceptance')
+        self.assertEqual(self.tool_schemas, [[], []])
+        self.assertEqual(self.host_calls, [])
+        self.assertIn('structured result', self.messages[0][0]['content'])
+        self.assertIn('JSON contract', self.messages[1][-1]['content'])
+        self.assertNotIn('Use the allowed tools', self.messages[1][-1]['content'])
+
+    async def test_resumed_exact_read_only_worker_does_not_receive_host_tool_nudge(self):
+        worker = self.worker(objective='Return exactly 42 using only reasoning.',
+                             acceptance='The result must be exactly "42".', write_scope=[])
+        self.responses = [answer('42') for _ in range(3)]
+        failed = await self.execute(worker)
+        self.assertEqual(failed['status'], 'failed')
+        self.store.update_worker('owner', self.task['id'], worker['id'], status='pending')
+        self.responses = [answer(json.dumps({
+            'completed': True, 'result': '42', 'acceptance_met': True,
+            'verification': {'expected': '42', 'actual': '42', 'match': True},
+            'paths_touched': [], 'files_modified': False, 'network_used': False,
+            'host_tools_used': False, 'unresolved_issues': [],
+        }))]
+
+        resumed = await self.execute(worker)
+
+        self.assertEqual(resumed['status'], 'done')
+        prompt = json.dumps(self.messages[-1])
+        self.assertIn('explicitly resumed', prompt)
+        self.assertIn('structured result', prompt)
+        self.assertNotIn('Use an actually available tool', prompt)
+
     async def test_explicit_python_requirement_cannot_finish_with_exact_self_report(self):
         self.store.update_task_metadata('owner', self.task['id'], {
             'goal': 'Compute 6 * 7 using Python and return exactly 42'})
