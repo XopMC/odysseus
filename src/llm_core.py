@@ -2813,7 +2813,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground",
+                     tool_choice_none: bool = False, tool_choice_required: bool = False,
+                     workload: str = "foreground",
                      on_model_request=None):
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
@@ -2829,6 +2830,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tools=tools,
             session_id=session_id,
             tool_choice_none=tool_choice_none,
+            tool_choice_required=tool_choice_required,
             on_model_request=on_model_request,
         ):
             yield chunk
@@ -2838,7 +2840,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False, on_model_request=None):
+                            tool_choice_none: bool = False, tool_choice_required: bool = False,
+                            on_model_request=None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2898,7 +2901,15 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload[tok_key] = max_tokens
         if tools:
             payload["tools"] = _alias_harmony_tools(tools, model)
-        elif tool_choice_none:
+        if tools and tool_choice_none:
+            payload["tool_choice"] = "none"
+        elif tools and tool_choice_required:
+            # Required mode is used by Plan mode until its durable plan is
+            # saved. Without it, some local models return ordinary prose and
+            # leave the Plan dock stuck at "Waiting for plan" despite having
+            # received create_plan in their schema.
+            payload["tool_choice"] = "required"
+        elif not tools and tool_choice_none:
             payload["tool_choice"] = "none"
         # Mistral thinking-capable models — send reasoning_effort so Mistral
         # activates thinking mode and returns structured reasoning_content.

@@ -4916,6 +4916,11 @@ async def stream_agent_loop(
     yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
 
     full_response = ""
+    # Plan mode must leave a durable plan behind, not only prose. Until the
+    # create_plan tool succeeds, tell the provider a tool call is required;
+    # after persistence, disable tools for the final explanation so planning
+    # cannot drift into execution or an unrelated follow-up action.
+    _plan_created = False
     total_start = time.time()
     time_to_first_token = None
     first_token_received = False
@@ -6287,7 +6292,8 @@ async def stream_agent_loop(
             max_tokens=max_tokens,
             prompt_type=prompt_type if round_num == 1 else None,
             tools=all_tool_schemas if all_tool_schemas else None,
-            tool_choice_none=_ody_doc_finetune_mode,
+            tool_choice_none=_ody_doc_finetune_mode or (plan_mode and _plan_created),
+            tool_choice_required=plan_mode and not _plan_created and not _ody_doc_finetune_mode,
             timeout=agent_stream_timeout,
             session_id=session_id,
             workload=workload,
@@ -7811,6 +7817,8 @@ async def stream_agent_loop(
             # Push it to the frontend so the stored plan + docked window update
             # live. Does NOT end the turn — the agent keeps working.
             if "plan_update" in result:
+                if plan_mode and block.tool_type == "create_plan":
+                    _plan_created = True
                 yield (
                     f'data: {json.dumps({"type": "plan_update", "data": result["plan_update"]})}\n\n'
                 )

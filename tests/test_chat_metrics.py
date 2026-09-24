@@ -49,8 +49,10 @@ class _FakeStreamCtx:
 class _FakeClient:
     def __init__(self, lines):
         self._lines = lines
+        self.last_stream = None
 
     def stream(self, method, url, **kw):
+        self.last_stream = {"method": method, "url": url, **kw}
         return _FakeStreamCtx(self._lines)
 
 
@@ -221,6 +223,29 @@ def test_stream_llm_reads_lm_studio_stats_on_final_delta_without_usage(monkeypat
     ])
     backend = next(e["data"] for e in events if e.get("type") == "backend_metrics")
     assert backend["gen_tps"] == 121.8
+
+
+def test_stream_llm_requires_tool_call_for_plan_mode_and_none_takes_precedence(monkeypatch):
+    client = _FakeClient(['data: [DONE]'])
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: client)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda _url: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *a, **k: None)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *a, **k: None)
+
+    async def run(**kwargs):
+        async for _ in llm_core.stream_llm(
+            "http://127.0.0.1:9235/v1/chat/completions",
+            "qwen-local",
+            [{"role": "user", "content": "Propose a plan."}],
+            tools=[{"type": "function", "function": {"name": "create_plan", "parameters": {"type": "object"}}}],
+            **kwargs,
+        ):
+            pass
+
+    asyncio.run(run(tool_choice_required=True))
+    assert client.last_stream["json"]["tool_choice"] == "required"
+    asyncio.run(run(tool_choice_none=True, tool_choice_required=True))
+    assert client.last_stream["json"]["tool_choice"] == "none"
 
 
 def test_stream_llm_surfaces_provider_resolved_model(monkeypatch):

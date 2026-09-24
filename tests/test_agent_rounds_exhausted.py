@@ -60,6 +60,44 @@ def _run_loop(monkeypatch, round_text, max_rounds=2, *, active_goal=None, sessio
     return _types(_collect(gen))
 
 
+def test_plan_mode_requires_tool_until_durable_plan_then_suppresses_more_tools(monkeypatch):
+    _patch_common(monkeypatch)
+    requests = []
+
+    async def stream(_candidates, _messages, **kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            yield ('data: ' + json.dumps({"delta": (
+                '```create_plan\n{"title":"Fixture plan","steps":[{"id":"one","text":"Step one"}]}\n```'
+            )}) + '\n\n')
+        else:
+            yield 'data: {"delta":"Plan saved."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def execute(block, *_args, **_kwargs):
+        assert block.tool_type == "create_plan"
+        return ("create_plan", {"plan_update": {"status": "draft", "revision": 1}, "output": "saved"})
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    from src import context_efficiency_state
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: None)
+
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "qwen-local",
+        [{"role": "user", "content": "Propose a simple plan."}],
+        max_rounds=3, relevant_tools={"create_plan"}, plan_mode=True,
+        session_id="fixture-chat", owner="alice",
+    )))
+
+    assert len(requests) == 2
+    assert requests[0]["tool_choice_required"] is True
+    assert requests[0]["tool_choice_none"] is False
+    assert requests[1]["tool_choice_required"] is False
+    assert requests[1]["tool_choice_none"] is True
+    assert any(event.get("type") == "plan_update" for event in events)
+
+
 def test_emits_rounds_exhausted_when_cap_hit_mid_task(monkeypatch):
     _patch_common(monkeypatch)
     # Use a system-owned interaction result so this remains a loop-control test:
