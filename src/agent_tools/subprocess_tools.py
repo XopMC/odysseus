@@ -379,6 +379,9 @@ class PythonTool:
         err = stderr.rstrip()
         if err:
             output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
+        if rc and "NameError:" in err:
+            output += ("\nPython tool note: each call starts a new process. Variables from earlier "
+                       "calls do not persist; define or recompute them in the same call.")
         output = _truncate(output, MAX_OUTPUT_CHARS)
         return {
             "output": output or (

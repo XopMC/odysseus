@@ -50,7 +50,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "python",
-            "description": "Execute Python code to compute a result or test something. This is a script, not a REPL: use print(...) to return a computed value; a bare expression has no stdout. Prefer a dedicated tool whenever one fits the job (reading, writing, or searching files); use python only for computation, data processing, or scripting no dedicated tool covers.",
+            "description": "Execute Python code to compute a result or test something. Each call starts a fresh process: variables from earlier calls do not persist, so define or recompute them in the same call. This is a script, not a REPL: use print(...) to return a computed value; a bare expression has no stdout. Prefer a dedicated tool whenever one fits the job (reading, writing, or searching files); use python only for computation, data processing, or scripting no dedicated tool covers.",
             "parameters": {
                 "type": "object",
                 "properties": {

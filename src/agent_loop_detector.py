@@ -34,7 +34,7 @@ class LoopDetector:
     """One diagnostic nudge, then a bounded escalation for unchanged evidence."""
 
     def __init__(self):
-        self._recent = deque(maxlen=8)
+        self._recent = deque(maxlen=12)
         self._nudged = False
 
     def observe(self, batch):
@@ -45,7 +45,13 @@ class LoopDetector:
         tail = list(self._recent)
         same = len(tail) >= 3 and tail[-3:] == [fingerprint] * 3
         cycle = len(tail) >= 5 and tail[-5] == tail[-3] == tail[-1] and tail[-4] == tail[-2]
-        if not (same or cycle):
+        longer_cycle = any(
+            len(tail) >= 2 * size
+            and len(set(tail[-size:])) == size
+            and tail[-2 * size:-size] == tail[-size:]
+            for size in (3, 4)
+        )
+        if not (same or cycle or longer_cycle):
             if fingerprint not in tail[:-1]:
                 self._nudged = False
             return None
@@ -56,6 +62,15 @@ class LoopDetector:
         # batch resets the warning and allows the agent to make progress.
         if len(tail) >= 5 and tail[-5:] == [fingerprint] * 5:
             return "escalate"
-        if len(tail) >= 8 and tail[-8:-4] == tail[-4:]:
+        if (len(tail) >= 8 and len(set(tail[-4:])) == 2
+                and tail[-4] == tail[-2] and tail[-3] == tail[-1]
+                and tail[-8:-4] == tail[-4:]):
+            return "escalate"
+        if any(
+            len(tail) >= 3 * size
+            and len(set(tail[-size:])) == size
+            and tail[-3 * size:-2 * size] == tail[-2 * size:-size] == tail[-size:]
+            for size in (3, 4)
+        ):
             return "escalate"
         return None

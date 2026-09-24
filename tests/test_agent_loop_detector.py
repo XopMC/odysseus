@@ -38,6 +38,28 @@ def test_two_step_cycle_is_bounded():
     ]
 
 
+def test_four_step_tool_error_cycle_is_bounded_without_flagging_first_pass():
+    detector = LoopDetector()
+    cycle = [
+        [("python", {"code": f"print({number})"}, {"output": str(number), "exit_code": 0})]
+        for number in (385, 2485, 6585)
+    ]
+    cycle.append([("python", {"code": "print(part_1 + part_2 + part_3)"},
+                   {"output": "NameError: part_1 is not defined", "exit_code": 1})])
+
+    assert [detector.observe(batch) for batch in cycle] == [None] * 4
+    assert [detector.observe(batch) for batch in cycle] == [None, None, None, "nudge"]
+    assert [detector.observe(batch) for batch in cycle] == [None, None, None, "escalate"]
+
+
+def test_four_step_cycle_with_changed_evidence_is_not_stalled():
+    detector = LoopDetector()
+    for iteration in range(4):
+        for part in range(4):
+            assert detector.observe([("python", {"code": f"print({part})"},
+                                     {"output": str(iteration * 4 + part), "exit_code": 0})]) is None
+
+
 def test_distinct_actions_and_observations_do_not_trigger():
     detector = LoopDetector()
     for index in range(20):
