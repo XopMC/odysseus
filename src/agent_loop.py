@@ -3268,10 +3268,10 @@ def _resolve_tool_blocks(
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
         elif round_reasoning:
-            # Some local text-tool models put their explicit protocol call in
-            # the reasoning channel rather than the answer channel. Accept only
-            # explicit markup here (never ordinary prose or fenced examples),
-            # then use the same advertised-tool and approval path as usual.
+            # Some local text-tool models put a protocol call in reasoning
+            # rather than the answer channel. Accept only a complete explicit
+            # call (including strict whole-answer tool_name{JSON}), never
+            # ordinary prose, then use the regular dispatch/approval path.
             tool_blocks = parse_tool_blocks(round_reasoning, skip_fenced=True)
             if tool_blocks:
                 logger.info(

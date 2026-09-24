@@ -131,3 +131,59 @@ def test_streaming_filter_preserves_fenced_example_when_requested_but_hides_mark
     assert "```bash" in visible
     assert "<tool_call>" not in visible
     assert '"name"' not in visible
+
+
+def test_bare_json_call_dispatches_and_never_leaks_to_live_or_replay():
+    bare = ('update_plan_step{"step_id":"step-2","status":"done",'
+            '"summary":"verified","verification":["stdout 4"]}')
+    for call, native in ((bare, True), ("```" + bare, True), ("```" + bare + "```", False)):
+        blocks = parse_tool_blocks(call, skip_fenced=native)
+        assert len(blocks) == 1
+        assert blocks[0].tool_type == "update_plan_step"
+        assert strip_tool_blocks(call, skip_fenced=native) == ""
+        for length in range(1, len(call) + 1):
+            assert strip_tool_blocks_streaming(call[:length], skip_fenced=native) == ""
+        assert strip_tool_blocks_streaming(call, final=True, skip_fenced=native) == ""
+    example = "```" + bare + "```"
+    assert parse_tool_blocks(example, skip_fenced=True) == []
+    assert strip_tool_blocks_streaming(example, skip_fenced=True) == example
+    shell = 'bash{"command":"printf fixture"}'
+    assert [(block.tool_type, block.content) for block in parse_tool_blocks(shell)] == [
+        ("bash", "printf fixture")
+    ]
+    assert strip_tool_blocks_streaming(shell, final=True) == ""
+
+
+def test_bare_plan_call_is_whole_answer_only_and_rejects_other_tools():
+    for text in (
+        'Example: update_plan_step{"step_id":"s","status":"done"}',
+        'update_plan_step{"step_id":"s","status":"done"} then continue',
+        'update_plan_step{"step_id":"s","status":"invalid"}',
+        'update_plan_step{"status":"done"}',
+        'bash{"command":"echo unsafe"} then continue',
+        'bash{"wrong":"echo unsafe"}',
+    ):
+        assert parse_tool_blocks(text, skip_fenced=True) == []
+        assert strip_tool_blocks(text, skip_fenced=True) == text
+
+
+def test_agent_resolves_kat_bare_plan_call_without_native_function_channel():
+    from src.agent_loop import _resolve_tool_blocks
+
+    answer = 'update_plan_step{"step_id":"step-2","status":"done"}'
+    blocks, used_native, converted = _resolve_tool_blocks(
+        answer, [], 2, is_api_model=True,
+    )
+    assert [(block.tool_type, block.content) for block in blocks] == [
+        ("update_plan_step", '{"step_id": "step-2", "status": "done"}')
+    ]
+    assert used_native is False
+    assert converted == []
+
+    shell, native, _ = _resolve_tool_blocks(
+        'bash{"command":"printf fixture"}', [], 3, is_api_model=True,
+    )
+    assert [(block.tool_type, block.content) for block in shell] == [
+        ("bash", "printf fixture")
+    ]
+    assert native is False

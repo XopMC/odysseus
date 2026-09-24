@@ -42,6 +42,49 @@ _TOOL_BLOCK_RE = re.compile(
 # executes for them.
 _CODE_FENCE_TAGS = frozenset({"bash", "python"})
 
+# Some local models emit the entire call as `tool_name{...}` without a fence.
+# Keep this adapter narrow in syntax: a known tool, an object argument, and
+# nothing else in the answer. The normal converter and dispatch policy still
+# validate required arguments, advertised inventory, permissions and effects.
+_BARE_TOOL_PREFIX = re.compile(
+    r"^\s*(?:```\s*)?(" + "|".join(re.escape(tag) for tag in sorted(TOOL_TAGS, key=len, reverse=True))
+    + r")(?![\w-])\s*", re.IGNORECASE,
+)
+_BARE_TOOL_NAMES = tuple(sorted((tag.casefold() for tag in TOOL_TAGS), key=len, reverse=True))
+
+
+def _bare_json_tool_call(text: str, *, skip_fenced: bool = False) -> Optional[ToolBlock]:
+    match = _BARE_TOOL_PREFIX.match(text)
+    if match is None:
+        return None
+    try:
+        args, end = json.JSONDecoder().raw_decode(text, match.end())
+    except (ValueError, TypeError):
+        return None
+    remainder = text[end:].strip()
+    if remainder not in {"", "```"} or not isinstance(args, dict):
+        return None
+    # A *closed* fence from a native-function model can be an illustrative
+    # example, not a call. Preserve the existing native fence safety gate;
+    # the unclosed KAT form remains recoverable.
+    if skip_fenced and text.lstrip().startswith("```") and remainder == "```":
+        return None
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS, function_call_to_tool_block
+    tool_name = match.group(1).lower()
+    if tool_name == "update_plan_step" and args.get("status") not in {
+        "pending", "in_progress", "done", "blocked",
+    }:
+        return None
+    for schema in FUNCTION_TOOL_SCHEMAS:
+        function = schema.get("function") or {}
+        if function.get("name") != tool_name:
+            continue
+        required = (function.get("parameters") or {}).get("required") or []
+        if any(key not in args or args[key] in (None, "") for key in required):
+            return None
+        break
+    return function_call_to_tool_block(tool_name, json.dumps(args, ensure_ascii=False))
+
 
 def _fenced_tool_call(m) -> Optional[Tuple[str, str]]:
     """Classify a Pattern-1 fence match: (tag, content) when it is an
@@ -1477,6 +1520,11 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
         if m:
             blocks.append(ToolBlock("ui_control", f"open_panel {m.group(1).lower()}"))
 
+    if not blocks:
+        bare_call = _bare_json_tool_call(text, skip_fenced=skip_fenced)
+        if bare_call:
+            blocks.append(bare_call)
+
     return blocks
 
 
@@ -1519,6 +1567,8 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
             _, (start, end) = raw_web_json
             cleaned = cleaned[:start] + cleaned[end:]
     cleaned = _PLAIN_UI_OPEN_PANEL_RE.sub("", cleaned)
+    if _bare_json_tool_call(cleaned, skip_fenced=skip_fenced):
+        cleaned = ""
     # Strip bare <invoke> blocks not wrapped in <tool_call>
     cleaned = _strip_bare_invoke_markup(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
@@ -1558,6 +1608,29 @@ def strip_tool_blocks_streaming(
     source = str(text or "")
     if not source:
         return ""
+
+    # Hold a possible bare call from its first byte. Once complete it
+    # either dispatches through the ordinary tool pipeline or stays inert;
+    # never flash its JSON arguments in the live answer before that decision.
+    # This is called for every accumulated stream delta: inspect only the
+    # control prefix, not a case-folded copy of a potentially huge answer.
+    bare_prefix = source.lstrip()[:128].casefold()
+    if skip_fenced and source.lstrip().startswith("```") and source.rstrip().endswith("```") \
+            and len(source.strip()) > 6:
+        return strip_tool_blocks(source, skip_fenced=True)
+    if "```".startswith(bare_prefix):
+        return "" if not final else strip_tool_blocks(source, skip_fenced=skip_fenced)
+    if bare_prefix.startswith("```"):
+        bare_prefix = bare_prefix[3:].lstrip()
+    if bare_prefix and any(name.startswith(bare_prefix) for name in _BARE_TOOL_NAMES):
+        return "" if not final else strip_tool_blocks(source, skip_fenced=skip_fenced)
+    for name in _BARE_TOOL_NAMES:
+        if bare_prefix.startswith(name):
+            suffix = bare_prefix[len(name):].lstrip()
+            if not suffix or suffix.startswith("{"):
+                if not final or _bare_json_tool_call(source, skip_fenced=skip_fenced):
+                    return ""
+            break
 
     # Once a thinking stream declares a tool call, neither its arguments nor
     # any same-round trailing claim is user-visible: that claim predates the
