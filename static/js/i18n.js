@@ -403,6 +403,8 @@ const RU = Object.freeze({
   'Subagent completed':'Сабагент завершён', 'Subagent failed':'Ошибка сабагента',
   'Subagent missing result':'Сабагент завершился без результата',
   'Subagent cancelled':'Сабагент остановлен', 'Subagent interrupted':'Сабагент прерван',
+  'Subagent thinking':'Размышления сабагента', 'Subagent tool activity':'Инструменты сабагента',
+  'Subagent answer':'Ответ сабагента',
   'Subagent settings':'Настройки сабагентов',
   'Harness profile':'Профиль агентского движка',
   'Performance':'Производительность', 'Efficiency':'Экономия контекста',

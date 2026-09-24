@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v483-planresume1';
+const CACHE_NAME = 'odysseus-v484-subagentdetail1';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -42,7 +42,7 @@ const PRECACHE = [
   '/static/style.css?v=20260924actionpreview1',
   '/static/css/team-workspace.css?v=20260921livefix18',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
-  '/static/app.js?v=20260924planresume1',
+  '/static/app.js?v=20260924subagentdetail1',
   '/static/js/startupShell.js?v=20260922restore1',
   '/static/js/i18n.js',
   '/static/js/storage.js',
@@ -77,7 +77,7 @@ const PRECACHE = [
   '/static/js/chat-work.js?v=20260924planresume1',
   '/static/js/chat-run-inspector.js?v=20260923runinspector3',
   '/static/js/runHealth.js?v=20260924budgetwarn1',
-  '/static/js/chat-subagents.js?v=20260923runinspector1',
+  '/static/js/chat-subagents.js?v=20260924detailchannels1',
   '/static/js/team-workspace.js?v=20260924modelcache1',
   '/static/js/accessMode.js?v=20260921livefix18',
   '/static/js/projects.js?v=20260922projects2',

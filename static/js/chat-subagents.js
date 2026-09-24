@@ -16,10 +16,37 @@ let detailSession = '';
 let detailChild = '';
 let detailCursor = 0;
 let detailText = '';
+let detailThinking = '';
+let detailAnswer = '';
+let detailTools = '';
 const MAX_DETAIL_CHARS = 250000;
 const listRefreshKinds = new Set(['created', 'status', 'removed', 'guidance']);
 
 const el = id => document.getElementById(id);
+export function foldSubagentDetailEvents(channels, events, maxChars = MAX_DETAIL_CHARS) {
+  const next = { ...channels };
+  for (const event of events || []) {
+    if (event.kind === 'thinking') next.thinking += event.payload?.text || '';
+    else if (event.kind === 'delta') next.answer += event.payload?.text || '';
+    else if (event.kind === 'tool_start') next.tools += `\n▶ ${event.payload?.tool || 'tool'} ${event.payload?.command || ''}\n`;
+    else if (event.kind === 'tool_output') next.tools += `\n${event.payload?.output || event.payload?.result?.output || ''}\n`;
+    else if (event.kind === 'status' && event.payload?.ask_user) {
+      const ask = event.payload.ask_user;
+      next.tools += `\n? ${ask.question || 'Input required'}\n${(ask.options || []).map(option => `- ${option.label || option}`).join('\n')}\n`;
+    }
+    next.cursor = Math.max(next.cursor, Number(event.seq || event.id || 0));
+  }
+  for (const key of ['thinking', 'answer', 'tools']) next[key] = next[key].slice(-maxChars);
+  return next;
+}
+
+export function formatSubagentDetailChannels(channels, labels) {
+  return [
+    channels.thinking && `${labels.thinking}\n${channels.thinking}`,
+    channels.tools && `${labels.tools}\n${channels.tools.trim()}`,
+    channels.answer && `${labels.answer}\n${channels.answer}`,
+  ].filter(Boolean).join('\n\n');
+}
 async function json(url, options = {}) {
   const res = await fetch(url, { credentials:'same-origin', cache:'no-store', ...options });
   const data = await res.json().catch(() => ({}));
@@ -97,6 +124,7 @@ async function showDetail(childId) {
   if (reset) {
     detailSession = expectedSession; detailChild = childId;
     detailCursor = 0; detailText = '';
+    detailThinking = ''; detailAnswer = ''; detailTools = '';
   }
   selectedId = childId;
   const detail = await json(`${api}/api/chat/subagents/${encodeURIComponent(expectedSession)}/${encodeURIComponent(childId)}`);
@@ -108,20 +136,16 @@ async function showDetail(childId) {
     + `&limit=${reset ? 1000 : 200}&tail=${reset ? 'true' : 'false'}&child_id=${encodeURIComponent(childId)}`
   );
   if (myGeneration !== detailGeneration || sessionId !== expectedSession || selectedId !== childId) return;
-  const text = [];
-  for (const event of events.events || []) {
-    if (event.kind === 'thinking') text.push(`[thinking] ${event.payload?.text || ''}`);
-    else if (event.kind === 'delta') text.push(event.payload?.text || '');
-    else if (event.kind === 'tool_start') text.push(`\n▶ ${event.payload?.tool || 'tool'} ${event.payload?.command || ''}\n`);
-    else if (event.kind === 'tool_output') text.push(`\n${event.payload?.output || event.payload?.result?.output || ''}\n`);
-    else if (event.kind === 'status' && event.payload?.ask_user) {
-      const ask=event.payload.ask_user;
-      text.push(`\n? ${ask.question || 'Input required'}\n${(ask.options || []).map(option => `- ${option.label || option}`).join('\n')}\n`);
-    }
-    detailCursor = Math.max(detailCursor, Number(event.seq || event.id || 0));
-  }
-  const addition = text.join('');
-  if (addition) detailText += addition;
+  const channels = foldSubagentDetailEvents({
+    cursor: detailCursor, thinking: detailThinking, tools: detailTools, answer: detailAnswer,
+  }, events.events);
+  detailCursor = channels.cursor;
+  detailThinking = channels.thinking;
+  detailTools = channels.tools;
+  detailAnswer = channels.answer;
+  detailText = formatSubagentDetailChannels(channels, {
+    thinking: t('Subagent thinking'), tools: t('Subagent tool activity'), answer: t('Subagent answer'),
+  });
   if (!detailText || detailText === 'No output yet.') {
     detailText = detail.result || detail.error || 'No output yet.';
   }
@@ -142,6 +166,7 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   if (source) { source.close(); source = null; }
   rows = []; cursor = 0; selectedId = '';
   detailSession = ''; detailChild = ''; detailCursor = 0; detailText = '';
+  detailThinking = ''; detailAnswer = ''; detailTools = '';
   if (el('subagent-detail')) el('subagent-detail').hidden = true;
   if (!sessionId) { render(); return; }
   try {

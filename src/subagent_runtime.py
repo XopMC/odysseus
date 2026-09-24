@@ -419,14 +419,14 @@ class SubagentRuntime:
             # monopolising SQLite/the web event loop while retaining live UI.
             if not force and time.monotonic() - last_flush < 1.0:
                 return
-            if pending_delta:
-                text = "".join(pending_delta)
-                pending_delta.clear()
-                self._event(child_id, owner, session_id, "delta", {"text": text})
             if pending_thinking:
                 text = "".join(pending_thinking)
                 pending_thinking.clear()
                 self._event(child_id, owner, session_id, "thinking", {"text": text})
+            if pending_delta:
+                text = "".join(pending_delta)
+                pending_delta.clear()
+                self._event(child_id, owner, session_id, "delta", {"text": text})
             if output_parts or reasoning_parts:
                 self._update(child_id, owner, result="".join(output_parts)[-120000:], heartbeat_at=_utcnow())
                 self._merge_metrics(child_id, owner, {
