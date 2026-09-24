@@ -267,6 +267,130 @@ async def test_chat_stream_route_keeps_selected_model_strict_with_legacy_data(mo
 
 
 @pytest.mark.asyncio
+async def test_streaming_chat_tps_uses_output_delta_span_not_usage_or_done_tail(monkeypatch):
+    captured = {}
+    endpoint = _chat_stream_endpoint(
+        monkeypatch, "chat", captured, capture_completion=True,
+    )
+    clock = [100.0]
+    real_time = chat_routes.time
+    monkeypatch.setattr(
+        chat_routes,
+        "time",
+        SimpleNamespace(time=real_time.time, monotonic=lambda: clock[0]),
+    )
+
+    async def stream(_candidates, _messages, **_kwargs):
+        yield 'data: {"delta":"first"}\n\n'
+        clock[0] += 2.0
+        yield 'data: {"delta":"last"}\n\n'
+        clock[0] += 8.0  # The provider's usage trailer is not token generation.
+        yield ('data: {"type":"usage","data":'
+               '{"model":"selected-model","input_tokens":10,"output_tokens":100}}\n\n')
+        clock[0] += 30.0  # Nor is the final transport tail before [DONE].
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(chat_routes, "stream_llm_with_fallback", stream)
+    response = await endpoint(_RouteRequest("chat"))
+    chunks = [chunk async for chunk in response.body_iterator]
+    metrics_events = []
+    for chunk in chunks:
+        if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
+            continue
+        event = json.loads(chunk[6:])
+        if event.get("type") == "metrics":
+            metrics_events.append(event["data"])
+    assert metrics_events
+    assert metrics_events[0]["generation_time"] == 2.0
+    assert metrics_events[0]["tokens_per_second"] == 50.0
+    assert metrics_events[0]["tps_source"] == "stream_elapsed"
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_single_delta_marks_tps_unavailable(monkeypatch):
+    captured = {}
+    endpoint = _chat_stream_endpoint(
+        monkeypatch, "chat", captured, capture_completion=True,
+    )
+
+    async def stream(_candidates, _messages, **_kwargs):
+        yield 'data: {"delta":"one buffered chunk"}\n\n'
+        yield ('data: {"type":"usage","data":'
+               '{"model":"selected-model","input_tokens":10,"output_tokens":100}}\n\n')
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(chat_routes, "stream_llm_with_fallback", stream)
+    response = await endpoint(_RouteRequest("chat"))
+    chunks = [chunk async for chunk in response.body_iterator]
+    metrics_events = []
+    for chunk in chunks:
+        if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
+            continue
+        event = json.loads(chunk[6:])
+        if event.get("type") == "metrics":
+            metrics_events.append(event["data"])
+    assert metrics_events
+    assert metrics_events[0]["tps_source"] == "unavailable"
+    assert "tokens_per_second" not in metrics_events[0]
+    assert "generation_time" not in metrics_events[0]
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_fallback_measures_only_the_answering_route(monkeypatch):
+    captured = {}
+    endpoint = _chat_stream_endpoint(
+        monkeypatch, "chat", captured, capture_completion=True,
+    )
+    monkeypatch.setattr(foreground_model_routing, "_load_policy_preferences", lambda owner=None: {
+        "foreground_fallback_enabled": True,
+        "foreground_model_fallbacks": [
+            {"endpoint_id": "backup", "model": "backup-model"},
+        ],
+    })
+    monkeypatch.setattr(
+        foreground_model_routing,
+        "resolve_fallback_entries",
+        lambda *args, **kwargs: [("https://backup.example/v1", "backup-model", {})],
+    )
+    clock = [100.0]
+    real_time = chat_routes.time
+    monkeypatch.setattr(
+        chat_routes,
+        "time",
+        SimpleNamespace(time=real_time.time, monotonic=lambda: clock[0]),
+    )
+
+    async def stream(_candidates, _messages, **_kwargs):
+        yield 'data: {"delta":"failed candidate partial"}\n\n'
+        clock[0] += 100.0
+        yield ('data: {"type":"fallback","candidate_index":1,'
+               '"selected_model":"selected-model","answered_by":"backup-model"}\n\n')
+        clock[0] += 3.0
+        yield 'data: {"delta":"backup first"}\n\n'
+        clock[0] += 2.0
+        yield 'data: {"delta":"backup last"}\n\n'
+        clock[0] += 8.0
+        yield ('data: {"type":"usage","data":'
+               '{"model":"backup-model","input_tokens":10,"output_tokens":100}}\n\n')
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(chat_routes, "stream_llm_with_fallback", stream)
+    response = await endpoint(_RouteRequest("chat"))
+    chunks = [chunk async for chunk in response.body_iterator]
+    metrics_events = []
+    for chunk in chunks:
+        if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
+            continue
+        event = json.loads(chunk[6:])
+        if event.get("type") == "metrics":
+            metrics_events.append(event["data"])
+    assert metrics_events
+    assert metrics_events[0]["model"] == "backup-model"
+    assert metrics_events[0]["generation_time"] == 2.0
+    assert metrics_events[0]["tokens_per_second"] == 50.0
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_consumes_exact_tool_approval_for_own_session(monkeypatch):
     from src.tool_capabilities import capabilities_for_action
 

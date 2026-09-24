@@ -22,7 +22,7 @@ import {
   settleSessionHydration
 } from './js/startupShell.js?v=20260922restore1';
 import markdownModule from './js/markdown.js?v=20260923toolprogress1';
-import chatRenderer from './js/chatRenderer.js?v=20260924tpsround1';
+import chatRenderer from './js/chatRenderer.js?v=20260924tpsdelta1';
 import sessionModule from './js/sessions.js?v=20260923countrev1';
 import chatWork from './js/chat-work.js?v=20260924budgetwarn1';
 import chatSubagents from './js/chat-subagents.js?v=20260923runinspector1';

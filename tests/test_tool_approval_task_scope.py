@@ -421,10 +421,10 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "chat.js?v=20260924compactpreview1" in index
     assert "previewNode.textContent = previewLines.join('\\n')" in renderer
     assert "previewNode.innerHTML" not in renderer
-    assert "chatRenderer.js?v=20260924tpsround1" in frontend
-    assert "chatRenderer.js?v=20260924tpsround1" in app
-    assert "chatRenderer.js?v=20260924tpsround1" in index
+    assert "chatRenderer.js?v=20260924tpsdelta1" in frontend
+    assert "chatRenderer.js?v=20260924tpsdelta1" in app
+    assert "chatRenderer.js?v=20260924tpsdelta1" in index
     assert "style.css?v=20260924actionpreview1" in index
     service_worker = (root / "static/sw.js").read_text(encoding="utf-8")
-    assert "chatRenderer.js?v=20260924tpsround1" in service_worker
+    assert "chatRenderer.js?v=20260924tpsdelta1" in service_worker
     assert "style.css?v=20260924actionpreview1" in service_worker

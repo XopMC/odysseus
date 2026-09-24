@@ -2256,6 +2256,8 @@ def setup_chat_routes(
             elif chat_mode == "chat":
                 _chat_start = time.time()
                 _chat_generation_started_at = None
+                _chat_generation_last_delta_at = None
+                _chat_generation_delta_count = 0
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
@@ -2293,8 +2295,12 @@ def setup_chat_routes(
                             try:
                                 data = json.loads(chunk[6:])
                                 if "delta" in data:
-                                    if data.get("delta") and _chat_generation_started_at is None:
-                                        _chat_generation_started_at = time.monotonic()
+                                    if data.get("delta"):
+                                        _delta_at = time.monotonic()
+                                        if _chat_generation_started_at is None:
+                                            _chat_generation_started_at = _delta_at
+                                        _chat_generation_last_delta_at = _delta_at
+                                        _chat_generation_delta_count += 1
                                     if _commit_chat_compaction(_actual_candidate_index):
                                         _compacted_length = _chat_request_state["context_lengths"].get(
                                             _actual_candidate_index,
@@ -2314,6 +2320,14 @@ def setup_chat_routes(
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
                                     # Forward the notice and remember the real model.
+                                    # Discard the failed candidate's stream span and
+                                    # any non-authoritative metrics before measuring
+                                    # the model that actually answers the user.
+                                    _chat_generation_started_at = None
+                                    _chat_generation_last_delta_at = None
+                                    _chat_generation_delta_count = 0
+                                    backend_generation_metrics.clear()
+                                    last_metrics = None
                                     _answered_by = data.get("answered_by") or _answered_by
                                     _actual_model = _actual_model or _answered_by
                                     _actual_candidate_index = data.get("candidate_index", 0)
@@ -2419,10 +2433,18 @@ def setup_chat_routes(
                                     if last_metrics.get("gen_tps") and not last_metrics.get("tokens_per_second"):
                                         last_metrics["tokens_per_second"] = last_metrics["gen_tps"]
                                         last_metrics["tps_source"] = "backend"
-                                    elif last_metrics.get("output_tokens") and _chat_generation_started_at is not None:
-                                        _generation_time = max(
-                                            0.001,
-                                            time.monotonic() - _chat_generation_started_at,
+                                    elif (
+                                        last_metrics.get("output_tokens")
+                                        and _chat_generation_started_at is not None
+                                        and _chat_generation_last_delta_at is not None
+                                        and _chat_generation_delta_count >= 2
+                                        and _chat_generation_last_delta_at > _chat_generation_started_at
+                                    ):
+                                        # Measure generated output, not time spent
+                                        # waiting for a trailing usage/[DONE] frame.
+                                        _generation_time = (
+                                            _chat_generation_last_delta_at
+                                            - _chat_generation_started_at
                                         )
                                         last_metrics["generation_time"] = round(_generation_time, 2)
                                         last_metrics["tokens_per_second"] = round(
@@ -2430,6 +2452,12 @@ def setup_chat_routes(
                                             2,
                                         )
                                         last_metrics["tps_source"] = "stream_elapsed"
+                                    elif last_metrics.get("output_tokens") and not last_metrics.get("gen_tps"):
+                                        # A single buffered delta has no measurable
+                                        # first-to-last interval; do not invent a
+                                        # 1ms sample or include prompt prefill.
+                                        last_metrics.pop("tokens_per_second", None)
+                                        last_metrics["tps_source"] = "unavailable"
                                     # Wall-clock response time for the stats popup ("Time").
                                     last_metrics.setdefault("response_time", round(time.time() - _chat_start, 2))
                                     yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
@@ -2541,12 +2569,22 @@ def setup_chat_routes(
                             if not last_metrics and full_response:
                                 _elapsed = time.time() - _chat_start
                                 _est_out = len(full_response) // 4
-                                _generation_time = (
-                                    max(0.001, time.monotonic() - _chat_generation_started_at)
-                                    if _chat_generation_started_at is not None
-                                    else _elapsed
-                                )
-                                _tps = round(_est_out / _generation_time, 2) if _generation_time > 0 else 0
+                                if (
+                                    _chat_generation_started_at is not None
+                                    and _chat_generation_last_delta_at is not None
+                                    and _chat_generation_delta_count >= 2
+                                    and _chat_generation_last_delta_at > _chat_generation_started_at
+                                ):
+                                    _generation_time = (
+                                        _chat_generation_last_delta_at
+                                        - _chat_generation_started_at
+                                    )
+                                    _tps = round(_est_out / _generation_time, 2)
+                                    _tps_source = "stream_elapsed"
+                                else:
+                                    _generation_time = 0.0
+                                    _tps = 0.0
+                                    _tps_source = "unavailable"
                                 _actual_context_length = _chat_request_state["context_lengths"].get(
                                     _actual_candidate_index,
                                     _selected_context_length,
@@ -2562,8 +2600,8 @@ def setup_chat_routes(
                                     "input_tokens": _est_in,
                                     "output_tokens": _est_out,
                                     "tokens_per_second": _tps,
-                                    "generation_time": round(_generation_time, 2),
-                                    "tps_source": "stream_elapsed" if _chat_generation_started_at is not None else "computed",
+                                    **({"generation_time": round(_generation_time, 2)} if _generation_time > 0 else {}),
+                                    "tps_source": _tps_source,
                                     "request_context_tokens": _est_in,
                                     "context_percent": _ctx_pct,
                                     "context_length": _actual_context_length,

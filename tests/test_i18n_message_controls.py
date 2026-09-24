@@ -51,8 +51,8 @@ def test_message_and_theme_controls_in_real_browser(tmp_path):
         assert.equal(await page.locator('.ctx-popup > div').first().textContent(),'Статистика сообщения');
         assert((await page.locator('.ctx-popup .ctx-label').allTextContents()).includes('Ввод'));
         assert((await page.locator('.ctx-popup .ctx-label').allTextContents()).includes('Источник скорости'));
-        assert((await page.locator('.ctx-popup').innerText()).includes('Оценка по времени потока'));
-        assert((await page.locator('.ctx-popup').innerText()).includes('Провайдер не передал скорость декодирования; это оценка.'));
+        assert((await page.locator('.ctx-popup').innerText()).includes('Оценка по интервалу выходных токенов'));
+        assert((await page.locator('.ctx-popup').innerText()).includes('без prefill и завершающего хвоста потока'));
         await page.keyboard.press('Escape');
         await page.evaluate(()=>renderer.displayMetrics(document.getElementById('qa-message'),{response_time:2,input_tokens:80000,output_tokens:10,tokens_per_second:131.98,tps_source:'backend',context_percent:80,context_length:100000,model:'Save',usage_source:'real'}));
         assert((await page.locator('#qa-message .response-metrics').textContent()).includes('131.98 tok/s'));

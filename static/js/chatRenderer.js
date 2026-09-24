@@ -2275,7 +2275,7 @@ export function displayMetrics(messageElement, metrics) {
       : metrics.tps_source === 'mixed' || metrics.tps_source === 'mixed_partial'
         ? 'Mixed backend and stream measurements'
     : streamTpsSources.has(metrics.tps_source)
-      ? 'Stream-time estimate'
+      ? 'Output-delta estimate'
       : metrics.tps_source === 'unavailable'
         ? 'TPS unavailable'
         : 'Wall-clock estimate';
@@ -2333,7 +2333,7 @@ export function displayMetrics(messageElement, metrics) {
       ? `${hasBackendTps ? '' : '≈'}${tps} tok/s`
       : 'n/a';
     const speedSourceRow = hasTps
-      ? `<div><span class="ctx-label">Speed source</span> ${t(tpsSourceLabel)}</div>${hasBackendTps ? '' : `<div class="ctx-speed-note">${t(partialBackendTps ? 'Backend statistics are available only for measured rounds.' : hasRoundBackendTps && hasRoundStreamTps ? 'Combines backend statistics and stream-time estimates.' : 'Provider did not report backend decode speed; this is an estimate.')}</div>`}`
+      ? `<div><span class="ctx-label">Speed source</span> ${t(tpsSourceLabel)}</div>${hasBackendTps ? '' : `<div class="ctx-speed-note">${t(partialBackendTps ? 'Backend statistics are available only for measured rounds.' : hasRoundBackendTps && hasRoundStreamTps ? 'Combines backend statistics and stream-time estimates.' : 'Provider did not report backend decode speed; this estimate spans the first to last output delta and excludes prefill and stream finalization.')}</div>`}`
       : '';
     const generationTimeRow = Number.isFinite(Number(metrics.generation_time)) && Number(metrics.generation_time) > 0
       ? `<div><span class="ctx-label">Generation</span> ${Number(metrics.generation_time).toFixed(2)}s</div>`

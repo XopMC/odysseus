@@ -6347,6 +6347,8 @@ async def stream_agent_loop(
                 logger.exception("Failed to record Online Context Compact request")
         _model_stream_started = time.monotonic()
         _round_generation_started_at = None
+        _round_generation_last_delta_at = None
+        _round_generation_delta_count = 0
         _round_generation_timing_basis = None
         _round_backend_gen_tps = 0.0
         _round_backend_generation_time = 0.0
@@ -6476,9 +6478,12 @@ async def stream_agent_loop(
                     # IMPORTANT: check type-based events BEFORE "delta" key,
                     # because tool_call_delta also has an "arg_delta" field.
                     if data.get("type") == "tool_call_delta":
+                        _delta_at = time.monotonic()
                         if _round_generation_started_at is None:
-                            _round_generation_started_at = time.monotonic()
+                            _round_generation_started_at = _delta_at
                             _round_generation_timing_basis = "stream_delta"
+                        _round_generation_last_delta_at = _delta_at
+                        _round_generation_delta_count += 1
                         # Tool-call argument deltas are model proposals, not an
                         # authorization decision.  Document UI events are built
                         # from the parsed ToolBlock only after successful dispatch.
@@ -6690,9 +6695,13 @@ async def stream_agent_loop(
                         data["round"] = round_num
                         yield f"data: {json.dumps(data)}\n\n"
                     elif "delta" in data:
-                        if _round_generation_started_at is None:
-                            _round_generation_started_at = time.monotonic()
-                            _round_generation_timing_basis = "stream_delta"
+                        if data.get("delta"):
+                            _delta_at = time.monotonic()
+                            if _round_generation_started_at is None:
+                                _round_generation_started_at = _delta_at
+                                _round_generation_timing_basis = "stream_delta"
+                            _round_generation_last_delta_at = _delta_at
+                            _round_generation_delta_count += 1
                         if _apply_candidate_compaction(
                             candidate_index if isinstance(candidate_index, int) else 0
                         ):
@@ -6767,16 +6776,22 @@ async def stream_agent_loop(
         for _warning_event in _drain_budget_warnings():
             yield f'data: {json.dumps(_warning_event)}\n\n'
 
-        # Measure from the first streamed model output to completion. This
-        # excludes prompt/prefill/queue delay as well as tool execution and
-        # waits between rounds, matching decode throughput much more closely.
-        _model_stream_finished = time.monotonic()
+        # Measure only the first-to-last generated output delta span. Usage,
+        # [DONE], and network finalization may arrive well after the last token.
         _round_stream_duration = 0.0
-        if _round_generation_started_at is not None:
+        if (
+            _round_generation_started_at is not None
+            and _round_generation_last_delta_at is not None
+            and _round_generation_delta_count >= 2
+            and _round_generation_last_delta_at > _round_generation_started_at
+        ):
             _round_stream_duration = max(
-                0.001, _model_stream_finished - _round_generation_started_at
+                0.001,
+                _round_generation_last_delta_at - _round_generation_started_at,
             )
             model_stream_duration += _round_stream_duration
+        elif _round_generation_started_at is not None:
+            _round_generation_timing_basis = "single_stream_delta"
 
         logger.info(
             "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
@@ -6812,6 +6827,8 @@ async def stream_agent_loop(
             _round_tps_duration = _round_stream_duration
             _round_tps = round(_round_output_tokens_for_tps / _round_stream_duration, 2)
             _round_tps_source = "stream_elapsed"
+        elif _round_generation_started_at is not None and _round_output_tokens_for_tps > 0:
+            _round_tps_source = "unavailable_single_delta"
         elif _round_generation_started_at is None and _round_output_tokens_for_tps > 0:
             _round_tps_source = "unavailable_buffered"
         if _round_usage_bucket or native_tool_calls or round_response or round_reasoning:
@@ -6824,7 +6841,7 @@ async def stream_agent_loop(
                 "tps_source": _round_tps_source,
                 "timing_basis": (
                     "backend_stats" if _round_tps_source == "backend"
-                    else "first_stream_delta" if _round_tps_source == "stream_elapsed"
+                    else "first_to_last_stream_delta" if _round_tps_source == "stream_elapsed"
                     else _round_generation_timing_basis or "no_output_timing"
                 ),
             })

@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v478-tpsround1';
+const CACHE_NAME = 'odysseus-v479-tpsdelta1';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -65,7 +65,7 @@ const PRECACHE = [
   '/static/js/tts-ai.js',
   '/static/js/document.js?v=20260815approvalsave1',
   '/static/js/gallery.js?v=20260708match1',
-  '/static/js/chatRenderer.js?v=20260924tpsround1',
+  '/static/js/chatRenderer.js?v=20260924tpsdelta1',
   '/static/js/memorySafety.js?v=20260923memoryredact1',
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js?v=20260819approvalcontrol1',

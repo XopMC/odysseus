@@ -214,9 +214,12 @@ def test_agent_tps_uses_model_stream_time_and_excludes_tool_wait(monkeypatch):
 
     async def stream(_candidates, _messages, **_kwargs):
         clock[0] += 20.0  # TTFT/prefill/queue time must not enter decode TPS.
-        yield 'data: {"delta":"Answer"}\n\n'
-        clock[0] += 2.0  # Two seconds from first output to end of generation.
+        yield 'data: {"delta":"An"}\n\n'
+        clock[0] += 2.0  # Actual first-to-last output delta span.
+        yield 'data: {"delta":"swer"}\n\n'
+        clock[0] += 8.0  # Provider's usage trailer is delayed after the last token.
         yield 'data: {"type":"usage","data":{"input_tokens":10,"output_tokens":100}}\n\n'
+        clock[0] += 30.0  # [DONE] and transport tail are not decode time either.
         yield 'data: [DONE]\n\n'
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
@@ -227,9 +230,33 @@ def test_agent_tps_uses_model_stream_time_and_excludes_tool_wait(monkeypatch):
     )))
     metrics = next(event["data"] for event in events if event.get("type") == "metrics")
     assert metrics.get("tokens_per_second") == 50.0, metrics
+    assert metrics["generation_time"] == 2.0
     assert metrics["tps_source"] == "stream_elapsed"
     assert metrics["tps_coverage_percent"] == 100.0
     assert metrics["round_generation_metrics"][0]["tps_source"] == "stream_elapsed"
+    assert metrics["round_generation_metrics"][0]["timing_basis"] == "first_to_last_stream_delta"
+
+
+def test_agent_single_buffered_delta_does_not_invent_a_decode_rate(monkeypatch):
+    _patch_common(monkeypatch)
+
+    async def stream(_candidates, _messages, **_kwargs):
+        yield 'data: {"delta":"One buffered response chunk"}\n\n'
+        yield 'data: {"type":"usage","data":{"input_tokens":10,"output_tokens":100}}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "test-model", [{"role": "user", "content": "Hello"}],
+        max_rounds=1,
+        active_goal={"id": "safe-goal", "status": "active", "checkpoint": {}},
+    )))
+    metrics = next(event["data"] for event in events if event.get("type") == "metrics")
+    round_metric = metrics["round_generation_metrics"][0]
+    assert round_metric["timing_basis"] == "single_stream_delta"
+    assert round_metric["tps_source"] == "unavailable_single_delta"
+    assert metrics["tokens_per_second"] == 0
+    assert metrics["tps_source"] == "unavailable"
 
 
 def test_buffered_tool_call_without_decode_timing_is_not_reported_as_tps(monkeypatch):
