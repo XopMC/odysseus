@@ -2259,11 +2259,26 @@ export function displayMetrics(messageElement, metrics) {
   const outputTokens = metrics.output_tokens || 0;
   const tps = metrics.tokens_per_second;
   const hasBackendTps = metrics.tps_source === 'backend';
+  const partialBackendTps = metrics.tps_source === 'backend_partial';
+  const roundTpsMetrics = Array.isArray(metrics.round_generation_metrics)
+    ? metrics.round_generation_metrics.filter(row => row && typeof row === 'object')
+    : [];
+  const hasRoundBackendTps = roundTpsMetrics.some(row => row.tps_source === 'backend');
+  const hasRoundStreamTps = roundTpsMetrics.some(row => row.tps_source === 'stream_elapsed');
+  const streamTpsSources = new Set([
+    'stream_elapsed', 'stream_elapsed_partial', 'mixed', 'mixed_partial',
+  ]);
   const tpsSourceLabel = hasBackendTps
     ? 'Backend-reported'
-    : metrics.tps_source === 'stream_elapsed'
+    : partialBackendTps
+      ? 'Backend-reported for measured rounds'
+      : metrics.tps_source === 'mixed' || metrics.tps_source === 'mixed_partial'
+        ? 'Mixed backend and stream measurements'
+    : streamTpsSources.has(metrics.tps_source)
       ? 'Stream-time estimate'
-      : 'Wall-clock estimate';
+      : metrics.tps_source === 'unavailable'
+        ? 'TPS unavailable'
+        : 'Wall-clock estimate';
   const isReal = metrics.usage_source === 'real';
   const ctxPct = metrics.context_percent;
   const model = metrics.model || 'Unknown';
@@ -2283,7 +2298,7 @@ export function displayMetrics(messageElement, metrics) {
 
   // Keep token counts in the Message Stats popup; the footer should stay slim.
   const costStr0 = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : null;
-  const hasTps = tps != null && tps !== 'undefined';
+  const hasTps = Number.isFinite(Number(tps)) && Number(tps) > 0;
   const metricsLabel = hasTps
     ? `${hasBackendTps ? '' : '≈'}${tps} tok/s`
     : costStr0
@@ -2295,7 +2310,11 @@ export function displayMetrics(messageElement, metrics) {
   metricsContainer.textContent = metricsLabel;
   metricsContainer.style.cursor = 'pointer';
   const metricsTitle = hasTps && !hasBackendTps
-    ? 'Approximate speed; backend decode TPS was not reported'
+    ? partialBackendTps
+      ? 'Approximate speed; backend stats cover only measured rounds'
+      : hasRoundBackendTps && hasRoundStreamTps
+        ? 'Approximate speed; combines backend stats and stream estimates'
+      : 'Approximate speed; backend decode TPS was not reported'
     : 'Click for details';
   metricsContainer.title = t(metricsTitle);
   bindUiText(metricsContainer, metricsTitle, 'title');
@@ -2310,14 +2329,35 @@ export function displayMetrics(messageElement, metrics) {
 
     const costStr = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : '';
     const costRows = costStr ? `<div><span class="ctx-label">Cost</span> ${costStr}</div>` : '';
-    const speedStr = tps != null && tps !== 'undefined'
+    const speedStr = hasTps
       ? `${hasBackendTps ? '' : '≈'}${tps} tok/s`
       : 'n/a';
     const speedSourceRow = hasTps
-      ? `<div><span class="ctx-label">Speed source</span> ${t(tpsSourceLabel)}</div>${hasBackendTps ? '' : `<div class="ctx-speed-note">${t('Provider did not report backend decode speed; this is an estimate.')}</div>`}`
+      ? `<div><span class="ctx-label">Speed source</span> ${t(tpsSourceLabel)}</div>${hasBackendTps ? '' : `<div class="ctx-speed-note">${t(partialBackendTps ? 'Backend statistics are available only for measured rounds.' : hasRoundBackendTps && hasRoundStreamTps ? 'Combines backend statistics and stream-time estimates.' : 'Provider did not report backend decode speed; this is an estimate.')}</div>`}`
       : '';
     const generationTimeRow = Number.isFinite(Number(metrics.generation_time)) && Number(metrics.generation_time) > 0
       ? `<div><span class="ctx-label">Generation</span> ${Number(metrics.generation_time).toFixed(2)}s</div>`
+      : '';
+    const roundTpsRows = roundTpsMetrics.length > 1
+      ? `<div class="ctx-round-tps" style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);">
+          <div class="ctx-heading" style="font-weight:600;margin-bottom:4px;color:var(--fg);">Per-round speed</div>
+          ${roundTpsMetrics.map((row, index) => {
+            const roundNumber = Number(row.round) || index + 1;
+            const roundTokens = Math.max(Number(row.output_tokens) || 0, 0);
+            const roundRate = Number(row.tokens_per_second);
+            const rateLabel = Number.isFinite(roundRate) && roundRate > 0
+              ? `${row.tps_source === 'backend' ? '' : '≈'}${roundRate.toFixed(2)} tok/s`
+              : t('Unavailable (tool-call timing was not reported)');
+            return `<div><span class="ctx-label">${t('Round')} ${roundNumber}</span> ${roundTokens.toLocaleString()} tokens · ${rateLabel}</div>`;
+          }).join('')}
+        </div>`
+      : '';
+    const tpsCoverageRow = Number.isFinite(Number(metrics.tps_coverage_percent))
+      && Number(metrics.tps_coverage_percent) < 100
+      ? `<div class="ctx-round-note">${t('Measured output tokens')}: ${Number(metrics.tps_measured_tokens) || 0} / ${outputTokens.toLocaleString()} (${Number(metrics.tps_coverage_percent).toFixed(1)}%)</div>`
+      : '';
+    const tpsScopeNote = roundTpsMetrics.length > 1
+      ? `<div class="ctx-round-note">${t('Agent speed is aggregated across measured rounds; provider logs show per-request rates.')}</div>`
       : '';
     const totalTok = inputTokens + outputTokens;
     const ctxColor = ctxPct >= 85 ? 'var(--red, #e06c75)' : ctxPct >= 70 ? '#ff9900' : 'var(--color-muted-alt, #6b7280)';
@@ -2346,6 +2386,9 @@ export function displayMetrics(messageElement, metrics) {
       <div><span class="ctx-label">Speed</span> ${speedStr}</div>
       ${speedSourceRow}
       ${generationTimeRow}
+      ${tpsScopeNote}
+      ${tpsCoverageRow}
+      ${roundTpsRows}
       <div><span class="ctx-label">Time</span> ${responseTime}s</div>
       ${prepTime != null ? `<div><span class="ctx-label">Prep</span> ${prepTime}s</div>` : ''}
       ${modelWaitTime != null ? `<div><span class="ctx-label">Model wait</span> ${modelWaitTime}s</div>` : ''}
@@ -2360,7 +2403,7 @@ export function displayMetrics(messageElement, metrics) {
       </div>` : ''}
       ${isReal ? '' : '<div style="margin-top:4px;font-size:0.8em;opacity:0.4;">~ estimated token count</div>'}
     `;
-    popup.querySelectorAll('.ctx-label, .ctx-heading, .ctx-speed-note').forEach(node => bindUiText(node, node.textContent));
+    popup.querySelectorAll('.ctx-label, .ctx-heading, .ctx-speed-note, .ctx-round-note').forEach(node => bindUiText(node, node.textContent));
 
     const rect = metricsContainer.getBoundingClientRect();
     popup.style.left = rect.left + 'px';

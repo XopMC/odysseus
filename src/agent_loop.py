@@ -3400,6 +3400,50 @@ def _append_tool_results(
         messages.append(untrusted_result)
 
 
+def _aggregate_agent_round_tps(round_metrics: list, total_output_tokens: int) -> dict:
+    """Aggregate only rounds with a trustworthy decode-time measurement.
+
+    A buffered tool-call frame without preceding deltas has no observable
+    decode start; using request-start time would silently fold prompt prefill
+    into TPS. Keep those output tokens in the coverage denominator but exclude
+    them from the measured rate.
+    """
+    measured = []
+    for item in round_metrics or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            tokens = max(int(item.get("output_tokens") or 0), 0)
+            seconds = float(item.get("generation_time") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        source = item.get("tps_source")
+        if (tokens > 0 and math.isfinite(seconds) and seconds > 0
+                and source in {"backend", "stream_elapsed"}):
+            measured.append((tokens, seconds, source))
+
+    measured_tokens = sum(item[0] for item in measured)
+    generation_time = sum(item[1] for item in measured)
+    total_tokens = max(int(total_output_tokens or 0), 0)
+    coverage = min(round(100.0 * measured_tokens / total_tokens, 1), 100.0) if total_tokens else 0.0
+    tps = measured_tokens / generation_time if generation_time > 0 else 0.0
+    sources = {item[2] for item in measured}
+    if not measured:
+        source = "unavailable"
+    elif len(sources) == 1:
+        only = next(iter(sources))
+        source = only if coverage >= 100.0 else f"{only}_partial"
+    else:
+        source = "mixed" if coverage >= 100.0 else "mixed_partial"
+    return {
+        "tokens_per_second": round(tps, 2),
+        "tps_source": source,
+        "tps_measured_tokens": measured_tokens,
+        "tps_coverage_percent": coverage,
+        "generation_time": round(generation_time, 2) if generation_time > 0 else 0.0,
+    }
+
+
 def _compute_final_metrics(
     messages: List[Dict],
     full_response: str,
@@ -3423,6 +3467,7 @@ def _compute_final_metrics(
     backend_gen_tps: float = 0,
     backend_prefill_tps: float = 0,
     model_stream_duration: float = 0,
+    round_generation_metrics: Optional[list] = None,
 ) -> dict:
     """Compute token counts, TPS, and build the final metrics dict."""
     if has_real_usage:
@@ -3440,7 +3485,16 @@ def _compute_final_metrics(
     # Fall back to tokens/wall-clock only when the backend didn't report it
     # (e.g. cloud APIs without timings); that figure reads low because
     # total_duration includes prefill + agent overhead.
-    if backend_gen_tps and backend_gen_tps > 0:
+    round_tps_summary = (
+        _aggregate_agent_round_tps(round_generation_metrics, output_tokens)
+        if round_generation_metrics is not None
+        else None
+    )
+    if round_tps_summary is not None:
+        tps = round_tps_summary["tokens_per_second"]
+        tps_source = round_tps_summary["tps_source"]
+        model_stream_duration = round_tps_summary["generation_time"]
+    elif backend_gen_tps and backend_gen_tps > 0:
         tps = backend_gen_tps
         tps_source = "backend"
     elif output_tokens > 0 and model_stream_duration > 0:
@@ -3485,6 +3539,12 @@ def _compute_final_metrics(
     }
     if backend_prefill_tps and backend_prefill_tps > 0:
         metrics["prefill_tps"] = round(backend_prefill_tps, 2)
+    if round_tps_summary is not None:
+        metrics.update({
+            key: value for key, value in round_tps_summary.items()
+            if key != "generation_time"
+        })
+        metrics["round_generation_metrics"] = list(round_generation_metrics or [])
     if prep_timings:
         prep_total = round(sum(prep_timings.values()), 3)
         metrics["agent_prep_time"] = prep_total
@@ -4932,6 +4992,7 @@ async def stream_agent_loop(
     round_models = []  # Actual model for each corresponding round
     round_endpoint_ids = []
     round_endpoint_labels = []
+    round_generation_metrics = []
     # Completion-verifier state (mechanism 3a). _effectful_used flips on when
     # a tool that produces a checkable artifact runs; the verifier only fires
     # on such turns and at most _VERIFIER_MAX_ROUNDS times.
@@ -6286,6 +6347,9 @@ async def stream_agent_loop(
                 logger.exception("Failed to record Online Context Compact request")
         _model_stream_started = time.monotonic()
         _round_generation_started_at = None
+        _round_generation_timing_basis = None
+        _round_backend_gen_tps = 0.0
+        _round_backend_generation_time = 0.0
         async for chunk in stream_llm_with_fallback(
             _candidates,
             messages,
@@ -6414,6 +6478,7 @@ async def stream_agent_loop(
                     if data.get("type") == "tool_call_delta":
                         if _round_generation_started_at is None:
                             _round_generation_started_at = time.monotonic()
+                            _round_generation_timing_basis = "stream_delta"
                         # Tool-call argument deltas are model proposals, not an
                         # authorization decision.  Document UI events are built
                         # from the parsed ToolBlock only after successful dispatch.
@@ -6435,8 +6500,10 @@ async def stream_agent_loop(
                     elif data.get("type") == "tool_calls":
                         if _round_generation_started_at is None:
                             # Some OpenAI-compatible servers emit tool calls
-                            # only after buffering the complete arguments.
-                            _round_generation_started_at = _model_stream_started
+                            # only after buffering the complete arguments. There
+                            # is no observable decode start in that case; using
+                            # request-start would incorrectly include prefill.
+                            _round_generation_timing_basis = "buffered_tool_call"
                         if _apply_candidate_compaction(candidate_index):
                             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
                         native_tool_calls = data.get("calls", [])
@@ -6450,6 +6517,13 @@ async def stream_agent_loop(
                             gen_tps = float(provider_metrics.get("gen_tps") or 0)
                             if math.isfinite(gen_tps) and gen_tps > 0:
                                 backend_gen_tps = gen_tps
+                                _round_backend_gen_tps = gen_tps
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                        try:
+                            generation_time = float(provider_metrics.get("generation_time") or 0)
+                            if math.isfinite(generation_time) and generation_time > 0:
+                                _round_backend_generation_time = generation_time
                         except (TypeError, ValueError, OverflowError):
                             pass
                         try:
@@ -6500,8 +6574,17 @@ async def stream_agent_loop(
                         # reads low. Keep the last round's value (the gen phase).
                         if u.get("gen_tps"):
                             backend_gen_tps = u["gen_tps"]
+                            try:
+                                _round_backend_gen_tps = float(u["gen_tps"])
+                            except (TypeError, ValueError, OverflowError):
+                                pass
                         if u.get("prefill_tps"):
                             backend_prefill_tps = u["prefill_tps"]
+                        if u.get("generation_time"):
+                            try:
+                                _round_backend_generation_time = float(u["generation_time"])
+                            except (TypeError, ValueError, OverflowError):
+                                pass
                     elif data.get("type") == "fallback":
                         # The selected model failed and another answered; surface
                         # the notice so a misconfigured provider isn't masked.
@@ -6609,6 +6692,7 @@ async def stream_agent_loop(
                     elif "delta" in data:
                         if _round_generation_started_at is None:
                             _round_generation_started_at = time.monotonic()
+                            _round_generation_timing_basis = "stream_delta"
                         if _apply_candidate_compaction(
                             candidate_index if isinstance(candidate_index, int) else 0
                         ):
@@ -6687,14 +6771,12 @@ async def stream_agent_loop(
         # excludes prompt/prefill/queue delay as well as tool execution and
         # waits between rounds, matching decode throughput much more closely.
         _model_stream_finished = time.monotonic()
+        _round_stream_duration = 0.0
         if _round_generation_started_at is not None:
-            model_stream_duration += max(
+            _round_stream_duration = max(
                 0.001, _model_stream_finished - _round_generation_started_at
             )
-        else:
-            model_stream_duration += max(
-                0.0, _model_stream_finished - _model_stream_started
-            )
+            model_stream_duration += _round_stream_duration
 
         logger.info(
             "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
@@ -6706,6 +6788,46 @@ async def stream_agent_loop(
             _round_first_token_logged,
         )
         _finalize_round_usage(include_empty=not _request_budget_hit)
+        _round_usage_bucket = next(
+            (bucket for bucket in reversed(usage_buckets)
+             if bucket.get("round") == round_num),
+            None,
+        )
+        _round_output_tokens_for_tps = (
+            int(_round_usage_bucket.get("output_tokens") or 0)
+            if _round_usage_bucket else max(_round_real_output_tokens, 0)
+        )
+        _round_tps_source = "unavailable_buffered"
+        _round_tps = None
+        _round_tps_duration = None
+        if _round_backend_generation_time > 0 and _round_output_tokens_for_tps > 0:
+            _round_tps_duration = _round_backend_generation_time
+            _round_tps = round(_round_output_tokens_for_tps / _round_tps_duration, 2)
+            _round_tps_source = "backend"
+        elif _round_backend_gen_tps > 0 and _round_output_tokens_for_tps > 0:
+            _round_tps = round(_round_backend_gen_tps, 2)
+            _round_tps_duration = _round_output_tokens_for_tps / _round_backend_gen_tps
+            _round_tps_source = "backend"
+        elif _round_stream_duration > 0 and _round_output_tokens_for_tps > 0:
+            _round_tps_duration = _round_stream_duration
+            _round_tps = round(_round_output_tokens_for_tps / _round_stream_duration, 2)
+            _round_tps_source = "stream_elapsed"
+        elif _round_generation_started_at is None and _round_output_tokens_for_tps > 0:
+            _round_tps_source = "unavailable_buffered"
+        if _round_usage_bucket or native_tool_calls or round_response or round_reasoning:
+            round_generation_metrics.append({
+                "round": round_num,
+                "model": _round_actual_model,
+                "output_tokens": _round_output_tokens_for_tps,
+                "generation_time": round(_round_tps_duration, 4) if _round_tps_duration else None,
+                "tokens_per_second": _round_tps,
+                "tps_source": _round_tps_source,
+                "timing_basis": (
+                    "backend_stats" if _round_tps_source == "backend"
+                    else "first_stream_delta" if _round_tps_source == "stream_elapsed"
+                    else _round_generation_timing_basis or "no_output_timing"
+                ),
+            })
         if _request_budget_hit:
             full_response += "\n\n[Agent paused: model request limit reached.]"
             break
@@ -8476,6 +8598,7 @@ async def stream_agent_loop(
         backend_gen_tps=backend_gen_tps,
         backend_prefill_tps=backend_prefill_tps,
         model_stream_duration=model_stream_duration,
+        round_generation_metrics=round_generation_metrics or None,
     )
     metrics["requested_model"] = requested_model
     if _working_context:

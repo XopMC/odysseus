@@ -228,6 +228,35 @@ def test_agent_tps_uses_model_stream_time_and_excludes_tool_wait(monkeypatch):
     metrics = next(event["data"] for event in events if event.get("type") == "metrics")
     assert metrics.get("tokens_per_second") == 50.0, metrics
     assert metrics["tps_source"] == "stream_elapsed"
+    assert metrics["tps_coverage_percent"] == 100.0
+    assert metrics["round_generation_metrics"][0]["tps_source"] == "stream_elapsed"
+
+
+def test_buffered_tool_call_without_decode_timing_is_not_reported_as_tps(monkeypatch):
+    _patch_common(monkeypatch)
+    from src import context_efficiency_state
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: {"cache_write_read_ratio": 1.0})
+
+    async def stream(_candidates, _messages, **_kwargs):
+        # A server may buffer the entire call and emit no argument deltas.
+        # Request start includes prefill, so it cannot stand in for decode start.
+        yield 'data: ' + json.dumps({"type": "tool_calls", "calls": []}) + '\n\n'
+        yield 'data: ' + json.dumps({"type": "usage", "data": {"input_tokens": 10, "output_tokens": 100}}) + '\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream, raising=False)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "A harmless buffered call fixture."}],
+        max_rounds=1, relevant_tools={"python"}, session_id="fixture-chat",
+    )))
+    metrics = next(event["data"] for event in events if event.get("type") == "metrics")
+    round_metric = metrics["round_generation_metrics"][0]
+    assert round_metric["timing_basis"] == "buffered_tool_call"
+    assert round_metric["tps_source"] == "unavailable_buffered"
+    assert metrics["tokens_per_second"] == 0
+    assert metrics["tps_source"] == "unavailable"
+    assert metrics["tps_measured_tokens"] == 0
+    assert metrics["tps_coverage_percent"] == 0.0
 
 
 def test_tool_budget_event_has_exact_run_identity(monkeypatch):

@@ -59,6 +59,23 @@ def test_message_and_theme_controls_in_real_browser(tmp_path):
         assert.equal((await page.locator('#qa-message .response-metrics').textContent()).includes('≈'),false);
         await page.locator('#qa-message .response-metrics').click();
         assert((await page.locator('.ctx-popup').innerText()).includes('Данные backend'));
+        await page.keyboard.press('Escape');
+        await page.evaluate(()=>renderer.displayMetrics(document.getElementById('qa-message'),{
+          response_time:46.5,input_tokens:16678,output_tokens:830,tokens_per_second:29.8,tps_source:'mixed',
+          tps_measured_tokens:830,tps_coverage_percent:100,generation_time:27.85,context_percent:15.8,
+          context_length:128512,model:'qwen-local',usage_source:'real',round_generation_metrics:[
+            {round:1,output_tokens:146,tokens_per_second:7.3,tps_source:'stream_elapsed',generation_time:20.0},
+            {round:2,output_tokens:63,tokens_per_second:120,tps_source:'backend',generation_time:0.525},
+          ]
+        }));
+        assert((await page.locator('#qa-message .response-metrics').textContent()).includes('≈29.8 tok/s'));
+        await page.locator('#qa-message .response-metrics').click();
+        const tpsPopup=await page.locator('.ctx-popup').innerText();
+        assert(tpsPopup.includes('Скорость по раундам'));
+        assert(tpsPopup.includes('Раунд 1') || tpsPopup.includes('Round 1'));
+        assert(tpsPopup.includes('≈7.30 tok/s'));
+        assert(tpsPopup.includes('120.00 tok/s'));
+        assert(tpsPopup.includes('Скорость Agent усреднена по измеренным раундам'));
         await page.keyboard.press('Escape');await page.locator('#qa-message .ctx-ring').click();
         assert.equal(await page.locator('.ctx-compact-btn').textContent(),'Сжать контекст');
         assert.equal(await page.locator('.ctx-compact-btn').getAttribute('title'),'Сжать старые сообщения, чтобы освободить контекст');

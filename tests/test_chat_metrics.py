@@ -15,6 +15,7 @@ These tests lock in two things:
 """
 import json
 import asyncio
+import pytest
 
 from src import llm_core
 from src.agent_loop import _compute_final_metrics
@@ -317,3 +318,42 @@ def test_metrics_use_model_stream_time_not_total_agent_wall_time():
     )
     assert m["tokens_per_second"] == 123.1
     assert m["tps_source"] == "stream_elapsed"
+
+
+def test_agent_tps_aggregates_per_round_instead_of_using_only_last_provider_rate():
+    m = _metrics(
+        real_output_tokens=209,
+        backend_gen_tps=120.0,
+        model_stream_duration=20.525,
+        round_generation_metrics=[
+            {"round": 1, "output_tokens": 146, "generation_time": 20.0,
+             "tokens_per_second": 7.3, "tps_source": "stream_elapsed"},
+            {"round": 2, "output_tokens": 63, "generation_time": 0.525,
+             "tokens_per_second": 120.0, "tps_source": "backend"},
+        ],
+    )
+    # The 120 t/s backend number belongs only to round 2. Report the weighted
+    # run rate instead of applying that last-call rate to all 209 tokens.
+    assert m["tokens_per_second"] == 10.18
+    assert m["tps_source"] == "mixed"
+    assert m["tps_measured_tokens"] == 209
+    assert m["tps_coverage_percent"] == 100.0
+    assert m["round_generation_metrics"][0]["tokens_per_second"] == 7.3
+
+
+def test_agent_tps_reports_coverage_when_buffered_round_has_no_decode_timing():
+    m = _metrics(
+        real_output_tokens=300,
+        backend_gen_tps=0,
+        model_stream_duration=2.0,
+        round_generation_metrics=[
+            {"round": 1, "output_tokens": 200, "generation_time": 2.0,
+             "tokens_per_second": 100.0, "tps_source": "stream_elapsed"},
+            {"round": 2, "output_tokens": 100, "generation_time": None,
+             "tokens_per_second": None, "tps_source": "unavailable_buffered"},
+        ],
+    )
+    assert m["tokens_per_second"] == 100.0
+    assert m["tps_source"] == "stream_elapsed_partial"
+    assert m["tps_measured_tokens"] == 200
+    assert m["tps_coverage_percent"] == pytest.approx(66.7)
