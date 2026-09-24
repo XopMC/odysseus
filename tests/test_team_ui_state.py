@@ -13,7 +13,13 @@ def test_team_event_cursor_and_explicit_external_consent():
     module = (Path(__file__).resolve().parents[1] / "static/js/team-workspace.js").as_uri()
     script = r"""
       import assert from 'node:assert/strict';
-      const {createTeamEventCursor, createTeamNotificationTracker, terminalPlainText, normalizeTeamStart, reviewedGitFiles, fileRollbackArguments, replayTeamTimeline} = await import(process.argv[1]);
+      const {createTeamEventCursor, createTeamNotificationTracker, terminalPlainText, normalizeTeamStart, reviewedGitFiles, fileRollbackArguments, replayTeamTimeline, visibleTeamWorkers} = await import(process.argv[1]);
+      const draftWorker={name:'qa-python-executor',model:'worker-model'};
+      const savedWorker={id:'worker-1',name:'running-worker',model:'worker-model'};
+      assert.deepEqual(visibleTeamWorkers(null,{status:'No task',workers:[]},[draftWorker]),[draftWorker],
+        'a no-task server snapshot must not hide workers added to the draft');
+      assert.deepEqual(visibleTeamWorkers('team-1',{workers:[savedWorker]},[draftWorker]),[savedWorker],
+        'running tasks must show authoritative server workers');
       const cursor=createTeamEventCursor('a',3);
       assert.equal(cursor.accept({team_id:'a',seq:4}),true);
       assert.equal(cursor.accept({team_id:'a',seq:4}),false);

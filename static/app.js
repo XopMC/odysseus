@@ -29,7 +29,7 @@ import chatSubagents from './js/chat-subagents.js?v=20260924detailchannels1';
 import chatRunInspector from './js/chat-run-inspector.js?v=20260923runinspector3';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';
 import projectsModule from './js/projects.js?v=20260922projects2';
-import { createTeamWorkspace } from './js/team-workspace.js?v=20260924modelcache1';
+import { createTeamWorkspace } from './js/team-workspace.js?v=20260925teamdraft1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';

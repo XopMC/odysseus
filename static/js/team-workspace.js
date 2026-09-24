@@ -44,6 +44,12 @@ export function createTeamNotificationTracker() {
   };
 }
 
+export function visibleTeamWorkers(teamId, snapshot, draftWorkers) {
+  if (!teamId) return Array.isArray(draftWorkers) ? draftWorkers : [];
+  if (Array.isArray(snapshot?.workers)) return snapshot.workers;
+  return Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+}
+
 // Replay is intentionally deterministic and side-effect free: the same saved
 // event stream produces the same cards after a refresh, another device opens
 // the chat, or the SSE connection reconnects.  Old runs did not carry message
@@ -708,7 +714,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   function renderWorkers() {
     if (!ui.workerList) return;
     ui.workerList.replaceChildren(); ui.taskList.replaceChildren();
-    const workers = snapshot?.workers || snapshot?.tasks || manualWorkers;
+    const workers = visibleTeamWorkers(teamId, snapshot, manualWorkers);
     const previousScope = ui.hostScope.value;
     ui.hostScope.replaceChildren(uiOption('Team host scope', ''));
     for (const worker of workers) if (worker.id) ui.hostScope.append(new Option(worker.name || worker.id, worker.id));
