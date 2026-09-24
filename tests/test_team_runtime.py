@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from src.team_runtime import TeamRuntime
-from src.team_store import TeamStore, NotFound
+from src.team_store import TeamStore, NotFound, Conflict
 
 
 def answer(text='Verified the requested change', calls=None):
@@ -21,6 +21,12 @@ def answer(text='Verified the requested change', calls=None):
 def tool(name='read_file', args=None, identifier='call-1'):
     return {'id': identifier, 'type': 'function', 'function': {
         'name': name, 'arguments': json.dumps(args or {'path': '/project/example.py'})}}
+
+
+PYTHON_SCHEMA = {'type': 'function', 'function': {
+    'name': 'python', 'description': 'Run Python code',
+    'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}},
+                   'required': ['code']}}}
 
 
 class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -243,6 +249,113 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['result']['completion_validation'], 'exact_read_only_acceptance')
         self.assertEqual(self.tool_schemas, [[]], 'exact-value read-only workers must not receive tools')
         self.assertEqual(self.host_calls, [])
+
+    async def test_explicit_python_requirement_cannot_finish_with_exact_self_report(self):
+        self.store.update_task_metadata('owner', self.task['id'], {
+            'goal': 'Compute 6 * 7 using Python and return exactly 42'})
+        worker = self.worker(objective='Calculate 6 * 7 using Python',
+                             acceptance="The result must be exactly '42'.", write_scope=[])
+        claimed = json.dumps({
+            'completed': True, 'result': '42', 'acceptance_met': True,
+            'verification': {'expected': '42', 'actual': '42', 'match': True},
+            'paths_touched': [], 'files_modified': False, 'network_used': False,
+            'host_tools_used': False, 'unresolved_issues': [],
+        })
+        self.responses = [answer(claimed) for _ in range(3)]
+        with patch('src.team_tools.schemas', return_value=[PYTHON_SCHEMA]):
+            result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertFalse(self.host_calls)
+        self.assertTrue(all(any(tool['function']['name'] == 'python' for tool in tools)
+                            for tools in self.tool_schemas), 'Python must remain offered')
+
+    async def test_unrelated_successful_tool_does_not_satisfy_required_python(self):
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Compute 6 * 7 using Python'})
+        worker = self.worker(objective='Calculate 6 * 7 using Python',
+                             acceptance="The result must be exactly '42'.", write_scope=[])
+        self.responses = [answer('', [tool('read_file', {'path': '/project/example.py'})])]
+        self.responses.extend(answer('42') for _ in range(3))
+
+        with patch('src.team_tools.schemas', return_value=[PYTHON_SCHEMA]):
+            result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual([intent['name'] for intent in self.store.list_tool_intents(
+            'owner', self.task['id'], worker['id'])], ['read_file'])
+        self.assertIn('Required Python execution', result['result']['error'])
+
+    async def test_verified_python_intent_allows_completion_and_acceptance(self):
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Compute 6 * 7 using Python'})
+        worker = self.worker(objective='Calculate 6 * 7 using Python',
+                             acceptance="The result must be exactly '42'.", write_scope=['.'])
+        self.host_result = {'output': '42\n', 'exit_code': 0}
+        self.responses = [answer('', [tool('python', {'code': 'print(6 * 7)'})]),
+                          answer('The verified Python output is 42')]
+
+        async def python_host(owner, scope, op, args):
+            self.host_calls.append((op, copy.deepcopy(args), owner, scope))
+            if op == 'command.start':
+                return {'id': 'qa-python-job'}
+            if op == 'terminal.poll':
+                return {'status': 'done', 'output': '42\n', 'next_offset': 3, 'exit_code': 0}
+            raise AssertionError(f'Unexpected host operation: {op}')
+
+        with patch('src.team_tools.schemas', return_value=[PYTHON_SCHEMA]), \
+                patch.object(self.runtime, 'host_call', new=python_host):
+            result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'done', result)
+        intents = self.store.list_tool_intents('owner', self.task['id'], worker['id'])
+        self.assertEqual([(item['name'], item['status']) for item in intents], [('python', 'done')])
+        await self.runtime.accept_result('owner', self.task['id'], worker['id'])
+        self.assertEqual(self.store.get_worker('owner', self.task['id'], worker['id'])['status'], 'accepted')
+
+    async def test_required_python_with_read_only_scope_blocks_before_model_call(self):
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Вычисли 6 * 7 с помощью Python'})
+        worker = self.worker(objective='Calculate 6 * 7',
+                             acceptance="The result must be exactly '42'.", write_scope=[])
+
+        result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'waiting_approval')
+        self.assertIn('python tool is not permitted', result['result']['error'])
+        self.assertFalse(self.messages)
+        self.assertFalse(self.host_calls)
+
+    async def test_python_tool_output_must_match_exact_acceptance(self):
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Compute 6 * 7 using Python'})
+        worker = self.worker(objective='Calculate 6 * 7 using Python',
+                             acceptance="The result must be exactly '42'.", write_scope=['.'])
+        self.responses = [answer('', [tool('python', {'code': 'print(41)'})])]
+        self.responses.extend(answer('42') for _ in range(3))
+
+        async def wrong_python(owner, scope, op, args):
+            if op == 'command.start':
+                return {'id': 'wrong-python-job'}
+            if op == 'terminal.poll':
+                return {'status': 'done', 'output': '41\n', 'next_offset': 3, 'exit_code': 0}
+            raise AssertionError(f'Unexpected host operation: {op}')
+
+        with patch('src.team_tools.schemas', return_value=[PYTHON_SCHEMA]), \
+                patch.object(self.runtime, 'host_call', new=wrong_python):
+            result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('Required Python execution', result['result']['error'])
+        self.assertEqual(self.store.list_tool_intents('owner', self.task['id'], worker['id'])[0]['status'], 'done')
+
+    async def test_human_acceptance_cannot_override_missing_required_python(self):
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Compute 6 * 7 using Python'})
+        worker = self.worker(objective='Calculate 6 * 7 using Python',
+                             acceptance="The result must be exactly '42'.", write_scope=[])
+        claim = self.store.claim_worker('owner', self.task['id'], worker_id=worker['id'])
+        self.store.finish_worker('owner', self.task['id'], worker['id'], claim['lease_token'],
+                                 {'summary': '42', 'completed': True})
+
+        with self.assertRaisesRegex(Conflict, 'Required Python execution'):
+            await self.runtime.accept_result('owner', self.task['id'], worker['id'])
+        self.assertEqual(self.store.get_worker('owner', self.task['id'], worker['id'])['status'], 'done')
 
     async def test_exact_read_only_acceptance_rejects_wrong_value_after_stagnant_reads(self):
         worker = self.worker(

@@ -48,10 +48,8 @@ def json_answer(text):
     return value
 
 
-def _exact_acceptance_target(profile):
-    if not isinstance(profile, dict) or profile.get('kind') not in {'worker', 'executor'}:
-        return None
-    if profile.get('write_scope') not in (None, []):
+def _declared_exact_result(profile):
+    if not isinstance(profile, dict):
         return None
     acceptance = profile.get('acceptance')
     if not isinstance(acceptance, str):
@@ -63,7 +61,47 @@ def _exact_acceptance_target(profile):
     return match.group(1) if match else None
 
 
-def _exact_read_only_acceptance(profile, text):
+def _exact_acceptance_target(profile):
+    if not isinstance(profile, dict) or profile.get('kind') not in {'worker', 'executor'}:
+        return None
+    if profile.get('write_scope') not in (None, []):
+        return None
+    return _declared_exact_result(profile)
+
+
+def _requires_python_execution(profile, goal=''):
+    """Keep an explicit owner/worker Python requirement out of tool-free QA.
+
+    An exact output string is not evidence that a requested command ran.  Use
+    narrow action phrases so merely discussing Python source stays read-only.
+    The owner goal is considered for exact-result subtasks because a planner
+    can otherwise omit the execution requirement from its short acceptance.
+    """
+    if not isinstance(profile, dict) or profile.get('kind') not in {'worker', 'executor'}:
+        return False
+    text = ' '.join(str(profile.get(key) or '') for key in ('objective', 'acceptance'))
+    if _declared_exact_result(profile) is not None:
+        text += ' ' + str(goal or '')
+    return re.search(
+        r'\b(?:using|use|via|with|run|execute|call|используя|через|запусти|вызови)\s+'
+        r'(?:the\s+|a\s+|инструмент\s+)?python(?:3)?\b'
+        r'|\bс\s+помощью\s+python(?:3)?\b', text, flags=re.IGNORECASE,
+    ) is not None
+
+
+def _verified_python_intent(store, owner, team_id, worker_id, expected=None):
+    for intent in store.list_tool_intents(owner, team_id, worker_id):
+        result = intent.get('result') or {}
+        if (intent['name'] == 'python' and intent['status'] == 'done'
+                and isinstance(result, dict) and type(result.get('exit_code')) is int
+                and result['exit_code'] == 0 and not result.get('error')
+                and not result.get('not_executed')
+                and (expected is None or str(result.get('output') or '').strip() == expected)):
+            return True
+    return False
+
+
+def _exact_read_only_acceptance(profile, text, goal=''):
     """Validate a narrowly-scoped, tool-free exact-result subtask.
 
     Team workers normally need durable tool evidence before completion. A
@@ -73,7 +111,7 @@ def _exact_read_only_acceptance(profile, text):
     the server-owned criterion and explicitly reports no side effects.
     """
     expected = _exact_acceptance_target(profile)
-    if expected is None:
+    if expected is None or _requires_python_execution(profile, goal):
         return False
     try:
         result = json_answer(text)
@@ -945,6 +983,7 @@ class TeamRuntime:
         task = self.assert_task_runtime(owner, team_id)
         meta, profile = task['metadata'], worker['profile']
         kind = profile.get('kind', 'worker')
+        requires_python = _requires_python_execution(profile, meta.get('goal'))
         checkpoint = self.store.load_checkpoint(owner, team_id, worker['id'])
         saved = checkpoint['payload'] if checkpoint else {}
         if kind == 'finalizer':
@@ -1036,9 +1075,11 @@ class TeamRuntime:
             saved['guidance_seq'] = cursor
             if not pending_calls(messages):
                 messages.extend(saved.pop('pending_guidance', []))
-            exact_read_only_task = _exact_acceptance_target(profile) is not None
-            # Exact-value tasks with no write scope (for example arithmetic QA)
-            # have no legitimate need for host, web, or team-status tools.
+            exact_read_only_task = (_exact_acceptance_target(profile) is not None
+                                    and not requires_python)
+            # Pure exact-value tasks with no write scope (for example mental
+            # arithmetic QA) have no legitimate need for host or status tools.
+            # An explicit Python-execution criterion is never pure arithmetic.
             # Offering team_status to these workers caused them to poll their
             # own running record until the unchanged-read breaker failed a
             # correct result. Keep their route genuinely tool-free instead.
@@ -1048,6 +1089,18 @@ class TeamRuntime:
             )
             if saved.get('force_final'):
                 tools = []
+            if requires_python:
+                python_verified = _verified_python_intent(
+                    self.store, owner, team_id, worker['id'], _declared_exact_result(profile))
+                if python_verified and saved['successful_tools'] == 0:
+                    # A durable result may have committed just before a crash
+                    # while the following checkpoint update was still pending.
+                    saved['successful_tools'] = 1
+                if not python_verified and saved.get('force_final'):
+                    raise RuntimeError('Required Python execution has no verified matching tool result')
+                if (not python_verified and not any(
+                        (item.get('function') or {}).get('name') == 'python' for item in tools)):
+                    raise PermissionError('Python execution is required but the python tool is not permitted by this worker scope or current host access')
             async def summarize(prompt):
                 return (await self.model_call(owner, team_id, worker, token, prompt, []))['content']
             if self.context_policy(owner, team_id, worker) is None:
@@ -1106,15 +1159,26 @@ class TeamRuntime:
                     if saved['successful_tools'] == 0:
                         raise RuntimeError('Reviewer supplied no independently inspected evidence')
                     return {'review': verdict, 'target_worker': profile['target_worker'], 'completed': True}
+                if requires_python and not _verified_python_intent(
+                        self.store, owner, team_id, worker['id'], _declared_exact_result(profile)):
+                    saved['no_tool_nudges'] = int(saved.get('no_tool_nudges', 0)) + 1
+                    if saved.get('force_final') or saved['no_tool_nudges'] >= 3:
+                        raise RuntimeError('Required Python execution has no verified matching tool result')
+                    messages.append({'role': 'user', 'content': (
+                        'The assigned task explicitly requires Python execution. '
+                        'A reported answer or an unrelated tool result does not prove it. '
+                        'Call the advertised python tool with code that prints the value, '
+                        'inspect its returned output, then answer; if unavailable, report the blocker.')})
+                    continue
                 if saved.get('force_final'):
                     if (saved['successful_tools'] == 0
-                            and _exact_read_only_acceptance(profile, answer.get('content'))):
+                            and _exact_read_only_acceptance(profile, answer.get('content'), meta.get('goal'))):
                         return {'summary': answer['content'], 'completed': True, 'cwd': saved['cwd'],
                                 'successful_tools': 0, 'compactions': saved['compactions'],
                                 'completion_validation': 'exact_read_only_acceptance'}
                     raise RuntimeError('No progress after repeated unchanged reads: ' + str(answer.get('content', ''))[:1000])
                 if saved['successful_tools'] == 0:
-                    if _exact_read_only_acceptance(profile, answer.get('content')):
+                    if _exact_read_only_acceptance(profile, answer.get('content'), meta.get('goal')):
                         return {'summary': answer['content'], 'completed': True, 'cwd': saved['cwd'],
                                 'successful_tools': 0, 'compactions': saved['compactions'],
                                 'completion_validation': 'exact_read_only_acceptance'}
@@ -1221,7 +1285,8 @@ class TeamRuntime:
             if saved.get('force_final'):
                 if kind == 'verification':
                     final_instruction = ('No new evidence after three identical reads. Stop tools. Review ONLY the assigned subtask, not files another worker has not integrated yet. Return the required JSON verdict using inspected evidence; if evidence is insufficient, verdict must be fail.')
-                elif _exact_acceptance_target(profile) is not None and not profile.get('write_scope'):
+                elif (_exact_acceptance_target(profile) is not None
+                      and not profile.get('write_scope') and not requires_python):
                     final_instruction = ('No new information after three identical status reads. Stop calling status tools. The assigned task has an exact-result acceptance criterion and no write scope. If you can satisfy it from the task and your own reasoning, return ONLY JSON with completed=true, acceptance_met=true, result=<exact value>, verification={expected:<exact value>,actual:<exact value>,match:true}, paths_touched=[], files_modified=false, network_used=false, host_tools_used=false, unresolved_issues=[]. Otherwise report completed=false and a concrete blocker. Do not claim tools were used.')
                 else:
                     final_instruction = ('No new evidence after three identical reads. Stop tools. Review ONLY the assigned subtask, not files another worker has not integrated yet. Non-reviewers must state the concrete blocker, not claim completion.')
@@ -1426,6 +1491,11 @@ class TeamRuntime:
         if worker['status'] != 'done':
             from src.team_store import Conflict
             raise Conflict('Only a completed worker result can be accepted')
+        if (_requires_python_execution(worker['profile'], self.store.get_task(owner, team_id)['metadata'].get('goal'))
+                and not _verified_python_intent(self.store, owner, team_id, worker_id,
+                                                _declared_exact_result(worker['profile']))):
+            from src.team_store import Conflict
+            raise Conflict('Required Python execution has no verified matching tool result')
         if worker['profile'].get('workspace'):
             if not self.store.get_task(owner, team_id)['metadata']['config'].get('trusted_host'):
                 raise PermissionError('Host access was revoked; integration not performed')
