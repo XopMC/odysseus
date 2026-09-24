@@ -166,6 +166,27 @@ def test_stream_llm_reads_lm_studio_stats_from_usage_frame(monkeypatch):
     assert usage["gen_tps"] == 123.45
 
 
+def test_stream_llm_keeps_lm_studio_timings_when_usage_shares_final_delta(monkeypatch):
+    # LM Studio can attach final usage/stats to the same OpenAI-compatible
+    # frame that contains the final content delta. Both must survive: treating
+    # these as mutually exclusive drops the backend's true decode speed, after
+    # which the UI divides by end-to-end stream time and can show ~20 instead
+    # of the server's 120+ tokens/s.
+    events = _stream_events(monkeypatch, [
+        'data: ' + json.dumps({
+            "choices": [{"index": 0, "delta": {"content": "Final answer"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 120},
+            "stats": {"tokens_per_second": 123.45},
+        }),
+        'data: [DONE]',
+    ])
+    usage_events = [event["data"] for event in events if event.get("type") == "usage"]
+    assert len(usage_events) == 1
+    assert usage_events[0]["output_tokens"] == 120
+    assert usage_events[0]["gen_tps"] == 123.45
+    assert any(event.get("delta") == "Final answer" for event in events)
+
+
 def test_stream_llm_surfaces_provider_resolved_model(monkeypatch):
     events = _stream_events(monkeypatch, [
         'data: ' + json.dumps({
