@@ -615,6 +615,7 @@ NEVER pipe multi-line Python through `python -c "..."` — shell quoting eats re
 <python code>
 ```
 Execute Python code. Use for computation, data processing, scripting. NOT for writing code for the user (use create_document for that). Same sandbox limits as bash — no TTY, no GUI, no `input()`; for anything the user should interact with, generate a single HTML file with inline JS instead.
+This tool runs a script, not an interactive REPL: bare expressions produce no output. Use `print(...)` when you need a value returned to the conversation.
 Prefer a dedicated tool whenever one fits the job (reading, searching, or writing files); use python only for computation/processing no dedicated tool covers - not for reading or writing files.
 Do NOT use Python/requests for web lookup/search/latest/current requests when `web_search` or `web_fetch` is available.""",
 

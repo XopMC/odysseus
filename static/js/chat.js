@@ -630,7 +630,18 @@ function appendStreamErrorGuidance(container, error) {
   }
 
   async function _adoptOpenedSessionBeforeAutoCreate() {
-    if (!sessionModule || !sessionModule.getCurrentSessionId || sessionModule.getCurrentSessionId()) return true;
+    if (!sessionModule || !sessionModule.getCurrentSessionId) return true;
+    // A background session-list refresh can race with the explicitly opened
+    // New Chat composer and restore the previous id before Send. The URL and
+    // header still describe a fresh chat: never adopt that stale id (or its
+    // last-selected fallback) as the destination for the first message.
+    const freshComposer = !_hashSessionCandidate()
+      && document.getElementById('current-meta')?.textContent?.trim() === 'New Chat';
+    if (freshComposer) {
+      if (sessionModule.getCurrentSessionId()) sessionModule.setCurrentSessionId?.(null);
+      return false;
+    }
+    if (sessionModule.getCurrentSessionId()) return true;
     // Don't adopt a stale session when the user explicitly started a New Chat
     // (pending state set) — the send path must materialize the pending session.
     if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) return false;
@@ -1519,6 +1530,15 @@ function appendStreamErrorGuidance(container, error) {
       clearTimeout(window._researchTimeoutTimer);
       window._researchTimeoutTimer = null;
     }
+    // The visible New Chat composer owns the next send even if an old
+    // session-list/Goal refresh raced in after the user clicked New Chat.
+    // Fence it before the active-Goal guidance shortcut below, or the first
+    // message can be attached to the previous chat without creating an id.
+    const freshComposerAtSubmit = !_hashSessionCandidate()
+      && document.getElementById('current-meta')?.textContent?.trim() === 'New Chat';
+    if (freshComposerAtSubmit && sessionModule.getCurrentSessionId?.()) {
+      sessionModule.setCurrentSessionId?.(null);
+    }
     // Get current session
     const sessionId = sessionModule.getCurrentSessionId();
     const session = sessionModule.getSessions().find(s => s.id === sessionId);
@@ -1540,6 +1560,7 @@ function appendStreamErrorGuidance(container, error) {
     const activeGoalGuidance = String(uiModule.el('message')?.value || '').trim();
     if (
       activeGoalGuidance
+      && !freshComposerAtSubmit
       && window.chatWork?.getSnapshot?.()?.goal?.status === 'active'
       && window.chatWork?.addGuidance
     ) {

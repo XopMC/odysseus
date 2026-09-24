@@ -380,4 +380,10 @@ class PythonTool:
         if err:
             output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
         output = _truncate(output, MAX_OUTPUT_CHARS)
-        return {"output": output or "(no output)", "exit_code": rc or 0}
+        return {
+            "output": output or (
+                "(no stdout; use print(...) to display a computed value)"
+                if rc == 0 else "(no output)"
+            ),
+            "exit_code": rc or 0,
+        }
