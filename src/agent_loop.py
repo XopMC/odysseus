@@ -4921,6 +4921,7 @@ async def stream_agent_loop(
     # after persistence, disable tools for the final explanation so planning
     # cannot drift into execution or an unrelated follow-up action.
     _plan_created = False
+    _plan_execution_complete = False
     total_start = time.time()
     time_to_first_token = None
     first_token_received = False
@@ -6292,8 +6293,15 @@ async def stream_agent_loop(
             max_tokens=max_tokens,
             prompt_type=prompt_type if round_num == 1 else None,
             tools=all_tool_schemas if all_tool_schemas else None,
-            tool_choice_none=_ody_doc_finetune_mode or (plan_mode and _plan_created),
-            tool_choice_required=plan_mode and not _plan_created and not _ody_doc_finetune_mode,
+            tool_choice_none=(
+                _ody_doc_finetune_mode
+                or (plan_mode and _plan_created)
+                or (bool(approved_plan) and _plan_execution_complete)
+            ),
+            tool_choice_required=(
+                (plan_mode and not _plan_created)
+                or (bool(approved_plan) and not _plan_execution_complete)
+            ) and not _ody_doc_finetune_mode,
             timeout=agent_stream_timeout,
             session_id=session_id,
             workload=workload,
@@ -7819,6 +7827,9 @@ async def stream_agent_loop(
             if "plan_update" in result:
                 if plan_mode and block.tool_type == "create_plan":
                     _plan_created = True
+                if (approved_plan and str(result["plan_update"].get("status") or "")
+                        in {"done", "completed"}):
+                    _plan_execution_complete = True
                 yield (
                     f'data: {json.dumps({"type": "plan_update", "data": result["plan_update"]})}\n\n'
                 )

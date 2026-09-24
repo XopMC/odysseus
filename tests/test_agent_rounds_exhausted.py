@@ -81,7 +81,9 @@ def test_plan_mode_requires_tool_until_durable_plan_then_suppresses_more_tools(m
     monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
     monkeypatch.setattr(al, "execute_tool_block", execute)
     from src import context_efficiency_state
-    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: None)
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: {"cache_write_read_ratio": 12.5})
+    from src import chat_effect_inbox
+    monkeypatch.setattr(chat_effect_inbox.inbox, "unknown", lambda *_args: [])
 
     events = _types(_collect(al.stream_agent_loop(
         "http://x/v1", "qwen-local",
@@ -96,6 +98,51 @@ def test_plan_mode_requires_tool_until_durable_plan_then_suppresses_more_tools(m
     assert requests[1]["tool_choice_required"] is False
     assert requests[1]["tool_choice_none"] is True
     assert any(event.get("type") == "plan_update" for event in events)
+
+
+def test_approved_plan_requires_progress_tool_until_plan_is_done(monkeypatch):
+    _patch_common(monkeypatch)
+    requests = []
+
+    async def stream(_candidates, _messages, **kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            yield ('data: ' + json.dumps({"delta": (
+                '```update_plan_step\n{"step_id":"one","status":"done"}\n```'
+            )}) + '\n\n')
+        else:
+            yield 'data: {"delta":"Plan complete."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def execute(block, *_args, **_kwargs):
+        assert block.tool_type == "update_plan_step"
+        return ("update_plan_step", {
+            "plan_update": {"status": "done", "revision": 2},
+            "output": "step updated",
+        })
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    from src import context_efficiency_state
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: {"cache_write_read_ratio": 12.5})
+    from src import chat_effect_inbox
+    monkeypatch.setattr(chat_effect_inbox.inbox, "unknown", lambda *_args: [])
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_intent", lambda *_args: {"id": "safe-intent", "created": True})
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_result", lambda *_args: {"status": "done"})
+
+    _collect(al.stream_agent_loop(
+        "http://x/v1", "qwen-local",
+        [{"role": "user", "content": "Continue the approved plan."}],
+        max_rounds=3, relevant_tools={"update_plan_step"},
+        approved_plan="- [ ] Step one (step_id: one)",
+        session_id="fixture-chat", owner="alice",
+    ))
+
+    assert len(requests) == 2
+    assert requests[0]["tool_choice_required"] is True
+    assert requests[0]["tool_choice_none"] is False
+    assert requests[1]["tool_choice_required"] is False
+    assert requests[1]["tool_choice_none"] is True
 
 
 def test_emits_rounds_exhausted_when_cap_hit_mid_task(monkeypatch):
