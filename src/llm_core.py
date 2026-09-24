@@ -438,13 +438,19 @@ class _DegenerateStreamGuard:
             self.recent_tokens = self.recent_tokens[-96:]
 
         reason = None
+        reason_code = None
+        repeated_count = 0
         if self.same_run >= 28 and self.total_chars >= 100:
-            reason = f"repeated '{self.last_token}' {self.same_run} times"
+            reason = True
+            reason_code = "same_token_run"
+            repeated_count = self.same_run
         elif len(self.recent_tokens) >= 72:
             top = max(set(self.recent_tokens), key=self.recent_tokens.count)
             count = self.recent_tokens.count(top)
             if count >= 60 and count / max(len(self.recent_tokens), 1) >= 0.78:
-                reason = f"repeated '{top}' {count}/{len(self.recent_tokens)} recent tokens"
+                reason = True
+                reason_code = "dominant_token_window"
+                repeated_count = count
         if not reason and len(self.recent_tokens) >= 80:
             # Phrase loops are common on some local quantized MLX/MoE models:
             # "Also be a software developer mode?" repeated forever will not
@@ -456,17 +462,27 @@ class _DegenerateStreamGuard:
                 top_gram = max(set(grams), key=grams.count)
                 gram_count = grams.count(top_gram)
                 if gram_count >= 10:
-                    reason = f"repeated phrase '{' '.join(top_gram)}' {gram_count} times"
+                    reason = True
+                    reason_code = "repeated_phrase_window"
+                    repeated_count = gram_count
 
         if not reason:
             return None
 
-        logger.warning("[degenerate-stream] aborting model=%s reason=%s", self.model, reason)
-        message = (
-            f"Stopped generation: {self.model} started repeating tokens "
-            f"({reason}). Try a different model or lower temperature."
+        logger.warning(
+            "[degenerate-stream] aborting model=%s reason_code=%s count=%s",
+            self.model,
+            reason_code,
+            repeated_count,
         )
-        return f'event: error\ndata: {json.dumps({"status": 502, "text": message, "error": message, "fallback_eligible": False})}\n\n'
+        message = (
+            f"Stopped generation: {self.model} began repeating output. "
+            "Try a different model or lower temperature."
+        )
+        # This is a model-output validation failure, not an upstream gateway
+        # failure; keeping it out of 5xx buckets prevents misleading outage
+        # alerts and generic HTTP-502 UI messages.
+        return f'event: error\ndata: {json.dumps({"status": 422, "text": message, "error": message, "error_category": "degenerate_output", "fallback_eligible": False})}\n\n'
 
 
 def _model_activity_key(url: str, model: str) -> str:
@@ -3691,6 +3707,22 @@ def _stream_error_status(err_chunk: Optional[str]) -> Optional[int]:
                 continue
             status = json.loads(line[6:]).get("status")
             return _normalize_http_status(status)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _stream_failure_user_message(err_chunk: Optional[str]) -> Optional[str]:
+    """Return only allowlisted, server-authored explanations for UI errors."""
+    if not err_chunk:
+        return None
+    try:
+        for line in str(err_chunk).splitlines():
+            if not line.startswith("data: "):
+                continue
+            payload = json.loads(line[6:])
+            if payload.get("error_category") == "degenerate_output":
+                return "Output repetition guard stopped generation. Try a different model or lower temperature."
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     return None

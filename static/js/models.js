@@ -6,7 +6,7 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260923countrev1';
+import sessionModule from './sessions.js?v=20260924modelcache1';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js?v=20260924tpsdelta1';
@@ -19,6 +19,7 @@ let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
 let _lastFetchTime = 0;
 let _fetchInflight = null;
+let _forceFetchInflight = null;
 let _fetchSeq = 0;
 const _FETCH_CACHE_TTL = 30000; // 30s client-side cache for /api/models
 const COLLAPSE_KEY = 'odysseus-models-collapsed';
@@ -192,25 +193,38 @@ export async function refreshModels(force = false, opts = {}) {
       }
     }
     try {
-      if (force) _fetchInflight = null;
-      if (!_fetchInflight) {
+      const makeFetch = (forced) => {
+        const _seq = ++_fetchSeq;
         // Pass ?refresh=true on forced refreshes so the BACKEND's 30s
         // per-user cache also gets bypassed. Without this, `force=true`
         // only clears the frontend cache and the same stale list comes
         // back — newly-served endpoints don't appear until the cache
         // ages out. (Bug repro: serve a model, picker is empty for ~30s
         // even though the endpoint is in the DB and online.)
-        const _seq = ++_fetchSeq;
-        const _url = `${API_BASE}/api/models` + (force ? '?refresh=true' : '?background=false');
-        _fetchInflight = fetch(_url, { credentials: 'same-origin' })
+        const _url = `${API_BASE}/api/models` + (forced ? '?refresh=true' : '?background=false');
+        const _promise = fetch(_url, { credentials: 'same-origin' })
           .then(async (res) => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             return { data, seq: _seq };
-          })
-          .finally(() => { _fetchInflight = null; });
+          });
+        return _promise;
+      };
+      let request;
+      if (force) {
+        // Don't abandon a startup/list request and launch another in parallel.
+        if (_fetchInflight) await _fetchInflight.catch(() => {});
+        if (!_forceFetchInflight) {
+          _forceFetchInflight = makeFetch(true).finally(() => { _forceFetchInflight = null; });
+        }
+        request = _forceFetchInflight;
+      } else {
+        if (!_fetchInflight) {
+          _fetchInflight = makeFetch(false).finally(() => { _fetchInflight = null; });
+        }
+        request = _fetchInflight;
       }
-      const { data, seq } = await _fetchInflight;
+      const { data, seq } = await request;
       if (seq < _fetchSeq) return;
       _lastFetchTime = Date.now();
       _cachedItems = data.items || [];

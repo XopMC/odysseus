@@ -8,6 +8,11 @@ BASE = 'http://192.168.50.90:1234'
 MODEL = 'qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive'
 
 
+@pytest.fixture(autouse=True)
+def clear_context_caches_between_tests():
+    context.clear_model_context_cache()
+
+
 def catalog(monkeypatch, models, *, status=200):
     calls = []
     monkeypatch.setattr(context, '_configured_endpoint_kind', lambda _: 'local')

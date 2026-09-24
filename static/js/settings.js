@@ -1834,7 +1834,7 @@ async function initAgentSettings() {
   if (supInput) supInput.addEventListener('change', save);
   if (subagentMode) subagentMode.addEventListener('change', function() {
     if (subagentModelsRow) subagentModelsRow.hidden = subagentMode.value !== 'selected_models';
-    if (subagentMode.value === 'selected_models' && !subagentInventory.length) loadSubagentModels(false);
+    if (subagentMode.value === 'selected_models') loadSubagentModels(true);
     save();
   });
   if (efficiencyProfile) efficiencyProfile.addEventListener('change', save);
@@ -1849,7 +1849,7 @@ async function initAgentSettings() {
   if (subagentModelsRefresh) subagentModelsRefresh.addEventListener('click', function() {
     loadSubagentModels(true);
   });
-  if (subagentMode && subagentMode.value === 'selected_models') loadSubagentModels(false);
+  if (subagentMode && subagentMode.value === 'selected_models') loadSubagentModels(true);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +

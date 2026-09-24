@@ -1656,6 +1656,15 @@ def setup_model_routes(model_discovery):
         cache_entry = _models_cache.get(_cache_key)
         if not refresh and cache_entry is not None and (now - cache_entry["time"]) < _MODELS_CACHE_TTL:
             return cache_entry["data"]
+        if refresh:
+            # A forced inventory refresh is an explicit user action from the
+            # model picker/settings. Invalidate LM Studio's serving-context
+            # snapshot at that boundary, not once per Agent round.
+            try:
+                from src.model_context import clear_model_context_cache
+                clear_model_context_cache()
+            except Exception:
+                logger.debug("Model-context cache invalidation skipped", exc_info=True)
         result = _fetch_models(owner=owner, is_admin=_is_admin)
         _models_cache[_cache_key] = {"data": result, "time": now}
         # Kick off background refresh to update caches from live endpoints.

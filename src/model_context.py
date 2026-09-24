@@ -8,6 +8,8 @@ Provides token estimation for context usage tracking.
 import ipaddress
 import logging
 import sys
+import time
+import threading
 from typing import Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
@@ -236,6 +238,31 @@ KNOWN_CONTEXT_WINDOWS = {
 # Cache
 # ---------------------------------------------------------------------------
 _context_cache: Dict[Tuple[str, str], Tuple[int, bool]] = {}
+_local_context_cache: Dict[Tuple[str, str], Tuple[float, float, Tuple[int, bool]]] = {}
+_local_context_cache_lock = threading.RLock()
+_LOCAL_CONTEXT_CACHE_TTL = 300.0
+
+
+def clear_model_context_cache(endpoint_url: Optional[str] = None) -> None:
+    """Invalidate discovered context windows after an explicit model refresh.
+
+    Local serving context is stable for a route/model until the operator
+    refreshes the model inventory (typically after loading a different LM
+    Studio instance). It must not trigger a full ``/api/v1/models`` request on
+    every Agent round.
+    """
+    target = _normalize_base_for_compare(endpoint_url or "") if endpoint_url else None
+    with _local_context_cache_lock:
+        if target is None:
+            _local_context_cache.clear()
+            _context_cache.clear()
+            _catalog_ctx_cache.clear()
+            return
+        for cache in (_local_context_cache, _context_cache):
+            for key in list(cache):
+                if _normalize_base_for_compare(key[0]) == target:
+                    cache.pop(key, None)
+        _catalog_ctx_cache.pop(target, None)
 
 
 def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool]:
@@ -248,14 +275,25 @@ def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool
     # capped proxy vs. the full provider), so caching by model id alone would
     # serve one endpoint's window for the other (issue #2603).
     cache_key = (endpoint_url, model)
-    if not is_local and cache_key in _context_cache:
+    if is_local:
+        now = time.monotonic()
+        with _local_context_cache_lock:
+            cached = _local_context_cache.get(cache_key)
+        if cached and now - cached[0] < cached[1]:
+            return cached[2]
+    elif cache_key in _context_cache:
         return _context_cache[cache_key]
 
     ctx, known = _query_context_length(endpoint_url, model)
-    # Only cache non-default values to allow retry on next request.
-    # Local endpoints can restart with a different --max-model-len while keeping
-    # the same model id, so always re-query them instead of serving stale cache.
-    if not is_local and (ctx != DEFAULT_CONTEXT or configured_kind in ("api", "proxy")):
+    # Cache local loaded-instance context too: querying LM Studio's native
+    # ``/api/v1/models`` for every Agent round floods its log and adds latency.
+    # Explicit model-picker/settings refresh invalidates this cache; failed
+    # local discovery gets a short retry window rather than one request/round.
+    if is_local:
+        ttl = _LOCAL_CONTEXT_CACHE_TTL if known else 15.0
+        with _local_context_cache_lock:
+            _local_context_cache[cache_key] = (time.monotonic(), ttl, (ctx, known))
+    elif ctx != DEFAULT_CONTEXT or configured_kind in ("api", "proxy"):
         _context_cache[cache_key] = (ctx, known)
     logger.info(f"Context length for {model}: {ctx}")
     return ctx, known
@@ -264,8 +302,9 @@ def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool
 def get_context_length(endpoint_url: str, model: str) -> int:
     """Get the context window size for a model.
 
-    Queries /v1/models on the endpoint and looks for context_length
-    or context_window fields. Caches result per (endpoint, model).
+    Reads endpoint-specific context_length / context_window metadata. Local
+    serving-context probes are cached until explicit model inventory refresh
+    (with a bounded expiry), while cloud catalogs use their endpoint cache.
     Falls back to DEFAULT_CONTEXT if unavailable.
     """
     return _get_context_length_cached(endpoint_url, model)[0]

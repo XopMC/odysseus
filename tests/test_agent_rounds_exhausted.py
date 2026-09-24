@@ -207,6 +207,59 @@ def test_agent_parses_local_coder_tool_name_alias_and_continues(monkeypatch):
     assert not any(event.get("type") == "rounds_exhausted" for event in events)
 
 
+def test_explicit_tool_markup_in_thinking_executes_and_is_not_rendered(monkeypatch):
+    _patch_common(monkeypatch)
+    from src import context_efficiency_state, chat_effect_inbox
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: {"cache_write_read_ratio": 12.5})
+    monkeypatch.setattr(chat_effect_inbox.inbox, "unknown", lambda *_args: [])
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_intent", lambda *_: {
+        "id": "safe-intent", "created": True,
+    })
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_result", lambda *_: {"status": "done"})
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda _owner: set())
+    requests = []
+    calls = []
+    markup = (
+        '<tool_call>{"name":"python",'
+        '"arguments":{"code":"print(6*7)"}}</tool_call>'
+    )
+
+    async def stream(_candidates, _messages, **_kwargs):
+        requests.append(True)
+        if len(requests) == 1:
+            yield 'data: ' + json.dumps({
+                "delta": "I should calculate this. " + markup,
+                "thinking": True,
+            }) + '\n\n'
+        else:
+            yield 'data: ' + json.dumps({"delta": "The verified result is 42."}) + '\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def execute(block, *_args, **_kwargs):
+        calls.append((block.tool_type, block.content))
+        return (block.tool_type, {"output": "42", "exit_code": 0})
+
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "local-coder",
+        [{"role": "user", "content": "Use Python to compute 6*7."}],
+        max_rounds=3, relevant_tools={"python"}, session_id="fixture-chat",
+        owner="alice", access_mode="full_access",
+    )))
+
+    assert requests == [True, True]
+    assert len(calls) == 1 and calls[0][0] == "python"
+    tool_result = next(event for event in events if event.get("type") == "tool_output")
+    assert tool_result.get("tool") == "python"
+    thinking = "".join(event.get("delta", "") for event in events if event.get("thinking"))
+    assert "I should calculate this." in thinking
+    assert "<tool_call>" not in thinking
+    assert '"arguments"' not in thinking
+    assert any(event.get("type") == "tool_output" for event in events)
+
+
 def test_agent_tps_uses_model_stream_time_and_excludes_tool_wait(monkeypatch):
     _patch_common(monkeypatch)
     clock = [1000.0]

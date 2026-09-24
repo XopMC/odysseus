@@ -354,6 +354,15 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     if (!select.value) return null;
     const [endpoint_id, model] = JSON.parse(select.value); return { endpoint_id, model };
   }
+  async function refreshTeamModelInventory() {
+    const data = await request('/api/team/models?refresh=true');
+    models = data.models || [];
+    if (active) {
+      if (teamId) renderWorkers();
+      else build();
+    }
+    return models;
+  }
   function projectPath() {
     const worker = (snapshot?.workers || []).find(w => w.id === ui.hostScope?.value);
     return worker?.profile?.cwd || snapshot?.metadata?.project_path || snapshot?.task?.metadata?.project_path || snapshot?.task?.project_path || snapshot?.project_path || ui.project.control.value;
@@ -367,12 +376,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     const heading = element('div', '', 'team-heading'); heading.append(uiElement('h3', 'Team workspace'));
     ui.status = element('span', '', 'team-status'); ui.status.append(teamStatus('span', 'No task')); heading.append(ui.status,
       button('Refresh', () => act(() => loadSnapshot())),
-      button('Refresh models', event => act(async () => {
-        const data = await request('/api/team/models?refresh=true');
-        models = data.models || [];
-        if (teamId) renderWorkers();
-        else build();
-      }, event.currentTarget)),
+      button('Refresh models', event => act(refreshTeamModelInventory, event.currentTarget)),
       button('Back to chat', () => setActive(false)));
     root.append(heading);
     root.append(uiElement('p', 'Team tasks retain checkpoints. Review results before applying changes; uncertain command outcomes require inspection before resuming.', 'team-notice'));
@@ -998,7 +1002,14 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     active = !!value; root.hidden = !active; modeButton.setAttribute('aria-pressed', String(active)); modeButton.classList.toggle('active', active);
     document.body.classList.toggle('team-workspace-active', active);
     modeButton.closest('.mode-toggle')?.classList.toggle('mode-third', active);
-    if (active) { sid = null; syncSession(); sessionTimer = setInterval(syncSession, 500); }
+    if (active) {
+      sid = null;
+      const initialSync = syncSession();
+      sessionTimer = setInterval(syncSession, 500);
+      initialSync.finally(() => {
+        if (active) refreshTeamModelInventory().catch(error => notice(error.message, true));
+      });
+    }
     else { generation++; disconnect(); clearInterval(sessionTimer); sessionTimer = null; }
   }
   function blockChatSubmit(event) {
@@ -1010,8 +1021,8 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     modeButton.hidden = true; root.hidden = true;
     try {
       const capability = await request('/api/team/capabilities'); if (capability.enabled !== true || disposed) return false;
-      const [modelData, presetData] = await Promise.all([request('/api/team/models'), request('/api/team/presets')]);
-      if (disposed) return false; models = modelData.models || []; presets = presetData.presets || [];
+      const presetData = await request('/api/team/presets');
+      if (disposed) return false; presets = presetData.presets || [];
       enabled = true; hostEnabled = capability.host_enabled === true; modeButton.hidden = false;
       engineeringEnabled = capability.engineering_enabled === true;
       modeButton.closest('.mode-toggle')?.classList.add('mode-toggle-three');

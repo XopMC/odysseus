@@ -813,7 +813,9 @@ async function _pick(m) {
         // inventory and starts refresh work separately. Without this, models
         // enabled in Added Models can be absent from the chatbox picker until
         // the tab's frontend cache ages out.
-        _refreshPickerModels({ force: hasCache, showLoading: !hasCache }).then(() => {
+        // Opening the picker is an explicit user request to refresh current
+        // endpoint inventory; do it once here, never from a periodic poll.
+        _refreshPickerModels({ force: true, showLoading: !hasCache }).then(() => {
           if (!menu.classList.contains('hidden')) _populate(search.value || '');
           updateModelPicker();
         }).catch(() => {});

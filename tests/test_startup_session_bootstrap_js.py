@@ -32,7 +32,7 @@ _IMPORT_REWRITES = {
     "import { providerLogo } from './providers.js';": (
         "import { providerLogo } from './providers.mjs';"
     ),
-    "import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';": (
+    "import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260924modelcache1';": (
         "import { initModelPicker, updateModelPicker } from './modelPicker.mjs';"
     ),
     "import themeModule from './theme.js?v=20260921livefix20';": "import themeModule from './theme.mjs';",

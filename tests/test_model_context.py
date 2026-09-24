@@ -203,9 +203,10 @@ class _FakeResp:
 class TestGetContextLength:
     def setup_method(self):
         model_context._context_cache.clear()
+        model_context._local_context_cache.clear()
         model_context._catalog_ctx_cache.clear()
 
-    def test_local_endpoint_requeries_same_model_after_restart(self, monkeypatch):
+    def test_local_endpoint_context_is_cached_until_explicit_model_refresh(self, monkeypatch):
         calls = []
 
         def fake_query(endpoint_url, model):
@@ -221,7 +222,10 @@ class TestGetContextLength:
         second = model_context.get_context_length(endpoint, model)
 
         assert first == 8192
-        assert second == 27000
+        assert second == 8192
+        assert len(calls) == 1
+        model_context.clear_model_context_cache(endpoint)
+        assert model_context.get_context_length(endpoint, model) == 27000
         assert len(calls) == 2
 
     def test_remote_endpoint_keeps_cached_context(self, monkeypatch):

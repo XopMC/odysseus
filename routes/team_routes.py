@@ -96,6 +96,11 @@ def setup_team_routes():
         owner = owner_for(request)
         refreshed = None
         if refresh:
+            try:
+                from src.model_context import clear_model_context_cache
+                clear_model_context_cache()
+            except Exception:
+                pass
             refreshed = await asyncio.to_thread(team_config.refresh_models, owner)
         return {'models': team_config.models(owner), 'refresh': refreshed}
 

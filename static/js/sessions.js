@@ -6,7 +6,7 @@ import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
 import chatRenderer from './chatRenderer.js?v=20260924tpsdelta1';
 import { providerLogo } from './providers.js';
-import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260916livecontext1';
+import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260924modelcache1';
 import themeModule from './theme.js?v=20260921livefix20';
 import spinnerModule from './spinner.js';
 

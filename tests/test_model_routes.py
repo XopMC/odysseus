@@ -1703,6 +1703,22 @@ def _route_request():
     )
 
 
+def test_explicit_model_refresh_invalidates_context_snapshot(monkeypatch):
+    from src import model_context
+
+    invalidations = []
+    monkeypatch.setattr(model_context, "clear_model_context_cache", lambda endpoint_url=None: invalidations.append(endpoint_url))
+    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: _RouteDb([]))
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    _route_endpoint(router, "/api/models")(_route_request(), refresh=True)
+
+    assert invalidations == [None]
+
+
 def test_api_models_preserves_identical_names_on_distinct_endpoints(monkeypatch):
     shared = "same-coder-model"
     rows = [

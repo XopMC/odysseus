@@ -6,7 +6,7 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js?v=20260922approval1';
+import modelsModule from './js/models.js?v=20260924modelcache1';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
@@ -23,13 +23,13 @@ import {
 } from './js/startupShell.js?v=20260922restore1';
 import markdownModule from './js/markdown.js?v=20260923toolprogress1';
 import chatRenderer from './js/chatRenderer.js?v=20260924tpsdelta1';
-import sessionModule from './js/sessions.js?v=20260923countrev1';
+import sessionModule from './js/sessions.js?v=20260924modelcache1';
 import chatWork from './js/chat-work.js?v=20260924budgetwarn1';
 import chatSubagents from './js/chat-subagents.js?v=20260923runinspector1';
 import chatRunInspector from './js/chat-run-inspector.js?v=20260923runinspector3';
 import accessModeModule from './js/accessMode.js?v=20260921livefix18';
 import projectsModule from './js/projects.js?v=20260922projects2';
-import { createTeamWorkspace } from './js/team-workspace.js?v=20260923context1';
+import { createTeamWorkspace } from './js/team-workspace.js?v=20260924modelcache1';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -39,7 +39,7 @@ import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
-import settingsModule from './js/settings.js?v=20260922batch2';
+import settingsModule from './js/settings.js?v=20260924modelcache1';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.

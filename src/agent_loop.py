@@ -28,6 +28,7 @@ from src.llm_core import (
     _is_ollama_native_url,
     _normalize_http_status,
     _normalize_usage_counts,
+    _stream_failure_user_message,
 )
 from src.model_context import estimate_tokens
 from src.subagent_limits import MAX_ACTIVE_PER_MODEL
@@ -3213,6 +3214,7 @@ def _resolve_tool_blocks(
     round_response: str,
     native_tool_calls: list,
     round_num: int,
+    round_reasoning: str = "",
     is_api_model: bool = False,
     allow_fenced_for_api: bool = False,
     canonical_tools: bool = False,
@@ -3258,6 +3260,18 @@ def _resolve_tool_blocks(
         tool_blocks = parse_tool_blocks(round_response, skip_fenced=(is_api_model and not allow_fenced_for_api))
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
+        elif round_reasoning:
+            # Some local text-tool models put their explicit protocol call in
+            # the reasoning channel rather than the answer channel. Accept only
+            # explicit markup here (never ordinary prose or fenced examples),
+            # then use the same advertised-tool and approval path as usual.
+            tool_blocks = parse_tool_blocks(round_reasoning, skip_fenced=True)
+            if tool_blocks:
+                logger.info(
+                    "Agent round %s: %s explicit tool block(s) recovered from reasoning channel",
+                    round_num,
+                    len(tool_blocks),
+                )
 
     resp_preview = round_response[:200].replace('\n', '\\n') if round_response else "(empty)"
     logger.info(f"Agent round {round_num} summary: {len(round_response)} chars, "
@@ -4187,7 +4201,7 @@ async def stream_agent_loop(
                         )
                     except (StopIteration, json.JSONDecodeError):
                         terminal_status = None
-                    failure_message = (
+                    failure_message = _stream_failure_user_message(chunk) or (
                         f"Model request failed (HTTP {terminal_status})"
                         if terminal_status is not None
                         else "Model request failed"
@@ -5618,6 +5632,8 @@ async def stream_agent_loop(
         round_started_at = time.time()
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        _round_reasoning_visible = ""
+        _round_reasoning_saved = ""
         native_tool_calls = []  # populated if model uses function calling
 
         _round_had_correction = False
@@ -6418,9 +6434,12 @@ async def stream_agent_loop(
                     pass
                 terminal_error = {
                     "message": (
-                        f"Model request failed (HTTP {terminal_status})"
-                        if terminal_status is not None
-                        else "Model request failed"
+                        _stream_failure_user_message(chunk)
+                        or (
+                            f"Model request failed (HTTP {terminal_status})"
+                            if terminal_status is not None
+                            else "Model request failed"
+                        )
                     ),
                     "status": terminal_status,
                 }
@@ -6436,6 +6455,10 @@ async def stream_agent_loop(
                 ).strip()
                 if _ody_qwen_finetune_model:
                     partial_round = _strip_doc_model_artifacts(partial_round).strip()
+                from src.tool_parsing import strip_tool_blocks_streaming
+                _safe_failed_reasoning = strip_tool_blocks_streaming(
+                    round_reasoning, final=True
+                ).strip()
                 failure_note = f"[Agent stopped: {terminal_error['message']}]"
                 terminal_round = (
                     f"{partial_round}\n\n{failure_note}"
@@ -6453,15 +6476,15 @@ async def stream_agent_loop(
                     "requested_endpoint_label": requested_endpoint_label,
                     "tool_events": tool_events,
                     "round_texts": [*round_texts, terminal_round],
-                    "round_reasonings": [*round_reasonings, round_reasoning.strip()],
+                    "round_reasonings": [*round_reasonings, _safe_failed_reasoning],
                     "round_timestamps": [*round_timestamps, round_started_at],
                     "round_models": [*round_models, _round_actual_model],
                     "round_endpoint_ids": [*round_endpoint_ids, _round_actual_endpoint_id],
                     "round_endpoint_labels": [*round_endpoint_labels, _round_actual_endpoint_label],
                     **_usage_bucket_summary(usage_buckets),
                 }
-                if round_reasoning.strip():
-                    terminal_metadata["thinking"] = round_reasoning.strip()
+                if _safe_failed_reasoning:
+                    terminal_metadata["thinking"] = _safe_failed_reasoning
                 if isinstance(actual_endpoint_cost_tracked, bool):
                     terminal_metadata["endpoint_cost_tracked"] = (
                         actual_endpoint_cost_tracked
@@ -6725,6 +6748,14 @@ async def stream_agent_loop(
                         # round_response unchanged.
                         if data.get("thinking"):
                             round_reasoning += data["delta"]
+                            from src.tool_parsing import strip_tool_blocks_streaming
+                            _safe_reasoning = strip_tool_blocks_streaming(round_reasoning)
+                            if _safe_reasoning.startswith(_round_reasoning_visible):
+                                _reasoning_delta = _safe_reasoning[len(_round_reasoning_visible):]
+                                if _reasoning_delta:
+                                    _round_reasoning_visible = _safe_reasoning
+                                    data["delta"] = _reasoning_delta
+                                    yield f"data: {json.dumps(data)}\n\n"
                         else:
                             _delta_text = (
                                 _strip_doc_model_artifacts(data["delta"])
@@ -6736,7 +6767,7 @@ async def stream_agent_loop(
                             round_response += _delta_text
                             full_response += _delta_text
                             data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                        if not data.get("thinking") and not _ody_qwen_finetune_model:
                             yield f"data: {json.dumps(data)}\n\n"
                         # Prompt occupancy is fixed at dispatch, but the
                         # generated reasoning/answer occupies the same model
@@ -6775,6 +6806,16 @@ async def stream_agent_loop(
 
         for _warning_event in _drain_budget_warnings():
             yield f'data: {json.dumps(_warning_event)}\n\n'
+
+        # Flush safe thinking text delayed while checking for split tool
+        # markers. Partial markers and complete tool blocks are dropped at EOF.
+        from src.tool_parsing import strip_tool_blocks_streaming
+        _round_reasoning_saved = strip_tool_blocks_streaming(round_reasoning, final=True).strip()
+        if _round_reasoning_saved.startswith(_round_reasoning_visible):
+            _reasoning_tail = _round_reasoning_saved[len(_round_reasoning_visible):]
+            if _reasoning_tail:
+                yield f'data: {json.dumps({"delta": _reasoning_tail, "thinking": True})}\n\n'
+                _round_reasoning_visible = _round_reasoning_saved
 
         # Measure only the first-to-last generated output delta span. Usage,
         # [DONE], and network finalization may arrive well after the last token.
@@ -6869,6 +6910,7 @@ async def stream_agent_loop(
             _normalized_doc_round,
             native_tool_calls,
             round_num,
+            round_reasoning=round_reasoning,
             is_api_model=_round_native_builtins,
             allow_fenced_for_api=_ody_doc_finetune_mode,
             canonical_tools=_engineering_registry is not None,
@@ -7208,7 +7250,7 @@ async def stream_agent_loop(
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_round_native_builtins and not used_native)).strip()
         round_texts.append(cleaned_round)
-        round_reasonings.append(round_reasoning.strip())
+        round_reasonings.append(_round_reasoning_saved)
         round_timestamps.append(round_started_at)
         round_models.append(_round_actual_model)
         round_endpoint_ids.append(_round_actual_endpoint_id)
@@ -8409,7 +8451,7 @@ async def stream_agent_loop(
                 _append_tool_results(
                     messages, round_response, converted_calls[:len(tool_result_texts)],
                     tool_results, tool_result_texts, used_native, round_num,
-                    round_reasoning=round_reasoning,
+                    round_reasoning=_round_reasoning_saved,
                     tool_result_records=tool_result_records,
                 )
                 _checkpoint_messages = _durable_model_checkpoint(messages)
@@ -8452,7 +8494,7 @@ async def stream_agent_loop(
         # (and left the real call answered empty).
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
-                             round_reasoning=round_reasoning,
+                             round_reasoning=_round_reasoning_saved,
                              tool_result_records=tool_result_records)
 
         # Persist the exact model-visible ledger after every completed tool
@@ -8531,7 +8573,7 @@ async def stream_agent_loop(
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
     full_response, _fallback_chunk = _empty_response_fallback(
-        full_response, round_reasoning, tool_events
+        full_response, _round_reasoning_saved, tool_events
     )
     if _fallback_chunk:
         yield _fallback_chunk

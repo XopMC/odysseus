@@ -14,6 +14,17 @@ import pytest
 from src import llm_core
 
 
+def test_repetition_guard_reports_safe_cause_instead_of_generic_model_502():
+    guard = llm_core._DegenerateStreamGuard("fixture-model")
+    event = guard.check("alpha " * 30)
+    assert event
+    payload = json.loads(event.split("data: ", 1)[1])
+    assert payload["status"] == 422
+    assert payload["error_category"] == "degenerate_output"
+    assert "repetition guard" in llm_core._stream_failure_user_message(event).lower()
+    assert "alpha" not in payload["text"].lower()
+
+
 class _FakeResp:
     def __init__(self, lines):
         self._lines = lines

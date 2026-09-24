@@ -1523,3 +1523,64 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     cleaned = _strip_bare_invoke_markup(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
+
+
+_STREAM_TOOL_OPENERS = (
+    re.compile(r"<(?:[\w.-]+:)?(?:tool_call|function_call)\s*>", re.IGNORECASE),
+    re.compile(r"\[TOOL_CALL\]", re.IGNORECASE),
+    re.compile(r"<tool_code\b", re.IGNORECASE),
+    re.compile(r"<invoke\b", re.IGNORECASE),
+)
+_STREAM_TOOL_CLOSERS = (
+    re.compile(r"</(?:[\w.-]+:)?(?:tool_call|function_call)\s*>", re.IGNORECASE),
+    re.compile(r"\[/TOOL_CALL\]", re.IGNORECASE),
+    re.compile(r"</tool_code\s*>", re.IGNORECASE),
+    re.compile(r"</invoke\s*>", re.IGNORECASE),
+)
+_STREAM_TOOL_MARKERS = (
+    "<tool_call>", "</tool_call>", "<function_call>", "</function_call>",
+    "[tool_call]", "[/tool_call]", "<tool_code", "</tool_code>",
+    "<invoke", "</invoke>", "<|tool_call_begin|>", "<|tool▁call▁begin｜>",
+)
+
+
+def strip_tool_blocks_streaming(text: str, *, final: bool = False) -> str:
+    """Return the safe, user-visible prefix of an accumulating model stream.
+
+    Tool markup can arrive in the reasoning channel, one delta at a time. A
+    normal ``strip_tool_blocks`` call removes complete blocks, but an opener
+    may be split over several deltas; exposing that suffix even briefly leaks
+    tool arguments into the thinking card. Keep a possible partial opener
+    buffered, and fail closed for a complete but unterminated tool block.
+    """
+    source = str(text or "")
+    if not source:
+        return ""
+
+    # Once a thinking stream declares a tool call, neither its arguments nor
+    # any same-round trailing claim is user-visible: that claim predates the
+    # actual tool result. Keep only the safe prefix before the first control
+    # block, including when the provider forgets its closing marker.
+    cut_at = None
+    for opener, closer in zip(_STREAM_TOOL_OPENERS, _STREAM_TOOL_CLOSERS):
+        opens = list(opener.finditer(source))
+        if opens:
+            candidate = opens[0].start()
+            cut_at = candidate if cut_at is None else min(cut_at, candidate)
+    if cut_at is not None:
+        source = source[:cut_at]
+
+    cleaned = strip_tool_blocks(source)
+
+    # If the latest delta ends in a partial control marker (for example
+    # ``<tool_ca``), hold only that suffix until the next delta disambiguates
+    # it. This preserves responsive ordinary thinking text.
+    lowered = source.casefold()
+    for start in (lowered.rfind("<"), lowered.rfind("[")):
+        if start < 0:
+            continue
+        suffix = lowered[start:]
+        if any(marker.casefold().startswith(suffix) for marker in _STREAM_TOOL_MARKERS):
+            if cleaned.casefold().endswith(suffix):
+                cleaned = cleaned[: len(cleaned) - len(suffix)]
+    return cleaned

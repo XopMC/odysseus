@@ -9,7 +9,7 @@ XML-like text inside JSON argument values must stay data, and a non-object
 "arguments" value is rejected rather than coerced.
 """
 import src.agent_tools  # noqa: F401  (break agent_tools<->tool_parsing import cycle)
-from src.tool_parsing import parse_tool_blocks, strip_tool_blocks
+from src.tool_parsing import parse_tool_blocks, strip_tool_blocks, strip_tool_blocks_streaming
 
 # Verbatim payload from issue #5187.
 ISSUE_PAYLOAD = '<tool_call>\n{"name": "bash", "arguments": {"command": "mkdir -p agent-test"}}\n</tool_call>'
@@ -106,3 +106,17 @@ def test_xml_body_wrapper_regression():
     assert len(blocks) == 1
     assert blocks[0].tool_type == "bash"
     assert blocks[0].content == "echo hi"
+
+
+def test_streaming_thinking_filter_holds_split_tool_marker_and_hides_arguments():
+    prefix = "Thinking normally. "
+    assert strip_tool_blocks_streaming(prefix + "<tool_ca") == prefix
+    partially_open = prefix + '<tool_call>{"name":"python","arguments":{"code":"print(42)"}}'
+    assert strip_tool_blocks_streaming(partially_open) == prefix.rstrip()
+    complete = partially_open + "</tool_call> Unverified same-round claim."
+    filtered = strip_tool_blocks_streaming(complete, final=True)
+    assert "<tool_call>" not in filtered
+    assert "print(42)" not in filtered
+    assert "Thinking normally." in filtered
+    assert "Unverified same-round claim." not in filtered
+    assert strip_tool_blocks_streaming(prefix + "<tool_ca", final=True) == prefix

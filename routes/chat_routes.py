@@ -20,6 +20,7 @@ from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import (
     _normalize_http_status,
+    _stream_failure_user_message,
     llm_call_async,
     llm_call_async_with_route_fallback,
     stream_llm,
@@ -2470,7 +2471,7 @@ def setup_chat_routes(
                                 and (full_response.strip() or thinking_response.strip())
                             ):
                                 _failure_status = _stream_failure_status(chunk)
-                                _failure_message = (
+                                _failure_message = _stream_failure_user_message(chunk) or (
                                     f"Model request failed (HTTP {_failure_status})"
                                     if _failure_status is not None
                                     else "Model request failed"
@@ -2926,10 +2927,12 @@ def setup_chat_routes(
                                         failure_message = "A tool outcome is unknown; inspect it before continuing."
                                     elif failure_kind == "effect_ledger":
                                         failure_message = "The effect ledger is unavailable; no tool action was started."
-                                    elif failure_status is not None:
-                                        failure_message = f"Model request failed (HTTP {failure_status})"
                                     else:
-                                        failure_message = "Model request failed"
+                                        failure_message = _stream_failure_user_message(chunk) or (
+                                            f"Model request failed (HTTP {failure_status})"
+                                            if failure_status is not None
+                                            else "Model request failed"
+                                        )
                                     sanitized_failure = {
                                         "status": failure_status,
                                         "message": failure_message,
