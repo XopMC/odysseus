@@ -36,6 +36,7 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
                       'project_path': '/project', 'config': self.config,
                       'leader': self.selection, 'participants': []})
         self.messages = []
+        self.tool_schemas = []
         self.responses = []
         self.host_calls = []
         self.host_result = {'output': 'def correct(): return True', 'exit_code': 0}
@@ -54,6 +55,7 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def complete(self, route, messages, tools, *, max_tokens, on_delta):
         self.messages.append(copy.deepcopy(messages))
+        self.tool_schemas.append(copy.deepcopy(tools))
         value = self.responses.pop(0)
         if isinstance(value, BaseException):
             raise value
@@ -169,6 +171,87 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'failed')
         self.assertIn('Repeated tool failure', result['result']['error'])
         self.assertEqual(len(self.host_calls), 2)
+
+    async def test_exact_read_only_acceptance_can_finish_after_stagnant_status_reads(self):
+        worker = self.worker(
+            objective='Compute 17 * 19 = 323 using only the selected workers.',
+            acceptance="The result must be exactly '323'.",
+            write_scope=[],
+        )
+        final = {
+            'completed': True,
+            'result': '323',
+            'acceptance_met': True,
+            'verification': {'expected': '323', 'actual': '323', 'match': True},
+            'paths_touched': [],
+            'files_modified': False,
+            'network_used': False,
+            'host_tools_used': False,
+            'unresolved_issues': [],
+        }
+        self.responses = [
+            answer('', [tool('team_status', {'limit': 10}, identifier=f'status-{i}')])
+            for i in range(3)
+        ] + [answer(json.dumps(final))]
+
+        result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['successful_tools'], 0)
+        self.assertEqual(self.host_calls, [])
+
+    async def test_exact_read_only_acceptance_can_finish_without_tool_calls(self):
+        worker = self.worker(
+            objective='Compute 17 * 19 = 323 using only the selected workers.',
+            acceptance="The result must be exactly '323'.",
+            write_scope=[],
+        )
+        final = {
+            'completed': True,
+            'result': '323',
+            'acceptance_met': True,
+            'verification': {'expected': '323', 'actual': '323', 'match': True},
+            'paths_touched': [],
+            'files_modified': False,
+            'network_used': False,
+            'host_tools_used': False,
+            'unresolved_issues': [],
+        }
+        self.responses = [answer(json.dumps(final))]
+
+        result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['completion_validation'], 'exact_read_only_acceptance')
+        self.assertEqual(self.tool_schemas, [[]], 'exact-value read-only workers must not receive tools')
+        self.assertEqual(self.host_calls, [])
+
+    async def test_exact_read_only_acceptance_rejects_wrong_value_after_stagnant_reads(self):
+        worker = self.worker(
+            objective='Compute 17 * 19 = 323 using only the selected workers.',
+            acceptance="The result must be exactly '323'.",
+            write_scope=[],
+        )
+        final = {
+            'completed': True,
+            'result': '324',
+            'acceptance_met': True,
+            'verification': {'expected': '323', 'actual': '324', 'match': False},
+            'paths_touched': [],
+            'files_modified': False,
+            'network_used': False,
+            'host_tools_used': False,
+            'unresolved_issues': [],
+        }
+        self.responses = [
+            answer('', [tool('team_status', {'limit': 10}, identifier=f'status-{i}')])
+            for i in range(3)
+        ] + [answer(json.dumps(final))]
+
+        result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('No progress after repeated unchanged reads', result['result']['error'])
 
     async def test_reviewer_cannot_mutate_host_even_if_model_requests_it(self):
         worker = self.worker(role='reviewer', kind='verification', target_worker='not-dispatched')

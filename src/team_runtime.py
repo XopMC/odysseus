@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import shlex
 import time
 import uuid
@@ -45,6 +46,55 @@ def json_answer(text):
     if not isinstance(value, dict):
         raise ValueError('Expected a structured object')
     return value
+
+
+def _exact_acceptance_target(profile):
+    if not isinstance(profile, dict) or profile.get('kind') not in {'worker', 'executor'}:
+        return None
+    if profile.get('write_scope') not in (None, []):
+        return None
+    acceptance = profile.get('acceptance')
+    if not isinstance(acceptance, str):
+        return None
+    match = re.fullmatch(
+        r"\s*The result must be exactly ['\"]([^'\"]{1,200})['\"]\.\s*",
+        acceptance, flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def _exact_read_only_acceptance(profile, text):
+    """Validate a narrowly-scoped, tool-free exact-result subtask.
+
+    Team workers normally need durable tool evidence before completion. A
+    planner may, however, assign pure calculations with an exact string
+    acceptance criterion. Permit those only when the workspace scope is empty
+    and the worker returns a structured self-check whose value exactly matches
+    the server-owned criterion and explicitly reports no side effects.
+    """
+    expected = _exact_acceptance_target(profile)
+    if expected is None:
+        return False
+    try:
+        result = json_answer(text)
+    except (TypeError, ValueError):
+        return False
+    verification = result.get('verification')
+    return bool(
+        result.get('completed') is True
+        and result.get('acceptance_met') is True
+        and isinstance(result.get('result'), str)
+        and result['result'].strip() == expected
+        and isinstance(verification, dict)
+        and verification.get('expected') == expected
+        and verification.get('actual') == expected
+        and verification.get('match') is True
+        and result.get('paths_touched') == []
+        and result.get('files_modified') is False
+        and result.get('network_used') is False
+        and result.get('host_tools_used') is False
+        and result.get('unresolved_issues') == []
+    )
 
 
 def pending_calls(messages):
@@ -946,7 +996,16 @@ class TeamRuntime:
             saved['guidance_seq'] = cursor
             if not pending_calls(messages):
                 messages.extend(saved.pop('pending_guidance', []))
-            tools = team_tools.schemas(owner, worker_tool_role(profile), config.get('web', False), config=config, store=self.store) + team_collaboration.schemas()
+            exact_read_only_task = _exact_acceptance_target(profile) is not None
+            # Exact-value tasks with no write scope (for example arithmetic QA)
+            # have no legitimate need for host, web, or team-status tools.
+            # Offering team_status to these workers caused them to poll their
+            # own running record until the unchanged-read breaker failed a
+            # correct result. Keep their route genuinely tool-free instead.
+            tools = [] if exact_read_only_task else (
+                team_tools.schemas(owner, worker_tool_role(profile), config.get('web', False), config=config, store=self.store)
+                + team_collaboration.schemas()
+            )
             if saved.get('force_final'):
                 tools = []
             async def summarize(prompt):
@@ -1008,8 +1067,17 @@ class TeamRuntime:
                         raise RuntimeError('Reviewer supplied no independently inspected evidence')
                     return {'review': verdict, 'target_worker': profile['target_worker'], 'completed': True}
                 if saved.get('force_final'):
+                    if (saved['successful_tools'] == 0
+                            and _exact_read_only_acceptance(profile, answer.get('content'))):
+                        return {'summary': answer['content'], 'completed': True, 'cwd': saved['cwd'],
+                                'successful_tools': 0, 'compactions': saved['compactions'],
+                                'completion_validation': 'exact_read_only_acceptance'}
                     raise RuntimeError('No progress after repeated unchanged reads: ' + str(answer.get('content', ''))[:1000])
                 if saved['successful_tools'] == 0:
+                    if _exact_read_only_acceptance(profile, answer.get('content')):
+                        return {'summary': answer['content'], 'completed': True, 'cwd': saved['cwd'],
+                                'successful_tools': 0, 'compactions': saved['compactions'],
+                                'completion_validation': 'exact_read_only_acceptance'}
                     messages.append({'role': 'user', 'content': 'Do not finish with an intention or unsupported claim. Use the allowed tools to inspect or verify the assigned work, or state a concrete blocker.'})
                     if round_num >= 2:
                         raise RuntimeError('Worker stopped without any verified tool result')
@@ -1093,7 +1161,13 @@ class TeamRuntime:
                     raise UnknownToolOutcome('Uncertain tool outcome saved; explicit reconciliation required before continuing this worker')
             messages.extend(saved.pop('pending_guidance', []))
             if saved.get('force_final'):
-                messages.append({'role': 'user', 'content': 'No new evidence after three identical reads. Stop tools. Review ONLY the assigned subtask, not files another worker has not integrated yet. Return the required JSON verdict using inspected evidence; if evidence is insufficient, verdict must be fail. Non-reviewers must state the concrete blocker, not claim completion.'})
+                if kind == 'verification':
+                    final_instruction = ('No new evidence after three identical reads. Stop tools. Review ONLY the assigned subtask, not files another worker has not integrated yet. Return the required JSON verdict using inspected evidence; if evidence is insufficient, verdict must be fail.')
+                elif _exact_acceptance_target(profile) is not None and not profile.get('write_scope'):
+                    final_instruction = ('No new information after three identical status reads. Stop calling status tools. The assigned task has an exact-result acceptance criterion and no write scope. If you can satisfy it from the task and your own reasoning, return ONLY JSON with completed=true, acceptance_met=true, result=<exact value>, verification={expected:<exact value>,actual:<exact value>,match:true}, paths_touched=[], files_modified=false, network_used=false, host_tools_used=false, unresolved_issues=[]. Otherwise report completed=false and a concrete blocker. Do not claim tools were used.')
+                else:
+                    final_instruction = ('No new evidence after three identical reads. Stop tools. Review ONLY the assigned subtask, not files another worker has not integrated yet. Non-reviewers must state the concrete blocker, not claim completion.')
+                messages.append({'role': 'user', 'content': final_instruction})
             self.event(owner, team_id, 'worker_context', {
                 'worker_id': worker['id'], 'tokens': estimate_tokens(messages),
                 'limit': context_limit, 'window': context_window,
