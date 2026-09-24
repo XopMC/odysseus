@@ -671,6 +671,10 @@ def test_unknown_prior_effect_fences_agent_before_dispatch(monkeypatch):
 def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypatch):
     _patch_common(monkeypatch)
     from src.chat_effect_inbox import inbox
+    from src import agent_runs
+    parent_run_id = "p" * 32
+    child_run_id = "c" * 32
+    monkeypatch.setattr(agent_runs, "get_run_id", lambda _session: parent_run_id)
 
     async def stream(_candidates, _messages, **_kwargs):
         yield 'data: {"delta":"```bash\\necho fixture\\n```"}\n\n'
@@ -683,6 +687,7 @@ def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypat
 
     def record_intent(owner, session, run, call, name, content):
         order.append("intent")
+        assert run == child_run_id
         assert (owner, session, name, content) == (
             "alice", "fixture-chat", "bash", "echo fixture")
         return {"id": "effect-1", "created": True}
@@ -703,6 +708,7 @@ def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypat
         "http://x/v1", "m", [{"role": "user", "content": "Run fixture"}],
         session_id="fixture-chat", owner="alice", max_rounds=1,
         relevant_tools={"bash"}, access_mode="full_access",
+        child_run_id=child_run_id,
     )))
     assert order == ["intent", "dispatch", "receipt"]
     assert any(e.get("type") == "tool_start" and e.get("tool_call_id") == "round-1-tool-0"

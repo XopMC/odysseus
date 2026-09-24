@@ -51,6 +51,19 @@ def test_unknown_effect_is_durable_redacted_and_owner_scoped(inbox):
         assert "private-marker" not in json.dumps({"action_hash": row.action_hash, "receipt": row.receipt})
 
 
+def test_parallel_children_can_record_same_round_tool_ordinal(inbox):
+    store, _factory = inbox
+    first = store.record_intent(
+        "alice", "owned-chat", "a" * 32, "round-1-tool-0", "python", '{"expr":"19*19"}',
+    )
+    second = store.record_intent(
+        "alice", "owned-chat", "b" * 32, "round-1-tool-0", "python", '{"expr":"23*23"}',
+    )
+    assert first["created"] is True
+    assert second["created"] is True
+    assert first["id"] != second["id"]
+
+
 def test_reconciliation_is_cas_fenced_and_never_dispatches(inbox):
     store, _factory = inbox
     intent = store.record_intent("alice", "owned-chat", "b" * 32, "call-2", "write_file", "path+body")

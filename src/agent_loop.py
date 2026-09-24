@@ -7543,8 +7543,15 @@ async def stream_agent_loop(
                             yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "An earlier tool outcome is unknown; inspect the effect inbox before continuing."}}})}\n\n'
                             return
                         from src import agent_runs as _effect_runs
+                        # Child runs share the parent's chat session, so a
+                        # session lookup resolves to the parent run ID. Scope
+                        # each child's effect ledger to its own durable run ID
+                        # first; otherwise sibling tool calls with the same
+                        # round/call ordinal collide and fail before dispatch.
                         _effect_run_id = (
-                            _effect_runs.get_run_id(session_id) or run_security.run_id
+                            child_run_id
+                            or _effect_runs.get_run_id(session_id)
+                            or run_security.run_id
                         )
                         _effect_call_id = f"round-{round_num}-tool-{i}"
                         try:
