@@ -139,6 +139,22 @@ def test_resume_blocked_task_retries_failed_worker_without_reopening_accepted_wo
     assert env.runtime.calls[-1] == ('start',)
 
 
+def test_old_chat_team_is_found_and_duplicate_start_rejected_after_100_new_tasks(team_client):
+    env = team_client
+    for index in range(101):
+        env.store.create_task('alice', f'newer-{index}',
+                              metadata={**env.task['metadata'], 'session_id': f'other-{index}'})
+    assert env.task['id'] not in {task['id'] for task in env.store.list_tasks('alice')}
+    assert env.task['id'] in {task['id'] for task in env.store.list_runnable_tasks('alice')}
+
+    snapshot = env.client.get('/api/team/session/alice-chat')
+    assert snapshot.status_code == 200
+    assert snapshot.json()['team_id'] == env.task['id']
+    duplicate = env.client.post('/api/team/session/alice-chat/start', json={}, headers=ORIGIN)
+    assert duplicate.status_code == 409
+    assert env.runtime.calls == []
+
+
 def test_feature_off_hides_discovery_and_never_constructs_runtime(team_client, monkeypatch):
     env = team_client
     monkeypatch.setattr(team_config, "enabled", lambda: False)

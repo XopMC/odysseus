@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS team_tasks (
  event_seq INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS team_tasks_owner ON team_tasks(owner, created_at);
+CREATE INDEX IF NOT EXISTS team_tasks_owner_session ON team_tasks(owner, json_extract(metadata, '$.session_id'), created_at);
 CREATE TABLE IF NOT EXISTS team_coordinator_leases (
  task_id TEXT PRIMARY KEY REFERENCES team_tasks(id), lease_token TEXT NOT NULL, lease_expires REAL NOT NULL
 );
@@ -394,6 +395,22 @@ class TeamStore:
         _text(owner, "owner"); _integer(limit, "limit", 1, 500)
         with self._tx(write=False) as db:
             return [_row(row) for row in db.execute("SELECT * FROM team_tasks WHERE owner=? ORDER BY created_at DESC,id LIMIT ?", (owner, limit))]
+
+    def list_tasks_for_session(self, owner, session_id):
+        """Find a chat's durable Team tasks without the sidebar's 100-row cap."""
+        _text(owner, "owner"); _text(session_id, "session_id")
+        with self._tx(write=False) as db:
+            return [_row(row) for row in db.execute(
+                "SELECT * FROM team_tasks WHERE owner=? AND json_extract(metadata, '$.session_id')=? "
+                "ORDER BY created_at DESC,id DESC", (owner, session_id))]
+
+    def list_runnable_tasks(self, owner):
+        """The scheduler must not strand an older active task after 100 new tasks."""
+        _text(owner, "owner")
+        with self._tx(write=False) as db:
+            return [_row(row) for row in db.execute(
+                "SELECT * FROM team_tasks WHERE owner=? AND status IN ('pending','queued','running','recovering') "
+                "ORDER BY created_at DESC,id DESC", (owner,))]
 
     def update_task_metadata(self, owner, task_id, patch, *, coordinator_token=None):
         """Shallow-merge owner-provided metadata without replacing other fields."""

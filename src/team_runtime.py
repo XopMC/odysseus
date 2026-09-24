@@ -387,7 +387,7 @@ class TeamRuntime:
             try:
                 for owner in self.store.list_owners_internal():
                     self.store.recover(owner)
-                    for team in self.store.list_tasks(owner):
+                    for team in self.store.list_runnable_tasks(owner):
                         team_id = team['id']
                         if not self.supports_task(team):
                             continue

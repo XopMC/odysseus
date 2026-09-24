@@ -130,7 +130,7 @@ def setup_team_routes():
         owner, runtime = runtime_for(request)
         from routes.session_routes import _verify_session_owner
         _verify_session_owner(request, session_id)
-        tasks = [t for t in runtime.store.list_tasks(owner) if t['metadata'].get('session_id') == session_id]
+        tasks = runtime.store.list_tasks_for_session(owner, session_id)
         if not tasks:
             return {'team_id': None, 'status': 'idle', 'tasks': [], 'workers': [], 'last_seq': 0}
         return runtime.snapshot(owner, tasks[0]['id'])
@@ -141,9 +141,8 @@ def setup_team_routes():
         from routes.session_routes import _verify_session_owner
         _verify_session_owner(request, session_id)
         body = await body_object(request)
-        existing = [t for t in runtime.store.list_tasks(owner)
-                    if t['metadata'].get('session_id') == session_id
-                    and t['status'] not in {'done', 'accepted', 'cancelled'}]
+        existing = [t for t in runtime.store.list_tasks_for_session(owner, session_id)
+                    if t['status'] not in {'done', 'accepted', 'cancelled'}]
         if existing:
             raise HTTPException(409, 'This chat already has an unfinished team task')
         try:
