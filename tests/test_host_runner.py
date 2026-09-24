@@ -177,6 +177,14 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('memory', snapshot)
         self.assertIsInstance(snapshot['temperatures'], list)
 
+    def test_inspect_toolchain_is_available_through_team_host_file_rpc(self):
+        result = self.call('file.call', {
+            'tool': 'inspect_toolchain', 'content': {}, 'cwd': str(self.root),
+        })
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['result']['exit_code'], 0)
+        self.assertIn('python', result['result']['tools'])
+
     def test_model_policy_blocks_credentials_nested_search_and_outside_write(self):
         workspace = self.root / 'workspace'
         workspace.mkdir()

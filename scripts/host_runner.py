@@ -969,7 +969,7 @@ class Runner:
             run_id = args.get('run_id')
             if run_id is not None and (not isinstance(run_id, str) or len(run_id) > 200):
                 raise ValueError('invalid durable run identity')
-            if tool not in {'read_file', 'write_file', 'edit_file', 'apply_patch', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'get_workspace'}:
+            if tool not in {'read_file', 'write_file', 'edit_file', 'apply_patch', 'ls', 'glob', 'grep', 'search_files', 'list_tree', 'file_outline', 'git_status', 'git_diff', 'git_log', 'inspect_toolchain', 'get_workspace'}:
                 raise ValueError('unknown file tool')
             parsed = json.loads(content) if isinstance(content, str) and content.strip().startswith('{') else content
             path_guard = None
