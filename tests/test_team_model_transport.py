@@ -151,7 +151,7 @@ class TeamModelTransportTests(unittest.IsolatedAsyncioTestCase):
             sse('[DONE]'),
         ]
         tools = [{'type': 'function', 'function': {'name': 'python', 'parameters': {
-            'type': 'object', 'properties': {'code': {'type': 'string'}}}}}]
+            'type': 'object', 'properties': {'code': {'type': 'string'}}, 'required': ['code']}}}]
 
         result = await team_model.complete(self.route, self.messages, tools)
 
@@ -171,6 +171,35 @@ class TeamModelTransportTests(unittest.IsolatedAsyncioTestCase):
         result = await team_model.complete(self.route, self.messages, tools)
         self.assertNotIn('tool_calls', result['message'])
         self.assertIn('<tool_call>', result['message']['content'])
+
+    async def test_qwen_text_markup_accepts_advertised_no_argument_tool(self):
+        self.response = [
+            sse({'choices': [{'delta': {'content': '<tool_call><function=team_finish_plan>'
+                '</function></tool_call>'}}]}),
+            sse('[DONE]'),
+        ]
+        tools = [{'type': 'function', 'function': {'name': 'team_finish_plan', 'parameters': {
+            'type': 'object', 'properties': {}, 'required': []}}}]
+
+        result = await team_model.complete(self.route, self.messages, tools)
+
+        self.assertEqual(len(result['message']['tool_calls']), 1)
+        call = result['message']['tool_calls'][0]
+        self.assertEqual(call['function']['name'], 'team_finish_plan')
+        self.assertEqual(json.loads(call['function']['arguments']), {})
+
+    async def test_qwen_text_markup_rejects_missing_required_arguments(self):
+        self.response = [
+            sse({'choices': [{'delta': {'content': '<tool_call><function=python>'
+                '</function></tool_call>'}}]}),
+            sse('[DONE]'),
+        ]
+        tools = [{'type': 'function', 'function': {'name': 'python', 'parameters': {
+            'type': 'object', 'properties': {'code': {'type': 'string'}}, 'required': ['code']}}}]
+
+        result = await team_model.complete(self.route, self.messages, tools)
+
+        self.assertNotIn('tool_calls', result['message'])
 
     async def test_truncated_stream_never_becomes_success(self):
         self.response = [sse({'choices': [{'delta': {'content': 'Only partial'}}]})]

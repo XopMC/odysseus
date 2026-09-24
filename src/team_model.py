@@ -42,7 +42,8 @@ def _parse_text_tool_calls(text, tools):
         function_schema = offered.get(name.casefold())
         if function_schema is None:
             continue
-        properties = ((function_schema.get('parameters') or {}).get('properties') or {})
+        parameters = function_schema.get('parameters') or {}
+        properties = parameters.get('properties') or {}
         args = {}
         valid = True
         for parameter in _TEXT_PARAMETER_RE.finditer(match.group(2)):
@@ -60,7 +61,8 @@ def _parse_text_tool_calls(text, tools):
                 except (ValueError, TypeError):
                     value = raw
             args[key] = value
-        if not valid or not args:
+        required = parameters.get('required') or []
+        if not valid or (not args and required):
             continue
         calls.append({
             'id': f'team_text_{len(calls)}',
