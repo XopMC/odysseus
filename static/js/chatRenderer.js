@@ -2258,6 +2258,12 @@ export function displayMetrics(messageElement, metrics) {
   const inputTokens = metrics.input_tokens || 0;
   const outputTokens = metrics.output_tokens || 0;
   const tps = metrics.tokens_per_second;
+  const hasBackendTps = metrics.tps_source === 'backend';
+  const tpsSourceLabel = hasBackendTps
+    ? 'Backend-reported'
+    : metrics.tps_source === 'stream_elapsed'
+      ? 'Stream-time estimate'
+      : 'Wall-clock estimate';
   const isReal = metrics.usage_source === 'real';
   const ctxPct = metrics.context_percent;
   const model = metrics.model || 'Unknown';
@@ -2279,7 +2285,7 @@ export function displayMetrics(messageElement, metrics) {
   const costStr0 = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : null;
   const hasTps = tps != null && tps !== 'undefined';
   const metricsLabel = hasTps
-    ? `${tps} tok/s`
+    ? `${hasBackendTps ? '' : '≈'}${tps} tok/s`
     : costStr0
       ? costStr0
       : responseTime != null
@@ -2288,8 +2294,11 @@ export function displayMetrics(messageElement, metrics) {
   if (!metricsLabel) return;
   metricsContainer.textContent = metricsLabel;
   metricsContainer.style.cursor = 'pointer';
-  metricsContainer.title = 'Click for details';
-  bindUiText(metricsContainer, 'Click for details', 'title');
+  const metricsTitle = hasTps && !hasBackendTps
+    ? 'Approximate speed; backend decode TPS was not reported'
+    : 'Click for details';
+  metricsContainer.title = t(metricsTitle);
+  bindUiText(metricsContainer, metricsTitle, 'title');
   const metricsDivider = document.createElement('span');
   metricsDivider.className = 'metrics-divider';
   metricsDivider.textContent = ' | ';
@@ -2301,7 +2310,12 @@ export function displayMetrics(messageElement, metrics) {
 
     const costStr = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : '';
     const costRows = costStr ? `<div><span class="ctx-label">Cost</span> ${costStr}</div>` : '';
-    const speedStr = tps != null && tps !== 'undefined' ? `${tps} tok/s` : 'n/a';
+    const speedStr = tps != null && tps !== 'undefined'
+      ? `${hasBackendTps ? '' : '≈'}${tps} tok/s`
+      : 'n/a';
+    const speedSourceRow = hasTps
+      ? `<div><span class="ctx-label">Speed source</span> ${t(tpsSourceLabel)}</div>${hasBackendTps ? '' : `<div class="ctx-speed-note">${t('Provider did not report backend decode speed; this is an estimate.')}</div>`}`
+      : '';
     const generationTimeRow = Number.isFinite(Number(metrics.generation_time)) && Number(metrics.generation_time) > 0
       ? `<div><span class="ctx-label">Generation</span> ${Number(metrics.generation_time).toFixed(2)}s</div>`
       : '';
@@ -2330,6 +2344,7 @@ export function displayMetrics(messageElement, metrics) {
       <div><span class="ctx-label">Output</span> ${outputTokens.toLocaleString()} tokens${isReal ? '' : '~'}</div>
       <div><span class="ctx-label">Total</span> ${totalTok.toLocaleString()} tokens</div>
       <div><span class="ctx-label">Speed</span> ${speedStr}</div>
+      ${speedSourceRow}
       ${generationTimeRow}
       <div><span class="ctx-label">Time</span> ${responseTime}s</div>
       ${prepTime != null ? `<div><span class="ctx-label">Prep</span> ${prepTime}s</div>` : ''}
@@ -2345,7 +2360,7 @@ export function displayMetrics(messageElement, metrics) {
       </div>` : ''}
       ${isReal ? '' : '<div style="margin-top:4px;font-size:0.8em;opacity:0.4;">~ estimated token count</div>'}
     `;
-    popup.querySelectorAll('.ctx-label, .ctx-heading').forEach(node => bindUiText(node, node.textContent));
+    popup.querySelectorAll('.ctx-label, .ctx-heading, .ctx-speed-note').forEach(node => bindUiText(node, node.textContent));
 
     const rect = metricsContainer.getBoundingClientRect();
     popup.style.left = rect.left + 'px';

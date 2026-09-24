@@ -33,7 +33,7 @@ def test_message_and_theme_controls_in_real_browser(tmp_path):
           const history=document.getElementById('chat-history');history.innerHTML='';
           const msg=document.createElement('div');msg.id='qa-message';msg.className='msg msg-ai';msg.dataset.raw='Save Delete original';msg.innerHTML='<div class="body">Save Delete original</div>';history.append(msg);msg.append(renderer.createMsgFooter(msg));
           const image=renderer.buildImageBubble('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/jFkAAAAASUVORK5CYII=','Copy prompt','Save','1x1','standard','image-qa');image.id='qa-image';history.append(image);
-          renderer.displayMetrics(msg,{response_time:2,input_tokens:80000,output_tokens:10,tokens_per_second:5,context_percent:80,context_length:100000,model:'Save',usage_source:'real'});
+          renderer.displayMetrics(msg,{response_time:2,input_tokens:80000,output_tokens:10,tokens_per_second:5,tps_source:'stream_elapsed',context_percent:80,context_length:100000,model:'Save',usage_source:'real'});
           const attachments=renderer.buildAttachCards([{id:'locale-ocr',name:'Save.png',mime:'image/png',previewUrl:image.querySelector('img').src}]);attachments.id='qa-attachments';history.append(attachments);
           renderer.addMessage('assistant','Save original interrupted text','Save',{stopped:true});
         });
@@ -46,9 +46,19 @@ def test_message_and_theme_controls_in_real_browser(tmp_path):
         assert((await page.locator('.msg-overflow-item').allTextContents()).some(text=>text.trim()==='✂ Сделать короче'));
         assert.equal(await page.locator('.msg-overflow-item[title="Сделать короче"] .overflow-icon').count(),1);
         await page.keyboard.press('Escape');
+        assert((await page.locator('#qa-message .response-metrics').textContent()).includes('≈5 tok/s'));
         await page.locator('#qa-message .response-metrics').click();
         assert.equal(await page.locator('.ctx-popup > div').first().textContent(),'Статистика сообщения');
         assert((await page.locator('.ctx-popup .ctx-label').allTextContents()).includes('Ввод'));
+        assert((await page.locator('.ctx-popup .ctx-label').allTextContents()).includes('Источник скорости'));
+        assert((await page.locator('.ctx-popup').innerText()).includes('Оценка по времени потока'));
+        assert((await page.locator('.ctx-popup').innerText()).includes('Провайдер не передал скорость декодирования; это оценка.'));
+        await page.keyboard.press('Escape');
+        await page.evaluate(()=>renderer.displayMetrics(document.getElementById('qa-message'),{response_time:2,input_tokens:80000,output_tokens:10,tokens_per_second:131.98,tps_source:'backend',context_percent:80,context_length:100000,model:'Save',usage_source:'real'}));
+        assert((await page.locator('#qa-message .response-metrics').textContent()).includes('131.98 tok/s'));
+        assert.equal((await page.locator('#qa-message .response-metrics').textContent()).includes('≈'),false);
+        await page.locator('#qa-message .response-metrics').click();
+        assert((await page.locator('.ctx-popup').innerText()).includes('Данные backend'));
         await page.keyboard.press('Escape');await page.locator('#qa-message .ctx-ring').click();
         assert.equal(await page.locator('.ctx-compact-btn').textContent(),'Сжать контекст');
         assert.equal(await page.locator('.ctx-compact-btn').getAttribute('title'),'Сжать старые сообщения, чтобы освободить контекст');
