@@ -40,6 +40,27 @@ def test_empty_history_thinking_is_lazy_loaded_from_durable_run():
     assert "bindLazyHistoryThinking(b, metadata, 1, storedThinking)" in source
 
 
+def test_explicit_empty_reasoning_round_does_not_create_false_thinking_card():
+    source = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    body = source.split("export function shouldBindLazyHistoryThinking", 1)[1].split(
+        "function bindLazyHistoryThinking", 1,
+    )[0]
+    function_source = "function shouldBindLazyHistoryThinking" + body
+    script = """
+      const canLazyHistoryThinking = m => /^[0-9a-f]{32}$/.test(m?.timeline_v2?.run_id || '');
+    """ + function_source + """
+      const base = {timeline_v2:{run_id:'a'.repeat(32)},round_reasonings:['real thinking','','']};
+      console.log(JSON.stringify([
+        shouldBindLazyHistoryThinking(base,1,'real thinking'),
+        shouldBindLazyHistoryThinking(base,2,''),
+        shouldBindLazyHistoryThinking(base,3,''),
+        shouldBindLazyHistoryThinking({timeline_v2:base.timeline_v2},2,''),
+      ]));
+    """
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == [True, False, False, True]
+
+
 def test_reload_does_not_eagerly_fetch_every_saved_thinking_card():
     renderer = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
     markdown = (ROOT / "static/js/markdown.js").read_text(encoding="utf-8")

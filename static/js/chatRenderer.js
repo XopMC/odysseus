@@ -31,9 +31,23 @@ function canLazyHistoryThinking(metadata) {
   return /^[0-9a-f]{32}$/.test(runId);
 }
 
+export function shouldBindLazyHistoryThinking(metadata, roundNumber, preservedReasoning = '') {
+  if (!canLazyHistoryThinking(metadata)) return false;
+  if (String(preservedReasoning || '').trim()) return true;
+  const canonical = metadata?.round_reasonings;
+  // A current canonical row explicitly records an empty reasoning slot for
+  // each text-only round. Do not fabricate a disclosure that can only return
+  // "unavailable". Older rows with no per-round array remain probeable from
+  // their durable replay artifact, preserving access to legacy thinking.
+  if (Array.isArray(canonical) && roundNumber >= 1 && roundNumber <= canonical.length) {
+    return Boolean(String(canonical[roundNumber - 1] || '').trim());
+  }
+  return true;
+}
+
 function bindLazyHistoryThinking(root, metadata, roundNumber, fallbackReasoning = '') {
   const runId = String(metadata?.timeline_v2?.run_id || '');
-  if (!canLazyHistoryThinking(metadata)) return;
+  if (!shouldBindLazyHistoryThinking(metadata, roundNumber, fallbackReasoning)) return;
   let section = root?.querySelector?.('.thinking-section');
   if (!section) {
     const shell = document.createElement('div');
@@ -1562,7 +1576,7 @@ document.addEventListener('click', function(e) {
       a.classList.add('is-loading');
       a.setAttribute('aria-busy', 'true');
     } catch {}
-    import('./sessions.js?v=20260925deephash1').then(mod => {
+    import('./sessions.js?v=20260925thinkempty1').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
       if (fn) return fn(id, { showLoading: true, immediateLoading: true });
     }).finally(() => {
