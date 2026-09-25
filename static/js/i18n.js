@@ -104,6 +104,7 @@ const RU = Object.freeze({
   'Review the limit before resuming.':'Проверьте лимит перед продолжением.',
   'A tool outcome is unknown. Inspect the effect and choose whether to forbid a repeat.':'Исход действия инструмента неизвестен. Проверьте результат и решите, запрещать ли повтор.',
   'A tool outcome is unknown. Verify its outcome or forbid a repeat.':'Исход действия неизвестен. Проверьте его или запретите повтор.',
+  'Review the tool effect before resuming.':'Перед продолжением разберите результат действия инструмента в открытой панели.',
   'The effect was verified as not applied. Authorize one exact retry or forbid a repeat before resuming.':'Проверено, что действие не применено. Перед продолжением разрешите один точный повтор или запретите его.',
   'One exact retry is authorized. Resume explicitly; only the matching action can consume it.':'Разрешён один точный повтор. Возобновите явно; разрешение сработает только для совпадающего действия.',
   'Unknown tool effects':'Действия с неизвестным результатом',

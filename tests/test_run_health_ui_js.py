@@ -97,8 +97,8 @@ def test_goal_health_is_owner_snapshot_driven_and_hidden_without_active_goal():
     assert "describeBudgetWarnings(goal, runHealthSnapshot)" in work
     assert "./runHealth.js?v=20260924budgetwarn1" in work
     assert "/static/js/runHealth.js?v=20260924budgetwarn1" in sw
-    assert "./js/chat-work.js?v=20260924planresume1" in app
-    assert "/static/js/chat-work.js?v=20260924planresume1" in sw
+    assert "./js/chat-work.js?v=20260925effectrecovery1" in app
+    assert "/static/js/chat-work.js?v=20260925effectrecovery1" in sw
 
 
 def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
@@ -122,6 +122,9 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       ids['wait-unknown-effects'].children=[];
       ids['wait-unknown-effects'].replaceChildren=function(){this.children=[]};
       ids['wait-unknown-effects'].appendChild=function(child){this.children.push(child)};
+      const waitClasses=new Set();
+      ids['wait-mode-status'].classList={add:x=>waitClasses.add(x),remove:x=>waitClasses.delete(x),contains:x=>waitClasses.has(x)};
+      ids['wait-mode-status'].querySelector=()=>({setAttribute(){}});
       let goal={id:'goal-1',objective:'Harmless fixture',status:'active',attempt:1,progress:'',revision:1};
       let uiLongTaskCallback;
       class FakePerformanceObserver {constructor(callback){uiLongTaskCallback=callback}observe(){}disconnect(){}}
@@ -131,7 +134,7 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
         lease:{held:true,expires_at:'2099-01-01T00:00:00Z'},
         checkpoint:{durable_seq:7,context_revision:3,ledger_hash:'a'.repeat(64)},
         recovery_action:'inspect'};
-      let effects=[],noRetryCalls=0,verifyCalls=0,retryAuthorizeCalls=0,staleResume=false,errorToasts=[];
+      let effects=[],noRetryCalls=0,verifyCalls=0,retryAuthorizeCalls=0,staleResume=false,blockedResume=false,errorToasts=[];
       let confirmAnswers=[false,true,true];
       let delayOld=false,releaseOld;
       const document={visibilityState:'visible',getElementById:id=>ids[id]||null,querySelectorAll:()=>[],
@@ -157,7 +160,9 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
           }
           if(url.includes('/unknown-effects/')&&url.endsWith('/no-retry')){noRetryCalls++;effects=[];return{ok:true,json:async()=>({status:'no_retry'})};}
           if(url.endsWith('/unknown-effects'))return{ok:true,json:async()=>({effects})};
-          if(url.endsWith('/goal/resume')){goalResumeCalls++;goal={...goal,status:'active',revision:goal.revision+1};
+          if(url.endsWith('/goal/resume')){goalResumeCalls++;
+            if(blockedResume)return{ok:false,status:409,json:async()=>({detail:'Tool effect must be reconciled or explicitly authorized before Goal resumes'})};
+            goal={...goal,status:'active',revision:goal.revision+1};
             if(staleResume){staleResume=false;return{ok:false,status:409,json:async()=>({detail:'Goal changed; reload'})};}
             return{ok:true,json:async()=>goal};}
           if(url.endsWith('/why-waiting'))return{ok:true,json:async()=>url.includes('/chat-2/')?{phase:'idle',run_id:null,goal_status:null}:wait};
@@ -274,6 +279,15 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       assert.equal(noRetryCalls,1);
       assert.equal(ids['goal-work-resume'].hidden,false,'no-retry unlocks explicit resume only');
       assert.equal(goal.status,'waiting_user','no-retry never auto-resumes the goal');
+      effects=[{id:'effect-2',run_id:'run-2',tool_call_id:'round-1-tool-0',tool_name:'python',action_hash:'b'.repeat(64),status:'unknown',revision:2}];
+      goal={...goal,status:'paused',checkpoint:{}};
+      wait={...wait,phase:'paused',wait_reason:'goal_paused',recovery_action:'resume_goal'};
+      blockedResume=true;await api.refresh('chat-1');await api.mutate('goal','resume');
+      assert.equal(api.getSnapshot().goal.status,'paused','unknown effect must not silently resume');
+      assert.equal(ids['wait-unknown-effects'].hidden,false,'blocked resume exposes the effect inbox');
+      assert.equal(waitClasses.has('expanded'),true,'blocked resume opens the recovery panel');
+      assert.equal(errorToasts.at(-1),'Review the tool effect before resuming.');
+      effects=[];blockedResume=false;errorToasts=[];
       goal={...goal,status:'paused',checkpoint:{}};await api.refresh('chat-1');
       staleResume=true;await api.mutate('goal','resume');
       assert.equal(api.getSnapshot().goal.status,'active');

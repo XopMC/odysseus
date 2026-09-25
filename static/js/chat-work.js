@@ -439,6 +439,16 @@ async function mutate(kind, action) {
     const current = snapshot[kind];
     if (kind === 'goal' && error.status === 409 && desiredStatus
         && current?.id === record.id && current.status === desiredStatus) return;
+    if (kind === 'goal' && action === 'resume' && error.status === 409) {
+      await refreshEffects(sessionId);
+      if (effectInboxLoaded && effectInbox.some(effect =>
+        ['unknown', 'verified_not_applied'].includes(effect.status))) {
+        await refreshWait(sessionId);
+        openEffectRecovery();
+        toast(t('Review the tool effect before resuming.'), true);
+        return;
+      }
+    }
     toast(error.message, true);
   }
 }
@@ -496,6 +506,10 @@ async function addGuidance(message) {
 
 function armCollapse(node) {
   clearTimeout(collapseTimer);
+  // Recovery decisions must remain visible until the owner chooses one.
+  // The ordinary four-second floating-card timeout is too short for an
+  // unknown side effect and made Goal resume look permanently broken.
+  if (node.id === 'wait-mode-status' && effectInbox.length) return;
   collapseTimer = setTimeout(() => {
     node.classList.remove('expanded');
     node.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded', 'false');
@@ -503,6 +517,15 @@ function armCollapse(node) {
       el('subagents-status')?.style.removeProperty('top');
     }
   }, 4000);
+}
+
+function openEffectRecovery() {
+  const node = el('wait-mode-status');
+  node?.classList?.add?.('expanded');
+  node?.querySelector?.('.chat-work-card-toggle')?.setAttribute?.('aria-expanded', 'true');
+  clearTimeout(collapseTimer);
+  node?.scrollIntoView?.({ block: 'nearest' });
+  el('wait-unknown-effects')?.querySelector?.('button')?.focus?.();
 }
 
 function placeSubagentsBelowPlan(plan, expanded) {
@@ -582,11 +605,8 @@ async function runWaitAction() {
     return;
   }
   if (action === 'inspect_effect') {
-    const node = el('wait-mode-status');
-    node?.classList.add('expanded');
-    node?.querySelector('.chat-work-card-toggle')?.setAttribute('aria-expanded', 'true');
     await refreshEffects(sessionId);
-    el('wait-unknown-effects')?.querySelector('button')?.focus?.();
+    openEffectRecovery();
     return;
   }
   if (action === 'inspect_context') {
