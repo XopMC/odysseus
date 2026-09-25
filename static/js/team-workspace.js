@@ -815,6 +815,14 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     const data = await request(`/api/team/session/${encode(id)}`);
     if (!current(token, id) || requestSeq !== snapshotRequestSeq) return;
     const previousId = teamId; applySnapshot(data);
+    // A terminal snapshot is authoritative even if replay of a long timeline
+    // is still pending (or fails).  Clear stale reconnect UI and stop the SSE
+    // retry loop before the first awaited replay request.
+    if (terminalTeam()) {
+      source?.close(); source = null;
+      clearTimeout(retryTimer); retryTimer = null;
+      clearReconnectNotice();
+    }
     if (previousId !== teamId) { source?.close(); source = null; timelineEvents = new Map(); renderTimeline(); }
     let last = Number(data.last_seq);
     if (!Number.isSafeInteger(last) || last < 0) { try { last = Number(storage?.getItem(cursorKey(teamId))) || 0; } catch (_) { last = 0; } }
@@ -825,11 +833,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     // Starting SSE first loses the history on reload by design.
     if (teamId && (previousId !== teamId || !timelineEvents.size)) await loadTimeline(teamId, token);
     if (!current(token, id) || requestSeq !== snapshotRequestSeq) return;
-    if (terminalTeam()) {
-      source?.close(); source = null;
-      clearTimeout(retryTimer); retryTimer = null;
-      clearReconnectNotice();
-    } else if (teamId && !source) connect();
+    if (!terminalTeam() && teamId && !source) connect();
     if (teamId) loadEvidence().catch(error => { if (current(token, id)) notice(error.message, true); });
   }
   async function loadEvidence() {
