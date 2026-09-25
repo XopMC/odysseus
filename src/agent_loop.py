@@ -3492,7 +3492,15 @@ def _agent_round_tps_measurement(
     if tokens and backend_time:
         return round(tokens / backend_time, 2), backend_time, "backend"
     if tokens and stream_time:
-        return round(tokens / stream_time, 2), stream_time, "stream_elapsed"
+        observed_rate = tokens / stream_time
+        # First-to-last SSE delta is not decode time when a local provider
+        # buffers a whole answer and flushes it in a millisecond-scale burst.
+        # Such samples produced false 10,000+ tok/s badges on KAT/LM Studio.
+        # Prefer no rate to a confidently wrong one; backend TPS above still
+        # wins even for short or extremely fast responses.
+        if stream_time >= 0.25 and observed_rate <= 1500:
+            return round(observed_rate, 2), stream_time, "stream_elapsed"
+        return None, None, "unavailable_buffered"
     if tokens:
         return None, None, "unavailable_single_delta" if generation_started else "unavailable_buffered"
     return None, None, "unavailable"

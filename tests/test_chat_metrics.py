@@ -327,6 +327,30 @@ def test_agent_round_prefers_explicit_lm_studio_decode_tps_over_generation_time(
     assert metrics["tps_source"] == "backend"
 
 
+def test_agent_round_does_not_call_buffered_sse_burst_decode_speed():
+    tps, duration, source = _agent_round_tps_measurement(
+        74, stream_duration=0.005, generation_started=True,
+    )
+    assert (tps, duration, source) == (None, None, "unavailable_buffered")
+
+    metrics = _metrics(
+        real_output_tokens=74,
+        round_generation_metrics=[{
+            "round": 1, "output_tokens": 74, "generation_time": duration,
+            "tokens_per_second": tps, "tps_source": source,
+        }],
+    )
+    assert metrics["tps_source"] == "unavailable"
+    assert metrics["tokens_per_second"] == 0
+    assert metrics["tps_measured_tokens"] == 0
+
+    # A real backend decode rate remains authoritative even if HTTP flushes
+    # all output deltas at once.
+    assert _agent_round_tps_measurement(
+        74, backend_gen_tps=123.4, stream_duration=0.005,
+    )[0] == 123.4
+
+
 def test_metrics_fall_back_to_wallclock_without_backend_timings():
     m = _metrics(backend_gen_tps=0, backend_prefill_tps=0)
     # 42 output tokens / 10s wall-clock.
