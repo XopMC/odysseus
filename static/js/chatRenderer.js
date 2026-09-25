@@ -225,7 +225,7 @@ export function localizeToolNode(node) {
 // scroll position and the rest of a long chat untouched.
 export function reconcileToolApprovalCard(approvalId, decision) {
   const key = String(approvalId || '');
-  if (!key || !['approve', 'approve_task', 'deny'].includes(decision)) return false;
+  if (!key || !['approve_once', 'approve', 'approve_task', 'deny'].includes(decision)) return false;
   let changed = false;
   document.querySelectorAll('.agent-thread-node[data-approval-id]').forEach(node => {
     if (node.dataset.approvalId !== key) return;
@@ -2945,7 +2945,7 @@ export function addMessage(role, content, modelName, metadata) {
         // accepted, the resumed run has its own real tool event; rendering
         // both as "done" fabricates a duplicate execution on reload.
         if (ev?.ask_user?.kind === 'tool_approval'
-            && ['approve', 'approve_task'].includes(ev.ask_user.resolved)) continue;
+            && ['approve_once', 'approve', 'approve_task'].includes(ev.ask_user.resolved)) continue;
         const r = ev.round ?? 1;
         if (!toolsByRound[r]) toolsByRound[r] = [];
         toolsByRound[r].push(ev);

@@ -107,4 +107,4 @@ def test_resolved_approval_proposal_is_not_rendered_as_second_completed_tool():
     root = Path(__file__).resolve().parents[1]
     renderer = (root / "static/js/chatRenderer.js").read_text(encoding="utf-8")
     assert "ev?.ask_user?.kind === 'tool_approval'" in renderer
-    assert "['approve', 'approve_task'].includes(ev.ask_user.resolved)" in renderer
+    assert "['approve_once', 'approve', 'approve_task'].includes(ev.ask_user.resolved)" in renderer

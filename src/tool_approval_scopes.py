@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 TASK_APPROVAL_DECISION = "approve_task"
 CHAT_SESSION_APPROVAL_DECISION = "approve"
 DENY_APPROVAL_DECISION = "deny"
+SINGLE_ACTION_APPROVAL_DECISION = "approve_once"
 
 # Session.get_context_messages() adds this server-owned marker only when the
 # session history contains a matching, resolved chat-session approval.
@@ -153,6 +154,8 @@ class ToolApprovalScope(str, Enum):
 
 def scope_for_decision(decision: object) -> ToolApprovalScope | None:
     normalized = str(decision or "").strip().lower()
+    if normalized == SINGLE_ACTION_APPROVAL_DECISION:
+        return ToolApprovalScope.SINGLE_ACTION
     if normalized == TASK_APPROVAL_DECISION:
         return ToolApprovalScope.TASK
     if normalized == CHAT_SESSION_APPROVAL_DECISION:

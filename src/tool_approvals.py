@@ -20,6 +20,7 @@ from typing import Any, Callable
 from src.tool_approval_scopes import (
     CHAT_SESSION_APPROVAL_DECISION,
     DENY_APPROVAL_DECISION,
+    SINGLE_ACTION_APPROVAL_DECISION,
     TASK_APPROVAL_DECISION,
     ToolApprovalScope,
     scope_for_decision,
@@ -202,6 +203,15 @@ class PendingToolApproval:
             ),
             "options": [
                 {
+                    "label": "Allow once",
+                    "value": SINGLE_ACTION_APPROVAL_DECISION,
+                    "description": (
+                        "Execute only this sealed action. A later gated action "
+                        "will require a new approval. Current tool, account, "
+                        "workspace, and sandbox restrictions still apply."
+                    ),
+                },
+                {
                     "label": "Allow for this task",
                     "value": TASK_APPROVAL_DECISION,
                     "description": (
@@ -254,11 +264,8 @@ class ExactToolApproval:
 
     pending: PendingToolApproval
     scope: ToolApprovalScope = ToolApprovalScope.TASK
-    # The seam consumed by agent_loop. Both chat-card allow choices cover the
-    # complete resumed task, because one-action scope there immediately
-    # re-entered the same gate on the next round. Callers with no resumable
-    # chat still get SINGLE_ACTION, which leaves the gate armed behind the
-    # sealed action.
+    # The seam consumed by agent_loop. Single-action approval executes only
+    # the sealed call and deliberately re-arms the gate for later actions.
     allow_remaining_actions: bool = True
     _claimed: bool = field(default=False, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -473,9 +480,9 @@ class ToolApprovalStore:
         ``allow_continuation`` is the caller's assertion that it owns a
         resumable conversation the granted scope can apply to. Callers without
         one (the skill tester, unattended audits) pass ``False`` and get the
-        original one-use grant, so a button labelled "Allow once" cannot widen
-        into a run-long bypass just because the chat card reuses the same wire
-        value.
+        original one-use grant. Chat users can now choose that same one-use
+        scope explicitly; the separate task/chat decisions still permit a
+        broader continuation when deliberately selected.
         """
         now = time.time()
         with self._lock:
@@ -511,7 +518,7 @@ class ToolApprovalStore:
         return ExactToolApproval(
             pending,
             scope=scope,
-            allow_remaining_actions=True,
+            allow_remaining_actions=scope is not ToolApprovalScope.SINGLE_ACTION,
         )
 
     def peek(self, approval_id: Any) -> PendingToolApproval | None:
