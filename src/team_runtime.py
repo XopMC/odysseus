@@ -1482,6 +1482,7 @@ class TeamRuntime:
             if kind == 'planner':
                 pool = task['metadata']['participants'] or [task['metadata']['leader']]
                 proposals = result['plan']['tasks']
+                pure_arithmetic = _arithmetic_goal_value(str(task['metadata'].get('goal') or ''))
                 identifiers = [uuid.uuid5(uuid.NAMESPACE_URL, team_id + ':plan:' + worker['id'] + ':' + str(i)).hex for i in range(len(proposals))]
                 existing = {w['id'] for w in workers}
                 # Validate the entire plan before creating any of its nodes.
@@ -1493,6 +1494,14 @@ class TeamRuntime:
                         raise ValueError('Planner chose an unavailable participant')
                     if any(type(d) is not int or d < 0 or d >= index for d in proposal.get('depends_on', [])):
                         raise ValueError('Planner returned invalid dependencies')
+                    if pure_arithmetic is not None:
+                        wording = str(proposal.get('name') or '') + ' ' + str(proposal.get('objective') or '')
+                        if re.search(r'\b(?:write|edit|modify|create\s+file|run|execute|python|bash|shell|fetch|download|upload)\b',
+                                     wording, flags=re.IGNORECASE):
+                            raise ValueError('A tool-free arithmetic goal cannot assign host actions')
+                        if (_arithmetic_value(wording) is None
+                                and not re.search(r'\b(?:sum|verify|final|answer|result)\b', wording, re.IGNORECASE)):
+                            raise ValueError('Arithmetic plan step has no verifiable expression or final result')
                 for index, proposal in enumerate(proposals):
                     member = proposal['participant']
                     deps = proposal.get('depends_on', [])
@@ -1500,6 +1509,13 @@ class TeamRuntime:
                         raise ValueError('Planner returned invalid dependencies')
                     if identifiers[index] not in existing:
                         content = {key: proposal[key] for key in ('name', 'objective', 'acceptance', 'write_scope') if key in proposal}
+                        if pure_arithmetic is not None:
+                            # Model-proposed write scopes and file-based checks
+                            # cannot expand an explicitly tool-free owner goal.
+                            value = _arithmetic_value(str(content.get('name') or '') + ' ' + str(content.get('objective') or ''))
+                            content['acceptance'] = "The result must be exactly '" + str(
+                                value if value is not None else pure_arithmetic) + "'."
+                            content['write_scope'] = []
                         self.add_worker(owner, team_id, {**pool[member], **content, 'id': identifiers[index]},
                                         depends_on=[identifiers[d] for d in deps], coordinator_token=token)
                 self.store.accept_worker(owner, team_id, worker['id'], coordinator_token=token)

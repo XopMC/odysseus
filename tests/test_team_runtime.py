@@ -337,6 +337,29 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.coordinate('owner', self.task['id'])
         self.assertEqual(self.store.get_task('owner', self.task['id'])['status'], 'blocked')
 
+    async def test_pure_arithmetic_planner_cannot_create_host_file_work(self):
+        self.store.update_task_metadata('owner', self.task['id'], {
+            'goal': 'QA arithmetic: compute twelve times eleven. Reasoning only; do not use tools.'})
+        planner = self.worker(kind='planner', role='lead')
+        claim = self.store.claim_worker('owner', self.task['id'], worker_id=planner['id'])
+        plan = {'tasks': [
+            {'name': 'Compute 12 × 10', 'objective': 'Calculate 12 × 10',
+             'acceptance': 'Write 120 to intermediate.txt', 'participant': 0,
+             'depends_on': [], 'write_scope': ['intermediate.txt']},
+            {'name': 'Verify final result', 'objective': 'Confirm the answer is 132',
+             'acceptance': 'The value in result.txt is exactly 132', 'participant': 0,
+             'depends_on': [0], 'write_scope': ['result.txt']},
+        ]}
+        self.store.finish_worker('owner', self.task['id'], planner['id'], claim['lease_token'],
+                                 {'plan': plan, 'completed': True})
+        await self.runtime.coordinate('owner', self.task['id'])
+        workers = [w for w in self.store.list_workers('owner', self.task['id'])
+                   if w['profile'].get('kind') == 'worker']
+        self.assertEqual(len(workers), 2)
+        self.assertEqual([w['profile']['write_scope'] for w in workers], [[], []])
+        self.assertEqual({w['profile']['acceptance'] for w in workers},
+                         {"The result must be exactly '120'.", "The result must be exactly '132'."})
+
     def test_planner_multistep_arithmetic_uses_server_checked_goal(self):
         goal = ('QA arithmetic: compute twelve times eleven. Success criterion: final result 132. '
                 'Reasoning only; do not use host commands, files, network, or tools.')
