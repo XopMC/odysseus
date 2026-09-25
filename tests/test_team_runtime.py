@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.team_runtime import TeamRuntime, _exact_read_only_acceptance, _exact_acceptance_target
+from src.team_runtime import TeamRuntime, _exact_read_only_acceptance, _exact_acceptance_target, _required_python_output
 from src.team_store import TeamStore, NotFound, Conflict
 
 
@@ -605,6 +605,67 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(Exception, 'Required Python execution'):
             await self.runtime.accept_result('owner', self.task['id'], worker['id'])
+
+    def test_explicit_python_stdout_target_is_not_a_prose_shortcut(self):
+        profile = {'kind': 'worker', 'objective': 'Call python with print(6 * 7)',
+                   'acceptance': 'A durable python intent has status done, output 42 and exit_code 0.',
+                   'write_scope': ['.']}
+        self.assertEqual(_required_python_output(profile), '42')
+        self.assertIsNone(_exact_acceptance_target(profile))
+
+    async def test_reviewer_receives_durable_python_evidence_without_file_search(self):
+        target = self.worker(
+            objective='Execute exactly python3 -c "print(6 * 7)".',
+            acceptance='Dedicated python intent returns 42 with exit_code 0.',
+            write_scope=['.'],
+        )
+        claim = self.store.claim_worker('owner', self.task['id'], worker_id=target['id'])
+        intent = self.store.record_tool_intent('owner', self.task['id'], target['id'], claim['lease_token'],
+                                                'python', {'code': 'print(6 * 7)'},
+                                                effectful=True, idempotency_key='python-42')
+        self.store.record_tool_result('owner', self.task['id'], intent['id'], claim['lease_token'],
+                                      {'exit_code': 0, 'output': '42\n'})
+        self.store.finish_worker('owner', self.task['id'], target['id'], claim['lease_token'],
+                                 {'summary': '42', 'completed': True})
+        target = self.store.get_worker('owner', self.task['id'], target['id'])
+        reviewer = self.worker(
+            role='reviewer', kind='verification', target_worker=target['id'],
+            target_attempt=target['attempt_id'], objective='Verify the target result.',
+            acceptance='Dedicated python intent returns 42 with exit_code 0.',
+        )
+        self.responses = [answer(json.dumps({'verdict': 'pass', 'reason': 'Verified from Team ledger'}))]
+
+        result = await self.execute(reviewer)
+
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['review']['verdict'], 'pass')
+        prompt = str(self.messages[0][0]['content'])
+        evidence = str(self.messages[0][2]['content'])
+        self.assertIn('Team database, not project files', prompt)
+        self.assertIn('UNTRUSTED SOURCE DATA', evidence)
+        self.assertIn('print(6 * 7)', evidence)
+        self.assertIn('42\\n', evidence)
+        self.assertFalse(self.host_calls)
+
+    async def test_non_python_reviewer_still_needs_independent_tool_read(self):
+        target = self.worker(objective='Inspect example', acceptance='Show file evidence')
+        claim = self.store.claim_worker('owner', self.task['id'], worker_id=target['id'])
+        intent = self.store.record_tool_intent('owner', self.task['id'], target['id'], claim['lease_token'],
+                                                'read_file', {'path': '/project/example.py'},
+                                                effectful=False, idempotency_key='read-example')
+        self.store.record_tool_result('owner', self.task['id'], intent['id'], claim['lease_token'],
+                                      {'output': 'example', 'exit_code': 0})
+        self.store.finish_worker('owner', self.task['id'], target['id'], claim['lease_token'],
+                                 {'summary': 'example', 'completed': True})
+        target = self.store.get_worker('owner', self.task['id'], target['id'])
+        reviewer = self.worker(role='reviewer', kind='verification', target_worker=target['id'],
+                               target_attempt=target['attempt_id'], objective='Verify file result')
+        self.responses = [answer(json.dumps({'verdict': 'pass', 'reason': 'Claimed'}))]
+
+        result = await self.execute(reviewer)
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('Reviewer supplied no independently inspected evidence', result['result']['error'])
 
     async def test_python_tool_output_must_match_exact_acceptance(self):
         self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Compute 6 * 7 using Python'})
