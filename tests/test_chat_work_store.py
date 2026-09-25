@@ -11,6 +11,7 @@ from src import agent_runs
 from src.agent_tools import ToolBlock
 from src.chat_work_store import ChatWorkStore, WorkConflict, WorkNotFound
 from src.chat_work_store import checklist_steps
+from src.agent_tools.interaction_tools import UpdatePlanTool
 import src.agent_loop as agent_loop
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 
@@ -94,6 +95,37 @@ def test_paused_goal_cannot_be_completed_by_an_ordinary_agent_run(owned_chat):
     completed = work.complete_goal("alice", owned_chat, "Result 49", ["Python stdout was 49"])
     assert resumed["status"] == "active"
     assert completed["status"] == "completed"
+
+
+def test_legacy_update_plan_starts_active_goal_plan_and_completion_waits_for_steps(owned_chat):
+    work = ChatWorkStore()
+    work.ensure_goal("alice", owned_chat, "Calculate and verify 13 × 17 using two plan steps")
+    _name, result = asyncio.run(UpdatePlanTool().execute(
+        json.dumps({"plan": "- [ ] Calculate 13 × 17\n- [ ] Verify 221"}),
+        {"owner": "alice", "session_id": owned_chat},
+    ))
+    assert result["exit_code"] == 0
+    plan = result["plan_update"]
+    assert plan["status"] == "executing"
+    assert [step["status"] for step in plan["steps"]] == ["in_progress", "pending"]
+    with pytest.raises(WorkConflict, match="required steps"):
+        work.complete_goal("alice", owned_chat, "221", ["calculation checked"])
+    for step in plan["steps"]:
+        plan = work.update_plan_step(
+            "alice", owned_chat, step["id"], "done",
+            summary="Verified arithmetic", expected_revision=plan["revision"],
+        )
+    assert plan["status"] == "done"
+    assert work.complete_goal("alice", owned_chat, "221", ["13 × 17 = 221"])["status"] == "completed"
+
+
+def test_legacy_update_plan_without_active_goal_stays_draft(owned_chat):
+    _name, result = asyncio.run(UpdatePlanTool().execute(
+        json.dumps({"plan": "- [ ] Review first"}),
+        {"owner": "alice", "session_id": owned_chat},
+    ))
+    assert result["exit_code"] == 0
+    assert result["plan_update"]["status"] == "draft"
 
 
 def test_repeated_monologue_requires_review_without_fake_question_or_user_pause(owned_chat):

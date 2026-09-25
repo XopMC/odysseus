@@ -131,10 +131,12 @@ class UpdatePlanTool:
                     expected_revision=(current or {}).get("revision", 0),
                     replace_terminal=bool(ctx.get("plan_recovery")) if isinstance(ctx, dict) else False,
                 )
+                goal = store.get(owner, session_id).get("goal")
+                if goal and goal.get("status") == "active" and saved.get("status") == "draft":
+                    saved = store.plan_action(owner, session_id, "execute", saved["revision"])
                 # ``save_plan`` preserves an already executing/done status and
-                # reconciles the existing step IDs. Calling plan_action here
-                # would try to execute an already executing plan and turn a
-                # valid progress update into a conflict.
+                # reconciles existing step IDs. Only a fresh Goal draft starts
+                # here; starting an executing plan again would be a conflict.
                 plan_update = saved
             except Exception as exc:
                 return "update_plan: failed", {"error": str(exc), "exit_code": 1}
