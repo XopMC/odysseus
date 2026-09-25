@@ -1126,6 +1126,7 @@ def _agent_route_tool_mode(
         "llama-3.3", "llama-4", "llama3.1", "llama3.2", "llama3.3", "llama4",
         "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
         "glm-4", "internlm", "hermes", "deepseek-v", "deepseek-chat",
+        "kat-coder-v2.5",
     ))
     model_no_tools = any(kw in model_lc for kw in (
         "deepseek-r1",

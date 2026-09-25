@@ -18,6 +18,31 @@ from src.agent_loop import (
 from src.llm_core import _is_ollama_native_url
 
 
+def test_kat_coder_v25_uses_verified_native_lm_studio_tool_transport(monkeypatch):
+    """KAT v2.5 emits OpenAI tool_calls; never force its fragile text adapter."""
+    from core import database
+
+    class Query:
+        def filter(self, *args):
+            return self
+
+        def all(self):
+            return []
+
+    class Db:
+        def query(self, *args):
+            return Query()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(database, "SessionLocal", lambda: Db())
+    assert _agent_route_tool_mode(
+        "http://192.168.50.4:1234/v1/chat/completions",
+        "kat-coder-v2.5-dev-35b-a3b-mtp-abliterated-i1",
+    ) == (True, False, False)
+
+
 def _compute_is_api_model(model: str, endpoint_url: str, endpoint_supports=None) -> bool:
     """Replicate the heuristic from stream_agent_loop without side effects."""
     model_lc = model.lower()
@@ -28,7 +53,7 @@ def _compute_is_api_model(model: str, endpoint_url: str, endpoint_supports=None)
         "llama-3.3", "llama-4", "llama3.1", "llama3.2", "llama3.3", "llama4",
         "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
         "glm-4", "internlm", "hermes",
-        "deepseek-v", "deepseek-chat",
+        "deepseek-v", "deepseek-chat", "kat-coder-v2.5",
     ))
     model_no_tools = any(kw in model_lc for kw in (
         "deepseek-r1",
