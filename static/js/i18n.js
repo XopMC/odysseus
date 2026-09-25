@@ -126,7 +126,7 @@ const RU = Object.freeze({
   'Do not retry this tool action? This does not verify whether it already happened.':'Не повторять это действие? Это не подтверждает, выполнилось ли оно ранее.',
   'Do not retry this action even though it was verified as not applied?':'Не повторять действие, хотя проверено, что оно не применено?',
   'Revoke the one-shot retry authorization? No action will run.':'Отозвать одноразовое разрешение на повтор? Действие не будет запущено.',
-  'Effect marked no-retry. Goal was not resumed automatically.':'Повтор действия запрещён. Цель не была возобновлена автоматически.',
+  'Effect marked no-retry. No action was replayed.':'Повтор действия запрещён. Действие не выполнялось повторно.',
   'Action: answer':'К вопросу', 'Action: resume_goal':'Продолжить цель',
   'Action: reconnect':'Переподключиться', 'Action: inspect':'К последнему событию',
   'Action: inspect_effect':'Проверить неопределённое действие',

@@ -55,6 +55,9 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert 'chat_work_store.goal_action(\n                        owner, session, "resume"' in routes
     assert 'if _status == "error" and not goal_failure_recorded_in_stream:' in routes
     assert "goal.checkpoint?._wait_reason === 'provider_failure'" in work
+    assert "toast('Effect marked no-retry. No action was replayed.')" in work
+    assert "Goal was not resumed automatically" not in work
+    assert "'Effect marked no-retry. No action was replayed.':'Повтор действия запрещён. Действие не выполнялось повторно.'" in (root / 'static/js/i18n.js').read_text()
     assert "window.chatWork?.handleEvent?.({ type: 'goal_update', data: result.goal })" in chat
     assert "if (stopServer) {\n      window.chatWork?.pauseActiveGoal?.();" not in chat
     work_routes = (root / "routes" / "chat_work_routes.py").read_text()

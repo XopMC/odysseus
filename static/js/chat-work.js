@@ -624,7 +624,7 @@ async function chooseNoRetry(effect) {
       expected_revision: effect.revision,
     });
     if (targetSession !== sessionId) return;
-    toast('Effect marked no-retry. Goal was not resumed automatically.');
+    toast('Effect marked no-retry. No action was replayed.');
     await refreshEffects(targetSession);
     await refreshWait(targetSession);
   } catch (error) {
