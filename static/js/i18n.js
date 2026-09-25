@@ -387,6 +387,7 @@ const RU = Object.freeze({
   'Context settings':'Настройки контекста',
   'Working checkpoint':'Рабочий checkpoint', 'Effective trigger':'Эффективный порог',
   'Last backend request':'Последний запрос backend',
+  'Session peak (audit)':'Пик сессии (аудит)',
   'Threshold basis':'База порога', 'Usable input budget':'Доступный входной бюджет',
   'Model window':'Окно модели', 'Nothing old enough to compact':'Нет достаточно старых сообщений для сжатия',
   'Thinking saved — open to load':'Размышления сохранены — откройте для загрузки',

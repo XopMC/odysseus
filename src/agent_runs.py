@@ -132,7 +132,7 @@ def reasoning_artifact(session_id: str, run_id: str, round_number: int) -> Optio
 class _Run:
     __slots__ = (
         "buffer", "subscribers", "status", "task", "evict_task", "run_id",
-        "context_usage", "started_at", "round", "segment", "tool_counter",
+        "context_usage", "latest_context_observation", "started_at", "round", "segment", "tool_counter",
         "active_tool_call_id", "on_terminal", "context_revision", "terminal_status",
         "owner", "session_id", "continuation", "durable_seq", "ledger_hash", "terminal_at",
         "compaction_pending", "terminal_reason", "rendered_rounds", "message_saved",
@@ -151,6 +151,9 @@ class _Run:
         # The browser uses it to make local cost accounting replay-idempotent.
         self.run_id: str = uuid.uuid4().hex
         self.context_usage: Optional[dict] = None
+        # Exact latest request observation, separate from the session's
+        # no-compaction high-water ledger used for Stop/recovery auditing.
+        self.latest_context_observation: Optional[dict] = None
         self.started_at: float = time.time()
         self.round: int = 0
         self.segment: int = 0
@@ -238,8 +241,13 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
                         continue
                     if value.get("model") != accepted_context.get("model"):
                         continue
+                    if value.get("context_length") != accepted_context.get("context_length"):
+                        continue
                     if value.get("endpoint_key") and accepted_context.get("endpoint_key") \
                             and value.get("endpoint_key") != accepted_context.get("endpoint_key"):
+                        continue
+                    if value.get("route_revision") and accepted_context.get("route_revision") \
+                            and value.get("route_revision") != accepted_context.get("route_revision"):
                         continue
                     prior_contexts.append(value)
                 if prior_contexts:
@@ -284,6 +292,8 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
             row.ledger_hash = run.ledger_hash
             row.context_snapshot = dict(run.context_usage) if run.context_usage else None
             continuation = dict(run.continuation or {})
+            if run.latest_context_observation:
+                continuation["latest_context_observation"] = dict(run.latest_context_observation)
             health = run.progress.snapshot(effective_status)
             continuation["progress_health"] = health
             continuation["health_metrics"] = run.health_metrics.snapshot()
@@ -426,6 +436,16 @@ def _publish(run: _Run, ev: str) -> None:
             event_type = "context_usage"
             snapshot = normalize_context_usage(payload.get("data"))
             if snapshot is not None:
+                run.latest_context_observation = {
+                    key: snapshot[key] for key in (
+                        "used_tokens", "context_length", "model", "source",
+                        "prompt_tokens", "round", "compactions", "endpoint_key",
+                    ) if key in snapshot
+                }
+                run.latest_context_observation.update(
+                    run_id=run.run_id, seq=seq, started_at=run.started_at,
+                    recorded_at=time.time(),
+                )
                 previous = run.context_usage
                 previous_compactions = int((previous or {}).get("compactions", 0) or 0)
                 current_compactions = int(snapshot.get("compactions", 0) or 0)
@@ -1383,6 +1403,36 @@ def get_context_usage(session_id: str, *, include_terminal: bool = False) -> Opt
         except Exception:
             logger.debug("[agent-run] durable context lookup failed", exc_info=True)
     return run_context
+
+
+def get_latest_context_observation(session_id: str) -> Optional[dict]:
+    """Return the latest measured request, not the historical peak.
+
+    A pause without another model request leaves this unchanged. A later
+    request may legitimately use fewer schema/system tokens without having
+    compacted or lost any conversation messages.
+    """
+    run = _RUNS.get(session_id)
+    if run is not None and run.latest_context_observation:
+        return dict(run.latest_context_observation)
+    try:
+        from core.database import ChatRunState, SessionLocal
+        with SessionLocal() as db:
+            row = db.query(ChatRunState).filter(
+                ChatRunState.session_id == session_id,
+            ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).first()
+            value = (row.continuation or {}).get("latest_context_observation") if row else None
+            if not isinstance(value, dict):
+                return None
+            if (type(value.get("used_tokens")) is not int or value["used_tokens"] < 0
+                    or type(value.get("context_length")) is not int or value["context_length"] <= 0
+                    or value.get("source") not in {"backend", "estimated"}
+                    or not isinstance(value.get("model"), str)):
+                return None
+            return dict(value)
+    except Exception:
+        logger.debug("[agent-run] latest context observation unavailable", exc_info=True)
+        return None
 
 
 def continuation_for_session(session_id: str) -> dict:

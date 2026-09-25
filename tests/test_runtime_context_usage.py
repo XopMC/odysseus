@@ -87,6 +87,49 @@ def test_context_ledger_rejects_lower_measurement_without_compaction(monkeypatch
     assert current["context_reason"] == "compaction"
 
 
+def test_current_request_observation_is_separate_from_session_peak(monkeypatch):
+    run = agent_runs._Run()
+    monkeypatch.setattr(agent_runs, "_RUNS", {"chat": run})
+    _publish(run, _snapshot(used_tokens=34823))
+    _publish(run, _snapshot(used_tokens=14495, source="estimated"))
+    _publish(run, _snapshot(used_tokens=13360, prompt_tokens=13281, source="backend"))
+    assert agent_runs.get_context_usage("chat")["used_tokens"] == 34823
+    observed = agent_runs.get_latest_context_observation("chat")
+    assert observed["used_tokens"] == 13360
+    assert observed["source"] == "backend"
+    assert observed["run_id"] == run.run_id
+    # A Stop/Pause without another model request cannot change the observed
+    # occupancy. Only a new measurement or explicit compaction can do that.
+    run.status = "stopped"
+    assert agent_runs.get_latest_context_observation("chat")["used_tokens"] == 13360
+
+
+def test_latest_request_observation_survives_in_memory_eviction(monkeypatch):
+    import core.database as database
+    observation = {
+        "used_tokens": 13360, "context_length": 262144, "model": "mac-qwen",
+        "source": "backend", "run_id": "current", "seq": 60,
+    }
+    saved = SimpleNamespace(continuation={"latest_context_observation": observation})
+
+    class Query:
+        def filter(self, *_args, **_kwargs): return self
+        def order_by(self, *_args, **_kwargs): return self
+        def first(self): return saved
+
+    class Db:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def query(self, *_args, **_kwargs): return Query()
+
+    monkeypatch.setattr(database, "SessionLocal", lambda: Db())
+    monkeypatch.setattr(agent_runs, "_RUNS", {})
+    result = agent_runs.get_latest_context_observation("chat")
+    assert result == observation
+    result["used_tokens"] = 1
+    assert agent_runs.get_latest_context_observation("chat")["used_tokens"] == 13360
+
+
 def test_context_window_change_is_new_measurement_route_not_stale_highwater(monkeypatch):
     run = agent_runs._Run()
     monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})
@@ -220,6 +263,43 @@ def test_session_high_water_survives_lower_measurement_on_new_run(monkeypatch):
     assert run.context_usage["compactions"] == 8
 
 
+def test_new_serving_window_does_not_inherit_prior_peak(monkeypatch):
+    import core.database as database
+    prior = SimpleNamespace(
+        run_id="prior", context_snapshot=_snapshot(
+            used_tokens=100000, context_length=262144, compactions=8,
+        ),
+    )
+    current = SimpleNamespace(
+        run_id="current", context_snapshot=None, continuation=None,
+        status="running", last_seq=-1, durable_seq=-1, context_revision=0,
+        ledger_hash=None, terminal_at=None,
+    )
+
+    class Query:
+        def filter(self, *_args, **_kwargs): return self
+        def all(self): return [prior]
+        def first(self): return current
+
+    class Db:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def get_bind(self): return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+        def query(self, *_args, **_kwargs): return Query()
+
+    class Factory:
+        def begin(self): return Db()
+
+    monkeypatch.setattr(database, "SessionLocal", Factory())
+    run = agent_runs._Run()
+    run.run_id = "current"
+    run.session_id = "same-session"
+    run.context_usage = _snapshot(used_tokens=40000, context_length=131840, compactions=1)
+    agent_runs._persist_run_state(run, status="stopped", durable=True)
+    assert run.context_usage["used_tokens"] == 40000
+    assert run.context_usage["context_length"] == 131840
+
+
 def test_context_read_uses_session_high_water_when_latest_run_counter_reset(monkeypatch):
     import core.database as database
     from types import SimpleNamespace
@@ -329,6 +409,20 @@ def test_route_prefers_live_request_over_short_persisted_history(monkeypatch):
     assert data["stored_chat_tokens"] == 1627
     assert data["messages"] == 2
     assert data["can_compact"] is False
+
+
+def test_context_header_reports_latest_request_and_auditable_peak(monkeypatch):
+    run = agent_runs._Run()
+    _publish(run, _snapshot(used_tokens=34823, source="estimated"))
+    _publish(run, _snapshot(used_tokens=14495, source="estimated"))
+    _publish(run, _snapshot(used_tokens=13360, prompt_tokens=13281, source="backend"))
+    data = _client(monkeypatch, _history(), run).get("/api/session/chat/context").json()
+    assert data["used_tokens"] == 13360
+    assert data["context_percent"] == round(13360 / 262144 * 100, 1)
+    assert data["high_water_used_tokens"] == 34823
+    assert data["high_water_context_percent"] == round(34823 / 262144 * 100, 1)
+    assert data["last_request_run_id"] == run.run_id
+    assert data["source"] == "backend"
 
 
 def test_completed_snapshot_is_explicitly_last_request(monkeypatch):

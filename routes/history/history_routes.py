@@ -1140,7 +1140,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         _verify_session_owner(request, session_id)
         try:
             from src.model_context import estimate_tokens, get_context_length
-            from src.agent_runs import get_context_usage, is_active
+            from src.agent_runs import get_context_usage, get_latest_context_observation, is_active
             from src.agent_context import context_endpoint_key
 
             active = is_active(session_id)
@@ -1225,12 +1225,21 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 status = "working_checkpoint"
             elif snapshot is None and checkpoint is not None:
                 status = "working_checkpoint"
-            used = snapshot["used_tokens"] if snapshot else working_used
+            observation = get_latest_context_observation(session_id) if snapshot else None
+            if observation and (
+                observation.get("model") != session.model
+                or (observation.get("endpoint_key") and observation["endpoint_key"] != context_endpoint_key(session.endpoint_url))
+            ):
+                observation = None
+            used = observation["used_tokens"] if observation else snapshot["used_tokens"] if snapshot else working_used
             # A completed request's window is historical. The selected local
             # model may have been reloaded with a different serving window,
             # even while retaining the same model id.
             current_window = int(get_context_length(session.endpoint_url, session.model) or 0)
-            ctx_len = snapshot["context_length"] if active and snapshot else current_window
+            ctx_len = observation["context_length"] if active and observation else (
+                snapshot["context_length"] if active and snapshot else
+                current_window or (observation or snapshot or {}).get("context_length", 0)
+            )
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
             pct = max(0.0, min(100.0, pct))
             visible_messages = visible_from_db if lightweight else sum(
@@ -1341,12 +1350,18 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "used_tokens": used,
                 "context_length": ctx_len,
                 "context_percent": pct,
-                "source": snapshot["source"] if snapshot else "estimated",
+                "source": observation["source"] if observation else snapshot["source"] if snapshot else "estimated",
                 "context_status": status,
+                "last_request_run_id": observation.get("run_id") if observation else None,
+                "last_request_seq": observation.get("seq") if observation else None,
+                "last_request_started_at": observation.get("started_at") if observation else None,
+                "high_water_used_tokens": snapshot.get("used_tokens") if snapshot and observation else None,
+                "high_water_context_percent": round(100 * snapshot["used_tokens"] / ctx_len, 1)
+                    if snapshot and observation and ctx_len else None,
                 "active_run": active,
                 "stored_chat_tokens": stored_used,
-                "prompt_tokens": snapshot.get("prompt_tokens") if snapshot else None,
-                "round": snapshot.get("round") if snapshot else None,
+                "prompt_tokens": observation.get("prompt_tokens") if observation else snapshot.get("prompt_tokens") if snapshot else None,
+                "round": observation.get("round") if observation else snapshot.get("round") if snapshot else None,
                 "compactions": snapshot.get("compactions", 0) if snapshot else int(
                     checkpoint_meta.get("context_generation")
                     or (int((backend_snapshot or {}).get("compactions", 0) or 0) + (1 if checkpoint_is_newer else 0))

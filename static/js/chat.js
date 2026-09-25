@@ -257,6 +257,10 @@ function appendStreamErrorGuidance(container, error) {
     if (d.context_status !== 'stored_chat' && d.stored_chat_tokens != null) {
       rows.push(['Stored chat (est.)', _fmtContextNumber(d.stored_chat_tokens)]);
     }
+    if (Number.isInteger(d.high_water_used_tokens)
+        && d.high_water_used_tokens > Number(d.used_tokens || 0)) {
+      rows.push(['Session peak (audit)', `${_fmtContextNumber(d.high_water_used_tokens)} · ${Number(d.high_water_context_percent || 0).toFixed(1)}%`]);
+    }
     if (d.context_status === 'working_checkpoint' && d.backend_measurement?.context_percent != null) {
       rows.push(['Last backend request', `${Number(d.backend_measurement.context_percent).toFixed(1)}%`]);
     }
@@ -460,13 +464,24 @@ function appendStreamErrorGuidance(container, error) {
       }
       if (replayMeta.stale === true) data = { ...(data || {}), stale: true };
     }
-    if (!data || data.stale === true
+    const observedRunId = typeof replayMeta?.run_id === 'string' ? replayMeta.run_id : '';
+    const observedSeq = Number(replayMeta?.seq);
+    const observedStartedAt = Number(replayMeta?.started_at);
+    const orderedObservation = !!observedRunId && Number.isInteger(observedSeq) && observedSeq >= 0
+      && Number.isFinite(observedStartedAt) && observedStartedAt > 0;
+    if (!data || (data.stale === true && !orderedObservation)
         || !Number.isInteger(data.used_tokens) || data.used_tokens < 0
         || !Number.isInteger(data.context_length) || data.context_length <= 0
         || !['backend', 'estimated'].includes(data.source) || !data.model) return false;
     const selected = sm.getSessions && sm.getSessions().find(s => s.id === sessionId);
     if (selected && selected.model && selected.model !== data.model) return false;
     const previous = _contextHeaderData && _contextHeaderData.session_id === sessionId ? _contextHeaderData : {};
+    if (orderedObservation) {
+      const previousStartedAt = Number(previous.last_request_started_at || 0);
+      if (previousStartedAt > observedStartedAt) return false;
+      if (previous.last_request_run_id === observedRunId
+          && Number(previous.last_request_seq ?? -1) >= observedSeq) return false;
+    }
     const sameRoute = previous.model === data.model
       && Number(previous.context_length) === Number(data.context_length)
       && (!previous.route_revision || !data.route_revision || previous.route_revision === data.route_revision)
@@ -479,9 +494,9 @@ function appendStreamErrorGuidance(container, error) {
     // ledger). Reject only an older revision: an equal-revision measurement
     // with a larger used_tokens value is still useful live progress and must
     // not leave the header frozen at its first value.
-    if (sameRoute && incomingRevision > 0 && previousRevision > 0 && incomingRevision < previousRevision
+    if (!orderedObservation && sameRoute && incomingRevision > 0 && previousRevision > 0 && incomingRevision < previousRevision
         && Number(data.compactions || 0) <= Number(previous.compactions || 0)) return false;
-    if (sameRoute && Number(previous.compactions || 0) === Number(data.compactions || 0)
+    if (!orderedObservation && sameRoute && Number(previous.compactions || 0) === Number(data.compactions || 0)
         && Number(previous.used_tokens || 0) > Number(data.used_tokens || 0)) return false;
     if (data.endpoint_key !== undefined) {
       if (typeof data.endpoint_key !== 'string' || !/^[a-f0-9]{64}$/.test(data.endpoint_key)) return false;
@@ -502,6 +517,12 @@ function appendStreamErrorGuidance(container, error) {
     _bindContextHeaderPill();
     _applyContextHeaderData({
       messages: selected && selected.message_count, ...previous, ...data, session_id: sessionId,
+      ...(orderedObservation ? {
+        last_request_run_id: observedRunId,
+        last_request_seq: observedSeq,
+        last_request_started_at: observedStartedAt,
+        high_water_used_tokens: Math.max(Number(previous.high_water_used_tokens || 0), Number(previous.used_tokens || 0), data.used_tokens),
+      } : {}),
       context_percent: Math.min(100, Math.round(data.used_tokens / data.context_length * 1000) / 10),
       context_status: 'active_request', active_run: true, can_compact: false,
     });

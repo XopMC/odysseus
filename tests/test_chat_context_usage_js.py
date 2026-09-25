@@ -79,6 +79,18 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
         context_length:262144,context_percent:31.3,source:'backend',context_status:'active_request'})});
       await mod.namespace.refreshChatContextHeader('pin-endpoint');
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64)},'chat-a'),true);
+      assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:40000},'chat-a',
+        {run_id:'new-run',seq:2,started_at:200,stale:true}),true,
+        'an ordered current request must be visible even below the audit peak');
+      assert.match(pill.title,/40,000 \/ 262,144/);
+      assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:82000},'chat-a',
+        {run_id:'old-run',seq:99,started_at:100}),false,'older replay cannot restore the peak');
+      assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:39000},'chat-a',
+        {run_id:'new-run',seq:1,started_at:200}),false,'duplicate/out-of-order replay cannot lower it');
+      assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:39000},'chat-a',
+        {run_id:'new-run',seq:3,started_at:200,stale:true}),true,
+        'a later backend correction can refine the same request');
+      assert.match(pill.title,/39,000 \/ 262,144/);
       const endpointTitle=pill.title;
       assert.equal(apply({...snapshot,endpoint_key:'b'.repeat(64),used_tokens:1},'chat-a'),false);
       assert.equal(apply({...snapshot,endpoint_key:'malformed'},'chat-a'),false);
