@@ -3716,6 +3716,8 @@ def _safe_model_failure_message(category: Optional[str]) -> Optional[str]:
     """Map a machine category to an allowlisted, server-authored explanation."""
     if category == "degenerate_output":
         return "Output repetition guard stopped generation. Try a different model or lower temperature."
+    if category == "empty_output":
+        return "The model returned no usable output. Try again or select another model."
     return None
 
 
@@ -4125,7 +4127,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         if retried:
             continue
         if not is_last and fallback_on_empty:
-            last_error = f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502})}\n\n'
+            last_error = f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502, "error_category": "empty_output"})}\n\n'
             failures.append({
                 "candidate_index": i,
                 "model": model,
@@ -4136,7 +4138,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
             logger.warning(f"[fallback] {tag} {model} returned no substantive output; trying next")
             continue
         if not is_last:
-            yield f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502, "error_category": "empty_output"})}\n\n'
             return
-        yield f'event: error\ndata: {json.dumps({"error": "All model candidates returned no substantive output", "status": 502})}\n\n'
+        yield f'event: error\ndata: {json.dumps({"error": "All model candidates returned no substantive output", "status": 502, "error_category": "empty_output"})}\n\n'
         return

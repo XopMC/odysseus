@@ -53,7 +53,7 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert 'nonlocal active_goal' in routes
     assert 'active_goal.get("status") == "waiting_user"' in routes
     assert 'chat_work_store.goal_action(\n                        owner, session, "resume"' in routes
-    assert 'if _status == "error":' in routes
+    assert 'if _status == "error" and not goal_failure_recorded_in_stream:' in routes
     assert "window.chatWork?.handleEvent?.({ type: 'goal_update', data: result.goal })" in chat
     assert "if (stopServer) {\n      window.chatWork?.pauseActiveGoal?.();" not in chat
     work_routes = (root / "routes" / "chat_work_routes.py").read_text()

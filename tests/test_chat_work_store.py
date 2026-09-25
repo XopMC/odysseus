@@ -385,6 +385,22 @@ def test_goal_model_failures_retry_then_wait_for_user(owned_chat):
     assert goal["status"] == "waiting_user"
 
 
+def test_goal_prose_checkpoint_does_not_reset_provider_failure_budget(owned_chat):
+    work = ChatWorkStore()
+    work.ensure_goal("alice", owned_chat, "Finish despite model failures")
+    for expected in (1, 2):
+        failed = work.record_goal_failure("alice", owned_chat, "Empty model output")
+        assert failed["failure_count"] == expected
+        prose = work.update_goal(
+            "alice", owned_chat, "Model said it will continue",
+            {"response_excerpt": "I will continue"}, reset_failures=False,
+        )
+        assert prose["failure_count"] == expected
+    parked = work.record_goal_failure("alice", owned_chat, "Empty model output")
+    assert parked["failure_count"] == 3
+    assert parked["status"] == "waiting_user"
+
+
 def test_manual_goal_resume_dispatch_failure_waits_immediately(owned_chat):
     store = ChatWorkStore()
     goal = store.ensure_goal("alice", owned_chat, "Harmless verification")

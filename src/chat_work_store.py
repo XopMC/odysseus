@@ -514,7 +514,7 @@ class ChatWorkStore:
             return {"goal": _public_goal(row), "guidance": item}
 
     def update_goal(self, owner, session_id, progress, checkpoint=None, *,
-                    waiting_user=False, review_required=False,
+                    waiting_user=False, review_required=False, reset_failures=True,
                     expected_goal_id=None, expected_attempt=None):
         progress = _clean_text(progress, "goal progress", 12000)
         if checkpoint is not None and not isinstance(checkpoint, dict):
@@ -581,7 +581,7 @@ class ChatWorkStore:
             if review_required:
                 row.lease_token = None
                 row.lease_expires_at = None
-            if not waiting_user:
+            if not waiting_user and reset_failures:
                 row.failure_count = 0
                 row.last_error = None
             row.revision += 1

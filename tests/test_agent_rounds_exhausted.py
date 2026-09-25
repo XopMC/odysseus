@@ -783,7 +783,7 @@ def test_action_observation_escalation_fences_active_goal_for_review(monkeypatch
     monkeypatch.setattr(store, "get", lambda *_: {"goal": dict(goal)})
 
     def update_goal(_owner, _session, _progress, checkpoint=None, *,
-                    waiting_user=False, review_required=False,
+                    waiting_user=False, review_required=False, reset_failures=True,
                     expected_goal_id=None, expected_attempt=None):
         assert expected_goal_id == goal["id"]
         assert expected_attempt == goal["attempt"]
@@ -814,7 +814,7 @@ def test_goal_repeated_monologue_emits_explicit_stall_not_silent_question(monkey
     goal = {"id": "goal-1", "status": "active", "revision": 1}
     monkeypatch.setattr(store, "get", lambda *_: {"goal": goal})
 
-    def update_goal(_owner, _session, _progress, checkpoint=None, *, waiting_user=False, review_required=False):
+    def update_goal(_owner, _session, _progress, checkpoint=None, *, waiting_user=False, review_required=False, reset_failures=True):
         goal["status"] = "review_required" if review_required else "waiting_user" if waiting_user else "active"
         goal["revision"] += 1
         return dict(goal)

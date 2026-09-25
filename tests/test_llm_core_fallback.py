@@ -458,6 +458,7 @@ def test_empty_final_candidate_surfaces_terminal_error(monkeypatch):
     assert len(errors) == 1
     assert "All model candidates returned no substantive output" in errors[0]
     assert '"status": 502' in errors[0]
+    assert '"error_category": "empty_output"' in errors[0]
 
 
 def test_explicit_foreground_policy_falls_back_on_availability_error(monkeypatch):

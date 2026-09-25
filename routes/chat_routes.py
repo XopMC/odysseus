@@ -1904,10 +1904,12 @@ def setup_chat_routes(
         if _effective_mode in ('agent', 'research', 'chat'):
             set_session_mode(session, _effective_mode)
 
+        goal_failure_recorded_in_stream = False
+
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
-            nonlocal active_goal
+            nonlocal active_goal, goal_failure_recorded_in_stream
             research_sources = None
             web_sources = ctx.web_sources
 
@@ -2965,6 +2967,7 @@ def setup_chat_routes(
                                                     _user, session, failure_message,
                                                     {"run_failure": terminal_metadata["failure"]},
                                                 )
+                                            goal_failure_recorded_in_stream = True
                                             yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                                         except WorkNotFound:
                                             pass
@@ -3145,7 +3148,7 @@ def setup_chat_routes(
                         or current_goal.get("id") != _origin_goal_id
                         or current_goal.get("attempt") != _origin_goal_attempt):
                     return
-                if _status == "error":
+                if _status == "error" and not goal_failure_recorded_in_stream:
                     try:
                         current_goal = chat_work_store.record_goal_failure(
                             _user, session, "Agent run failed before completion",

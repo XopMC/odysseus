@@ -2643,7 +2643,10 @@ def test_agent_terminal_first_round_error_has_no_success_completion(monkeypatch,
     assert not any("empty response" in chunk.lower() for chunk in chunks)
 
 
-def test_agent_retries_one_degeneration_without_replaying_tool_effects(monkeypatch):
+@pytest.mark.parametrize(("category", "status"), [
+    ("degenerate_output", 422), ("empty_output", 502),
+])
+def test_agent_retries_one_unusable_model_round_without_tool_effects(monkeypatch, category, status):
     calls = []
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
@@ -2658,9 +2661,10 @@ def test_agent_retries_one_degeneration_without_replaying_tool_effects(monkeypat
         calls.append((list(messages), kwargs.get("temperature")))
         if len(calls) == 1:
             yield 'data: {"delta": "I should repeat repeat repeat", "thinking": true}\n\n'
-            yield ('event: error\ndata: {"status": 422, '
-                   '"error_category": "degenerate_output", '
-                   '"fallback_eligible": false}\n\n')
+            yield ('event: error\ndata: ' + json.dumps({
+                "status": status, "error_category": category,
+                "fallback_eligible": False,
+            }) + '\n\n')
         else:
             yield 'data: {"delta": "42"}\n\n'
             yield 'data: [DONE]\n\n'
@@ -2675,7 +2679,7 @@ def test_agent_retries_one_degeneration_without_replaying_tool_effects(monkeypat
     ))
 
     assert len(calls) == 2
-    assert any("previous generation repeated" in str(item.get("content", "")).lower()
+    assert any("previous generation was unusable" in str(item.get("content", "")).lower()
                for item in calls[1][0])
     assert not any(chunk.startswith("event: error") for chunk in chunks)
     assert not any('"type": "agent_terminal"' in chunk for chunk in chunks)

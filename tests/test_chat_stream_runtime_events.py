@@ -323,19 +323,25 @@ def test_checkpoint_failure_parks_goal_on_first_failed_attempt(stream_client, mo
     assert work.goal["status"] == "waiting_user"
 
 
-def test_agent_terminal_preserves_allowlisted_repetition_reason(stream_client, monkeypatch):
+@pytest.mark.parametrize(("category", "status", "message"), [
+    ("degenerate_output", 422, "Output repetition guard stopped generation"),
+    ("empty_output", 502, "The model returned no usable output"),
+])
+def test_agent_terminal_preserves_allowlisted_model_reason(
+        stream_client, monkeypatch, category, status, message):
     client, _captured, _events_sent = stream_client
 
     async def failed_stream(*_args, **_kwargs):
         yield "data: " + json.dumps({"type": "agent_terminal", "data": {
             "failed": True,
-            "failure": {"status": 422, "category": "degenerate_output",
-                        "message": "Output repetition guard stopped generation. Try a different model or lower temperature."},
+            "failure": {"status": status, "category": category,
+                        "message": message},
             "round_texts": [], "round_reasonings": [], "tool_events": [],
         }}) + "\n\n"
-        yield ('event: error\ndata: {"status": 422, '
-               '"error_category": "degenerate_output", '
-               '"fallback_eligible": false}\n\n')
+        yield 'event: error\ndata: ' + json.dumps({
+            "status": status, "error_category": category,
+            "fallback_eligible": False,
+        }) + '\n\n'
 
     monkeypatch.setattr(chat_routes, "stream_agent_loop", failed_stream)
     response = client.post("/api/chat_stream", data={
@@ -343,8 +349,8 @@ def test_agent_terminal_preserves_allowlisted_repetition_reason(stream_client, m
     })
 
     assert response.status_code == 200
-    assert "Output repetition guard stopped generation" in response.text
-    assert "[Agent stopped: Model request failed (HTTP 422)]" not in response.text
+    assert message in response.text
+    assert f"[Agent stopped: Model request failed (HTTP {status})]" not in response.text
 
 
 def test_terminal_goal_retry_uses_shared_fenced_dispatcher(stream_client, monkeypatch):
@@ -378,6 +384,63 @@ def test_terminal_goal_retry_uses_shared_fenced_dispatcher(stream_client, monkey
     run = agent_runs._RUNS["session-1"]
     asyncio.run(run.on_terminal("done"))
     assert ("alice", "session-1", "terminal_done", "safe-goal", 1) in calls
+
+
+def test_goal_terminal_failure_is_counted_once_when_detached_run_ends(
+        stream_client, monkeypatch):
+    client, _captured, _events_sent = stream_client
+    failures = []
+    from src.chat_effect_inbox import inbox
+    from src import goal_controller
+    monkeypatch.setattr(inbox, "unknown", lambda *_args, **_kwargs: [])
+
+    async def dispatch(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(goal_controller, "dispatch_goal_continuation", dispatch)
+
+    class GoalWorkStore:
+        goal = {"id": "safe-goal", "status": "active", "revision": 1,
+                "attempt": 1, "objective": "Harmless fixture", "checkpoint": {},
+                "failure_count": 0}
+
+        def get(self, owner, session):
+            return {"plan": None, "goal": dict(self.goal), "cursor": 0}
+
+        def record_goal_failure(self, _owner, _session, error, checkpoint,
+                                **_kwargs):
+            failures.append(error)
+            self.goal = {**self.goal, "revision": self.goal["revision"] + 1,
+                         "failure_count": len(failures)}
+            return dict(self.goal)
+
+    work = GoalWorkStore()
+    monkeypatch.setattr(chat_routes, "chat_work_store", work)
+    original_start = agent_runs.start
+    callbacks = []
+
+    def detached_without_auto_callback(*args, on_terminal=None, **kwargs):
+        callbacks.append(on_terminal)
+        return original_start(*args, on_terminal=None, **kwargs)
+
+    monkeypatch.setattr(agent_runs, "start", detached_without_auto_callback)
+
+    async def failed_stream(*_args, **_kwargs):
+        yield "data: " + json.dumps({"type": "agent_terminal", "data": {
+            "failed": True, "failure": {"status": 502},
+            "round_texts": [], "round_reasonings": [], "tool_events": [],
+        }}) + "\n\n"
+        yield 'event: error\ndata: {"status": 502}\n\n'
+
+    monkeypatch.setattr(chat_routes, "stream_agent_loop", failed_stream)
+    response = client.post("/api/chat_stream", data={
+        "session": "session-1", "message": "safe", "mode": "agent",
+    })
+    assert response.status_code == 200
+    assert len(failures) == 1
+    assert len(callbacks) == 1
+    asyncio.run(callbacks[0]("error"))
+    assert len(failures) == 1
 
 
 @pytest.mark.parametrize("terminal_status", ["done", "error"])
