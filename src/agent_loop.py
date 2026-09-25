@@ -3291,7 +3291,7 @@ def _resolve_tool_blocks(
 
 
 def _explicit_native_tool_fence_miss(last_user: str, response: str, offered_tools) -> Optional[str]:
-    """Identify a code-only answer to an explicit request to run an offered tool.
+    """Identify an unverified answer to an explicit request to run an offered tool.
 
     This is a retry signal, never permission to execute the fence. Native
     models often use fenced code as examples; only a whole-answer fence (or
@@ -3299,22 +3299,34 @@ def _explicit_native_tool_fence_miss(last_user: str, response: str, offered_tool
     request qualifies for the bounded supervisor.
     """
     visible = _strip_think_blocks(response or "").strip()
+    request = str(last_user or "")
+    requested_tool = next((
+        tool for tool in ("python", "bash")
+        if tool in set(offered_tools or ()) and re.search(
+            rf"\b(?:вызови|выполни|запусти|call|execute|run)\b.{{0,120}}\b(?:native|настоящ(?:ий|ую)|инструмент|tool|{tool})\b",
+            request, re.IGNORECASE | re.DOTALL,
+        ) and re.search(rf"\b{tool}\b", request, re.IGNORECASE)
+    ), None)
+    if not requested_tool:
+        return None
     match = re.fullmatch(
         r"```(python|bash)[ \t]*\r?\n([\s\S]+?)\r?\n```(?:\s*[+-]?\d+(?:\.\d+)?)?",
         visible, re.IGNORECASE,
     )
-    if match is None or not match.group(2).strip():
-        return None
-    tool = match.group(1).lower()
-    if tool not in set(offered_tools or ()):
-        return None
-    request = str(last_user or "")
-    if not re.search(
-        rf"\b(?:вызови|выполни|запусти|call|execute|run)\b.{{0,120}}\b(?:native|настоящ(?:ий|ую)|инструмент|tool|{tool})\b",
-        request, re.IGNORECASE | re.DOTALL,
+    if match and match.group(2).strip() and match.group(1).lower() == requested_tool:
+        return requested_tool
+    # A local model can also skip the function channel entirely while saying
+    # "stdout=4; Python call completed". Do not accept that as tool evidence.
+    # This is only a retry signal; never execute prose as a tool call.
+    if re.search(
+        rf"\b(?:stdout|stderr|exit[_ ]?code)\b|\b{requested_tool}[- ]?(?:вызов|call)\b",
+        visible, re.IGNORECASE,
+    ) and re.search(
+        r"\b(?:заверш[её]н|выполнен|completed|finished|succeeded|успешно)\b",
+        visible, re.IGNORECASE,
     ):
-        return None
-    return tool
+        return requested_tool
+    return None
 
 
 def _append_tool_results(
@@ -7582,13 +7594,14 @@ async def stream_agent_loop(
             if _looks_like_promise and _intent_nudge_count < _MAX_INTENT_NUDGES:
                 _intent_nudge_count += 1
                 _matched_phrase = (
-                    f"fenced {_fenced_tool_miss} code without a native tool call"
+                    f"unverified {_fenced_tool_miss} output without a native tool call"
                     if _fenced_tool_miss else _intent_match.group(0).strip()
                 )
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
                 _fence_note = (
                     "A fenced code sample is not a tool call and was not executed. "
+                    "A claimed result without a tool event is not execution evidence. "
                     if _fenced_tool_miss else ""
                 )
                 _cookbook_log_hint = ""
@@ -7618,12 +7631,12 @@ async def stream_agent_loop(
                 continue
             if _looks_like_promise:
                 _matched_phrase = (
-                    f"fenced {_fenced_tool_miss} code without a native tool call"
+                    f"unverified {_fenced_tool_miss} output without a native tool call"
                     if _fenced_tool_miss else _intent_match.group(0).strip()
                 )
                 _guard_message = (
-                    "The agent stopped because it repeatedly returned a code sample "
-                    "instead of calling the tool. No code sample was executed."
+                    "The agent stopped because it repeatedly claimed a tool result "
+                    "instead of calling the tool. No tool action was executed."
                     if _fenced_tool_miss else
                     "The agent stopped because it repeatedly announced a tool "
                     "action without making the tool call."

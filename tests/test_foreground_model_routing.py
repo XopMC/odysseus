@@ -2697,9 +2697,23 @@ def test_explicit_native_tool_fence_miss_requires_user_execution_intent():
     assert detector("Покажи пример кода Python", response, {"python"}) is None
     assert detector("Вызови настоящий native python", response, {"bash"}) is None
     assert detector("Вызови настоящий native python", response + "\nThe answer is 56", {"python"}) is None
+    assert detector(
+        "Вызови native python с print(2 + 2) и дождись stdout=4",
+        "**stdout = `4`. Python-вызов завершён.**",
+        {"python"},
+    ) == "python"
+    assert detector(
+        "Покажи пример вывода Python",
+        "stdout=4; Python-вызов завершён.",
+        {"python"},
+    ) is None
 
 
-def test_agent_nudges_code_only_native_model_then_executes_real_function(monkeypatch):
+@pytest.mark.parametrize("first_response", [
+    "<think>Let me call the tool.</think>\n\n```python\nprint(7 * 8)\n```",
+    "**stdout = `56`. Python-вызов завершён.**",
+])
+def test_agent_nudges_code_only_native_model_then_executes_real_function(monkeypatch, first_response):
     calls = []
     effects = []
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
@@ -2715,7 +2729,7 @@ def test_agent_nudges_code_only_native_model_then_executes_real_function(monkeyp
     async def fake_stream(_candidates, messages, **kwargs):
         calls.append((list(messages), kwargs.get("tools")))
         if len(calls) == 1:
-            yield 'data: {"delta": "<think>Let me call the tool.</think>\\n\\n```python\\nprint(7 * 8)\\n```"}\n\n'
+            yield f'data: {json.dumps({"delta": first_response})}\n\n'
         elif len(calls) == 2:
             call = {"name": "python", "arguments": json.dumps({"code": "print(7 * 8)"})}
             yield f'data: {json.dumps({"type": "tool_calls", "calls": [call]})}\n\n'
