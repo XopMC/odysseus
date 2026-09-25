@@ -79,6 +79,23 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
         store.get("bob", owned_chat)
 
 
+def test_paused_goal_cannot_be_completed_by_an_ordinary_agent_run(owned_chat):
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Verify a harmless calculation")
+    paused = work.goal_action("alice", owned_chat, "pause", goal["revision"])
+    with pytest.raises(WorkNotFound, match="Active goal not found"):
+        work.complete_goal("alice", owned_chat, "Result 49", ["Python stdout was 49"])
+    unchanged = work.get("alice", owned_chat)["goal"]
+    assert unchanged["status"] == "paused"
+    assert unchanged["revision"] == paused["revision"]
+    assert not any(event["type"] == "goal_completed" for event in work.events("alice", owned_chat))
+
+    resumed = work.goal_action("alice", owned_chat, "resume", paused["revision"])
+    completed = work.complete_goal("alice", owned_chat, "Result 49", ["Python stdout was 49"])
+    assert resumed["status"] == "active"
+    assert completed["status"] == "completed"
+
+
 def test_repeated_monologue_requires_review_without_fake_question_or_user_pause(owned_chat):
     store = ChatWorkStore()
     goal = store.ensure_goal("alice", owned_chat, "Verify arithmetic")

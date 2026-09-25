@@ -727,7 +727,10 @@ class ChatWorkStore:
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
             row = db.query(ChatGoal).filter_by(owner=_storage_owner(owner), session_id=session_id).first()
-            if row is None or row.status in {"completed", "cancelled"}:
+            # An ordinary Agent run may still be started while the Goal is
+            # paused. Its tool calls must not silently finish that Goal:
+            # only an explicit resume returns it to the active state.
+            if row is None or row.status != "active":
                 raise WorkNotFound("Active goal not found")
             row.progress = summary
             row.checkpoint = {**dict(row.checkpoint or {}), "evidence": clean_evidence}
