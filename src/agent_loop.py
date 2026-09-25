@@ -7727,6 +7727,7 @@ async def stream_agent_loop(
         tool_result_texts = []  # plain text for native tool role messages
         tool_result_records = []  # aligned structured provenance for next round
         budget_hit = False
+        goal_completed_this_round = False
         for i, block in enumerate(tool_blocks):
             # Do not begin another potentially effectful tool after the
             # attempt's wall-time budget. Never interrupt one mid-effect.
@@ -8214,6 +8215,16 @@ async def stream_agent_loop(
                 yield (
                     f'data: {json.dumps({"type": "goal_update", "data": result["goal_update"]})}\n\n'
                 )
+                if (
+                    block.tool_type == "complete_goal"
+                    and isinstance(result["goal_update"], dict)
+                    and result["goal_update"].get("status") == "completed"
+                    and tool_result_is_successful(result)
+                ):
+                    # Native function calling may return several calls at once.
+                    # Completion is a terminal boundary: never dispatch a later
+                    # call from that same model-generated batch.
+                    goal_completed_this_round = True
 
             # Build output for frontend tool bubble.
             # Document tools get a short summary — content goes to the editor panel.
@@ -8635,13 +8646,15 @@ async def stream_agent_loop(
                 and not result.get("error")
             ):
                 _ody_doc_tool_completed = True
-            if _pending_ask_user_event:
+            if _pending_ask_user_event or goal_completed_this_round:
                 # An approval card is a turn boundary.  Never execute a later
                 # model-supplied call from the same batch after this request.
+                # Successful Goal completion is terminal for the same reason.
                 break
 
-        # If budget was hit, stop the loop
-        if budget_hit:
+        # Budget exhaustion and verified Goal completion both fence the
+        # remaining batch while preserving the executed result in the ledger.
+        if budget_hit or goal_completed_this_round:
             if tool_result_records:
                 _append_tool_results(
                     messages, round_response, converted_calls[:len(tool_result_texts)],

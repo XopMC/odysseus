@@ -1024,6 +1024,57 @@ def test_goal_prose_does_not_stop_detached_server_run(monkeypatch, owned_chat):
         )]
 
     chunks = asyncio.run(collect())
-    assert rounds == 3
+    # The prose checkpoint requires a second round, but verified completion
+    # must stop immediately rather than asking the model for a third round.
+    assert rounds == 2
     assert work.get("alice", owned_chat)["goal"]["status"] == "completed"
     assert any('"type": "goal_update"' in chunk for chunk in chunks)
+
+
+def test_completed_goal_fences_later_native_calls_in_same_batch(monkeypatch, owned_chat):
+    """A model may send completion and stale progress in one native batch."""
+    from src import chat_effect_inbox
+
+    monkeypatch.setattr(chat_effect_inbox, "needs_effect_intent", lambda *_: False)
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "_agent_route_tool_mode", lambda *args, **kwargs: (True, False, False))
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Finish after verification")
+    executed = []
+
+    async def transport(_candidates, _messages, **_kwargs):
+        yield 'data: ' + json.dumps({"type": "tool_calls", "calls": [
+            {"name": "complete_goal", "arguments": json.dumps({
+                "summary": "Verified result 2", "evidence": ["Python stdout was 2"],
+            })},
+            {"name": "update_goal_progress", "arguments": json.dumps({
+                "progress": "Continue after completion",
+            })},
+        ]}) + '\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def execute(block, **_kwargs):
+        executed.append(block.tool_type)
+        if block.tool_type == "complete_goal":
+            updated = work.complete_goal("alice", owned_chat, "Verified result 2", ["Python stdout was 2"])
+            return block.tool_type, {"goal_update": updated, "output": "Goal completed", "exit_code": 0}
+        return block.tool_type, {"error": "should not execute", "exit_code": 1}
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", transport)
+    monkeypatch.setattr(agent_loop, "execute_tool_block", execute)
+
+    async def collect():
+        return [chunk async for chunk in agent_loop.stream_agent_loop(
+            "http://model.test/v1", "kat-coder-v2.5-test",
+            [{"role": "user", "content": "Finish after verification"}],
+            owner="alice", session_id=owned_chat, active_goal=goal,
+            relevant_tools={"complete_goal", "update_goal_progress"},
+            max_rounds=1, _is_teacher_run=True,
+        )]
+
+    chunks = asyncio.run(collect())
+    assert executed == ["complete_goal"]
+    assert work.get("alice", owned_chat)["goal"]["status"] == "completed"
+    assert any('"type": "context_checkpoint"' in chunk for chunk in chunks)
