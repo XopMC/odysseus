@@ -3329,6 +3329,56 @@ def _explicit_native_tool_fence_miss(last_user: str, response: str, offered_tool
     return None
 
 
+def _requested_subagent_count(last_user: str) -> int:
+    request = str(last_user or "")
+    match = re.search(
+        r"\b(\d{1,2}|двух|два|две|три|четыре|пять|two|three|four|five)(?:-х)?\s+"
+        r"(?:\w+\s+){0,2}(?:сабагент\w*|subagents?|детей|children)\b",
+        request, re.IGNORECASE,
+    )
+    if not match:
+        return 1
+    words = {"двух": 2, "два": 2, "две": 2, "три": 3, "четыре": 4,
+             "пять": 5, "two": 2, "three": 3, "four": 4, "five": 5}
+    value = match.group(1).lower()
+    return max(1, min(int(value) if value.isdigit() else words[value], 32))
+
+
+def _explicit_subagent_claim_miss(last_user: str, response: str, offered_tools,
+                                  tool_events: list) -> Optional[str]:
+    """Nudge an explicit spawn request only when the model claims unrun children.
+
+    A statement is never delegated work. Only durable tool events count; this
+    detector never starts a child or grants a capability on the user's behalf.
+    """
+    if "delegate_subagent" not in set(offered_tools or ()):
+        return None
+    request = str(last_user or "")
+    if not re.search(
+        r"\b(?:запусти|создай|делегируй|вызови|start|spawn|create|delegate|call)\b"
+        r".{0,180}\b(?:сабагент\w*|subagents?|delegate_subagent)\b",
+        request, re.IGNORECASE | re.DOTALL,
+    ):
+        return None
+    visible = _strip_think_blocks(response or "").strip()
+    if not visible or re.search(
+        r"\b(?:cannot|can't|unavailable|not available|не могу|недоступен|недоступно)\b",
+        visible, re.IGNORECASE,
+    ):
+        return None
+    claimed = re.search(
+        r"\b(?:сабагент\w*|subagents?|дети|детей|children)\b.{0,100}"
+        r"\b(?:запущен\w*|создан\w*|started|spawned|running)\b"
+        r"|\b(?:ожидаю|жду|waiting for)\b.{0,90}\b(?:результат\w*|results?)\b",
+        visible, re.IGNORECASE | re.DOTALL,
+    )
+    if not claimed:
+        return None
+    executed = sum(_resolved_tool_event_name(event) == "delegate_subagent"
+                   for event in tool_events or ())
+    return "delegate_subagent" if executed < _requested_subagent_count(request) else None
+
+
 def _append_tool_results(
     messages: List[Dict],
     round_response: str,
@@ -7560,13 +7610,21 @@ async def stream_agent_loop(
                 _explicit_native_tool_fence_miss(_last_user, round_response, _tool_names_sent)
                 if _is_api_model and not guide_only and not _force_answer else None
             )
+            if not _fenced_tool_miss and _is_api_model and not guide_only and not _force_answer:
+                _fenced_tool_miss = _explicit_subagent_claim_miss(
+                    _last_user, round_response, _tool_names_sent, tool_events,
+                )
             if _fenced_tool_miss:
                 _pending_native_tool = _fenced_tool_miss
-            if _pending_native_tool and any(
-                _resolved_tool_event_name(event) == _pending_native_tool
-                for event in tool_events
-            ):
-                _pending_native_tool = None
+            if _pending_native_tool:
+                _completed_calls = sum(
+                    _resolved_tool_event_name(event) == _pending_native_tool
+                    for event in tool_events
+                )
+                _needed_calls = (_requested_subagent_count(_last_user)
+                                 if _pending_native_tool == "delegate_subagent" else 1)
+                if _completed_calls >= _needed_calls:
+                    _pending_native_tool = None
             if _pending_native_tool and re.search(
                 r"\b(?:cannot|can't|unavailable|not available|не могу|недоступен|недоступно)\b",
                 _intent_text, re.IGNORECASE,
@@ -7600,6 +7658,8 @@ async def stream_agent_loop(
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
                 _fence_note = (
+                    "A statement that children started is not a delegate_subagent event. "
+                    if _fenced_tool_miss == "delegate_subagent" else
                     "A fenced code sample is not a tool call and was not executed. "
                     "A claimed result without a tool event is not execution evidence. "
                     if _fenced_tool_miss else ""
@@ -7635,6 +7695,9 @@ async def stream_agent_loop(
                     if _fenced_tool_miss else _intent_match.group(0).strip()
                 )
                 _guard_message = (
+                    "The agent stopped because it claimed subagents had started "
+                    "without the required delegate_subagent events."
+                    if _fenced_tool_miss == "delegate_subagent" else
                     "The agent stopped because it repeatedly claimed a tool result "
                     "instead of calling the tool. No tool action was executed."
                     if _fenced_tool_miss else

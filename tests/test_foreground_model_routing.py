@@ -2709,6 +2709,58 @@ def test_explicit_native_tool_fence_miss_requires_user_execution_intent():
     ) is None
 
 
+def test_explicit_subagent_claim_needs_real_delegate_events():
+    detector = agent_loop._explicit_subagent_claim_miss
+    request = 'Запусти двух сабагентов параллельно и после обоих результатов ответь.'
+    claim = 'Оба сабагента запущены параллельно. Ожидаю результаты обоих.'
+    offered = {'delegate_subagent', 'manage_subagents'}
+    assert detector(request, claim, offered, []) == 'delegate_subagent'
+    assert detector(request, claim, offered, [{'tool': 'delegate_subagent'}]) == 'delegate_subagent'
+    assert detector(request, claim, offered, [{'tool': 'delegate_subagent'}] * 2) is None
+    assert agent_loop._requested_subagent_count('Создай 3-х сабагентов') == 3
+    assert detector(request, claim, {'manage_subagents'}, []) is None
+    assert detector('Объясни, как создать сабагента', claim, offered, []) is None
+    assert detector(request, 'Не могу запустить сабагентов: инструмент недоступен.', offered, []) is None
+
+
+def test_agent_nudges_fabricated_subagent_start_without_spawning(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agent_loop, 'get_setting', lambda key, default=None:
+                        'selected_models' if key == 'agent_subagents_mode' else default)
+    monkeypatch.setattr(agent_loop, 'get_mcp_manager', lambda: None)
+    monkeypatch.setattr(agent_loop, 'estimate_tokens', lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, 'blocked_tools_for_owner', lambda owner: set())
+    monkeypatch.setattr(agent_loop, '_is_casual_low_signal', lambda _text: False)
+    monkeypatch.setattr(agent_loop, '_classify_agent_request', lambda *_args: {
+        'low_signal': False, 'continuation': False, 'domains': [],
+        'retrieval_query': 'two parallel subagents',
+    })
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        calls.append((list(messages), kwargs.get('tools')))
+        yield 'data: {"delta": "Оба сабагента запущены параллельно. Ожидаю результаты обоих."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def must_not_execute(*_args, **_kwargs):
+        raise AssertionError('Unverified prose must not launch children')
+
+    monkeypatch.setattr(agent_loop, 'stream_llm_with_fallback', fake_stream)
+    monkeypatch.setattr(agent_loop, 'execute_tool_block', must_not_execute)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        'https://selected.example/v1', 'kat-coder-v2.5-dev-35b-a3b-mtp-abliterated-i1',
+        [{'role': 'user', 'content': 'Запусти двух сабагентов параллельно и после результатов ответь.'}],
+        max_rounds=5, relevant_tools={'delegate_subagent', 'manage_subagents'},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False,
+    ))
+    assert len(calls) == 3
+    assert any('delegate_subagent' == (schema.get('function') or {}).get('name')
+               for schema in calls[0][1])
+    assert any('A statement that children started is not a delegate_subagent event'
+               in str(item.get('content', '')) for item in calls[1][0])
+    assert any('"type": "intent_nudge_exhausted"' in chunk for chunk in chunks)
+
+
 @pytest.mark.parametrize("first_response", [
     "<think>Let me call the tool.</think>\n\n```python\nprint(7 * 8)\n```",
     "**stdout = `56`. Python-вызов завершён.**",
