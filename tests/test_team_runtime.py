@@ -97,6 +97,51 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_tool_intents('owner', self.task['id'])[0]['status'], 'done')
         self.assertEqual(self.store.get_task('owner', self.task['id'])['status'], 'running')
 
+    async def test_unsupported_host_file_tool_settles_intent_and_worker_continues(self):
+        worker = self.worker()
+        self.responses = [answer('', [tool('list_tree', {'path': '/project'}, 'tree-call')]),
+                          answer('', [tool('read_file', {'path': '/project/example.py'}, 'read-call')])]
+        self.responses.extend(answer('Verified using the supported read_file tool') for _ in range(4))
+
+        async def stale_host(op, args, *, owner, scope):
+            self.host_calls.append((op, copy.deepcopy(args), owner, scope))
+            if op == 'file.call' and args.get('tool') == 'list_tree':
+                return {'ok': False, 'error': 'unknown file tool'}
+            return {'ok': True, 'result': {'output': 'fixture', 'exit_code': 0}}
+
+        self.runtime.host = stale_host
+        result = await self.execute(worker)
+        self.assertEqual(result['status'], 'done', {
+            'worker': result, 'host_calls': [(item[0], item[1].get('tool')) for item in self.host_calls],
+            'intents': [(i['name'], i['status']) for i in self.store.list_tool_intents('owner', self.task['id'], worker['id'])],
+        })
+        intents = self.store.list_tool_intents('owner', self.task['id'], worker['id'])
+        by_name = {item['name']: item for item in intents}
+        self.assertEqual({name: item['status'] for name, item in by_name.items()},
+                         {'list_tree': 'done', 'read_file': 'done'})
+        self.assertTrue(by_name['list_tree']['result']['not_executed'])
+        self.assertEqual(by_name['list_tree']['result']['error_category'], 'not_supported_by_route')
+        self.assertEqual(result['result']['successful_tools'], 1)
+
+    async def test_effectful_host_transport_failure_blocks_with_unknown_intent(self):
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Compute 6 * 7 using Python'})
+        worker = self.worker(objective='Calculate 6 * 7 using Python',
+                             acceptance="The result must be exactly '42'.", write_scope=['.'])
+        self.responses = [answer('', [tool('python', {'code': 'print(6 * 7)'})])]
+
+        async def lost_host(op, args, *, owner, scope):
+            self.host_calls.append((op, copy.deepcopy(args), owner, scope))
+            return {'ok': False, 'error': 'transport response lost'}
+
+        self.runtime.host = lost_host
+        with patch('src.team_tools.schemas', return_value=[PYTHON_SCHEMA]):
+            result = await self.execute(worker)
+        self.assertEqual(result['status'], 'blocked')
+        intents = self.store.list_tool_intents('owner', self.task['id'], worker['id'])
+        self.assertEqual([(i['name'], i['status']) for i in intents], [('python', 'unknown')])
+        self.assertTrue(intents[0]['result']['outcome_unknown'])
+        self.assertEqual(intents[0]['result']['error_category'], 'unknown_outcome')
+
     async def test_tool_error_category_and_next_action_are_durable(self):
         worker = self.worker()
         self.host_result = {'error': 'Fixture missing', 'code': 'not_found', 'exit_code': 1}

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -206,6 +207,18 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('TOKEN', search['result']['output'])
         listing = file_call('ls', {})['result']
         self.assertNotIn('.ssh', [row['name'] for row in listing['entries']])
+        tree = file_call('list_tree', {'path': '.'})
+        self.assertTrue(tree['ok'], tree)
+        self.assertEqual(tree['result']['exit_code'], 0)
+        comparison = file_call('compare_files', {'before': 'ordinary.txt', 'after': 'ordinary.txt'})
+        self.assertTrue(comparison['ok'], comparison)
+        self.assertEqual(comparison['result']['exit_code'], 0)
+        verified = file_call('verify_hashes', {'files': [{
+            'path': 'ordinary.txt',
+            'sha256': hashlib.sha256(b'needle ordinary').hexdigest(),
+        }]})
+        self.assertTrue(verified['ok'], verified)
+        self.assertEqual(verified['result']['exit_code'], 0)
         self.assertFalse(file_call('read_file', {'path': '.ssh/key'})['ok'])
         self.assertFalse(file_call('write_file', {'path': '../outside', 'content': 'no'})['ok'])
         self.assertFalse((self.root / 'outside').exists())

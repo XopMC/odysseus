@@ -1305,6 +1305,33 @@ class TeamRuntime:
                     raise
                 intent = self.store.record_tool_intent(owner, team_id, worker['id'], token,
                             name, args, effectful=effectful, idempotency_key=call['id'])
+                async def dispatch_and_settle(intent_id):
+                    try:
+                        outcome = await self.execute_tool(
+                            owner, team_id, worker, name, args, call['id'], saved['cwd'], token)
+                    except Exception as exc:
+                        # An exception after an intent is durable must never
+                        # leave the worker running with an open intent. Only a
+                        # host's exact pre-dispatch allowlist rejection proves
+                        # that no file action was attempted. Other effectful
+                        # transport failures have an unknown outcome.
+                        if (name in team_tools.READ_TOOLS | team_tools.WRITE_TOOLS
+                                and str(exc) == 'unknown file tool'):
+                            outcome = {'error': 'Host runner does not support this file tool',
+                                       'code': 'not_supported_by_route', 'exit_code': 1,
+                                       'not_executed': True}
+                        elif effectful:
+                            outcome = {'error': 'Tool outcome is unknown; inspect the host receipt before retrying',
+                                       'code': 'unknown_outcome', 'exit_code': 1,
+                                       'outcome_unknown': True}
+                        else:
+                            outcome = {'error': f'Read-only tool transport failed: {type(exc).__name__}',
+                                       'code': 'transport_unavailable', 'exit_code': 1,
+                                       'retryable': True}
+                    from src.tool_errors import enrich_tool_error
+                    outcome = enrich_tool_error(outcome)
+                    self.store.record_tool_result(owner, team_id, intent_id, token, outcome)
+                    return outcome
                 if intent['status'] in {'done', 'not_run'}:
                     result = intent['result']
                     if intent['status'] == 'not_run':
@@ -1312,19 +1339,13 @@ class TeamRuntime:
                         # zero. Never reinterpret "not run" as verified success.
                         result = {**result, 'exit_code': 1, 'not_executed': True}
                 elif intent['created']:
-                    result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'], token)
-                    from src.tool_errors import enrich_tool_error
-                    result = enrich_tool_error(result)
-                    self.store.record_tool_result(owner, team_id, intent['id'], token, result)
+                    result = await dispatch_and_settle(intent['id'])
                 elif not effectful and intent['status'] == 'abandoned':
                     # Interrupted read-only calls may safely be repeated; give
                     # this attempt a distinct fenced ledger entry.
                     retry = self.store.record_tool_intent(owner, team_id, worker['id'], token,
                         name, args, effectful=False, idempotency_key=call['id'] + ':' + worker['attempt_id'])
-                    result = await self.execute_tool(owner, team_id, worker, name, args, call['id'], saved['cwd'], token)
-                    from src.tool_errors import enrich_tool_error
-                    result = enrich_tool_error(result)
-                    self.store.record_tool_result(owner, team_id, retry['id'], token, result)
+                    result = await dispatch_and_settle(retry['id'])
                 else:
                     raise RuntimeError('Uncertain tool outcome requires explicit reconciliation; not replayed')
                 from src.tool_errors import enrich_tool_error
