@@ -355,6 +355,35 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tool_schemas, [[], []])
         self.assertEqual(self.host_calls, [])
 
+    async def test_separate_russian_no_tools_and_no_capabilities_is_exact_read_only(self):
+        goal = ('Безопасная QA-задача без инструментов: вычислить 12 × 11 = 132 в уме. '
+                'Один исполнитель вычисляет число, руководитель сверяет 132. '
+                'Никаких файлов, shell, Python, сети, внешних действий и изменений проекта.')
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': goal})
+        worker = self.worker(
+            name='Вычислить 12 × 11 в уме',
+            objective='Произвести устное вычисление 12 на 11 и вернуть 132.',
+            acceptance='Исполнитель возвращает вычисленное значение. Проверка: результат равен 132. Никаких внешних инструментов.',
+            write_scope=[],
+        )
+        profile = self.store.get_worker('owner', self.task['id'], worker['id'])['profile']
+        self.assertEqual(_exact_acceptance_target(profile, goal), '132')
+        self.assertIsNone(_exact_acceptance_target(
+            profile, goal + ' Запусти Python для проверки результата.'))
+        self.assertIsNone(_exact_acceptance_target({**profile, 'write_scope': ['result.txt']}, goal))
+        final = {
+            'completed': True, 'result': 132, 'acceptance_met': True,
+            'verification': {'expected': 132, 'actual': 132, 'match': True},
+            'paths_touched': [], 'files_modified': False, 'network_used': False,
+            'host_tools_used': False, 'unresolved_issues': [],
+        }
+        self.responses = [answer(json.dumps(final))]
+        result = await self.execute(worker)
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['completion_validation'], 'exact_read_only_acceptance')
+        self.assertEqual(self.tool_schemas, [[]])
+        self.assertEqual(self.host_calls, [])
+
     async def test_planner_arithmetic_wrong_acceptance_still_requires_evidence(self):
         self.store.update_task_metadata('owner', self.task['id'], {
             'goal': 'QA arithmetic: compute twelve times eleven. Reasoning only; do not use tools.'})

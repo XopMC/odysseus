@@ -69,6 +69,24 @@ def _arithmetic_goal_value(goal):
         r'\bбез\s+файл\w*\s*,\s*команд\w*\s*,\s*python\s*,\s*сет\w*\b',
         goal, re.IGNORECASE,
     )
+    # A Russian owner may say "без инструментов" and enumerate forbidden
+    # capabilities in a separate sentence. Require both signals so a vague
+    # mention of mental arithmetic never waives the normal tool-evidence gate.
+    if not russian_tool_free:
+        russian_tool_free = (
+            re.search(r'\bбез\s+инструмент\w*\b', goal, re.IGNORECASE)
+            and re.search(r'\bникаких\s+файл\w*\b', goal, re.IGNORECASE)
+            and re.search(r'\b(?:shell|команд\w*)\b', goal, re.IGNORECASE)
+            and re.search(r'\bpython\b', goal, re.IGNORECASE)
+            and re.search(r'\bсет\w*\b', goal, re.IGNORECASE)
+        )
+    positive_host_action = re.search(
+        r'\b(?:запусти|выполни|создай|запиши|измени|отправь|run|execute|create|write|modify|send)\b'
+        r'.{0,50}\b(?:python|shell|bash|файл\w*|сет\w*|network|http)\b',
+        goal, re.IGNORECASE,
+    )
+    if positive_host_action:
+        return None
     if not explicit_tool_free and not forbidden_capabilities and not russian_tool_free:
         return None
     words = {'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
