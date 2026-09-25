@@ -163,6 +163,45 @@ def test_selected_subagent_model_is_an_exact_allowlist(monkeypatch):
     assert denied["policy"] == "disabled_by_policy"
 
 
+def test_selected_subagent_accepts_unique_visible_model_name(monkeypatch):
+    values = {
+        "agent_subagents_mode": "selected_models",
+        "agent_subagent_models": "worker-a@endpoint, worker-b@endpoint",
+    }
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: values.get(key, default))
+    monkeypatch.setattr("src.ai_interaction._resolve_model", lambda spec, owner=None: (
+        "http://endpoint/v1/chat/completions", spec.rsplit("@", 1)[0], {},
+    ))
+    monkeypatch.setattr("src.subagent_runtime.runtime.active_count", lambda **kwargs: 0)
+    captured = {}
+
+    async def spawn(**kwargs):
+        captured.update(kwargs)
+        return {"child_id": "a" * 32, "model": kwargs["model"], "exit_code": 0}
+
+    monkeypatch.setattr("src.subagent_runtime.runtime.spawn", spawn)
+    result = asyncio.run(tools.delegate_subagent(json.dumps({
+        "objective": "Check", "model": "worker-b",
+    }), {"owner": "alice", "session_id": "s1", "subagent_state": {},
+         "current_endpoint_url": "http://parent/v1/chat/completions", "current_model": "parent"}))
+    assert result["exit_code"] == 0
+    assert captured["model"] == "worker-b"
+    assert captured["endpoint_id"] == "endpoint"
+
+
+def test_selected_subagent_rejects_ambiguous_visible_model_name(monkeypatch):
+    values = {
+        "agent_subagents_mode": "selected_models",
+        "agent_subagent_models": "worker@endpoint-a, worker@endpoint-b",
+    }
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: values.get(key, default))
+    result = asyncio.run(tools.delegate_subagent(json.dumps({
+        "objective": "Check", "model": "worker",
+    }), {"owner": "alice"}))
+    assert result["policy"] == "ambiguous_model_route"
+    assert result["exit_code"] == 1
+
+
 def test_selected_models_are_allocated_breadth_first_before_reuse(monkeypatch):
     allowed = [f"worker-{idx}@endpoint-{idx}" for idx in range(1, 6)]
     values = {
@@ -792,6 +831,50 @@ def test_child_retries_transient_transport_failure_only_before_first_tool(monkey
 
     try:
         asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
+def test_child_timeout_persists_actionable_error_instead_of_blank(monkeypatch, caplog):
+    owner = "timeout-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="timeout test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+
+    async def fake_loop(*args, **kwargs):
+        raise asyncio.TimeoutError()
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe timeout", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=60,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        row = runtime.get(owner, session_id, child["child_id"])
+        assert row["status"] == "failed"
+        assert "60s deadline" in row["error"]
+        assert "No result was verified" in row["error"]
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        assert any(event["kind"] == "status" and
+                   "60s deadline" in event["payload"].get("error", "") for event in events)
+
+    try:
+        asyncio.run(scenario())
+        assert "exceeded its 60s model deadline" in caplog.text
+        assert "Traceback (most recent call last)" not in caplog.text
     finally:
         db = SessionLocal()
         ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]

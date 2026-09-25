@@ -574,8 +574,18 @@ class SubagentRuntime:
             raise
         except Exception as exc:
             await flush(force=True)
-            logger.warning("Subagent %s failed: %s", child_id, type(exc).__name__, exc_info=True)
-            safe_error = str(exc)[:1000]
+            if isinstance(exc, asyncio.TimeoutError):
+                # A busy backend reaching the child deadline is an expected
+                # operational failure, not an uncaught server traceback.
+                logger.warning("Subagent %s exceeded its %ss model deadline", child_id, timeout_seconds)
+            else:
+                logger.warning("Subagent %s failed: %s", child_id, type(exc).__name__, exc_info=True)
+            safe_error = (
+                f"Subagent model request exceeded its {timeout_seconds}s deadline; "
+                "the selected model may be busy. No result was verified."
+                if isinstance(exc, asyncio.TimeoutError) else
+                str(exc)[:1000] or f"Subagent failed ({type(exc).__name__}); no result was verified."
+            )
             self._update_with_event(
                 child_id, owner, session_id, "status",
                 {"status": "failed", "error": safe_error},

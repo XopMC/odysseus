@@ -200,8 +200,20 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
                     "policy": "disabled_by_policy"}
         automatic = requested_model.lower() in {"", "same", "auto"}
         if not automatic and requested_model not in allowed:
-            return {"error": "Requested subagent model is outside the configured allowlist", "exit_code": 1,
-                    "policy": "disabled_by_policy"}
+            # The picker stores endpoint-qualified specs, while the model sees
+            # and commonly repeats the visible model name. Accept that alias
+            # only when it identifies exactly one already-authorized route.
+            # Never guess an endpoint for a duplicate model name.
+            matches = [spec for spec in allowed
+                       if spec.rsplit("@", 1)[0] == requested_model]
+            if len(matches) == 1:
+                requested_model = matches[0]
+            elif len(matches) > 1:
+                return {"error": "Subagent model name matches multiple configured endpoints; use the exact model@endpoint_id or auto",
+                        "exit_code": 1, "policy": "ambiguous_model_route"}
+            else:
+                return {"error": "Requested subagent model is outside the configured allowlist", "exit_code": 1,
+                        "policy": "disabled_by_policy"}
 
         state = ctx.get("subagent_state") if isinstance(ctx.get("subagent_state"), dict) else {}
         cache_key = (
