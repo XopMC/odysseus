@@ -133,6 +133,11 @@ def _declared_exact_result(profile, goal=''):
             r'(?:точно\s+)?(\d{1,12})\b', acceptance, flags=re.IGNORECASE,
         )
     if not declared:
+        declared = re.search(
+            r'\bвычисленн\w*\s+значени\w*\s*(?:==|=)\s*(\d{1,12})\b',
+            acceptance, flags=re.IGNORECASE,
+        )
+    if not declared:
         return None
     actual = own_value if own_value is not None else goal_value
     return declared.group(1) if str(actual) == declared.group(1) else None

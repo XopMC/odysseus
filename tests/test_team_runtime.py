@@ -214,6 +214,20 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('without any verified tool result', result['result']['error'])
         self.assertEqual(self.host_calls, [])
 
+    def test_russian_exact_comparison_acceptance_is_server_checked(self):
+        goal = ('Безопасная QA-задача без инструментов: вычислить 12 × 11 = 132 в уме. '
+                'Никаких файлов, shell, Python, сети, внешних действий и изменений проекта.')
+        profile = {
+            'kind': 'executor', 'name': 'Сверить результат и завершить задачу',
+            'objective': 'Сверить вычисленное значение с эталонным числом 132.',
+            'acceptance': 'Результат сравнения: вычисленное значение == 132. Задача закрыта без внешних действий.',
+            'write_scope': [],
+        }
+        self.assertEqual(_exact_acceptance_target(profile, goal), '132')
+        self.assertIsNone(_exact_acceptance_target(
+            {**profile, 'acceptance': profile['acceptance'].replace('== 132', '== 133')}, goal))
+        self.assertIsNone(_exact_acceptance_target({**profile, 'write_scope': ['.']}, goal))
+
     async def test_manual_resume_after_unverified_prose_gets_fresh_tool_chance(self):
         worker = self.worker(objective='Inspect example using read_file')
         self.responses = [answer('I inspected the file and it is correct')] * 3
