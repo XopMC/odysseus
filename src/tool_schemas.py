@@ -673,7 +673,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_subagents",
-            "description": "List, inspect, message, stop, remove, or wait for independently running child agents. To preserve parallelism, spawn all requested children before calling wait. wait defaults to the first completed child so the parent can continue useful work; pass wait_for='all' only at the final join.",
+            "description": "List, inspect, message, stop, remove, or wait for independently running child agents. To preserve parallelism, spawn all requested children before calling wait. Omit child_ids to wait for children of the current parent run; this never includes children from older runs. wait defaults to the first completed child so the parent can continue useful work; pass wait_for='all' only at the final join.",
             "parameters": {
                 "type": "object",
                 "properties": {

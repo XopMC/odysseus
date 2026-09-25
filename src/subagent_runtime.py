@@ -616,7 +616,8 @@ class SubagentRuntime:
         finally:
             db.close()
 
-    def list(self, owner: Optional[str], session_id: str, *, include_removed=False) -> list[dict]:
+    def list(self, owner: Optional[str], session_id: str, *, include_removed=False,
+             parent_run_id: Optional[str] = None) -> list[dict]:
         self._recover_stale()
         db = SessionLocal()
         try:
@@ -624,6 +625,8 @@ class SubagentRuntime:
                 ChatSubagentRun.owner == (owner or ""),
                 ChatSubagentRun.parent_session_id == session_id,
             )
+            if parent_run_id is not None:
+                q = q.filter(ChatSubagentRun.parent_run_id == parent_run_id)
             if not include_removed:
                 q = q.filter(ChatSubagentRun.removed.is_(False))
             return [_public(row) for row in q.order_by(ChatSubagentRun.created_at.asc()).all()]

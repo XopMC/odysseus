@@ -312,6 +312,12 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
         return await runtime.remove(owner, session_id, child_id)
     if action == "wait":
         child_ids = payload.get("child_ids") or ([child_id] if child_id else [])
+        if not child_ids and ctx.get("parent_run_id"):
+            child_ids = [
+                row["child_id"] for row in runtime.list(
+                    owner, session_id, parent_run_id=ctx["parent_run_id"],
+                )
+            ]
         if not isinstance(child_ids, list) or not child_ids:
             return {"error": "wait requires child_ids", "exit_code": 1}
         return await runtime.wait(

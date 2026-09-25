@@ -472,6 +472,41 @@ def test_manage_subagents_wait_defaults_to_first_completion(monkeypatch):
     assert captured["wait_for"] == "any"
 
 
+def test_manage_subagents_wait_without_ids_uses_only_current_parent_run(monkeypatch):
+    captured = {}
+
+    def list_children(owner, session_id, *, parent_run_id=None):
+        assert (owner, session_id) == ("alice", "s1")
+        assert parent_run_id == "current-run"
+        return [
+            {"child_id": "first", "parent_run_id": "current-run"},
+            {"child_id": "second", "parent_run_id": "current-run"},
+        ]
+
+    async def wait(owner, session_id, child_ids, **kwargs):
+        captured.update(owner=owner, session_id=session_id, child_ids=child_ids, **kwargs)
+        return {"subagents": [], "completed": True, "exit_code": 0}
+
+    monkeypatch.setattr("src.subagent_runtime.runtime.list", list_children)
+    monkeypatch.setattr("src.subagent_runtime.runtime.wait", wait)
+    ctx = {"owner": "alice", "session_id": "s1", "parent_run_id": "current-run"}
+    result = asyncio.run(tools.manage_subagents('{"action":"wait"}', ctx))
+    assert result["exit_code"] == 0
+    assert captured["child_ids"] == ["first", "second"]
+    assert captured["wait_for"] == "any"
+
+
+def test_manage_subagents_wait_without_ids_needs_a_current_run(monkeypatch):
+    monkeypatch.setattr(
+        "src.subagent_runtime.runtime.list",
+        lambda *_args, **_kwargs: [],
+    )
+    ctx = {"owner": "alice", "session_id": "s1", "parent_run_id": "current-run"}
+    result = asyncio.run(tools.manage_subagents('{"action":"wait"}', ctx))
+    assert result["exit_code"] == 1
+    assert result["error"] == "wait requires child_ids"
+
+
 def test_subagent_settings_and_timeline_contract_are_wired():
     root = Path(__file__).resolve().parents[1]
     html = (root / "static/index.html").read_text(encoding="utf-8")
