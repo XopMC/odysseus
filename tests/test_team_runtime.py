@@ -250,6 +250,36 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tool_schemas, [[]], 'exact-value read-only workers must not receive tools')
         self.assertEqual(self.host_calls, [])
 
+    async def test_planner_arithmetic_prose_acceptance_gets_tool_free_correction(self):
+        worker = self.worker(
+            name='Compute 12 × 11',
+            objective='Calculate 12 × 11 using arithmetic reasoning.',
+            acceptance='The computed result equals exactly 132, confirmed by decomposition.',
+            write_scope=[],
+        )
+        final = {
+            'completed': True, 'result': '132', 'acceptance_met': True,
+            'verification': {'expected': '132', 'actual': '132', 'match': True},
+            'paths_touched': [], 'files_modified': False, 'network_used': False,
+            'host_tools_used': False, 'unresolved_issues': [],
+        }
+        self.responses = [answer('12 × 11 = 132'), answer(json.dumps(final))]
+        result = await self.execute(worker)
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['completion_validation'], 'exact_read_only_acceptance')
+        self.assertEqual(self.tool_schemas, [[], []])
+        self.assertEqual(self.host_calls, [])
+
+    async def test_planner_arithmetic_wrong_acceptance_still_requires_evidence(self):
+        worker = self.worker(
+            name='Compute 12 × 11', objective='Calculate 12 × 11.',
+            acceptance='The computed result equals exactly 133.', write_scope=[],
+        )
+        self.responses = [answer('133')] * 3
+        result = await self.execute(worker)
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('without any verified tool result', result['result']['error'])
+
     async def test_exact_read_only_worker_corrects_bare_value_without_suggesting_tools(self):
         worker = self.worker(objective='Return exactly 42 using only reasoning.',
                              acceptance='The result must be exactly "42".', write_scope=[])

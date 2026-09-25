@@ -58,7 +58,27 @@ def _declared_exact_result(profile):
         r"\s*The result must be exactly ['\"]([^'\"]{1,200})['\"]\.\s*",
         acceptance, flags=re.IGNORECASE,
     )
-    return match.group(1) if match else None
+    if match:
+        return match.group(1)
+    # A planner can restate a pure arithmetic acceptance in prose. Recognize
+    # it only when the assigned expression independently proves that value;
+    # otherwise ordinary engineering claims still require tool evidence.
+    if profile.get('write_scope') != []:
+        return None
+    expression = re.search(
+        r'\b(?:compute|calculate)\s+(\d{1,6})\s*([×*+−-])\s*(\d{1,6})\b',
+        str(profile.get('name') or '') + ' ' + str(profile.get('objective') or ''),
+        flags=re.IGNORECASE,
+    )
+    declared = re.search(
+        r'\b(?:result|product)\b.{0,48}\b(?:equals|is)\s+exactly\s+(\d{1,12})\b',
+        acceptance, flags=re.IGNORECASE,
+    )
+    if not expression or not declared:
+        return None
+    left, operator, right = int(expression.group(1)), expression.group(2), int(expression.group(3))
+    actual = left * right if operator in {'×', '*'} else left + right if operator == '+' else left - right
+    return declared.group(1) if str(actual) == declared.group(1) else None
 
 
 def _exact_acceptance_target(profile):
