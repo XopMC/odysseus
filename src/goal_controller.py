@@ -52,12 +52,19 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
     if not lease:
         return False
     prior = agent_runs.continuation_for_session(session_id)
+    current = await asyncio.to_thread(store.get, owner, session_id)
+    objective = str((current.get("goal") or {}).get("objective") or "")
     form = {
         "session": session_id,
         "message": (
-            "Continue the active goal from its durable checkpoint. Apply the "
-            "latest user guidance, change approach after repeated failures, and "
-            "call complete_goal only after verified completion."
+            "Continue the current active Goal from its durable checkpoint. "
+            "Current Goal objective (not a previous completed Goal): "
+            + json.dumps(objective, ensure_ascii=False) + "\n"
+            "Apply the latest user guidance and change approach after repeated "
+            "failures. An interrupted tool action marked no_retry must not be "
+            "repeated or treated as proof; use a distinct safe verification "
+            "action if needed. Do not claim Goal completion in prose: call "
+            "complete_goal only after verified evidence."
         ),
         "mode": "agent",
         "goal_continuation": "true",

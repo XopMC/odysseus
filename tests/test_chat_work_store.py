@@ -546,6 +546,47 @@ def test_goal_dispatch_rejects_stale_attempt_before_model_request(monkeypatch, o
     assert (current["status"], current["attempt"]) == ("active", revised["attempt"])
 
 
+def test_goal_continuation_names_current_objective_and_no_retry_boundary(monkeypatch, owned_chat):
+    import src.goal_controller as controller
+    from src.chat_effect_inbox import inbox
+
+    work = ChatWorkStore()
+    work.ensure_goal("alice", owned_chat, "Verify 100 with a fresh Python call")
+    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [])
+    monkeypatch.setattr(agent_runs, "is_active", lambda session: False)
+    monkeypatch.setattr(agent_runs, "continuation_for_session", lambda session: {})
+
+    async def same_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(controller.asyncio, "to_thread", same_thread)
+    submitted = []
+
+    class Response:
+        status_code = 200
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return False
+
+    class Client:
+        def __init__(self, **_): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return False
+        def stream(self, _method, _url, **kwargs):
+            submitted.append(kwargs["data"])
+            return Response()
+
+    monkeypatch.setattr(controller.httpx, "AsyncClient", Client)
+    assert asyncio.run(controller.dispatch_goal_continuation(
+        "alice", owned_chat, reason="goal_resumed",
+    )) is True
+    assert len(submitted) == 1
+    message = submitted[0]["message"]
+    assert 'Current Goal objective (not a previous completed Goal): "Verify 100 with a fresh Python call"' in message
+    assert "no_retry must not be repeated or treated as proof" in message
+    assert "call complete_goal only after verified evidence" in message
+
+
 def test_stale_run_error_cannot_mark_revised_goal_failed(owned_chat):
     work = ChatWorkStore()
     initial = work.ensure_goal("alice", owned_chat, "Harmless task")

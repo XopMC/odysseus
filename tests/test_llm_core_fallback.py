@@ -309,14 +309,8 @@ def test_usage_then_done_primary_invokes_fallback_and_discards_usage(monkeypatch
     assert not any('"type": "usage"' in c for c in chunks)
 
 
-@pytest.mark.parametrize(
-    "output_chunk",
-    [
-        'data: {"delta": "visible text"}\n\n',
-        'data: {"delta": "reasoning", "thinking": true}\n\n',
-    ],
-)
-def test_text_or_reasoning_output_prevents_fallback(monkeypatch, output_chunk):
+def test_visible_text_output_prevents_fallback(monkeypatch):
+    output_chunk = 'data: {"delta": "visible text"}\n\n'
     calls = []
 
     def per_model(model):
@@ -521,6 +515,42 @@ def test_explicit_foreground_policy_does_not_fallback_on_empty_completion(monkey
     assert len(chunks) == 1
     assert chunks[0].startswith("event: error")
     assert "returned no substantive output" in chunks[0]
+
+
+def test_reasoning_only_primary_does_not_commit_before_availability_failure(monkeypatch):
+    calls = []
+
+    def per_model(model):
+        calls.append(model)
+        if model == "primary":
+            return ['data: {"delta": "private analysis", "thinking": true}\n\n',
+                    'event: error\ndata: {"status": 503, "error": "unloaded"}\n\n']
+        return ['data: {"delta": "backup answer"}\n\n', 'data: [DONE]\n\n']
+
+    chunks = _run_fallback(monkeypatch, per_model,
+                           fallback_statuses={503}, fallback_on_empty=False)
+
+    assert calls == ["primary", "backup"]
+    assert any('"type": "fallback"' in chunk for chunk in chunks)
+    assert any('"delta": "backup answer"' in chunk for chunk in chunks)
+    assert not any('private analysis' in chunk for chunk in chunks)
+
+
+def test_reasoning_only_terminal_preserves_thinking_then_reports_empty(monkeypatch):
+    calls = []
+
+    def per_model(model):
+        calls.append(model)
+        return ['data: {"delta": "private analysis", "thinking": true}\n\n',
+                'data: [DONE]\n\n']
+
+    chunks = _run_fallback(monkeypatch, per_model, fallback_on_empty=False)
+
+    assert calls == ["primary"]
+    assert chunks[0] == 'data: {"delta": "private analysis", "thinking": true}\n\n'
+    assert chunks[1].startswith('event: error')
+    assert 'empty_output' in chunks[1]
+    assert not any('[DONE]' in chunk for chunk in chunks)
 
 
 def test_explicit_foreground_policy_respects_adapter_ineligible_override(monkeypatch):

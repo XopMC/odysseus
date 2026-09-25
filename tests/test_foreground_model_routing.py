@@ -2681,6 +2681,8 @@ def test_agent_retries_one_unusable_model_round_without_tool_effects(monkeypatch
     assert len(calls) == 2
     assert any("previous generation was unusable" in str(item.get("content", "")).lower()
                for item in calls[1][0])
+    assert any("Reasoning-only output is not an answer" in str(item.get("content", ""))
+               for item in calls[1][0])
     assert not any(chunk.startswith("event: error") for chunk in chunks)
     assert not any('"type": "agent_terminal"' in chunk for chunk in chunks)
     assert any('"delta": "42"' in chunk for chunk in chunks)

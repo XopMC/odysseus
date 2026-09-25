@@ -3950,6 +3950,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         emitted = False
         retried = False
         pending_metadata = []
+        pending_reasoning = []
         candidate_messages = messages
         candidate_kwargs = kwargs
         if candidate_request_factory is not None:
@@ -4031,6 +4032,8 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                     if not emitted:
                         # A last-candidate error is already the clearest terminal
                         # result; do not append an empty-completion error as well.
+                        for reasoning_chunk in pending_reasoning:
+                            yield reasoning_chunk
                         yield chunk
                         return
                     yield chunk
@@ -4060,10 +4063,19 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                     continue
                 substantive = (
                     isinstance(delta, str) and bool(delta.strip())
+                    and event_data.get("thinking") is not True
                 ) or (
                     event_type == "tool_calls"
                     and bool(event_data.get("calls"))
                 )
+                if (isinstance(delta, str) and delta.strip()
+                        and event_data.get("thinking") is True and not emitted):
+                    # Reasoning is useful replay evidence, not a final answer
+                    # or complete tool call. Keep it candidate-local until a
+                    # substantive response commits this route. Otherwise a
+                    # thinking-only failed primary suppresses fallback and can
+                    # strand a long Goal with an empty assistant turn.
+                    pending_reasoning.append(chunk)
 
                 if substantive and not emitted:
                     # First real output from a NON-primary candidate: tell the client
@@ -4138,7 +4150,11 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
             logger.warning(f"[fallback] {tag} {model} returned no substantive output; trying next")
             continue
         if not is_last:
+            for reasoning_chunk in pending_reasoning:
+                yield reasoning_chunk
             yield f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502, "error_category": "empty_output"})}\n\n'
             return
+        for reasoning_chunk in pending_reasoning:
+            yield reasoning_chunk
         yield f'event: error\ndata: {json.dumps({"error": "All model candidates returned no substantive output", "status": 502, "error_category": "empty_output"})}\n\n'
         return

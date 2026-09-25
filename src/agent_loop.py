@@ -7072,7 +7072,11 @@ async def stream_agent_loop(
                     "The previous generation was unusable and was discarded "
                     "before any tool action. Continue from the last verified "
                     "checkpoint. Do not repeat phrases or completed tool calls; "
-                    "take the next necessary step concisely."
+                    "take the next necessary step concisely. Reasoning-only "
+                    "output is not an answer: emit an actual final answer or "
+                    "a complete valid tool call. For an active Goal, prose "
+                    "claiming completion is not enough; use complete_goal only "
+                    "after verifiable evidence."
                 ),
                 "_agent_injected": "model_output_recovery",
             })
