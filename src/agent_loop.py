@@ -3294,11 +3294,15 @@ def _explicit_native_tool_fence_miss(last_user: str, response: str, offered_tool
     """Identify a code-only answer to an explicit request to run an offered tool.
 
     This is a retry signal, never permission to execute the fence. Native
-    models often use fenced code as examples; only a whole-answer fence plus
-    an explicit user action request qualifies for the bounded supervisor.
+    models often use fenced code as examples; only a whole-answer fence (or
+    that fence followed by a bare numeric claim) plus an explicit user action
+    request qualifies for the bounded supervisor.
     """
     visible = _strip_think_blocks(response or "").strip()
-    match = re.fullmatch(r"```(python|bash)[ \t]*\r?\n([\s\S]+?)\r?\n```", visible, re.IGNORECASE)
+    match = re.fullmatch(
+        r"```(python|bash)[ \t]*\r?\n([\s\S]+?)\r?\n```(?:\s*[+-]?\d+(?:\.\d+)?)?",
+        visible, re.IGNORECASE,
+    )
     if match is None or not match.group(2).strip():
         return None
     tool = match.group(1).lower()
@@ -5271,6 +5275,7 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    _pending_native_tool = None  # a user-requested call, never an executable fence
     _reasoning_only_nudges = 0
     _MAX_REASONING_ONLY_NUDGES = 2
 
@@ -7531,10 +7536,24 @@ async def stream_agent_loop(
                 _explicit_native_tool_fence_miss(_last_user, round_response, _tool_names_sent)
                 if _is_api_model and not guide_only and not _force_answer else None
             )
-            if _fenced_tool_miss and any(
-                _resolved_tool_event_name(event) == _fenced_tool_miss
+            if _fenced_tool_miss:
+                _pending_native_tool = _fenced_tool_miss
+            if _pending_native_tool and any(
+                _resolved_tool_event_name(event) == _pending_native_tool
                 for event in tool_events
             ):
+                _pending_native_tool = None
+            if _pending_native_tool and re.search(
+                r"\b(?:cannot|can't|unavailable|not available|не могу|недоступен|недоступно)\b",
+                _intent_text, re.IGNORECASE,
+            ):
+                # An honest refusal is preferable to a fabricated tool result.
+                _pending_native_tool = None
+            if _pending_native_tool:
+                # The next round can append a numeric answer to another code
+                # sample. It is still unverified until a real tool result exists.
+                _fenced_tool_miss = _pending_native_tool
+            else:
                 _fenced_tool_miss = None
             # Only nudge when the round REALLY looks like an unfinished
             # promise: short response (<400 chars), no fenced code/answer,
