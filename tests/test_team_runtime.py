@@ -647,6 +647,41 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('42\\n', evidence)
         self.assertFalse(self.host_calls)
 
+    async def test_reviewer_sees_verified_python_from_prior_worker_attempt(self):
+        target = self.worker(
+            objective='Execute exactly python3 -c "print(6 * 7)".',
+            acceptance='Dedicated python intent returns 42 with exit_code 0.',
+            write_scope=['.'],
+        )
+        first = self.store.claim_worker('owner', self.task['id'], worker_id=target['id'])
+        intent = self.store.record_tool_intent('owner', self.task['id'], target['id'], first['lease_token'],
+                                                'python', {'code': 'print(6 * 7)'},
+                                                effectful=True, idempotency_key='python-42-prior')
+        self.store.record_tool_result('owner', self.task['id'], intent['id'], first['lease_token'],
+                                      {'exit_code': 0, 'output': '42\n'})
+        self.store.finish_worker('owner', self.task['id'], target['id'], first['lease_token'],
+                                 {'summary': '42', 'completed': True})
+        self.store.reject_worker('owner', self.task['id'], target['id'], 'Retry after reviewer error')
+        second = self.store.claim_worker('owner', self.task['id'], worker_id=target['id'])
+        self.store.finish_worker('owner', self.task['id'], target['id'], second['lease_token'],
+                                 {'summary': 'Reused verified result 42', 'completed': True})
+        target = self.store.get_worker('owner', self.task['id'], target['id'])
+        reviewer = self.worker(
+            role='reviewer', kind='verification', target_worker=target['id'],
+            target_attempt=target['attempt_id'], objective='Verify the target result.',
+            acceptance='Dedicated python intent returns 42 with exit_code 0.',
+        )
+        self.responses = [answer(json.dumps({'verdict': 'pass', 'reason': 'Verified from Team ledger'}))]
+
+        result = await self.execute(reviewer)
+
+        self.assertEqual(result['status'], 'done')
+        evidence = str(self.messages[0][2]['content'])
+        self.assertIn('print(6 * 7)', evidence)
+        self.assertIn(first['attempt_id'], evidence)
+        self.assertIn('"inherited_from_prior_attempt": true', evidence)
+        self.assertFalse(self.host_calls)
+
     async def test_non_python_reviewer_still_needs_independent_tool_read(self):
         target = self.worker(objective='Inspect example', acceptance='Show file evidence')
         claim = self.store.claim_worker('owner', self.task['id'], worker_id=target['id'])

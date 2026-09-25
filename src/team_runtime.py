@@ -157,19 +157,21 @@ def _requires_python_execution(profile, goal=''):
     ) is not None
 
 
+def _matching_python_intent(intent, expected=None):
+    result = intent.get('result') or {}
+    return (intent['name'] == 'python' and intent['status'] == 'done'
+            and isinstance(result, dict) and type(result.get('exit_code')) is int
+            and result['exit_code'] == 0 and not result.get('error')
+            and not result.get('not_executed')
+            and (expected is None or str(result.get('output') or '').strip() == expected))
+
+
 def _verified_python_intent(store, owner, team_id, worker_id, expected=None):
-    for intent in store.list_tool_intents(owner, team_id, worker_id):
-        result = intent.get('result') or {}
-        if (intent['name'] == 'python' and intent['status'] == 'done'
-                and isinstance(result, dict) and type(result.get('exit_code')) is int
-                and result['exit_code'] == 0 and not result.get('error')
-                and not result.get('not_executed')
-                and (expected is None or str(result.get('output') or '').strip() == expected)):
-            return True
-    return False
+    return any(_matching_python_intent(intent, expected)
+               for intent in store.list_tool_intents(owner, team_id, worker_id))
 
 
-def _review_tool_evidence(store, owner, team_id, worker_id, attempt_id):
+def _review_tool_evidence(store, owner, team_id, worker_id, attempt_id, expected_python=None):
     """Bounded server-owned ledger excerpt for an independent Team reviewer.
 
     Intents live in the Team database, not in the project directory.  A
@@ -177,22 +179,36 @@ def _review_tool_evidence(store, owner, team_id, worker_id, attempt_id):
     there, consuming rounds and sometimes rejecting a valid worker result.
     Tool output remains untrusted text and is never a permission grant.
     """
-    rows = []
+    rows, inherited_python = [], []
     for intent in store.list_tool_intents(owner, team_id, worker_id):
-        if intent.get('attempt_id') != attempt_id or intent.get('status') != 'done':
+        if intent.get('status') != 'done':
             continue
         result = intent.get('result') or {}
         if not isinstance(result, dict) or result.get('not_executed'):
             continue
+        current_attempt = intent.get('attempt_id') == attempt_id
+        verified_python = _matching_python_intent(intent, expected_python)
+        # A pause/retry fences the lease and creates a new attempt, but a
+        # completed Python result remains durable and is reused by the worker.
+        # The reviewer must see that same server-owned evidence, explicitly
+        # attributed to its source attempt, instead of an empty current ledger.
+        if not current_attempt and not verified_python:
+            continue
         payload = intent.get('payload') or {}
-        rows.append({
+        row = {
             'tool': str(intent.get('name') or '')[:100],
             'status': 'done',
+            'attempt_id': str(intent.get('attempt_id') or '')[:64],
+            'inherited_from_prior_attempt': not current_attempt,
+            'verified_python': verified_python,
             'exit_code': result.get('exit_code'),
             'output_excerpt': str(result.get('output') or '')[:500],
             'code_excerpt': str(payload.get('code') or payload.get('command') or '')[:500]
                 if isinstance(payload, dict) else '',
-        })
+        }
+        (rows if current_attempt else inherited_python).append(row)
+    if not any(row['verified_python'] for row in rows) and inherited_python:
+        return rows[-19:] + inherited_python[-1:]
     return rows[-20:]
 
 
@@ -1131,14 +1147,15 @@ class TeamRuntime:
                     # A stale synthetic reviewer can still be exercised by
                     # the permission guard; missing targets grant no evidence.
                     target = None
+                expected_python = (_required_python_output(target['profile'], meta.get('goal'))
+                                   if target else None)
                 evidence = (_review_tool_evidence(self.store, owner, team_id, target['id'],
-                                                  profile.get('target_attempt')) if target else [])
+                                                  profile.get('target_attempt'), expected_python)
+                            if target else [])
                 python_evidence = bool(target and
                     target['attempt_id'] == profile.get('target_attempt')
                     and _requires_python_execution(target['profile'], meta.get('goal'))
-                    and _verified_python_intent(
-                        self.store, owner, team_id, target['id'],
-                        _required_python_output(target['profile'], meta.get('goal'))))
+                    and any(item['verified_python'] for item in evidence))
                 instructions += (' You are read-only. Inspect the result against acceptance and available files. '
                                  'Finish with ONLY JSON {"verdict":"pass" or "fail","reason":"..."}. '
                                  'Do not accept an unsupported claim of successful tests. '
