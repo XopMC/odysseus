@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.team_runtime import TeamRuntime
+from src.team_runtime import TeamRuntime, _exact_read_only_acceptance, _exact_acceptance_target
 from src.team_store import TeamStore, NotFound, Conflict
 
 
@@ -251,6 +251,8 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host_calls, [])
 
     async def test_planner_arithmetic_prose_acceptance_gets_tool_free_correction(self):
+        self.store.update_task_metadata('owner', self.task['id'], {
+            'goal': 'QA arithmetic: compute twelve times eleven. Reasoning only; do not use tools.'})
         worker = self.worker(
             name='Compute 12 × 11',
             objective='Calculate 12 × 11 using arithmetic reasoning.',
@@ -271,6 +273,8 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host_calls, [])
 
     async def test_planner_arithmetic_wrong_acceptance_still_requires_evidence(self):
+        self.store.update_task_metadata('owner', self.task['id'], {
+            'goal': 'QA arithmetic: compute twelve times eleven. Reasoning only; do not use tools.'})
         worker = self.worker(
             name='Compute 12 × 11', objective='Calculate 12 × 11.',
             acceptance='The computed result equals exactly 133.', write_scope=[],
@@ -279,6 +283,81 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.execute(worker)
         self.assertEqual(result['status'], 'failed')
         self.assertIn('without any verified tool result', result['result']['error'])
+
+    async def test_planner_arithmetic_numeric_json_is_verified_without_tools(self):
+        self.store.update_task_metadata('owner', self.task['id'], {
+            'goal': 'QA arithmetic: compute twelve times eleven. Reasoning only; do not use tools.'})
+        worker = self.worker(
+            name='Compute 12 × 10', objective='Calculate 12 multiplied by 10: 12 × 10 = 120',
+            acceptance='Result is exactly 120, verified by place value', write_scope=[],
+        )
+        final = {
+            'completed': True, 'result': 120, 'acceptance_met': True,
+            'verification': {'expected': 120, 'actual': 120, 'match': True},
+            'paths_touched': [], 'files_modified': False, 'network_used': False,
+            'host_tools_used': False, 'unresolved_issues': [],
+        }
+        self.responses = [answer(json.dumps(final))]
+        result = await self.execute(worker)
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['completion_validation'], 'exact_read_only_acceptance')
+        self.assertEqual(self.tool_schemas, [[]])
+
+    async def test_coordinator_accepts_server_checked_arithmetic_without_reviewer_tools(self):
+        goal = ('QA arithmetic: compute twelve times eleven. Success criterion: final result 132. '
+                'Reasoning only; do not use host commands, files, network, or tools.')
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': goal})
+        worker = self.worker(name='Verify final result',
+                             objective='Confirm the final answer is 132',
+                             acceptance='Final result equals 132; all prior subtasks accepted',
+                             write_scope=[])
+        final = {'completed': True, 'result': 132, 'acceptance_met': True,
+                 'verification': {'expected': 132, 'actual': 132, 'match': True},
+                 'paths_touched': [], 'files_modified': False,
+                 'network_used': False, 'host_tools_used': False,
+                 'unresolved_issues': []}
+        self.responses = [answer(json.dumps(final))]
+        result = await self.execute(worker)
+        self.assertEqual(result['status'], 'done')
+        await self.runtime.coordinate('owner', self.task['id'])
+        self.assertEqual(self.store.get_worker('owner', self.task['id'], worker['id'])['status'], 'accepted')
+        self.assertFalse(any(w['profile'].get('kind') == 'verification' for w in
+                             self.store.list_workers('owner', self.task['id'])))
+        self.assertTrue(any(e['type'] == 'worker_exact_result_verified' for e in
+                            self.store.events('owner', self.task['id'])))
+
+    async def test_failed_dependency_does_not_leave_team_running_forever(self):
+        parent = self.worker()
+        self.store.add_worker('owner', self.task['id'], 'Dependent',
+                              profile={**self.selection, 'kind': 'worker', 'role': 'executor',
+                                       'objective': 'Use parent result', 'acceptance': 'Verify it'},
+                              depends_on=[parent['id']])
+        self.store.update_worker('owner', self.task['id'], parent['id'], status='failed')
+        self.store.set_task_status('owner', self.task['id'], 'running')
+        await self.runtime.coordinate('owner', self.task['id'])
+        self.assertEqual(self.store.get_task('owner', self.task['id'])['status'], 'blocked')
+
+    def test_planner_multistep_arithmetic_uses_server_checked_goal(self):
+        goal = ('QA arithmetic: compute twelve times eleven. Success criterion: final result 132. '
+                'Reasoning only; do not use host commands, files, network, or tools.')
+        for name, objective, acceptance in (
+            ('Sum partial products', 'Add the partial results: 120 + 12 = 132',
+             'Sum equals exactly 132; cross-check multiplication'),
+            ('Verify final result', 'Confirm the final answer is 132',
+             'Final result equals 132; all prior subtasks accepted'),
+        ):
+            with self.subTest(name=name):
+                profile = {'kind': 'worker', 'name': name, 'objective': objective,
+                           'acceptance': acceptance, 'write_scope': []}
+                self.assertEqual(_exact_acceptance_target(profile, goal), '132')
+                final = {'completed': True, 'result': 132, 'acceptance_met': True,
+                         'verification': {'expected': 132, 'actual': 132, 'match': True},
+                         'paths_touched': [], 'files_modified': False,
+                         'network_used': False, 'host_tools_used': False,
+                         'unresolved_issues': []}
+                self.assertTrue(_exact_read_only_acceptance(profile, json.dumps(final), goal))
+                if name == 'Verify final result':
+                    self.assertIsNone(_exact_acceptance_target(profile, 'Implement and verify a project'))
 
     async def test_exact_read_only_worker_corrects_bare_value_without_suggesting_tools(self):
         worker = self.worker(objective='Return exactly 42 using only reasoning.',
