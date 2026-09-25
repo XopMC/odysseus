@@ -327,6 +327,34 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_exact_acceptance_target(profile, goal), '133')
         self.assertIsNone(_exact_acceptance_target(profile, goal.replace('No files, shell, Python, Internet, host execution,', 'Files and host execution are allowed;')))
 
+    async def test_russian_read_only_arithmetic_acceptance_is_tool_free_and_verified(self):
+        goal = ('QA read-only Team: поручите исполнителю вычислить 8 умножить на 9. '
+                'Критерий завершения: точный результат 72, без файлов, команд, Python, сети, внешних действий.')
+        self.store.update_task_metadata('owner', self.task['id'], {'goal': goal})
+        worker = self.worker(
+            name='Вычислить 8 × 9',
+            objective='Исполнителю на выбранной модели вычислить произведение 8 умножить на 9 и вернуть точный числовой результат. Никаких файлов, команд, Python, сетевых запросов или изменений проекта — только внутреннее вычисление и вывод результата.',
+            acceptance='Результат должен быть точно 72. Исполнитель возвращает число 72 как итог; никаких побочных действий (файлов, процессов, сети) не допускается.',
+            write_scope=[],
+        )
+        profile = self.store.get_worker('owner', self.task['id'], worker['id'])['profile']
+        self.assertEqual(_exact_acceptance_target(profile, goal), '72')
+        self.assertIsNone(_exact_acceptance_target({**profile, 'acceptance': 'Результат должен быть точно 73.'}, goal))
+        self.assertIsNone(_exact_acceptance_target({**profile, 'write_scope': ['.']}, goal))
+        self.assertIsNone(_exact_acceptance_target(profile, goal.replace('без файлов, команд, Python, сети,', 'с файлами и сетью,')))
+        final = {
+            'completed': True, 'result': 72, 'acceptance_met': True,
+            'verification': {'expected': 72, 'actual': 72, 'match': True},
+            'paths_touched': [], 'files_modified': False, 'network_used': False,
+            'host_tools_used': False, 'unresolved_issues': [],
+        }
+        self.responses = [answer('8 × 9 = 72'), answer(json.dumps(final))]
+        result = await self.execute(worker)
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(result['result']['completion_validation'], 'exact_read_only_acceptance')
+        self.assertEqual(self.tool_schemas, [[], []])
+        self.assertEqual(self.host_calls, [])
+
     async def test_planner_arithmetic_wrong_acceptance_still_requires_evidence(self):
         self.store.update_task_metadata('owner', self.task['id'], {
             'goal': 'QA arithmetic: compute twelve times eleven. Reasoning only; do not use tools.'})

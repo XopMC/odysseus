@@ -50,10 +50,11 @@ def json_answer(text):
 
 def _arithmetic_value(text):
     expression = re.search(r'\b(\d{1,6})\s*([×*+−-])\s*(\d{1,6})\b', text)
-    if not expression:
-        return None
-    left, operator, right = int(expression.group(1)), expression.group(2), int(expression.group(3))
-    return left * right if operator in {'×', '*'} else left + right if operator == '+' else left - right
+    if expression:
+        left, operator, right = int(expression.group(1)), expression.group(2), int(expression.group(3))
+        return left * right if operator in {'×', '*'} else left + right if operator == '+' else left - right
+    russian_product = re.search(r'\b(\d{1,6})\s+умножить\s+на\s+(\d{1,6})\b', text, re.IGNORECASE)
+    return int(russian_product.group(1)) * int(russian_product.group(2)) if russian_product else None
 
 
 def _arithmetic_goal_value(goal):
@@ -64,7 +65,11 @@ def _arithmetic_goal_value(goal):
         r'\b(?:arithmetic only|mental arithmetic)\b.*?\bno\s+files?\s*,\s*shell\s*,\s*python\s*,\s*'
         r'(?:internet|network)\s*,\s*host\s+execution\b', goal, re.IGNORECASE | re.DOTALL,
     )
-    if not explicit_tool_free and not forbidden_capabilities:
+    russian_tool_free = re.search(
+        r'\bбез\s+файл\w*\s*,\s*команд\w*\s*,\s*python\s*,\s*сет\w*\b',
+        goal, re.IGNORECASE,
+    )
+    if not explicit_tool_free and not forbidden_capabilities and not russian_tool_free:
         return None
     words = {'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
              'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
@@ -104,6 +109,11 @@ def _declared_exact_result(profile, goal=''):
         r'\b(?:result|product|sum|answer|returned\s+value)\b.{0,48}\b(?:equals|is)\s+(?:exactly\s+)?(\d{1,12})\b',
         acceptance, flags=re.IGNORECASE,
     )
+    if not declared:
+        declared = re.search(
+            r'\b(?:результат|ответ|произведение)\s+(?:должен\s+быть|равен)\s+'
+            r'(?:точно\s+)?(\d{1,12})\b', acceptance, flags=re.IGNORECASE,
+        )
     if not declared:
         return None
     actual = own_value if own_value is not None else goal_value

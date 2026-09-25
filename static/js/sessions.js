@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260925teamsync1';
+import chatRenderer from './chatRenderer.js?v=20260925teamroute2';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260924modelcache1';
 import themeModule from './theme.js?v=20260921livefix20';
@@ -2855,14 +2855,23 @@ export function initDragSort() {
 // Skip entity-prefixed hashes (document-, note-, etc.) — those are handled
 // by their own click handlers in chatRenderer.js and must not trigger
 // session navigation (which would reset the active chat).
-window.addEventListener('hashchange', () => {
+async function _handleSessionHashNavigation() {
   const hashId = window.location.hash.replace('#', '');
   if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return;
-  if (hashId && hashId !== currentSessionId) {
-    const target = sessions.find(s => s.id === hashId && !s.archived);
-    if (target) selectSession(hashId);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(hashId)
+      || hashId === currentSessionId) return;
+  let target = sessions.find(s => s.id === hashId && !s.archived);
+  if (!target) {
+    // A second browser can navigate to a chat created after this tab last
+    // fetched its sidebar. The address changed, but the old chat/Team panel
+    // otherwise remained on screen until a hard reload.
+    await loadSessions();
+    if (window.location.hash !== '#' + hashId || currentSessionId === hashId) return;
+    target = sessions.find(s => s.id === hashId && !s.archived);
   }
-});
+  if (target) await selectSession(hashId);
+}
+window.addEventListener('hashchange', () => { void _handleSessionHashNavigation(); });
 
 // ── Research indicator management ──
 function _updateResearchDots() {

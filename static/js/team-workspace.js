@@ -931,10 +931,6 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     };
   }
   async function start() {
-    const selected = selectedSessionId();
-    if (!selected) throw new Error('Select or create a chat first.');
-    if (!sid && !teamId) sid = selected;
-    if (sid !== selected) throw new Error('The selected chat changed; reopen Team before starting.');
     if (teamId) throw new Error('This chat already has a team task.');
     const external_approvals = ui.approvals.filter(x => x.checked.control.checked).map(x => ({ endpoint_id: x.endpoint.endpoint_id,
       limit_microusd: Number(x.budget.control.value), input_rate_per_million: x.inputRate.control.value === '' ? null : Number(x.inputRate.control.value),
@@ -952,7 +948,18 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
       payload.project_revision = selectedEngineeringProject.revision;
       payload.project_path = selectedEngineeringProject.root;
     }
-    await post(`/api/team/session/${encode(sid)}/start`, payload); await loadSnapshot();
+    // New Chat intentionally creates no DB session until first use. Team Start
+    // is itself first use: snapshot the form above, then materialize the
+    // pending chat before posting. The session refresh may rebuild this panel.
+    let selected = selectedSessionId();
+    if (!selected && window.sessionModule?.hasPendingChat?.()) {
+      const created = await window.sessionModule.materializePendingSession?.();
+      if (created) selected = selectedSessionId();
+    }
+    if (!selected) throw new Error('Choose a model and create a chat before starting Team.');
+    if (!sid && !teamId) sid = selected;
+    if (sid !== selected) throw new Error('The selected chat changed; reopen Team before starting.');
+    await post(`/api/team/session/${encode(selected)}/start`, payload); await loadSnapshot();
   }
   function showTab(label) {
     selectedTab = label;

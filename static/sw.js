@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v491-effectrecovery';
+const CACHE_NAME = 'odysseus-v492-teamroute';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -42,7 +42,7 @@ const PRECACHE = [
   '/static/style.css?v=20260924actionpreview1',
   '/static/css/team-workspace.css?v=20260921livefix18',
   '/static/css/engineering-workspace.css?v=20260914engineering1',
-  '/static/app.js?v=20260925teamsync1',
+  '/static/app.js?v=20260925teamroute2',
   '/static/js/startupShell.js?v=20260922restore1',
   '/static/js/i18n.js',
   '/static/js/storage.js',
@@ -51,13 +51,13 @@ const PRECACHE = [
   '/static/js/markdown.js?v=20260923toolprogress1',
   '/static/js/liveThinkingThrottle.js?v=20260923toolprogress1',
   '/static/js/dragSort.js',
-  '/static/js/sessions.js?v=20260925teamsync1',
+  '/static/js/sessions.js?v=20260925teamroute2',
   '/static/js/memory.js?v=20260722memoryloading1',
   '/static/js/skills.js',
   '/static/js/tourHints.js',
   '/static/js/fileHandler.js',
   '/static/js/voiceRecorder.js',
-  '/static/js/models.js?v=20260925teamsync1',
+  '/static/js/models.js?v=20260925teamroute2',
   '/static/js/rag.js',
   '/static/js/presets.js',
   '/static/js/search.js',
@@ -65,11 +65,11 @@ const PRECACHE = [
   '/static/js/tts-ai.js',
   '/static/js/document.js?v=20260815approvalsave1',
   '/static/js/gallery.js?v=20260708match1',
-  '/static/js/chatRenderer.js?v=20260925teamsync1',
+  '/static/js/chatRenderer.js?v=20260925teamroute2',
   '/static/js/memorySafety.js?v=20260923memoryredact1',
   '/static/js/codeRunner.js',
-  '/static/js/chatStream.js?v=20260925teamsync1',
-  '/static/js/chat.js?v=20260925teamsync1',
+  '/static/js/chatStream.js?v=20260925teamroute2',
+  '/static/js/chat.js?v=20260925teamroute2',
   '/static/js/replayHistory.js?v=20260923replaycursor2',
   '/static/js/context-settings-dialog.js?v=20260923context1',
   '/static/js/engineering-workspace.js?v=20260923context1',
@@ -78,7 +78,7 @@ const PRECACHE = [
   '/static/js/chat-run-inspector.js?v=20260923runinspector3',
   '/static/js/runHealth.js?v=20260924budgetwarn1',
   '/static/js/chat-subagents.js?v=20260924detailchannels1',
-  '/static/js/team-workspace.js?v=20260925teamsync1',
+  '/static/js/team-workspace.js?v=20260925teamroute2',
   '/static/js/accessMode.js?v=20260921livefix18',
   '/static/js/projects.js?v=20260922projects2',
   '/static/js/cookbook.js',
