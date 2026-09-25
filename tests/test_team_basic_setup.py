@@ -5,6 +5,11 @@ from pathlib import Path
 
 
 class TeamBasicSetupTest(unittest.TestCase):
+    def test_basic_setup_warns_that_workers_cannot_run_host_commands(self):
+        source = (Path(__file__).resolve().parents[1] / 'static/js/team-workspace.js').read_text()
+        self.assertIn('Basic workers are read-only and cannot run Python or shell commands.', source)
+        self.assertIn('Switch to Advanced setup to assign writable paths', source)
+
     def test_newly_materialized_chat_hash_is_a_safe_team_session_fallback(self):
         module = (Path(__file__).resolve().parents[1] / 'static/js/team-workspace.js').as_uri()
         script = r'''

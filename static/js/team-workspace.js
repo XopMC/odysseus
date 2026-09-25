@@ -589,7 +589,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   }
   function buildTeam() {
     const panel = panels.get('Team').panel;
-    ui.workerBasicHint = uiElement('p', 'Choose worker models in Tasks. The leader will plan and distribute the work. Switch to Advanced setup to configure individual assignments.');
+    ui.workerBasicHint = uiElement('p', 'Choose worker models in Tasks. Basic workers are read-only and cannot run Python or shell commands. Switch to Advanced setup to assign writable paths and command permissions.');
     ui.workerAdvanced = element('div');
     panel.append(ui.workerBasicHint, ui.workerAdvanced);
     ui.workerAdvanced.append(uiElement('p', 'Choose workers explicitly, or let the leader dispatch them after Start. External routes always require prior consent and known prices.'));

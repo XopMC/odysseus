@@ -574,6 +574,38 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.messages)
         self.assertFalse(self.host_calls)
 
+    async def test_python_command_wording_with_read_only_scope_blocks_early(self):
+        worker = self.worker(
+            objective='Execute only the command `python3 -c "print(6 * 7)"` in the QA directory.',
+            acceptance='Capture stdout and exit code; stdout must equal 42.',
+            write_scope=[],
+        )
+
+        result = await self.execute(worker)
+
+        self.assertEqual(result['status'], 'waiting_approval')
+        self.assertIn('python tool is not permitted', result['result']['error'])
+        self.assertFalse(self.messages)
+        self.assertFalse(self.host_calls)
+
+    async def test_exact_python_command_cannot_be_accepted_from_bash_evidence(self):
+        worker = self.worker(
+            objective='Execute exactly python3 -c "print(6 * 7)" in the QA directory.',
+            acceptance='A real Python tool intent finished with stdout 42 and exit_code 0.',
+            write_scope=['.'],
+        )
+        claim = self.store.claim_worker('owner', self.task['id'], worker_id=worker['id'])
+        intent = self.store.record_tool_intent('owner', self.task['id'], worker['id'], claim['lease_token'],
+                                                'bash', {'command': 'python3 -c "print(6 * 7)"'},
+                                                effectful=True, idempotency_key='bash-python')
+        self.store.record_tool_result('owner', self.task['id'], intent['id'], claim['lease_token'],
+                                      {'exit_code': 0, 'output': '42\n'})
+        self.store.finish_worker('owner', self.task['id'], worker['id'], claim['lease_token'],
+                                 {'summary': '42', 'completed': True})
+
+        with self.assertRaisesRegex(Exception, 'Required Python execution'):
+            await self.runtime.accept_result('owner', self.task['id'], worker['id'])
+
     async def test_python_tool_output_must_match_exact_acceptance(self):
         self.store.update_task_metadata('owner', self.task['id'], {'goal': 'Compute 6 * 7 using Python'})
         worker = self.worker(objective='Calculate 6 * 7 using Python',
