@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import uuid
+from datetime import datetime, timezone
 
 from core.database import ChatToolIntent, ChatWorkEvent, SessionLocal, reserve_sqlite_writer, utcnow_naive
 from src.chat_work_store import WorkConflict, WorkNotFound, _session, _storage_owner
@@ -57,7 +58,41 @@ class ChatEffectInbox:
             payload={"intent_id": row.id, "status": row.status},
         ))
 
-    def record_intent(self, owner, session_id, run_id, tool_call_id, tool_name, content):
+    @staticmethod
+    def _goal_cutoff(goal_created_at):
+        if goal_created_at is None:
+            return None
+        if not isinstance(goal_created_at, str):
+            raise ValueError("Goal creation time required")
+        cutoff = datetime.fromisoformat(goal_created_at)
+        return cutoff.astimezone(timezone.utc).replace(tzinfo=None) if cutoff.tzinfo else cutoff
+
+    @staticmethod
+    def _no_retry_row(db, owner, session_id, tool_name, digest, cutoff):
+        if cutoff is None:
+            return None
+        return db.query(ChatToolIntent).filter(
+            ChatToolIntent.owner == _storage_owner(owner),
+            ChatToolIntent.session_id == session_id,
+            ChatToolIntent.tool_name == tool_name,
+            ChatToolIntent.action_hash == digest,
+            ChatToolIntent.status == "no_retry",
+            ChatToolIntent.created_at >= cutoff,
+        ).first()
+
+    def no_retry_match(self, owner, session_id, tool_name, content, *, goal_created_at=None):
+        """Return a same-Goal no-retry fence without exposing tool arguments."""
+        cutoff = self._goal_cutoff(goal_created_at)
+        if cutoff is None:
+            return None
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with SessionLocal() as db:
+            _session(db, owner, session_id)
+            row = self._no_retry_row(db, owner, session_id, tool_name, digest, cutoff)
+            return _public(row) if row is not None else None
+
+    def record_intent(self, owner, session_id, run_id, tool_call_id, tool_name, content,
+                      *, goal_created_at=None):
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
             raise ValueError("Exact run ID required")
         if not isinstance(tool_call_id, str) or not tool_call_id or len(tool_call_id) > 200 or "\n" in tool_call_id:
@@ -67,6 +102,7 @@ class ChatEffectInbox:
         if not isinstance(content, str) or len(content.encode("utf-8")) > 2 * 1024 * 1024:
             raise ValueError("Bounded tool arguments required")
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        cutoff = self._goal_cutoff(goal_created_at)
         with SessionLocal.begin() as db:
             reserve_sqlite_writer(db)
             _session(db, owner, session_id)
@@ -78,6 +114,8 @@ class ChatEffectInbox:
                 if row.tool_name != tool_name or row.action_hash != digest:
                     raise WorkConflict("Tool call ID was reused for a different action")
                 return _public(row)
+            if self._no_retry_row(db, owner, session_id, tool_name, digest, cutoff) is not None:
+                raise WorkConflict("Exact action was marked Do not retry for this Goal")
             verified_not_applied = db.query(ChatToolIntent).filter_by(
                 owner=_storage_owner(owner), session_id=session_id,
                 tool_name=tool_name, action_hash=digest, status="verified_not_applied",

@@ -862,6 +862,40 @@ def test_unknown_prior_effect_fences_agent_before_dispatch(monkeypatch):
     assert not any(e.get("type") == "tool_start" for e in events)
 
 
+def test_no_retry_effect_is_feedback_not_dispatch_or_goal_stop(monkeypatch):
+    _patch_common(monkeypatch)
+    from src.chat_effect_inbox import inbox
+    from src import context_efficiency_state
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_: {"cache_write_read_ratio": 12.5})
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda _owner: set())
+    monkeypatch.setattr(inbox, "no_retry_match", lambda *_args, **_kwargs: {"id": "old-intent"})
+    monkeypatch.setattr(inbox, "record_intent", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("a no-retry action must not create an intent")))
+    calls = []
+
+    async def stream(_candidates, messages, **_kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            yield 'data: {"delta":"```python\\nimport time; time.sleep(90); print(49)\\n```"}\n\n'
+        else:
+            assert "Do not retry" in json.dumps(messages)
+            yield 'data: {"delta":"The prior action was not executed; I will choose another way."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Safe QA"}],
+        session_id="fixture-chat", owner="alice", max_rounds=2,
+        relevant_tools={"python"}, access_mode="full_access",
+        active_goal={"id": "safe-goal", "status": "active", "attempt": 1,
+                     "created_at": "2026-09-25T10:00:00", "checkpoint": {}},
+    )))
+    assert len(calls) == 2
+    assert any(e.get("type") == "tool_retry_blocked"
+               and e.get("reason") == "goal_effect_no_retry" for e in events)
+    assert not any(e.get("type") in {"tool_start", "agent_terminal"} for e in events)
+
+
 def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypatch):
     _patch_common(monkeypatch)
     from src.chat_effect_inbox import inbox

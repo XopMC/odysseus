@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
@@ -138,6 +139,31 @@ def test_no_retry_requires_exact_revision_and_generates_server_receipt(inbox):
         assert "private command" not in json.dumps(row.receipt)
         event = db.query(ChatWorkEvent).filter_by(entity_id=item["id"], kind="effect_reconciled").one()
         assert event.payload == {"intent_id": item["id"], "status": "no_retry"}
+
+
+def test_no_retry_fences_exact_action_within_goal_but_not_other_actions(inbox):
+    store, _factory = inbox
+    goal_started = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    action = '{"code":"import time; time.sleep(90); print(49)"}'
+    item = store.record_intent("alice", "owned-chat", "a" * 32, "call-old",
+                               "python", action, goal_created_at=goal_started)
+    unknown = store.mark_unknown("alice", "owned-chat", item["id"])
+    store.no_retry("alice", "owned-chat", item["id"], expected_revision=unknown["revision"])
+    assert store.no_retry_match("alice", "owned-chat", "python", action,
+                                goal_created_at=goal_started)["id"] == item["id"]
+    with pytest.raises(WorkConflict, match="Do not retry"):
+        store.record_intent("alice", "owned-chat", "b" * 32, "call-repeated",
+                            "python", action, goal_created_at=goal_started)
+    assert store.record_intent(
+        "alice", "owned-chat", "b" * 32, "call-short", "python",
+        '{"code":"print(49)"}', goal_created_at=goal_started,
+    )["created"]
+    # A later, unrelated Goal must not inherit this user decision.
+    later_goal = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    assert store.no_retry_match("alice", "owned-chat", "python", action,
+                                goal_created_at=later_goal) is None
+    assert store.record_intent("alice", "owned-chat", "c" * 32, "call-new-goal",
+                               "python", action, goal_created_at=later_goal)["created"]
 
 
 def test_verified_not_applied_requires_one_shot_exact_hash_retry_authorization(inbox):

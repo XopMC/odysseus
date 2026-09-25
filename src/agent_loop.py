@@ -7795,6 +7795,25 @@ async def stream_agent_loop(
         tool_result_records = []  # aligned structured provenance for next round
         budget_hit = False
         goal_completed_this_round = False
+        _goal_effect_cutoff = active_goal.get("created_at") if isinstance(active_goal, dict) else None
+
+        def _append_no_retry_result(block):
+            # This is a refusal, not a replayed success. Keep it in the model's
+            # tool-result ledger so it can choose a different action and carry on.
+            result = {
+                "error": "This exact action was marked Do not retry for the current Goal. "
+                         "It was not executed. Choose a different action or ask the user.",
+                "exit_code": 1, "blocked": True, "not_executed": True,
+                "policy": "goal_effect_no_retry",
+            }
+            result_text = format_tool_result(block.tool_type, result)
+            tool_results.append(result_text)
+            tool_result_texts.append(result_text)
+            tool_result_records.append({
+                "tool_name": block.tool_type, "content": block.content,
+                "result": result, "text": result_text,
+            })
+
         for i, block in enumerate(tool_blocks):
             # Do not begin another potentially effectful tool after the
             # attempt's wall-time budget. Never interrupt one mid-effect.
@@ -7850,6 +7869,16 @@ async def stream_agent_loop(
                 })
                 yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "approved_action_already_executed", "round": round_num})}\n\n'
                 continue
+            if session_id and _goal_effect_cutoff:
+                from src.chat_effect_inbox import inbox as _effect_inbox, needs_effect_intent
+                if (needs_effect_intent(block.tool_type, block.content)
+                        and _effect_inbox.no_retry_match(
+                            owner, session_id, block.tool_type, block.content,
+                            goal_created_at=_goal_effect_cutoff,
+                        )):
+                    _append_no_retry_result(block)
+                    yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "goal_effect_no_retry", "round": round_num})}\n\n'
+                    continue
             # Build a short display string for the frontend tool bubble.
             # Document tools show a brief summary instead of dumping full content.
             is_doc_tool = block.tool_type in ("create_document", "update_document", "edit_document", "suggest_document")
@@ -8013,14 +8042,28 @@ async def stream_agent_loop(
                         )
                         _effect_call_id = f"round-{round_num}-tool-{i}"
                         try:
+                            _effect_kwargs = (
+                                {"goal_created_at": _goal_effect_cutoff}
+                                if _goal_effect_cutoff else {}
+                            )
                             _effect_intent = _effect_inbox.record_intent(
                                 owner, session_id, _effect_run_id, _effect_call_id,
                                 block.tool_type, block.content,
+                                **_effect_kwargs,
                             )
                             if not _effect_intent["created"]:
                                 yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "This exact effect intent already exists; it will not be dispatched twice."}}})}\n\n'
                                 return
-                        except Exception:
+                        except Exception as exc:
+                            from src.chat_work_store import WorkConflict
+                            if (isinstance(exc, WorkConflict) and _goal_effect_cutoff
+                                    and _effect_inbox.no_retry_match(
+                                        owner, session_id, block.tool_type, block.content,
+                                        goal_created_at=_goal_effect_cutoff,
+                                    )):
+                                _append_no_retry_result(block)
+                                yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "goal_effect_no_retry", "round": round_num})}\n\n'
+                                continue
                             logger.exception("Unable to persist effect intent before dispatch")
                             yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "effect_ledger", "message": "Could not durably record the tool intent; action was not started."}}})}\n\n'
                             return
