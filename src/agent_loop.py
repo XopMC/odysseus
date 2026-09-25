@@ -4716,6 +4716,7 @@ async def stream_agent_loop(
         _relevant_tools.update(_DOMAIN_TOOL_MAP["files"])
         _relevant_tools.update({
             "ask_user", "get_goal", "update_goal_progress", "complete_goal",
+            "create_plan", "update_plan", "update_plan_step",
         })
     if _subagent_mode in {"same_model", "selected_models"} and not guide_only:
         if _relevant_tools is None:
@@ -4805,7 +4806,10 @@ async def stream_agent_loop(
         if route_tools is not None and approved_plan:
             route_tools |= {"ask_user", "update_plan", "update_plan_step"}
         if route_tools is not None and active_goal:
-            route_tools |= {"ask_user", "get_goal", "update_goal_progress", "complete_goal"}
+            route_tools |= {
+                "ask_user", "get_goal", "update_goal_progress", "complete_goal",
+                "create_plan", "update_plan", "update_plan_step",
+            }
         return route_tools
 
     (

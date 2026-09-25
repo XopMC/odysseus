@@ -86,7 +86,10 @@ def test_active_goal_keeps_execution_tools_and_emits_inventory(monkeypatch):
 
     events = asyncio.run(collect())
     inventory = next(event["data"] for event in events if event.get("type") == "tool_inventory")
-    for name in ("bash", "read_file", "get_goal", "update_goal_progress", "complete_goal", "ask_user"):
+    for name in (
+        "bash", "read_file", "get_goal", "update_goal_progress", "complete_goal",
+        "ask_user", "create_plan", "update_plan", "update_plan_step",
+    ):
         assert name in inventory["tools"]
     prompt = "\n".join(str(message.get("content", "")) for message in requests[0]["messages"])
     assert "bash" in prompt.lower()
