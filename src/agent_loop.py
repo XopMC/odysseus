@@ -6512,6 +6512,7 @@ async def stream_agent_loop(
         _live_context_last_tokens = 0
         _round_usage_finalized = False
         _request_budget_hit = False
+        _round_output_truncated = False
         _retry_model_output_round = False
         _retry_model_output_reason = None
         candidate_index = 0
@@ -6840,6 +6841,8 @@ async def stream_agent_loop(
                                 _round_backend_generation_time = float(u["generation_time"])
                             except (TypeError, ValueError, OverflowError):
                                 pass
+                    elif data.get("type") == "finish_reason":
+                        _round_output_truncated = data.get("reason") == "length"
                     elif data.get("type") == "fallback":
                         # The selected model failed and another answered; surface
                         # the notice so a misconfigured provider isn't masked.
@@ -7168,6 +7171,28 @@ async def stream_agent_loop(
             if _ody_doc_finetune_mode
             else round_response
         )
+        if _round_output_truncated and not _force_answer:
+            # A length-truncated tool proposal is never safe to dispatch,
+            # even if its partial JSON happens to parse. Keep plain answer
+            # prefixes for continuation, but discard incomplete tool frames.
+            _partial_tool_proposal = bool(native_tool_calls) or bool(re.search(
+                r"(?:<tool_call>|<function=|```(?:bash|python|[a-z_]+_tool)\b)",
+                round_response, re.IGNORECASE,
+            ))
+            if round_response.strip() and not _partial_tool_proposal:
+                messages.append({"role": "assistant", "content": round_response.strip()})
+            messages.append({"role": "system", "content": (
+                "The previous model output was cut off by its output-token limit. "
+                + (
+                    "Its incomplete tool proposal was discarded without execution. "
+                    "Issue a fresh complete tool call; do not assume any action occurred."
+                    if _partial_tool_proposal else
+                    "Continue the same answer from its exact endpoint without "
+                    "repeating the prefix. Do not claim completion until finished."
+                )
+            )})
+            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "output_limit_continuation"})}\n\n'
+            continue
         # Engineering finetunes receive textual builtin schemas even on an
         # OpenAI-compatible endpoint. Match that actual transport, including
         # when this round was answered by a fallback, instead of dropping the

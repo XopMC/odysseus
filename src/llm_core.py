@@ -3500,6 +3500,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                     _c0 = (j["choices"] or [None])[0]
                                     if _c0 is None:
                                         continue
+                                    _finish_reason = _c0.get("finish_reason")
+                                    if _finish_reason in {"length", "max_tokens"}:
+                                        yield 'data: {"type":"finish_reason","reason":"length"}\n\n'
                                     delta = _c0.get("delta") or {}
                                     if isinstance(delta, dict):
                                         # Text content

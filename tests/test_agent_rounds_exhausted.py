@@ -60,6 +60,54 @@ def _run_loop(monkeypatch, round_text, max_rounds=2, *, active_goal=None, sessio
     return _types(_collect(gen))
 
 
+def test_output_limit_continues_same_run_without_silent_completion(monkeypatch):
+    _patch_common(monkeypatch)
+    requests = []
+
+    async def stream(_candidates, messages, **kwargs):
+        requests.append(list(messages))
+        if len(requests) == 1:
+            yield 'data: {"delta":"first half"}\n\n'
+            yield 'data: {"type":"finish_reason","reason":"length"}\n\n'
+        else:
+            yield 'data: {"delta":" second half"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "write a long answer"}],
+        max_rounds=3, relevant_tools=set(),
+    )))
+    assert len(requests) == 2
+    assert any(msg.get("role") == "assistant" and msg.get("content") == "first half"
+               for msg in requests[1])
+    assert any(event.get("reason") == "output_limit_continuation" for event in events)
+    assert not any(event.get("type") == "rounds_exhausted" for event in events)
+
+
+def test_truncated_tool_proposal_is_not_executed(monkeypatch):
+    _patch_common(monkeypatch)
+    calls = []
+
+    async def execute(block, *_args, **_kwargs):
+        calls.append(block)
+        return (block.tool_type, {"output": "unexpected"})
+
+    async def stream(_candidates, _messages, **_kwargs):
+        yield 'data: {"delta":"```bash\\necho unfinished"}\n\n'
+        yield 'data: {"type":"finish_reason","reason":"length"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "run a tool"}],
+        max_rounds=1, relevant_tools={"bash"},
+    )))
+    assert calls == []
+    assert any(event.get("type") == "rounds_exhausted" for event in events)
+
+
 def test_plan_mode_requires_tool_until_durable_plan_then_suppresses_more_tools(monkeypatch):
     _patch_common(monkeypatch)
     requests = []

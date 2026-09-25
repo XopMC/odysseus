@@ -105,6 +105,20 @@ def test_usage_on_finish_delta_with_role_is_captured(monkeypatch):
     assert usage[-1] == {"input_tokens": 9, "output_tokens": 1}
 
 
+def test_output_limit_finish_reason_is_forwarded(monkeypatch):
+    lines = [
+        'data: ' + json.dumps({"choices": [{"delta": {"content": "partial"}}]}),
+        'data: ' + json.dumps({
+            "choices": [{"delta": {}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 7},
+        }),
+        'data: [DONE]',
+    ]
+    blob = _drive(monkeypatch, lines)
+    assert '"type":"finish_reason","reason":"length"' in blob
+    assert _usage_events(blob)[-1]["output_tokens"] == 7
+
+
 def test_usage_on_empty_choices_chunk_still_captured(monkeypatch):
     # canonical OpenAI include_usage: final chunk has empty choices + usage
     lines = [
