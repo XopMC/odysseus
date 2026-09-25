@@ -205,6 +205,11 @@ function checkbox(label, checked = false) {
 }
 const list = text => String(text || '').split(',').map(s => s.trim()).filter(Boolean);
 
+export function shouldConnectTeamEvents(data) {
+  const status = data?.status || data?.task?.status || '';
+  return !['done', 'completed', 'cancelled'].includes(status);
+}
+
 export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   EventSourceImpl = globalThis.EventSource, storage = globalThis.sessionStorage,
   NotificationImpl = globalThis.Notification,
@@ -227,6 +232,11 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   const notice = (message, error = false) => {
     if (!ui.notice) return;
     ui.notice.textContent = message; ui.notice.classList.toggle('team-error', error);
+  };
+  const reconnectNotice = 'Reconnecting to team events…';
+  const terminalTeam = () => !shouldConnectTeamEvents(snapshot);
+  const clearReconnectNotice = () => {
+    if (ui.notice?.textContent === reconnectNotice) notice('');
   };
   function updateNotificationControl() {
     if (!ui.notifications) return;
@@ -805,7 +815,11 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     // Starting SSE first loses the history on reload by design.
     if (teamId && (previousId !== teamId || !timelineEvents.size)) await loadTimeline(teamId, token);
     if (!current(token, id) || requestSeq !== snapshotRequestSeq) return;
-    if (teamId && !source) connect();
+    if (terminalTeam()) {
+      source?.close(); source = null;
+      clearTimeout(retryTimer); retryTimer = null;
+      clearReconnectNotice();
+    } else if (teamId && !source) connect();
     if (teamId) loadEvidence().catch(error => { if (current(token, id)) notice(error.message, true); });
   }
   async function loadEvidence() {
@@ -860,7 +874,8 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     }
   }
   function connect() {
-    if (!teamId || !active || !EventSourceImpl) return;
+    if (!teamId || !active || !EventSourceImpl || terminalTeam()) return;
+    clearTimeout(retryTimer); retryTimer = null;
     source?.close(); const token = generation, id = teamId;
     const stream = new EventSourceImpl(`/api/team/${encode(id)}/events?after_seq=${cursor.afterSeq}`); source = stream;
     const receive = event => {
@@ -891,9 +906,17 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
       if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = null; loadSnapshot().catch(e => notice(e.message, true)); }, 150);
     };
     stream.onmessage = receive; stream.addEventListener?.('team', receive);
-    stream.onopen = () => { if (source === stream && current(token) && teamId === id) destroyEngineering?.refreshContextObservation?.(); };
+    stream.onopen = () => {
+      if (source === stream && current(token) && teamId === id) {
+        clearReconnectNotice();
+        destroyEngineering?.refreshContextObservation?.();
+      }
+    };
     stream.onerror = () => {
-      if (source !== stream) return; stream.close(); source = null; notice('Reconnecting to team events…');
+      if (source !== stream) return;
+      stream.close(); source = null;
+      if (terminalTeam()) { clearReconnectNotice(); return; }
+      notice(reconnectNotice);
       retryTimer = setTimeout(() => { if (current(token) && teamId === id) connect(); }, 2000);
     };
   }

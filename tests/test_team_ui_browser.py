@@ -248,8 +248,14 @@ def test_team_workspace_real_controls_and_session_isolation(tmp_path):
         assert.equal(await page.evaluate(()=>TestNotice.shown.length),1);
         await page.evaluate(()=>controller.loadSnapshot());assert.equal(await page.evaluate(()=>TestNotice.shown.length),1,'unchanged blocked status must not notify again');
         tasks.get('chat-a').status='done';await page.evaluate(()=>controller.loadSnapshot());assert.equal(await page.evaluate(()=>TestNotice.shown.length),2);
+        assert.equal(await page.evaluate(()=>Stream.instances.at(-1).closed),true,'terminal Team must close its SSE connection');
         await page.getByRole('button',{name:'Notifications on (this tab)',exact:true}).click();
         tasks.get('chat-a').status='blocked';await page.evaluate(()=>controller.loadSnapshot());assert.equal(await page.evaluate(()=>TestNotice.shown.length),2,'explicit off suppresses new notifications');
+        await page.evaluate(()=>Stream.instances.at(-1).onerror());
+        assert.equal(await page.locator('.team-notice').innerText(),'Reconnecting to team events…');
+        await page.evaluate(()=>controller.loadSnapshot());
+        await page.evaluate(()=>Stream.instances.at(-1).onopen());
+        assert.equal(await page.locator('.team-notice').innerText(),'','successful reconnect must clear its stale notice');
         await page.getByRole('tab',{name:'Tasks',exact:true}).click();await page.screenshot({path:out+'/team-desktop.png'});
         await page.evaluate(async()=>{window.oldStream=Stream.instances.at(-1);oldStream.emit({team_id:'team-chat-a',seq:4,type:'worker.done'});oldStream.emit({team_id:'team-chat-a',seq:4,type:'worker.done'});});
         assert.equal(await page.evaluate(()=>controller.getState().after_seq),4);
