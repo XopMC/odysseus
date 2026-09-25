@@ -206,8 +206,8 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = {"chat": "20260925teamroute2", "sessions": "20260925teamroute2",
-                    "models": "20260925teamroute2", "chatRenderer": "20260925teamroute2"}
+    expected = {"chat": "20260925teamstart3", "sessions": "20260925teamstart3",
+                    "models": "20260925teamstart3", "chatRenderer": "20260925teamstart3"}
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"

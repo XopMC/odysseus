@@ -417,14 +417,14 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
 
     version = "20260922approval1"
-    assert "chat.js?v=20260925teamroute2" in app
-    assert "chat.js?v=20260925teamroute2" in index
+    assert "chat.js?v=20260925teamstart3" in app
+    assert "chat.js?v=20260925teamstart3" in index
     assert "previewNode.textContent = previewLines.join('\\n')" in renderer
     assert "previewNode.innerHTML" not in renderer
-    assert "chatRenderer.js?v=20260925teamroute2" in frontend
-    assert "chatRenderer.js?v=20260925teamroute2" in app
-    assert "chatRenderer.js?v=20260925teamroute2" in index
+    assert "chatRenderer.js?v=20260925teamstart3" in frontend
+    assert "chatRenderer.js?v=20260925teamstart3" in app
+    assert "chatRenderer.js?v=20260925teamstart3" in index
     assert "style.css?v=20260924actionpreview1" in index
     service_worker = (root / "static/sw.js").read_text(encoding="utf-8")
-    assert "chatRenderer.js?v=20260925teamroute2" in service_worker
+    assert "chatRenderer.js?v=20260925teamstart3" in service_worker
     assert "style.css?v=20260924actionpreview1" in service_worker

@@ -952,6 +952,11 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     // is itself first use: snapshot the form above, then materialize the
     // pending chat before posting. The session refresh may rebuild this panel.
     let selected = selectedSessionId();
+    // The sidebar's New Chat can be model-less. Team already has an explicit
+    // leader route, so create the pending chat from that route on first use.
+    if (!selected && !window.sessionModule?.hasPendingChat?.() && payload.leader?.endpoint_id && payload.leader?.model) {
+      window.sessionModule?.createDirectChat?.('', payload.leader.model, payload.leader.endpoint_id);
+    }
     if (!selected && window.sessionModule?.hasPendingChat?.()) {
       const created = await window.sessionModule.materializePendingSession?.();
       if (created) selected = selectedSessionId();

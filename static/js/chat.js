@@ -7,9 +7,9 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260925teamroute2';
-import chatRenderer from './chatRenderer.js?v=20260925teamroute2';
-import chatStream from './chatStream.js?v=20260925teamroute2';
+import sessionModule from './sessions.js?v=20260925teamstart3';
+import chatRenderer from './chatRenderer.js?v=20260925teamstart3';
+import chatStream from './chatStream.js?v=20260925teamstart3';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js?v=20260923toolprogress1';
 import spinnerModule from './spinner.js';

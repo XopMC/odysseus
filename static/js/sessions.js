@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260925teamroute2';
+import chatRenderer from './chatRenderer.js?v=20260925teamstart3';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260924modelcache1';
 import themeModule from './theme.js?v=20260921livefix20';

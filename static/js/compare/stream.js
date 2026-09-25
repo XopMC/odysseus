@@ -1,7 +1,7 @@
 // compare/stream.js — SSE streaming to panes
 import state from './state.js';
 import { addFinishBadge } from './vote.js';
-import { getModelCost, renderAskUserCard, safeDisplayImageSrc } from '../chatRenderer.js?v=20260925teamroute2';
+import { getModelCost, renderAskUserCard, safeDisplayImageSrc } from '../chatRenderer.js?v=20260925teamstart3';
 import markdownModule from '../markdown.js?v=20260923toolprogress1';
 import spinnerModule from '../spinner.js';
 import uiModule from '../ui.js';

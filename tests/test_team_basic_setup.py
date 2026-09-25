@@ -76,8 +76,10 @@ const {chromium}=require('playwright'),http=require('http'),fs=require('fs'),ass
 const repo=process.argv[1],id='0a3727a6-a86b-4b57-9073-71da3b5410da',starts=[];
 const html=`<section id="team-workspace"></section><button id="mode-agent-btn">Agent</button><button id="mode-chat-btn">Chat</button><button id="mode-team-btn">Team</button><script type="module">
 import {createTeamWorkspace} from '/static/js/team-workspace.js';
-window.created=0;window.pendingSid=null;
-window.sessionModule={hasPendingChat:()=>true,materializePendingSession:async()=>{window.created++;window.pendingSid='0a3727a6-a86b-4b57-9073-71da3b5410da';history.replaceState(null,'','#'+window.pendingSid);return true;}};
+window.created=0;window.pendingSid=null;window.pending=false;window.createdRoute=null;
+window.sessionModule={hasPendingChat:()=>window.pending,
+createDirectChat:(url,model,endpointId)=>{window.pending=true;window.createdRoute={url,model,endpointId};},
+materializePendingSession:async()=>{window.created++;window.pending=false;window.pendingSid='0a3727a6-a86b-4b57-9073-71da3b5410da';history.replaceState(null,'','#'+window.pendingSid);return true;}};
 window.controller=createTeamWorkspace({getSessionId:()=>window.pendingSid,EventSourceImpl:class {close(){}},NotificationImpl:null});window.ready=controller.init();</script>`;
 const server=http.createServer((req,res)=>{const path=new URL(req.url,'http://localhost').pathname;if(path.startsWith('/static/')){res.setHeader('Content-Type','application/javascript');res.end(fs.readFileSync(repo+path));}else{res.setHeader('Content-Type','text/html');res.end(html);}});
 await new Promise(done=>server.listen(0,'127.0.0.1',done));
@@ -101,6 +103,7 @@ await page.getByRole('checkbox',{name:'KAT',exact:true}).check();
 await page.getByRole('button',{name:'Start team',exact:true}).click();
 await page.waitForFunction(()=>document.querySelector('.team-notice[role="status"]')?.textContent==='Saved.');
 assert.equal(await page.evaluate(()=>window.created),1);
+assert.deepEqual(await page.evaluate(()=>window.createdRoute),{url:'',model:'kat',endpointId:'local'});
 assert.equal(starts.length,1);assert.equal(starts[0].path,'/api/team/session/'+id+'/start');assert.deepEqual(errors,[]);
 }finally{await browser.close();await new Promise(done=>server.close(done));}
 })().catch(error=>{console.error(error);process.exitCode=1;});
