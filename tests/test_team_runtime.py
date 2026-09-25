@@ -464,6 +464,30 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workers[0]['profile']['acceptance'], "The result must be exactly '133'.")
         self.assertEqual(workers[0]['profile']['write_scope'], [])
 
+    async def test_russian_no_python_plan_is_tool_free_not_blocked(self):
+        self.store.update_task_metadata('owner', self.task['id'], {
+            'goal': ('Вычислить 8 умножить на 9. Точный результат 72, '
+                     'без файлов, команд, Python, сети и изменений проекта.')})
+        planner = self.worker(kind='planner', role='lead')
+        claim = self.store.claim_worker('owner', self.task['id'], worker_id=planner['id'])
+        plan = {'tasks': [{
+            'name': 'Вычислить 8 × 9',
+            'objective': ('Вычислить 8 умножить на 9. Никаких файлов, команд, Python '
+                          'или сетевого доступа.'),
+            'acceptance': 'Точный результат 72', 'participant': 0,
+            'depends_on': [], 'write_scope': [],
+        }]}
+        self.store.finish_worker('owner', self.task['id'], planner['id'], claim['lease_token'],
+                                 {'plan': plan, 'completed': True})
+        await self.runtime.coordinate('owner', self.task['id'])
+        workers = [w for w in self.store.list_workers('owner', self.task['id'])
+                   if w['profile'].get('kind') == 'worker']
+        self.assertEqual(len(workers), 1)
+        self.assertEqual(workers[0]['profile']['acceptance'], "The result must be exactly '72'.")
+        self.assertEqual(workers[0]['profile']['write_scope'], [])
+        self.assertNotIn('Python', workers[0]['profile']['objective'])
+        self.assertEqual(self.store.get_task('owner', self.task['id'])['status'], 'running')
+
     def test_planner_multistep_arithmetic_uses_server_checked_goal(self):
         goal = ('QA arithmetic: compute twelve times eleven. Success criterion: final result 132. '
                 'Reasoning only; do not use host commands, files, network, or tools.')

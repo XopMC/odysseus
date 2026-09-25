@@ -1628,9 +1628,6 @@ class TeamRuntime:
                         raise ValueError('Planner returned invalid dependencies')
                     if pure_arithmetic is not None:
                         wording = str(proposal.get('name') or '') + ' ' + str(proposal.get('objective') or '')
-                        if re.search(r'\b(?:write|edit|modify|create\s+file|run|execute|python|bash|shell|fetch|download|upload)\b',
-                                     wording, flags=re.IGNORECASE):
-                            raise ValueError('A tool-free arithmetic goal cannot assign host actions')
                         if (_arithmetic_value(wording) is None
                                 and not re.search(r'\b(?:sum|verify|final|answer|result)\b', wording, re.IGNORECASE)):
                             raise ValueError('Arithmetic plan step has no verifiable expression or final result')
@@ -1645,6 +1642,13 @@ class TeamRuntime:
                             # Model-proposed write scopes and file-based checks
                             # cannot expand an explicitly tool-free owner goal.
                             value = _arithmetic_value(str(content.get('name') or '') + ' ' + str(content.get('objective') or ''))
+                            # A planner may repeat forbidden capabilities in a
+                            # negated sentence ("no Python", "без команд"). Do
+                            # not parse that prose as a positive host request;
+                            # replace it with a server-owned tool-free task.
+                            content['name'] = f'Arithmetic step {index + 1}'
+                            content['objective'] = ('Return the exact numeric result using reasoning only. '
+                                                    'Do not call tools or access files, commands, or network.')
                             content['acceptance'] = "The result must be exactly '" + str(
                                 value if value is not None else pure_arithmetic) + "'."
                             content['write_scope'] = []
