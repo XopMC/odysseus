@@ -157,7 +157,9 @@ function renderGoal() {
     preview.textContent = goal.objective || '';
     preview.title = goal.objective || '';
   }
-  el('goal-work-state').textContent = `${t(goal.status === 'review_required' ? 'Review required' : goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
+  const needsReview = goal.status === 'review_required'
+    || (goal.status === 'waiting_user' && goal.checkpoint?._wait_reason === 'provider_failure');
+  el('goal-work-state').textContent = `${t(needsReview ? 'Review required' : goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
   el('goal-work-objective').value = goal.objective || '';
   el('goal-work-progress').textContent = goal.progress || '';
   const effectFence = goal.status === 'waiting_user'
