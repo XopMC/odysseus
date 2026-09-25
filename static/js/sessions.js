@@ -117,18 +117,27 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
   const existingIds = new Set(
     Array.from(box.querySelectorAll('[data-db-id]')).map(node => String(node.dataset.dbId)),
   );
-  const existingKeys = new Set(
-    Array.from(box.querySelectorAll('.msg')).map(node => {
-      const role = node.classList.contains('msg-user') ? 'user' : 'assistant';
-      return `${role}|${String(node.dataset.raw || node.querySelector('.body')?.textContent || '').trim()}`;
-    }),
-  );
+  const unkeyedNodes = new Map();
+  for (const node of box.querySelectorAll('.msg:not([data-db-id])')) {
+    const role = node.classList.contains('msg-user') ? 'user' : 'assistant';
+    const key = `${role}|${String(node.dataset.raw || node.querySelector('.body')?.textContent || '').trim()}`;
+    if (!unkeyedNodes.has(key)) unkeyedNodes.set(key, []);
+    unkeyedNodes.get(key).push(node);
+  }
   for (const msg of data.history) {
     const id = String(msg?.metadata?._db_id || '');
     const role = String(msg?.role || '');
     const content = String(msg?.content || '').trim();
     const key = `${role}|${content}`;
-    if ((id && existingIds.has(id)) || existingKeys.has(key)) {
+    const alreadyRendered = id && existingIds.has(id);
+    const legacyNode = !alreadyRendered ? unkeyedNodes.get(key)?.shift() : null;
+    if (alreadyRendered || legacyNode) {
+      // A live/local bubble may predate its canonical DB id. Claim only one
+      // such bubble; two persisted messages with identical text are distinct.
+      if (id && legacyNode && !existingIds.has(id)) {
+        legacyNode.dataset.dbId = id;
+        existingIds.add(id);
+      }
       for (const event of (Array.isArray(msg?.metadata?.tool_events) ? msg.metadata.tool_events : [])) {
         const approval = event?.ask_user;
         if (approval?.approval_id && approval?.resolved) {
@@ -137,12 +146,8 @@ export async function refreshSessionHistory(sessionId, { allowBusy = false } = {
       }
       continue;
     }
-    const rendered = _renderHistoryMessage(msg, data.model || null);
-    const nodes = Array.isArray(rendered) ? rendered : (rendered ? [rendered] : []);
-    for (const node of nodes) {
-      if (id) { node.dataset.dbId = id; existingIds.add(id); }
-      existingKeys.add(key);
-    }
+    _renderHistoryMessage(msg, data.model || null);
+    if (id) existingIds.add(id);
   }
   if (!_historyPager || _historyPager.sessionId !== sessionId) {
     _installHistoryPager(sessionId, data, data.model || null);
@@ -319,7 +324,10 @@ function _renderHistoryMessage(msg, modelName) {
       displayContent = `[Doc edit: ${docEditMatch[1]}] ${docEditMatch[3]}`;
     }
   }
-  return _addHistoryMessageWithFullRenderer(msg.role, displayContent, modelName, meta);
+  const nodes = _addHistoryMessageWithFullRenderer(msg.role, displayContent, modelName, meta);
+  const id = String(msg?.metadata?._db_id || '');
+  if (id) nodes.forEach(node => { if (node.dataset) node.dataset.dbId = id; });
+  return nodes;
 }
 
 function _clearHistoryPager() {

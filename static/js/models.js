@@ -6,7 +6,7 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import sessionModule from './sessions.js?v=20260924modelcache1';
+import sessionModule from './sessions.js?v=20260925historyid1';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js?v=20260924tpsdelta1';

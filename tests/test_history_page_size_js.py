@@ -49,3 +49,17 @@ def test_authoritative_live_message_count_is_monotonic():
     source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     assert "options.monotonic === true" in source
     assert "Math.max(_authoritativeCount, nextCount)" in source
+
+
+def test_live_history_uses_db_identity_not_text_to_reconcile_repeated_messages():
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+    refresh = source.split("export async function refreshSessionHistory", 1)[1].split(
+        "function _shouldPreserveStartupComposer", 1,
+    )[0]
+    renderer = source.split("function _renderHistoryMessage", 1)[1].split(
+        "function _clearHistoryPager", 1,
+    )[0]
+    assert "const alreadyRendered = id && existingIds.has(id);" in refresh
+    assert "box.querySelectorAll('.msg:not([data-db-id])')" in refresh
+    assert "existingKeys.has(key)" not in refresh
+    assert "node.dataset.dbId = id" in renderer
