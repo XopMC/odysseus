@@ -3,7 +3,7 @@
 
 import uiModule from './ui.js';
 import markdownModule from './markdown.js?v=20260923toolprogress1';
-import chatRenderer from './chatRenderer.js?v=20260925teamstart3';
+import chatRenderer from './chatRenderer.js?v=20260925deephash1';
 import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { PROMPT_TEMPLATES, getUserTemplates } from './presets.js';

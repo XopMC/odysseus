@@ -286,10 +286,28 @@ def setup_session_routes(
                 _purge_db.close()
         except Exception:
             pass
-        user_sessions = session_manager.get_sessions_for_user(user)
+        user_sessions = dict(session_manager.get_sessions_for_user(user))
+        # Startup intentionally caches only recent non-empty chats. A Team-only
+        # chat can have a durable session and task but no chat_messages; an old
+        # deep link can also fall outside that cache. Include precisely the
+        # owner-scoped hash target without hydrating its transcript or listing
+        # every historical session on every sidebar refresh.
+        include_id = str(request.query_params.get("include_id") or "").strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", include_id):
+            include_id = ""
         # Fetch folder info from DB for each session
         db = SessionLocal()
         try:
+            if include_id and include_id not in user_sessions:
+                target = owner_filter(
+                    db.query(DbSession).filter(
+                        DbSession.id == include_id, DbSession.archived == False,
+                    ), DbSession, user,
+                ).first()
+                if target is not None:
+                    meta = session_manager._db_to_session_meta(target)
+                    if meta is not None:
+                        user_sessions[include_id] = meta
             folder_map = {}
             token_map = {}
             important_map = {}

@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260925teamstart3';
+import chatRenderer from './chatRenderer.js?v=20260925deephash1';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260924modelcache1';
 import themeModule from './theme.js?v=20260921livefix20';
@@ -1931,16 +1931,27 @@ export async function loadSessions() {
     await _cleanupIncognitoSessions();
 
     // Use prefetched data from login page if available (first load only)
+    const requestedHashId = String(window.location.hash || '').replace(/^#/, '');
+    const requestedSessionId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(requestedHashId)
+      ? requestedHashId : '';
     const prefetched = sessionStorage.getItem('ody-prefetch-sessions');
-    let fetched;
+    let prefetchedSessions = null;
     if (prefetched) {
+      try { prefetchedSessions = JSON.parse(prefetched); } catch (_) {}
+    }
+    let fetched;
+    if (Array.isArray(prefetchedSessions)
+        && (!requestedSessionId || prefetchedSessions.some(s => s.id === requestedSessionId))) {
       sessionStorage.removeItem('ody-prefetch-sessions');
-      fetched = JSON.parse(prefetched);
+      fetched = prefetchedSessions;
     } else {
+      if (prefetched) sessionStorage.removeItem('ody-prefetch-sessions');
       let url = `${API_BASE}/api/sessions`;
-      if (currentSessionId && _isIncognitoSession(currentSessionId)) {
-        url += `?active_incognito_id=${encodeURIComponent(currentSessionId)}`;
-      }
+      const query = new URLSearchParams();
+      if (currentSessionId && _isIncognitoSession(currentSessionId)) query.set('active_incognito_id', currentSessionId);
+      if (requestedSessionId) query.set('include_id', requestedSessionId);
+      const queryString = query.toString();
+      if (queryString) url += `?${queryString}`;
       const res = await fetch(url);
       if (!res.ok) {
         let detail = '';

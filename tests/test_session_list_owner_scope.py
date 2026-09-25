@@ -76,6 +76,40 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
     assert bob_id not in returned_ids
 
 
+def test_explicit_hash_includes_only_owner_empty_session_outside_startup_cache(monkeypatch):
+    import routes.session_routes as sr
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    _stub_multipart_if_missing(monkeypatch)
+    monkeypatch.setattr(sr, "SessionLocal", _TS)
+    monkeypatch.setattr(sr, "effective_user", lambda request: "alice")
+    alice_id, bob_id = str(uuid.uuid4()), str(uuid.uuid4())
+    with _TS.begin() as db:
+        db.query(DbMessage).delete()
+        db.query(DbSession).delete()
+        db.add(DbSession(id=alice_id, owner="alice", name="Team-only QA",
+                         endpoint_url="http://localhost", model="m", archived=False))
+        db.add(DbSession(id=bob_id, owner="bob", name="Private Team-only",
+                         endpoint_url="http://localhost", model="m", archived=False))
+    sm = MagicMock()
+    sm.get_sessions_for_user.return_value = {}
+    sm._db_to_session_meta.side_effect = lambda row: SimpleNamespace(
+        id=row.id, name=row.name, model=row.model, endpoint_url=row.endpoint_url,
+        rag=False, archived=False,
+    )
+    router = sr.setup_session_routes(sm, {})
+    endpoint = next(r.endpoint for r in reversed(router.routes)
+                    if getattr(r, "path", "") == "/api/sessions"
+                    and "GET" in getattr(r, "methods", set()))
+    result = endpoint(request=MagicMock(query_params={"include_id": alice_id}))
+    assert alice_id in {item["id"] for item in result}
+    assert bob_id not in {item["id"] for item in result}
+    assert next(item for item in result if item["id"] == alice_id)["name"] == "Team-only QA"
+    assert bob_id not in {item["id"] for item in endpoint(
+        request=MagicMock(query_params={"include_id": bob_id}))}
+
+
 def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(monkeypatch):
     import routes.session_routes as sr
     from unittest.mock import MagicMock
