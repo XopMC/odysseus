@@ -8,6 +8,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+static_build/
 .env
 .env.bak.*
 # Secrets: keep plaintext and every transient secrets.env variant out of

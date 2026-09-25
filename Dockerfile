@@ -102,6 +102,11 @@ RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
 # Copy app code
 COPY . .
 
+# Generate one content-derived asset revision for every local JS/CSS import
+# and the PWA cache.  Keep the source tree byte-identical to the Git SHA.
+RUN python scripts/build_static_bundle.py --source static --output static_build
+ENV ODYSSEUS_STATIC_DIR=/app/static_build
+
 # Create data directory (mount a volume here for persistence)
 RUN mkdir -p data logs services/cache/search
 

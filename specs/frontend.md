@@ -22,6 +22,8 @@ This spec covers the current browser app in:
 
 `static/manifest.json` and `static/index.html` reference PWA icon files under `static/icons/`; the current 192px, 512px, and maskable icon files exist and should stay aligned with those references.
 
+Release images generate `static_build/` with `scripts/build_static_bundle.py` and serve that deterministic copy. Its revision is the SHA-256 digest of the entire source asset graph, embedded in local JS/CSS URLs and the service-worker cache name. The source `static/` remains readable and byte-identical to Git; local development without a build uses that source with `no-cache` revalidation. `asset-build.json` in the generated directory records the input digest for release verification.
+
 ## Current Call Sites Include
 
 - `static/index.html` script tags and modulepreloads;

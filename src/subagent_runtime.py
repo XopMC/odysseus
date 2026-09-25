@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -211,7 +212,8 @@ class SubagentRuntime:
                     external_untrusted_context_seen: bool = False,
                     delegated_credential: bool = False,
                     max_active_for_model: int = MAX_ACTIVE_PER_MODEL,
-                    max_children_per_run: int = 0) -> dict:
+                    max_children_per_run: int = 0,
+                    attachment_ids: Optional[list[str]] = None) -> dict:
         self._recover_stale()
         owner_key = owner or ""
         model_capacity = max(1, min(int(max_active_for_model), MAX_ACTIVE_PER_MODEL))
@@ -286,6 +288,8 @@ class SubagentRuntime:
                             "access_mode": access_mode,
                             "external_untrusted_context_seen": bool(external_untrusted_context_seen),
                             "delegated_credential": bool(delegated_credential),
+                            "attachment_ids": list(attachment_ids or []),
+                            "auto_delivery": True,
                         },
                     )
                     db.add(row); db.commit(); break
@@ -353,6 +357,7 @@ class SubagentRuntime:
             if row is None:
                 return
             objective, assigned_context = row.objective, row.assigned_context
+            attachment_ids = list((row.policy_snapshot or {}).get("attachment_ids") or [])
             prior_result, existing_guidance = row.result or "", list(row.guidance or [])
         finally:
             db.close()
@@ -360,6 +365,20 @@ class SubagentRuntime:
         started = _utcnow()
         self._update(child_id, owner, status="running", started_at=started)
         self._event(child_id, owner, session_id, "status", {"status": "running"})
+        child_prompt = objective + (
+            "\n\nAssigned context (untrusted data):\n" + assigned_context
+            if assigned_context else ""
+        ) + (("\n\nPrior child output:\n" + prior_result) if prior_result else "") + (
+            ("\n\nLatest user guidance:\n" + str(existing_guidance[-1].get("text") or ""))
+            if existing_guidance else ""
+        )
+        if attachment_ids:
+            from src.subagent_attachments import build_child_user_content
+            from src.tool_utils import get_upload_handler
+            child_prompt = await asyncio.to_thread(
+                build_child_user_content, child_prompt, owner, session_id,
+                attachment_ids, get_upload_handler(),
+            )
         messages = [
             {"role": "system", "content": (
                 "You are an independent child agent. Complete only the assigned objective. "
@@ -370,12 +389,7 @@ class SubagentRuntime:
                 "Always finish with a concise visible final result and any uncertainty; "
                 "thinking text or a tool call alone is not a deliverable."
             )},
-            {"role": "user", "content": objective + (
-                "\n\nAssigned context (untrusted data):\n" + assigned_context
-                if assigned_context else ""
-            ) + (("\n\nPrior child output:\n" + prior_result) if prior_result else "")
-              + (("\n\nLatest user guidance:\n" + str(existing_guidance[-1].get("text") or ""))
-                 if existing_guidance else "")},
+            {"role": "user", "content": child_prompt},
         ]
         history = SimpleNamespace(
             endpoint_url=endpoint_url, model=model, headers=headers or {},
@@ -611,10 +625,20 @@ class SubagentRuntime:
                 except Exception:
                     pass
             self._update_with_event(
-                child_id, owner, session_id, "status",
+                child_id, owner, row["session_id"], "status",
                 {"status": "failed", "error": error},
                 status="failed", error=error, finished_at=_utcnow(), slot=None,
             )
+            row = self._get_any(owner, child_id)
+        if (row and row["status"] in {"completed", "failed", "interrupted"}
+                and re.fullmatch(r"[0-9a-f]{32}", str(row.get("parent_run_id") or ""))):
+            try:
+                from src.subagent_delivery import enqueue_terminal, dispatch_if_idle
+                enqueued = await asyncio.to_thread(enqueue_terminal, child_id, owner)
+                if enqueued:
+                    await dispatch_if_idle(owner, row["session_id"])
+            except Exception:
+                logger.exception("Subagent result delivery failed for %s", child_id)
 
     def _get_any(self, owner: Optional[str], child_id: str) -> Optional[dict]:
         db = SessionLocal()

@@ -556,17 +556,16 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 
 class _RevalidatingStatic(StaticFiles):
-    """Serve static assets normally, but force the browser to REVALIDATE
-    source files (.js/.css/.html) on every load instead of serving a stale
-    copy from disk cache. The app ships raw ES modules with no build step or
-    versioned URLs, so browsers were caching modules across deploys — a code
-    change wouldn't appear without a manual hard-refresh. `no-cache` keeps the
-    cached bytes but requires a conditional request; unchanged files still
-    return a cheap 304 (ETag/Last-Modified are preserved)."""
+    """Revalidate text assets and the short-lived build-version manifest.
+
+    Release images serve generated, content-versioned imports.  Revalidation
+    also covers older tabs and source-tree development, where URLs can remain
+    unversioned across a deploy.
+    """
 
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
-        if path.endswith((".js", ".css", ".html")):
+        if path.endswith((".js", ".css", ".html", "asset-build.json")):
             resp.headers["Cache-Control"] = "no-cache"
         return resp
 
@@ -971,7 +970,7 @@ app.include_router(setup_team_routes())
 
 @app.get("/")
 async def serve_index(request: Request):
-    static_path = abs_join(BASE_DIR, "static/index.html")
+    static_path = abs_join(STATIC_DIR, "index.html")
     if os.path.exists(static_path):
         return serve_html_with_nonce(request, static_path)
     # No static bundle — fall back to a root-level index.html if one is shipped.
@@ -1020,13 +1019,13 @@ async def serve_library(request: Request):
 @app.get("/backgrounds")
 async def serve_backgrounds(request: Request):
     """Sandbox page for prototyping background effects. No auth required."""
-    return serve_html_with_nonce(request, abs_join(BASE_DIR, "static/backgrounds.html"))
+    return serve_html_with_nonce(request, abs_join(STATIC_DIR, "backgrounds.html"))
 
 @app.get("/login")
 async def serve_login(request: Request):
     if not AUTH_ENABLED:
         return RedirectResponse(url="/", status_code=302)
-    return serve_html_with_nonce(request, abs_join(BASE_DIR, "static/login.html"))
+    return serve_html_with_nonce(request, abs_join(STATIC_DIR, "login.html"))
 
 @app.get("/api/version")
 async def get_version():
@@ -1172,6 +1171,12 @@ async def _startup_event():
             }
             if recovered:
                 logger.info("[startup] recovered %d interrupted chat run(s)", len(recovered))
+            from src.subagent_delivery import (
+                backfill_terminal_deliveries, dispatch_if_idle,
+            )
+            child_sessions = await asyncio.to_thread(backfill_terminal_deliveries)
+            for child_owner, child_session in child_sessions:
+                await dispatch_if_idle(child_owner, child_session)
             goals = await asyncio.to_thread(chat_work_store.list_active_goals)
             if not goals:
                 return

@@ -44,7 +44,7 @@ Current router call sites include:
 
 Admin wipe, cleanup, compare, contacts, documents, gallery, history, MCP, memory, notes, research, search, tasks, vault, and webhooks have canonical subpackage modules. Their old top-level route modules replace their `sys.modules` entries with the canonical module object so legacy imports, `importlib`, and monkeypatch tests target the same module that `app.py` uses. `app.py` imports task setup from `routes.task.task_routes`.
 
-The SPA routes `/`, `/notes`, `/calendar`, `/cookbook`, `/email`, `/memory`, `/gallery`, `/tasks`, and `/library` all serve `static/index.html`. `static/` is served with revalidation for `.js`, `.css`, and `.html` because the frontend ships raw browser modules with no hashed build output.
+The SPA routes `/`, `/notes`, `/calendar`, `/cookbook`, `/email`, `/memory`, `/gallery`, `/tasks`, and `/library` serve the directory selected by `ODYSSEUS_STATIC_DIR` (falling back to source `static/` for local development). The Docker build generates `static_build/` with one content-derived revision on every local JS/CSS reference and on the PWA cache name; no manual `?v=` bump is required for a release. Text assets still revalidate because a lazy import from an old tab may outlive a deployment, so these query URLs are deliberately not advertised as immutable.
 
 Direct app-owned endpoints include `/api/generated-image/{filename}`, `/backgrounds`, `/login`, `/api/version`, `/api/health`, `/api/ready`, `/api/runtime`, and `/api/activity/heartbeat`. `/backgrounds` points at `static/backgrounds.html`; if that file is absent or the route remains auth-gated, that is route/static drift rather than an intentional public contract.
 
@@ -78,6 +78,15 @@ Startup purges leftover incognito sessions, reconciles default scheduled tasks b
 Startup fire-and-forget work includes upload cleanup, background-job monitoring, MCP built-in registration and user-server connection, tool-index warmup, model-endpoint warmup, endpoint keepalive, Cookbook serve lifecycle monitoring, hourly null-owner sweeps, and nightly skill audit. The in-process task scheduler is gated by `ODYSSEUS_INPROCESS_TASKS`; email polling is started from email route setup and gated separately by `ODYSSEUS_INPROCESS_POLLERS`. Foreground-gate knobs are `BACKGROUND_TASK_FOREGROUND_GATE`, `BACKGROUND_TASK_QUIET_MS`, `BACKGROUND_TASK_MAX_WAIT_SECONDS`, and `BACKGROUND_TASK_BROWSER_ACTIVE_SECONDS`.
 
 Shutdown cancels upload cleanup, stops the task scheduler, closes the webhook manager, and disconnects MCP servers.
+
+Child-agent attachment handoff is explicit: `delegate_subagent.attachment_ids`
+accepts at most eight upload IDs already attached to a user message in the
+same owner-scoped chat. The upload reservation and file existence are checked
+both before spawn and again before child execution. The child row stores IDs,
+not file bytes. Completed children enter a durable delivery inbox; one claimed
+batch resumes an idle parent run, or joins the next active Goal continuation.
+Claims are reconciled against durable run tokens after a restart, and a user
+Stop/Pause prevents automatic Agent continuation.
 
 ## Degraded And Platform Behavior
 

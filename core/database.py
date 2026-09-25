@@ -451,6 +451,28 @@ class ChatSubagentEvent(Base):
     )
 
 
+class ChatSubagentDelivery(Base):
+    """One durable, idempotent parent notification per terminal child.
+
+    The child row owns the full result.  This row stores only delivery state
+    and a short-lived claim token, so concurrent children cannot start
+    duplicate parent continuations after the parent run becomes idle.
+    """
+    __tablename__ = "chat_subagent_deliveries"
+    child_id = Column(String, ForeignKey("chat_subagent_runs.id", ondelete="CASCADE"), primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    parent_session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    parent_run_id = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)
+    claim_token = Column(String, nullable=True, index=True)
+    claimed_at = Column(DateTime, nullable=True)
+    delivered_run_id = Column(String, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    __table_args__ = (
+        Index("ix_subagent_delivery_owner_session", "owner", "parent_session_id", "status"),
+    )
+
+
 class ChatSubagentEvidence(Base):
     """Append-only evidence published by a child agent."""
     __tablename__ = "chat_subagent_evidence"

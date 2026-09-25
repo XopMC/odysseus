@@ -8,7 +8,7 @@ APP_VERSION = "1.0.3"
 
 # Base paths
 BASE_DIR = os.path.join(get_app_root(), "")
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+STATIC_DIR = os.environ.get("ODYSSEUS_STATIC_DIR") or os.path.join(BASE_DIR, "static")
 DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
 
 # Data file paths

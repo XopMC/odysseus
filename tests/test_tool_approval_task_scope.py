@@ -386,7 +386,8 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert 'decision not in {"approve", "approve_task", "deny"}' in route
     assert "set(pending_tool_approval.selected_tools)" in route
     assert "pending_tool_approval.continuation_query" in route
-    assert "persist_user_message=not tool_approval_continuation" in route
+    assert "persist_user_message=(not tool_approval_continuation and not goal_continuation" in route
+    assert "and not subagent_continuation" in route
     assert "_mark_tool_approval_resolved(" in route
     assert "_tool_approval_resolution_stream(decision, resumed_goal, tool_approval_id)" in route
     assert "Approved the exact" not in route

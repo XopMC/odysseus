@@ -72,6 +72,10 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
         "allow_bash": "true" if prior.get("allow_bash") is True else "false",
         "allow_web_search": "true" if prior.get("allow_web_search") is True else "false",
     }
+    from src.subagent_delivery import claim_pending, release_claim
+    delivery_token = await asyncio.to_thread(claim_pending, owner, session_id)
+    if delivery_token:
+        form["subagent_delivery_token"] = delivery_token
     headers = {"Origin": internal_api_base()}
     if owner:
         headers.update({
@@ -94,6 +98,8 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
         failure = "Goal continuation connection failed"
         failure_code = "transport"
     if failure:
+        if delivery_token and failure_code and failure_code != "transport":
+            await asyncio.to_thread(release_claim, owner, session_id, delivery_token)
         logger.warning("%s for session %s (%s)", failure, session_id, reason)
         try:
             await asyncio.to_thread(

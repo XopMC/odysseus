@@ -662,6 +662,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "objective": {"type": "string", "description": "Concrete bounded subtask and expected result"},
                     "context": {"type": "string", "description": "Only the context excerpt the child needs"},
+                    "attachment_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 8, "description": "Explicit IDs of files already attached to this parent chat; no other attachments are inherited"},
                     "model": {"type": "string", "description": "Use 'auto' (default) for balanced allocation, or an exact configured model/model@endpoint as a preference"},
                     "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 86400, "description": "Whole child-run deadline; defaults to 21600 seconds (6 hours)"}
                 },

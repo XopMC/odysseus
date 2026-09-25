@@ -141,6 +141,7 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         return {"error": "Subagent arguments must be a JSON object", "exit_code": 1}
     objective = str(payload.get("objective") or "").strip()
     assigned_context = str(payload.get("context") or "").strip()
+    requested_attachments = payload.get("attachment_ids")
     requested_model = str(payload.get("model") or "same").strip()
     if not objective or len(objective) > 20000 or len(assigned_context) > 100000:
         return {"error": "Subagent objective/context is missing or too large", "exit_code": 1}
@@ -151,6 +152,16 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
     if not 5 <= timeout_seconds <= MAX_SUBAGENT_TIMEOUT_SECONDS:
         return {"error": f"Subagent timeout must be between 5 and {MAX_SUBAGENT_TIMEOUT_SECONDS} seconds",
                 "exit_code": 1}
+
+    from src.subagent_attachments import ChildAttachmentError, authorize_child_attachments
+    from src.tool_utils import get_upload_handler
+    try:
+        attachment_ids, attachment_rows = await asyncio.to_thread(
+            authorize_child_attachments, ctx.get("owner"), ctx.get("session_id"),
+            requested_attachments, get_upload_handler(),
+        )
+    except ChildAttachmentError as exc:
+        return {"error": str(exc), "exit_code": 1, "policy": "attachment_not_authorized"}
 
     mode = str(get_setting("agent_subagents_mode", "off") or "off")
     if mode == "off":
@@ -279,6 +290,18 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         url, model, headers = selected["url"], selected["model"], selected["headers"]
         max_active_for_model = int(selected["capacity"])
 
+    if attachment_rows:
+        upload_handler = get_upload_handler()
+        has_image = any(upload_handler.is_image_file(
+            info.get("name") or info.get("original_name") or "",
+            info.get("mime") or "",
+        ) for info in attachment_rows.values())
+        if has_image:
+            from src.chat_helpers import model_supports_vision
+            if not await asyncio.to_thread(model_supports_vision, model, url):
+                return {"error": "Selected subagent model cannot accept image attachments",
+                        "exit_code": 1, "policy": "not_supported_by_route"}
+
     return await runtime.spawn(
         owner=ctx.get("owner"), session_id=ctx.get("session_id"),
         parent_run_id=ctx.get("parent_run_id"), objective=objective,
@@ -296,6 +319,7 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         delegated_credential=bool(ctx.get("delegated_credential")),
         max_active_for_model=max_active_for_model,
         max_children_per_run=max_children_per_run,
+        attachment_ids=attachment_ids,
     )
 
 

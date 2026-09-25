@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import secrets
 import time
 import logging
 from datetime import datetime
@@ -60,6 +61,7 @@ from core.database import SessionLocal, get_session_mode, set_session_mode, utcn
 from core.database import Session as DBSession, ChatMessage as DBChatMessage
 from core.database import Document as DBDocument, ModelEndpoint
 from core.log_safety import redact_url
+from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
 from routes.research_routes import _resolve_research_endpoint
 from routes.model_routes import _visible_models
 from routes.chat_helpers import (
@@ -1070,6 +1072,8 @@ def setup_chat_routes(
         goal_mode = str(form_data.get("goal_mode") or (body or {}).get("goal_mode") or "").lower() == "true"
         goal_continuation = str(form_data.get("goal_continuation") or (body or {}).get("goal_continuation") or "").lower() == "true"
         goal_lease_token = str(form_data.get("goal_lease_token") or (body or {}).get("goal_lease_token") or "").strip()
+        subagent_continuation = str(form_data.get("subagent_continuation") or (body or {}).get("subagent_continuation") or "").lower() == "true"
+        subagent_delivery_token = str(form_data.get("subagent_delivery_token") or (body or {}).get("subagent_delivery_token") or "").strip()
         # The browser sends this as a display hint, but the server-owned
         # owner preference below is authoritative for every run (including
         # detached Goal continuations).
@@ -1239,6 +1243,23 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            if subagent_continuation or subagent_delivery_token:
+                # This is an internal model-visible result, not a browser
+                # message.  Do not let a guessed token create a new run or
+                # inject arbitrary child output into another owner's chat.
+                internal = request.headers.get(INTERNAL_TOOL_HEADER) or ""
+                client_host = getattr(getattr(request, "client", None), "host", "")
+                if (client_host not in {"127.0.0.1", "::1"}
+                        or not secrets.compare_digest(internal, INTERNAL_TOOL_TOKEN)):
+                    raise HTTPException(403, "Internal child continuation required")
+                from src.subagent_delivery import claimed_summary
+                child_results = await asyncio.to_thread(
+                    claimed_summary, owner, session, subagent_delivery_token,
+                )
+                if not child_results:
+                    raise HTTPException(409, "Child result delivery is unavailable or already consumed")
+                message = str(message or "") + "\n\n" + child_results
+                chat_mode = "agent"
             try:
                 from routes.prefs_routes import get_access_mode_for_user
                 access_mode = get_access_mode_for_user(owner)
@@ -1381,7 +1402,7 @@ def setup_chat_routes(
                     allow_web_search = "true"
                     _search_enabled = True
                 chat_mode = "agent"
-            else:
+            elif not subagent_continuation:
                 # A normal user message supersedes the card that was waiting
                 # in this thread. Retire its opaque grant, but preserve the
                 # originating provenance for this turn so dismissing a card
@@ -1435,6 +1456,8 @@ def setup_chat_routes(
                 active_goal = chat_work_store.consume_goal_lease(owner, session, goal_lease_token)
                 work_state["goal"] = active_goal
                 chat_mode = "agent"
+            elif subagent_continuation and work_state.get("goal") and work_state["goal"].get("status") in {"active", "paused", "waiting_user", "review_required"}:
+                raise HTTPException(409, "Goal state changed during child continuation")
             elif goal_mode and not tool_approval_continuation:
                 active_goal = chat_work_store.ensure_goal(owner, session, str(message or ""))
                 work_state["goal"] = active_goal
@@ -1600,7 +1623,8 @@ def setup_chat_routes(
                 and pending_tool_approval.continuation_query
                 else None
             ),
-            persist_user_message=not tool_approval_continuation and not goal_continuation,
+            persist_user_message=(not tool_approval_continuation and not goal_continuation
+                                  and not subagent_continuation),
         )
 
         if str(getattr(sess, "project_id", None) or "").strip():
@@ -2789,6 +2813,7 @@ def setup_chat_routes(
                         context_correction=(
                             not goal_continuation
                             and not tool_approval_continuation
+                            and not subagent_continuation
                         ),
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -3177,6 +3202,18 @@ def setup_chat_routes(
 
             _goal_terminal_controller = _continue_goal_after_terminal
 
+        if _goal_terminal_controller is None and chat_mode == "agent":
+            async def _deliver_children_after_terminal(_status: str) -> None:
+                if _status != "done":
+                    return
+                from src.subagent_delivery import dispatch_if_idle
+                await dispatch_if_idle(_user, session)
+
+            _goal_terminal_controller = _deliver_children_after_terminal
+
+        if subagent_continuation and agent_runs.is_active(session):
+            raise HTTPException(409, "Another run started before child continuation")
+
         _detached_run = agent_runs.start(
             session,
             _safe_stream(),
@@ -3188,8 +3225,19 @@ def setup_chat_routes(
                 "allow_bash": str(allow_bash).lower() == "true",
                 "allow_web_search": bool(_search_enabled),
                 "goal": bool(active_goal),
+                **({"subagent_delivery_token": subagent_delivery_token}
+                   if subagent_delivery_token else {}),
             },
         )
+        if subagent_delivery_token:
+            from src.subagent_delivery import mark_delivered
+            try:
+                await asyncio.to_thread(
+                    mark_delivered, _user, session,
+                    subagent_delivery_token, _detached_run.run_id,
+                )
+            except Exception:
+                logger.exception("Child result delivery checkpoint failed for %s", session)
         return StreamingResponse(
             agent_runs.subscribe(session, _detached_run),
             media_type="text/event-stream",
