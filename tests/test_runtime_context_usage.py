@@ -425,6 +425,60 @@ def test_context_header_reports_latest_request_and_auditable_peak(monkeypatch):
     assert data["source"] == "backend"
 
 
+def test_legacy_idle_agent_uses_last_real_round_not_stale_estimated_peak(monkeypatch):
+    metadata = {
+        "timestamp": "2026-09-24T11:30:37+00:00",
+        "working_context": _snapshot(
+            used_tokens=42859, prompt_tokens=42761, source="estimated",
+            context_length=127744, compactions=1,
+        ),
+        "usage_buckets": [
+            {"round": 1, "model": "mac-qwen", "input_tokens": 11595,
+             "output_tokens": 179, "usage_source": "real"},
+        ],
+    }
+    history = [ChatMessage("user", "request"), ChatMessage("assistant", "answer", metadata)]
+    data = _client(monkeypatch, history).get("/api/session/chat/context").json()
+    assert data["context_status"] == "last_request"
+    assert data["source"] == "backend"
+    assert data["used_tokens"] == 11774
+    assert data["prompt_tokens"] == 11595
+    assert data["high_water_used_tokens"] == 42859
+    assert data["context_percent"] == round(11774 / 262144 * 100, 1)
+
+
+def test_legacy_idle_agent_does_not_infer_backend_from_estimated_or_stale_usage(monkeypatch):
+    metadata = {
+        "timestamp": "2026-09-24T11:30:37+00:00",
+        "working_context": _snapshot(used_tokens=42859, source="estimated"),
+        "usage_buckets": [{"round": 1, "model": "mac-qwen", "input_tokens": 11595,
+                           "output_tokens": 179, "usage_source": "estimated"}],
+    }
+    history = [ChatMessage("user", "request"), ChatMessage("assistant", "answer", metadata)]
+    data = _client(monkeypatch, history).get("/api/session/chat/context").json()
+    assert data["source"] == "estimated"
+    assert data["used_tokens"] == 42859
+    history.append(ChatMessage("user", "new unanswered request"))
+    data = _client(monkeypatch, history).get("/api/session/chat/context").json()
+    assert data["context_status"] == "stored_chat"
+    assert data["source"] == "estimated"
+
+
+def test_legacy_backend_recovery_does_not_override_newer_durable_snapshot():
+    metadata = {
+        "working_context": _snapshot(used_tokens=42859, source="estimated", context_revision=12),
+        "usage_buckets": [{"model": "mac-qwen", "input_tokens": 11595,
+                           "output_tokens": 179, "usage_source": "real"}],
+    }
+    session = SimpleNamespace(
+        model="mac-qwen", endpoint_url="http://mac.test/v1",
+        history=[ChatMessage("user", "request"), ChatMessage("assistant", "answer", metadata)],
+        context_checkpoint=None,
+    )
+    newer = _snapshot(used_tokens=45000, source="estimated", context_revision=13)
+    assert history_routes._last_backend_context_observation(session, newer) is None
+
+
 def test_completed_snapshot_is_explicitly_last_request(monkeypatch):
     data = _client(monkeypatch, _history()).get("/api/session/chat/context").json()
     assert data["used_tokens"] == 82000

@@ -172,6 +172,50 @@ def _last_request_context(session):
     return snapshot
 
 
+def _last_backend_context_observation(session, persisted_snapshot=None):
+    """Recover exact idle occupancy from pre-observation Agent metadata.
+
+    Older runs persisted a conservative estimated high-water snapshot but not
+    ``latest_context_observation``. Their final assistant row can still have
+    per-round real provider usage. Prefer that last request's actual token
+    count for the idle pill while retaining the estimate as an audit peak.
+    Never infer a measurement from aggregate billing or an estimated bucket.
+    """
+    snapshot = _last_request_context(session)
+    if snapshot is None or snapshot.get("source") != "estimated":
+        return None
+    if persisted_snapshot is not None and any(
+        snapshot.get(key) != persisted_snapshot.get(key)
+        for key in ("used_tokens", "compactions", "context_revision")
+    ):
+        # A newer tool-only/Goal run may have updated the durable occupancy
+        # after this assistant row. Never relabel that newer snapshot with an
+        # older provider measurement.
+        return None
+    metadata = getattr(session.history[-1], "metadata", None) or {}
+    buckets = metadata.get("usage_buckets")
+    if not isinstance(buckets, list) or not buckets:
+        return None
+    last = buckets[-1]
+    if not isinstance(last, dict) or last.get("usage_source") != "real":
+        return None
+    if last.get("model") and last["model"] != session.model:
+        return None
+    prompt = last.get("input_tokens")
+    output = last.get("output_tokens")
+    if (type(prompt) is not int or prompt <= 0
+            or type(output) is not int or output < 0):
+        return None
+    used = prompt + output
+    return {
+        **snapshot,
+        "used_tokens": used,
+        "prompt_tokens": prompt,
+        "source": "backend",
+        "context_percent": min(100.0, round(100 * used / snapshot["context_length"], 1)),
+    }
+
+
 def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
     router = APIRouter(
         tags=["history"],
@@ -1231,6 +1275,8 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 or (observation.get("endpoint_key") and observation["endpoint_key"] != context_endpoint_key(session.endpoint_url))
             ):
                 observation = None
+            if not active and snapshot and observation is None:
+                observation = _last_backend_context_observation(session, snapshot)
             used = observation["used_tokens"] if observation else snapshot["used_tokens"] if snapshot else working_used
             # A completed request's window is historical. The selected local
             # model may have been reloaded with a different serving window,
