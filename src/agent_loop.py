@@ -8897,10 +8897,30 @@ async def stream_agent_loop(
             break
 
         # ask_user posed a question — stop here and wait for the user's choice.
-        # Don't feed tool results back or advance a round; the user's selection
-        # arrives as the next message and the agent resumes from there. The
-        # question text is already in the streamed response, so it persists.
+        # Do not advance another model round before the user's selection, but
+        # persist the exact assistant/tool ledger at this wait boundary.  The
+        # next Goal request must see the question and its tool result before
+        # the human answer, including after a browser/server restart.
         if _awaiting_user:
+            if tool_result_records:
+                _append_tool_results(
+                    messages, round_response, converted_calls[:len(tool_result_texts)],
+                    tool_results, tool_result_texts, used_native, round_num,
+                    round_reasoning=_round_reasoning_saved,
+                    tool_result_records=tool_result_records,
+                    skip_fenced=(_round_native_builtins and not used_native),
+                )
+                _question = str((_pending_ask_user_event or {}).get("question") or "").strip()
+                if _question and not any(
+                    item.get("role") == "assistant" and _question in str(item.get("content") or "")
+                    for item in messages[-4:]
+                ):
+                    messages.append({"role": "assistant", "content": _question})
+                _checkpoint_messages = _durable_model_checkpoint(messages)
+                _checkpoint_encoded = json.dumps(
+                    _checkpoint_messages, ensure_ascii=False, separators=(",", ":"), default=str,
+                )
+                yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _checkpoint_messages, "ledger_hash": hashlib.sha256(_checkpoint_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions}, ensure_ascii=False)}\n\n'
             break
 
         if _doc_stream_create_completed:

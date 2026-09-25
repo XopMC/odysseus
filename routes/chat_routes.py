@@ -95,6 +95,36 @@ logger = logging.getLogger(__name__)
 _active_streams: Dict[str, dict] = {}
 
 
+def _restore_goal_checkpoint_messages(ctx, ledger: list, *, answer_question: str = "") -> None:
+    """Use one durable ledger for both the selected and fallback routes.
+
+    The foreground router consumes ``route_messages``, not ``messages``.  A
+    Goal answer must also retain the last server-recorded question when an
+    older checkpoint predates the ask_user turn. Fresh runtime preface and
+    owner-scoped project context are rebuilt for this request, not replayed
+    from the old checkpoint.
+    """
+    latest_user = ctx.messages[-1] if ctx.messages and ctx.messages[-1].get("role") == "user" else None
+    preface = [dict(item) for item in getattr(ctx, "preface", []) if isinstance(item, dict)]
+    project_context = [
+        dict(item) for item in getattr(ctx, "route_messages", [])[len(preface):]
+        if isinstance(item, dict)
+        and isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("source") == "project memory and skills"
+    ]
+    restored = preface + project_context + [dict(item) for item in ledger if isinstance(item, dict)]
+    if latest_user is not None:
+        question = str(answer_question or "").strip()
+        if question and not any(
+            item.get("role") == "assistant" and question in str(item.get("content") or "")
+            for item in restored[-4:]
+        ):
+            restored.append({"role": "assistant", "content": question})
+        restored.append(dict(latest_user))
+    ctx.messages = restored
+    ctx.route_messages = [dict(item) for item in restored]
+
+
 def _stream_failure_status(chunk: str) -> Optional[int]:
     """Extract a provider status without retaining provider-supplied detail."""
 
@@ -1463,6 +1493,7 @@ def setup_chat_routes(
                 work_state["goal"] = active_goal
             else:
                 active_goal = work_state.get("goal")
+            goal_answer_question = ""
             # A normal reply to ask_user is guidance for the existing Goal,
             # not an implicit Pause/Cancel. Resume the durable state before
             # building this request so the same user message becomes the next
@@ -1480,6 +1511,9 @@ def setup_chat_routes(
                     active_goal = chat_work_store.goal_action(
                         owner, session, "resume", active_goal["revision"],
                     )
+                    goal_answer_question = str(
+                        (active_goal.get("checkpoint") or {}).get("question") or ""
+                    ).strip()
                     work_state["goal"] = active_goal
                     chat_mode = "agent"
                 except WorkConflict:
@@ -1667,10 +1701,9 @@ def setup_chat_routes(
             if durable_checkpoint:
                 ledger = durable_checkpoint.get("messages")
                 if isinstance(ledger, list) and ledger:
-                    latest_user = ctx.messages[-1] if ctx.messages and ctx.messages[-1].get("role") == "user" else None
-                    ctx.messages = [dict(item) for item in ledger if isinstance(item, dict)]
-                    if latest_user is not None:
-                        ctx.messages.append(latest_user)
+                    _restore_goal_checkpoint_messages(
+                        ctx, ledger, answer_question=goal_answer_question,
+                    )
                 else:
                     checkpoint_message = untrusted_context_message(
                         "durable agent working checkpoint",
