@@ -983,6 +983,10 @@ def test_stopped_long_run_keeps_timeline_tail_not_only_oldest_events(monkeypatch
 
 
 def test_goal_prose_does_not_stop_detached_server_run(monkeypatch, owned_chat):
+    # This fixture exercises Goal prose flow, not the separately tested effect
+    # ledger. In-memory SQLite connections can differ after route fixtures.
+    from src import chat_effect_inbox
+    monkeypatch.setattr(chat_effect_inbox, "needs_effect_intent", lambda *_: False)
     work = ChatWorkStore()
     goal = work.ensure_goal("alice", owned_chat, "Finish only after verification")
     rounds = 0
