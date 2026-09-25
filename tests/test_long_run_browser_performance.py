@@ -206,8 +206,8 @@ def test_synapse_uses_compositor_only_transforms_instead_of_canvas_repaint():
 
 def test_stateful_chat_modules_have_one_browser_identity():
     """Different query strings instantiate duplicate ES modules and listeners."""
-    expected = {"chat": "20260925contextobservation1", "sessions": "20260925historyid1",
-                    "models": "20260924modelcache1", "chatRenderer": "20260924tpsdelta1"}
+    expected = {"chat": "20260925teamsync1", "sessions": "20260925teamsync1",
+                    "models": "20260925teamsync1", "chatRenderer": "20260925teamsync1"}
     roots = [ROOT / "static/index.html", *sorted((ROOT / "static").rglob("*.js"))]
     pattern = re.compile(
         r"(?:from\s+|import\(\s*|(?:src|href)=)\s*['\"]"
@@ -236,7 +236,14 @@ def test_stateful_chat_modules_have_one_browser_identity():
     assert f"/static/js/init.js?v={init_versions.pop()}" in worker
     app_versions = set(re.findall(r"/static/app\.js\?v=([A-Za-z0-9_-]+)", index))
     assert len(app_versions) == 1, "preload and script must use the same app.js URL"
-    assert f"/static/app.js?v={app_versions.pop()}" in worker
+    app_version = app_versions.pop()
+    assert app_version == expected["sessions"], "the entrypoint must not reuse an older session module graph"
+    assert f"/static/app.js?v={app_version}" in worker
+    for module in ("chatStream", "team-workspace"):
+        refs = re.findall(rf"{re.escape(module)}\.js\?v=([A-Za-z0-9_-]+)",
+                          "\n".join(path.read_text(encoding="utf-8") for path in roots))
+        assert refs and set(refs) == {app_version}, f"{module} cache identity differs from the entrypoint"
+        assert f"/static/js/{module}.js?v={app_version}" in worker
 
 
 def test_manual_compaction_preflight_is_presented_as_unchanged_not_success_or_error():

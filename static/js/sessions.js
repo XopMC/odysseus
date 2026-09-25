@@ -4,7 +4,7 @@
 import Storage from './storage.js';
 import { bindUiText } from './i18n.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260924tpsdelta1';
+import chatRenderer from './chatRenderer.js?v=20260925teamsync1';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260924modelcache1';
 import themeModule from './theme.js?v=20260921livefix20';
@@ -2685,7 +2685,11 @@ export function hasPendingChat() { return !!_pendingChat; }
 export function getPendingChat() { return _pendingChat; }
 // Getters for external access
 export function getCurrentSessionId() {
-  return currentSessionId;
+  if (currentSessionId) return currentSessionId;
+  // A persisted first-send chat may have set the hash while a stale importer
+  // still holds an empty module-local selection. Never infer an ID on /.
+  const match = /^#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(window.location.hash || '');
+  return match ? match[1] : null;
 }
 
 export function getSessionViewToken() { return _sessionNavToken; }

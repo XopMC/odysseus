@@ -59,7 +59,12 @@ def _arithmetic_value(text):
 def _arithmetic_goal_value(goal):
     # Only a clearly tool-free arithmetic owner goal can validate a final
     # summary step that has no expression of its own.
-    if not re.search(r'\b(?:reasoning only|no tools|do not use.*tools)\b', goal, re.IGNORECASE):
+    explicit_tool_free = re.search(r'\b(?:reasoning only|no tools|do not use.*tools)\b', goal, re.IGNORECASE)
+    forbidden_capabilities = re.search(
+        r'\b(?:arithmetic only|mental arithmetic)\b.*?\bno\s+files?\s*,\s*shell\s*,\s*python\s*,\s*'
+        r'(?:internet|network)\s*,\s*host\s+execution\b', goal, re.IGNORECASE | re.DOTALL,
+    )
+    if not explicit_tool_free and not forbidden_capabilities:
         return None
     words = {'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
              'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
@@ -96,7 +101,7 @@ def _declared_exact_result(profile, goal=''):
         return None
     own_value = _arithmetic_value(str(profile.get('name') or '') + ' ' + str(profile.get('objective') or ''))
     declared = re.search(
-        r'\b(?:result|product|sum|answer)\b.{0,48}\b(?:equals|is)\s+(?:exactly\s+)?(\d{1,12})\b',
+        r'\b(?:result|product|sum|answer|returned\s+value)\b.{0,48}\b(?:equals|is)\s+(?:exactly\s+)?(\d{1,12})\b',
         acceptance, flags=re.IGNORECASE,
     )
     if not declared:

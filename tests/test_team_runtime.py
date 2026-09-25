@@ -272,6 +272,16 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tool_schemas, [[], []])
         self.assertEqual(self.host_calls, [])
 
+    def test_explicit_no_capabilities_arithmetic_goal_is_server_verifiable(self):
+        goal = ('QA read-only Team: compute 19 × 7 using arithmetic only and verify the exact result 133. '
+                'No files, shell, Python, Internet, host execution, write scope or external effects.')
+        profile = {'kind': 'worker', 'name': 'Compute 19 × 7 by hand arithmetic',
+                   'objective': 'Calculate 19 × 7 using mental arithmetic',
+                   'acceptance': 'The returned value is exactly 133, derived from 140 − 7.',
+                   'write_scope': []}
+        self.assertEqual(_exact_acceptance_target(profile, goal), '133')
+        self.assertIsNone(_exact_acceptance_target(profile, goal.replace('No files, shell, Python, Internet, host execution,', 'Files and host execution are allowed;')))
+
     async def test_planner_arithmetic_wrong_acceptance_still_requires_evidence(self):
         self.store.update_task_metadata('owner', self.task['id'], {
             'goal': 'QA arithmetic: compute twelve times eleven. Reasoning only; do not use tools.'})
@@ -359,6 +369,27 @@ class TeamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([w['profile']['write_scope'] for w in workers], [[], []])
         self.assertEqual({w['profile']['acceptance'] for w in workers},
                          {"The result must be exactly '120'.", "The result must be exactly '132'."})
+
+    async def test_coordinator_normalizes_explicit_no_capabilities_arithmetic_goal(self):
+        self.store.update_task_metadata('owner', self.task['id'], {
+            'goal': ('QA read-only Team: compute 19 × 7 using arithmetic only and verify exact result 133. '
+                     'No files, shell, Python, Internet, host execution, write scope or external effects.')})
+        planner = self.worker(kind='planner', role='lead')
+        claim = self.store.claim_worker('owner', self.task['id'], worker_id=planner['id'])
+        plan = {'tasks': [{
+            'name': 'Compute 19 × 7 by hand arithmetic',
+            'objective': 'Calculate 19 × 7 using mental arithmetic.',
+            'acceptance': 'The returned value is exactly 133, derived from 140 − 7.',
+            'participant': 0, 'depends_on': [], 'write_scope': [],
+        }]}
+        self.store.finish_worker('owner', self.task['id'], planner['id'], claim['lease_token'],
+                                 {'plan': plan, 'completed': True})
+        await self.runtime.coordinate('owner', self.task['id'])
+        workers = [w for w in self.store.list_workers('owner', self.task['id'])
+                   if w['profile'].get('kind') == 'worker']
+        self.assertEqual(len(workers), 1)
+        self.assertEqual(workers[0]['profile']['acceptance'], "The result must be exactly '133'.")
+        self.assertEqual(workers[0]['profile']['write_scope'], [])
 
     def test_planner_multistep_arithmetic_uses_server_checked_goal(self):
         goal = ('QA arithmetic: compute twelve times eleven. Success criterion: final result 132. '

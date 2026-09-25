@@ -210,6 +210,15 @@ export function shouldConnectTeamEvents(data) {
   return !['done', 'completed', 'cancelled'].includes(status);
 }
 
+export function resolveTeamSessionId(selectedId, hash = globalThis.location?.hash) {
+  if (selectedId) return selectedId;
+  // A newly materialized chat can update its URL before an older in-memory
+  // session module observes the selection. Only a canonical UUID hash is a
+  // safe fallback; the server still enforces ownership on Team start.
+  const match = /^#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(String(hash || ''));
+  return match ? match[1] : null;
+}
+
 export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   EventSourceImpl = globalThis.EventSource, storage = globalThis.sessionStorage,
   NotificationImpl = globalThis.Notification,
@@ -227,6 +236,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   let diffRequestSeq = 0;
   let notificationsEnabled = false;
   const notificationTracker = createTeamNotificationTracker();
+  const selectedSessionId = () => resolveTeamSessionId(getSessionId(), globalThis.location?.hash);
   const ui = {}, panels = new Map();
   const cursorKey = id => `odysseus-team-after-seq:${id}`;
   const notice = (message, error = false) => {
@@ -383,7 +393,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     const worker = (snapshot?.workers || []).find(w => w.id === ui.hostScope?.value);
     return worker?.profile?.cwd || snapshot?.metadata?.project_path || snapshot?.task?.metadata?.project_path || snapshot?.task?.project_path || snapshot?.project_path || ui.project.control.value;
   }
-  function current(token, id = sid) { return !disposed && active && token === generation && sid === id && getSessionId() === sid; }
+  function current(token, id = sid) { return !disposed && active && token === generation && sid === id && selectedSessionId() === sid; }
 
   function build() {
     destroyEngineering?.(); destroyEngineering = null;
@@ -921,7 +931,10 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     };
   }
   async function start() {
-    if (!sid || sid !== getSessionId()) throw new Error('Select or create a chat first.');
+    const selected = selectedSessionId();
+    if (!selected) throw new Error('Select or create a chat first.');
+    if (!sid && !teamId) sid = selected;
+    if (sid !== selected) throw new Error('The selected chat changed; reopen Team before starting.');
     if (teamId) throw new Error('This chat already has a team task.');
     const external_approvals = ui.approvals.filter(x => x.checked.control.checked).map(x => ({ endpoint_id: x.endpoint.endpoint_id,
       limit_microusd: Number(x.budget.control.value), input_rate_per_million: x.inputRate.control.value === '' ? null : Number(x.inputRate.control.value),
@@ -1008,7 +1021,7 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
   }
   async function syncSession() {
     if (!active) return;
-    const next = getSessionId() || null; if (sid === next) return;
+    const next = selectedSessionId(); if (sid === next) return;
     generation++; disconnect(); sid = next; teamId = null; snapshot = null; manualWorkers = [];
     notificationTracker.reset();
     terminalState = new Map(); selectedTerminal = ''; fileHash = null; fileLoadedPath = ''; clearDiffReview();
