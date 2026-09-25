@@ -3290,6 +3290,29 @@ def _resolve_tool_blocks(
     return tool_blocks, used_native, converted_calls
 
 
+def _explicit_native_tool_fence_miss(last_user: str, response: str, offered_tools) -> Optional[str]:
+    """Identify a code-only answer to an explicit request to run an offered tool.
+
+    This is a retry signal, never permission to execute the fence. Native
+    models often use fenced code as examples; only a whole-answer fence plus
+    an explicit user action request qualifies for the bounded supervisor.
+    """
+    visible = _strip_think_blocks(response or "").strip()
+    match = re.fullmatch(r"```(python|bash)[ \t]*\r?\n([\s\S]+?)\r?\n```", visible, re.IGNORECASE)
+    if match is None or not match.group(2).strip():
+        return None
+    tool = match.group(1).lower()
+    if tool not in set(offered_tools or ()):
+        return None
+    request = str(last_user or "")
+    if not re.search(
+        rf"\b(?:вызови|выполни|запусти|call|execute|run)\b.{{0,120}}\b(?:native|настоящ(?:ий|ую)|инструмент|tool|{tool})\b",
+        request, re.IGNORECASE | re.DOTALL,
+    ):
+        return None
+    return tool
+
+
 def _append_tool_results(
     messages: List[Dict],
     round_response: str,
@@ -7504,6 +7527,15 @@ async def stream_agent_loop(
             # tool doesn't pin us in a forever loop.
             _intent_text = _strip_think_blocks(cleaned_round).strip()
             _intent_match = _INTENT_RE.search(_intent_text) if _intent_text else None
+            _fenced_tool_miss = (
+                _explicit_native_tool_fence_miss(_last_user, round_response, _tool_names_sent)
+                if _is_api_model and not guide_only and not _force_answer else None
+            )
+            if _fenced_tool_miss and any(
+                _resolved_tool_event_name(event) == _fenced_tool_miss
+                for event in tool_events
+            ):
+                _fenced_tool_miss = None
             # Only nudge when the round REALLY looks like an unfinished
             # promise: short response (<400 chars), no fenced code/answer,
             # and an action-intent phrase was matched. Long answers that
@@ -7513,12 +7545,21 @@ async def stream_agent_loop(
                 and _intent_match is not None
                 and len(_intent_text) < 400
                 and "```" not in _intent_text
+            ) or bool(
+                _fenced_tool_miss
             )
             if _looks_like_promise and _intent_nudge_count < _MAX_INTENT_NUDGES:
                 _intent_nudge_count += 1
-                _matched_phrase = _intent_match.group(0).strip()
+                _matched_phrase = (
+                    f"fenced {_fenced_tool_miss} code without a native tool call"
+                    if _fenced_tool_miss else _intent_match.group(0).strip()
+                )
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
+                _fence_note = (
+                    "A fenced code sample is not a tool call and was not executed. "
+                    if _fenced_tool_miss else ""
+                )
                 _cookbook_log_hint = ""
                 if any(_word in _lower_phrase for _word in ("log", "logs", "output", "tail", "status")):
                     _cookbook_log_hint = (
@@ -7534,7 +7575,8 @@ async def stream_agent_loop(
                         "turn without making the actual tool call. The user can "
                         "see you announced the action but didn't run it, which "
                         "is the most frustrating thing you can do. "
-                        "DO IT NOW: emit the actual function call this turn. "
+                        "DO IT NOW: emit the actual native function call this turn. "
+                        f"{_fence_note}"
                         f"{_cookbook_log_hint}"
                         "If you decided not to do it after all, say so plainly in "
                         "one sentence instead of restating the plan."
@@ -7544,8 +7586,14 @@ async def stream_agent_loop(
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
             if _looks_like_promise:
-                _matched_phrase = _intent_match.group(0).strip()
+                _matched_phrase = (
+                    f"fenced {_fenced_tool_miss} code without a native tool call"
+                    if _fenced_tool_miss else _intent_match.group(0).strip()
+                )
                 _guard_message = (
+                    "The agent stopped because it repeatedly returned a code sample "
+                    "instead of calling the tool. No code sample was executed."
+                    if _fenced_tool_miss else
                     "The agent stopped because it repeatedly announced a tool "
                     "action without making the tool call."
                 )

@@ -2687,6 +2687,95 @@ def test_agent_retries_one_unusable_model_round_without_tool_effects(monkeypatch
     assert "data: [DONE]\n\n" in chunks
 
 
+def test_explicit_native_tool_fence_miss_requires_user_execution_intent():
+    response = "<think>Call the tool.</think>\n\n```python\nprint(7 * 8)\n```"
+    detector = agent_loop._explicit_native_tool_fence_miss
+    assert detector("Вызови настоящий native python для проверки", response, {"python"}) == "python"
+    assert detector("Покажи пример кода Python", response, {"python"}) is None
+    assert detector("Вызови настоящий native python", response, {"bash"}) is None
+    assert detector("Вызови настоящий native python", response + "\nThe answer is 56", {"python"}) is None
+
+
+def test_agent_nudges_code_only_native_model_then_executes_real_function(monkeypatch):
+    calls = []
+    effects = []
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
+    monkeypatch.setattr(agent_loop, "_is_casual_low_signal", lambda _text: False)
+    monkeypatch.setattr(agent_loop, "_classify_agent_request", lambda *_args: {
+        "low_signal": False, "continuation": False, "domains": [],
+        "retrieval_query": "verified arithmetic",
+    })
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        calls.append((list(messages), kwargs.get("tools")))
+        if len(calls) == 1:
+            yield 'data: {"delta": "<think>Let me call the tool.</think>\\n\\n```python\\nprint(7 * 8)\\n```"}\n\n'
+        elif len(calls) == 2:
+            call = {"name": "python", "arguments": json.dumps({"code": "print(7 * 8)"})}
+            yield f'data: {json.dumps({"type": "tool_calls", "calls": [call]})}\n\n'
+        else:
+            yield 'data: {"delta": "56"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def fake_execute(block, *args, **kwargs):
+        assert len(calls) == 2  # The first fenced sample was never executed.
+        effects.append((block.tool_type, block.content))
+        return "python", {"output": "56\n", "exit_code": 0}
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "kat-coder-v2.5-dev-35b-a3b-mtp-abliterated-i1",
+        [{"role": "user", "content": "Вызови настоящий native python с print(7 * 8) и проверь 56"}],
+        max_rounds=4, relevant_tools={"python"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False,
+    ))
+    assert len(calls) == 3
+    assert any("python" == (schema.get("function") or {}).get("name") for schema in calls[0][1])
+    assert any("A fenced code sample is not a tool call" in str(item.get("content", ""))
+               for item in calls[1][0])
+    assert effects == [("python", "print(7 * 8)")]
+    assert any('"delta": "56"' in chunk for chunk in chunks)
+
+
+def test_agent_repeated_code_only_native_model_stops_without_executing_fence(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
+    monkeypatch.setattr(agent_loop, "_is_casual_low_signal", lambda _text: False)
+    monkeypatch.setattr(agent_loop, "_classify_agent_request", lambda *_args: {
+        "low_signal": False, "continuation": False, "domains": [],
+        "retrieval_query": "verified arithmetic",
+    })
+
+    async def fake_stream(*_args, **_kwargs):
+        calls.append(True)
+        yield 'data: {"delta": "```python\\nprint(7 * 8)\\n```"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def must_not_execute(*_args, **_kwargs):
+        raise AssertionError("Illustrative code fence must never execute")
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    monkeypatch.setattr(agent_loop, "execute_tool_block", must_not_execute)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "kat-coder-v2.5-dev-35b-a3b-mtp-abliterated-i1",
+        [{"role": "user", "content": "Вызови настоящий native python с print(7 * 8)"}],
+        max_rounds=5, relevant_tools={"python"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False,
+    ))
+    assert len(calls) == 3
+    assert any('"type": "intent_nudge_exhausted"' in chunk for chunk in chunks)
+    assert "data: [DONE]\n\n" in chunks
+
+
 def test_agent_repeated_degeneration_stops_after_one_recovery(monkeypatch):
     calls = []
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
