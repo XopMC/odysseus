@@ -2643,6 +2643,127 @@ def test_agent_terminal_first_round_error_has_no_success_completion(monkeypatch,
     assert not any("empty response" in chunk.lower() for chunk in chunks)
 
 
+def test_agent_retries_one_degeneration_without_replaying_tool_effects(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "_is_casual_low_signal", lambda _text: False)
+    monkeypatch.setattr(agent_loop, "_classify_agent_request", lambda *_args: {
+        "low_signal": False, "continuation": False, "domains": [],
+        "retrieval_query": "verified computation",
+    })
+
+    async def fake_stream(candidates, messages, **kwargs):
+        calls.append((list(messages), kwargs.get("temperature")))
+        if len(calls) == 1:
+            yield 'data: {"delta": "I should repeat repeat repeat", "thinking": true}\n\n'
+            yield ('event: error\ndata: {"status": 422, '
+                   '"error_category": "degenerate_output", '
+                   '"fallback_eligible": false}\n\n')
+        else:
+            yield 'data: {"delta": "42"}\n\n'
+            yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Use Python to compute and verify 42"}],
+        max_rounds=3, relevant_tools={"python"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False, _is_teacher_run=True,
+    ))
+
+    assert len(calls) == 2
+    assert any("previous generation repeated" in str(item.get("content", "")).lower()
+               for item in calls[1][0])
+    assert not any(chunk.startswith("event: error") for chunk in chunks)
+    assert not any('"type": "agent_terminal"' in chunk for chunk in chunks)
+    assert any('"delta": "42"' in chunk for chunk in chunks)
+    assert "data: [DONE]\n\n" in chunks
+
+
+def test_agent_repeated_degeneration_stops_after_one_recovery(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "_is_casual_low_signal", lambda _text: False)
+    monkeypatch.setattr(agent_loop, "_classify_agent_request", lambda *_args: {
+        "low_signal": False, "continuation": False, "domains": [],
+        "retrieval_query": "verified computation",
+    })
+
+    async def fake_stream(*_args, **_kwargs):
+        calls.append(True)
+        yield ('event: error\ndata: {"status": 422, '
+               '"error_category": "degenerate_output", '
+               '"fallback_eligible": false}\n\n')
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Use Python to compute and verify 42"}],
+        max_rounds=4, relevant_tools={"python"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False, _is_teacher_run=True,
+    ))
+
+    assert len(calls) == 2
+    terminal = json.loads(next(
+        chunk for chunk in chunks if '"type": "agent_terminal"' in chunk
+    )[6:])["data"]
+    assert terminal["failure"]["category"] == "degenerate_output"
+    assert terminal["failure"]["status"] == 422
+    assert any(chunk.startswith("event: error") for chunk in chunks)
+    assert "data: [DONE]\n\n" not in chunks
+
+
+def test_degeneration_after_completed_tool_retries_model_only(monkeypatch):
+    calls = []
+    effects = []
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
+
+    async def fake_stream(_candidates, messages, **_kwargs):
+        calls.append([dict(item) for item in messages])
+        if len(calls) == 1:
+            call = {"name": "bash", "arguments": json.dumps({"command": "printf 42"})}
+            yield f'data: {json.dumps({"type": "tool_calls", "calls": [call]})}\n\n'
+            yield "data: [DONE]\n\n"
+        elif len(calls) == 2:
+            yield ('event: error\ndata: {"status": 422, '
+                   '"error_category": "degenerate_output", '
+                   '"fallback_eligible": false}\n\n')
+        else:
+            yield 'data: {"delta": "Verified 42"}\n\n'
+            yield "data: [DONE]\n\n"
+
+    async def fake_execute(block, *args, **kwargs):
+        effects.append(block.tool_type)
+        return "bash", {"output": "42", "exit_code": 0}
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://selected.example/v1", "selected-model",
+        [{"role": "user", "content": "Run one tool and report verified output."}],
+        max_rounds=4, relevant_tools={"bash"},
+        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        fallback_on_empty=False, _is_teacher_run=True,
+    ))
+
+    assert len(calls) == 3
+    assert effects == ["bash"]
+    assert any(item.get("role") == "tool" and "42" in str(item.get("content", ""))
+               for item in calls[2])
+    assert any('"delta": "Verified 42"' in chunk for chunk in chunks)
+    assert not any(chunk.startswith("event: error") for chunk in chunks)
+    assert "data: [DONE]\n\n" in chunks
+
+
 @pytest.mark.parametrize(
     ("provider_status", "expected_status", "expected_message"),
     [

@@ -323,6 +323,30 @@ def test_checkpoint_failure_parks_goal_on_first_failed_attempt(stream_client, mo
     assert work.goal["status"] == "waiting_user"
 
 
+def test_agent_terminal_preserves_allowlisted_repetition_reason(stream_client, monkeypatch):
+    client, _captured, _events_sent = stream_client
+
+    async def failed_stream(*_args, **_kwargs):
+        yield "data: " + json.dumps({"type": "agent_terminal", "data": {
+            "failed": True,
+            "failure": {"status": 422, "category": "degenerate_output",
+                        "message": "Output repetition guard stopped generation. Try a different model or lower temperature."},
+            "round_texts": [], "round_reasonings": [], "tool_events": [],
+        }}) + "\n\n"
+        yield ('event: error\ndata: {"status": 422, '
+               '"error_category": "degenerate_output", '
+               '"fallback_eligible": false}\n\n')
+
+    monkeypatch.setattr(chat_routes, "stream_agent_loop", failed_stream)
+    response = client.post("/api/chat_stream", data={
+        "session": "session-1", "message": "safe", "mode": "agent",
+    })
+
+    assert response.status_code == 200
+    assert "Output repetition guard stopped generation" in response.text
+    assert "[Agent stopped: Model request failed (HTTP 422)]" not in response.text
+
+
 def test_terminal_goal_retry_uses_shared_fenced_dispatcher(stream_client, monkeypatch):
     from src import goal_controller
 

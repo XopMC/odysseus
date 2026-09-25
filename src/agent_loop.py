@@ -5668,6 +5668,7 @@ async def stream_agent_loop(
         for item in _initial_goal_guidance
         if isinstance(item, dict) and item.get("id")
     }
+    _degenerate_retries = 0
     for round_num in range(1, max_rounds + 1):
         # All usage from the prior round is finalized before this boundary.
         # Fence the next model request, never an in-flight tool or model call.
@@ -6412,6 +6413,7 @@ async def stream_agent_loop(
         _live_context_last_tokens = 0
         _round_usage_finalized = False
         _request_budget_hit = False
+        _retry_degenerate_round = False
         candidate_index = 0
 
         def _finalize_round_usage(*, include_empty: bool = True):
@@ -6526,6 +6528,7 @@ async def stream_agent_loop(
                     chunk[:500],
                 )
                 terminal_status = None
+                error_data = {}
                 try:
                     error_line = next(
                         line[6:]
@@ -6538,6 +6541,22 @@ async def stream_agent_loop(
                     )
                 except Exception:
                     pass
+                # This guard fires while the model is still generating, before
+                # any proposed tool call from this round is dispatched. Give a
+                # local model one bounded chance to recover from its last
+                # verified checkpoint instead of turning a transient decode
+                # loop into a terminal Agent/Goal failure. Never retry an
+                # arbitrary provider error or bypass a model-request budget.
+                if (error_data.get("error_category") == "degenerate_output"
+                        and _degenerate_retries < 1 and round_num < max_rounds
+                        and not native_tool_calls and not _request_budget_hit):
+                    _degenerate_retries += 1
+                    _retry_degenerate_round = True
+                    logger.warning(
+                        "[agent] retrying degenerate output once from verified checkpoint round=%s",
+                        round_num,
+                    )
+                    break
                 terminal_error = {
                     "message": (
                         _stream_failure_user_message(chunk)
@@ -6549,6 +6568,8 @@ async def stream_agent_loop(
                     ),
                     "status": terminal_status,
                 }
+                if error_data.get("error_category") == "degenerate_output":
+                    terminal_error["category"] = "degenerate_output"
                 if full_response.strip() or round_reasoning.strip() or tool_events or round_texts:
                     _finalize_round_usage(include_empty=False)
                 partial_round = strip_tool_blocks(
@@ -7003,6 +7024,34 @@ async def stream_agent_loop(
                     else _round_generation_timing_basis or "no_output_timing"
                 ),
             })
+        if _retry_degenerate_round:
+            # The discarded generation is audit-visible, but is not added to
+            # the model-visible ledger. Its partial tool proposals have never
+            # executed; the next request begins from the previous verified
+            # messages and a small server-owned recovery instruction.
+            round_texts.append("[Model output repeated; retrying safely.]")
+            round_reasonings.append(_round_reasoning_saved)
+            round_timestamps.append(round_started_at)
+            round_models.append(_round_actual_model)
+            round_endpoint_ids.append(_round_actual_endpoint_id)
+            round_endpoint_labels.append(_round_actual_endpoint_label)
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The previous generation repeated itself and was discarded "
+                    "before any tool action. Continue from the last verified "
+                    "checkpoint. Do not repeat phrases or completed tool calls; "
+                    "take the next necessary step concisely."
+                ),
+                "_agent_injected": "degenerate_output_recovery",
+            })
+            try:
+                _requested_temperature = min(float(_requested_temperature), 0.2)
+            except (TypeError, ValueError, OverflowError):
+                _requested_temperature = 0.2
+            temperature = _requested_temperature
+            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "degenerate_output_retry"})}\n\n'
+            continue
         if _request_budget_hit:
             full_response += "\n\n[Agent paused: model request limit reached.]"
             break

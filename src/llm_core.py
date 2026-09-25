@@ -3712,6 +3712,13 @@ def _stream_error_status(err_chunk: Optional[str]) -> Optional[int]:
     return None
 
 
+def _safe_model_failure_message(category: Optional[str]) -> Optional[str]:
+    """Map a machine category to an allowlisted, server-authored explanation."""
+    if category == "degenerate_output":
+        return "Output repetition guard stopped generation. Try a different model or lower temperature."
+    return None
+
+
 def _stream_failure_user_message(err_chunk: Optional[str]) -> Optional[str]:
     """Return only allowlisted, server-authored explanations for UI errors."""
     if not err_chunk:
@@ -3721,8 +3728,9 @@ def _stream_failure_user_message(err_chunk: Optional[str]) -> Optional[str]:
             if not line.startswith("data: "):
                 continue
             payload = json.loads(line[6:])
-            if payload.get("error_category") == "degenerate_output":
-                return "Output repetition guard stopped generation. Try a different model or lower temperature."
+            message = _safe_model_failure_message(payload.get("error_category"))
+            if message:
+                return message
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     return None

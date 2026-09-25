@@ -21,6 +21,7 @@ from src.request_models import ChatRequest
 from src.llm_core import (
     _normalize_http_status,
     _stream_failure_user_message,
+    _safe_model_failure_message,
     llm_call_async,
     llm_call_async_with_route_fallback,
     stream_llm,
@@ -2928,7 +2929,7 @@ def setup_chat_routes(
                                     elif failure_kind == "effect_ledger":
                                         failure_message = "The effect ledger is unavailable; no tool action was started."
                                     else:
-                                        failure_message = _stream_failure_user_message(chunk) or (
+                                        failure_message = _safe_model_failure_message(failure.get("category")) or (
                                             f"Model request failed (HTTP {failure_status})"
                                             if failure_status is not None
                                             else "Model request failed"
