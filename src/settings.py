@@ -114,6 +114,7 @@ DEFAULT_SETTINGS = {
     "research_run_timeout_seconds": 1800,
     "agent_max_tool_calls": 0,
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
+    "agent_output_token_budget": 32768,  # completion incl. thinking; capped by the model's window
     "goal_max_rounds": 200,  # per-attempt Goal cap; separate from ordinary messages
     "goal_max_total_tokens": 0,  # 0 = unlimited; prompt + completion usage per attempt
     "goal_max_model_requests": 0,  # 0 = unlimited; counts each transport POST including fallbacks

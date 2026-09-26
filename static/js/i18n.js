@@ -679,6 +679,8 @@ const RU = Object.freeze({
   'Add Local Models':'Добавить локальные модели', 'Add API Models':'Добавить модели API', 'Proxy':'Прокси',
   'routed via server':'через сервер', 'API (direct)':'API (напрямую)', 'browser→provider':'браузер→провайдер',
   'Tool call limit':'Лимит вызовов инструментов', 'Max steps per message':'Максимум шагов на сообщение',
+  'Agent output tokens per request':'Токены ответа агента на запрос',
+  'Includes thinking. Default 32,768; smaller model windows use the largest safe budget.':'Включая размышления. По умолчанию 32 768; при меньшем окне модели используется максимально безопасный бюджет.',
   'Max steps per Goal attempt':'Максимум шагов на попытку цели',
   'Max model tokens per Goal attempt':'Максимум токенов модели на попытку цели',
   'Max model requests per Goal attempt':'Максимум запросов к модели на попытку цели',

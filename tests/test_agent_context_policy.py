@@ -47,7 +47,8 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             expected_revisions=self.store.get('owner')['revisions'])
 
     async def run_agent(self, messages=None, *, window=65536, fallback=False, change_before_dispatch=False, session_id=None,
-                        summary_impl=None, utility_route=None, window_error=None, request_max_tokens=4096):
+                        summary_impl=None, utility_route=None, window_error=None, request_max_tokens=4096,
+                        agent_output_setting=4096):
         from src import agent_loop, tool_execution, team_runtime
         sent, summaries = [], []
         async def summary(*args, **kwargs):
@@ -67,7 +68,8 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, {'ODYSSEUS_ENGINEERING_ENABLED': '1', 'ODYSSEUS_CONTEXT_POLICY_ENABLED': '1'}))
             stack.enter_context(patch.object(team_runtime, 'get_runtime', return_value=SimpleNamespace(store=self.team)))
-            stack.enter_context(patch.object(agent_loop, 'get_setting', side_effect=lambda key, default=None: default))
+            stack.enter_context(patch.object(agent_loop, 'get_setting', side_effect=lambda key, default=None:
+                                      agent_output_setting if key == 'agent_output_token_budget' else default))
             stack.enter_context(patch.object(agent_loop, 'get_mcp_manager', return_value=None))
             stack.enter_context(patch.object(agent_loop, 'blocked_tools_for_owner', return_value=set()))
             stack.enter_context(patch.object(agent_loop, '_agent_route_tool_mode', return_value=(True, False, True)))
@@ -85,7 +87,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch('src.endpoint_resolver.resolve_utility_fallback_candidates', return_value=[]))
             chunks = [chunk async for chunk in agent_loop.stream_agent_loop(
                 'http://fixture.invalid/v1', 'fixture-model', messages or [{'role':'user','content':'Reply briefly with your status'}],
-                owner='owner', session_id=session_id, relevant_tools={'read_file'}, context_length=65536,
+                owner='owner', session_id=session_id, relevant_tools={'read_file'}, context_length=window,
                 max_tokens=request_max_tokens, max_rounds=1, _is_teacher_run=True,
                 fallbacks=[('http://second.invalid/v1', 'second-model', {})] if fallback else None)]
         return sent, summaries, ''.join(chunks)
@@ -105,11 +107,20 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0]['_stream_max_tokens'], 4096)
         self.assertIn('"generation_budget_tokens": 4096', chunks)
 
-    async def test_agent_preserves_explicit_budget_above_minimum_with_profile_reserve(self):
+    async def test_agent_output_setting_controls_budget_above_minimum_with_profile_reserve(self):
         self.save({'output_reserve': 8192})
-        sent, _summaries, _chunks = await self.run_agent(request_max_tokens=6000)
+        sent, _summaries, _chunks = await self.run_agent(
+            request_max_tokens=4096, agent_output_setting=6000)
         self.assertEqual(sent[0]['kwargs']['max_tokens'], 6000)
         self.assertEqual(sent[0]['_stream_max_tokens'], 6000)
+
+    async def test_default_agent_output_setting_is_32k_on_large_model(self):
+        self.save({'output_reserve': 4096})
+        sent, _summaries, chunks = await self.run_agent(
+            window=131840, agent_output_setting=32768)
+        self.assertEqual(sent[0]['kwargs']['max_tokens'], 32768)
+        self.assertEqual(sent[0]['_stream_max_tokens'], 32768)
+        self.assertIn('"generation_budget_tokens": 32768', chunks)
 
     async def test_chat_policy_shapes_agent_without_changing_other_chats(self):
         from contextlib import contextmanager
@@ -137,9 +148,11 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
                 self.store.get('owner', session_id='private')
             with self.assertRaises(ValueError):
                 self.store.get('owner', session_id='chat-a', task_id='task')
-            for identity, expected in [('chat-a', 4096), ('chat-b', 8192)]:
+            for identity in ('chat-a', 'chat-b'):
                 sent, _, _ = await self.run_agent(session_id=identity, request_max_tokens=0)
-                self.assertEqual(sent[0]['kwargs']['max_tokens'], expected)
+                # Agent output has its own setting; chat policy still shapes
+                # input/reserves, but no longer changes completion length.
+                self.assertEqual(sent[0]['kwargs']['max_tokens'], 4096)
             self.assertEqual(self.store.get('owner')['effective']['output_reserve'], 8192)
 
     async def test_unknown_window_never_uses_user_requested_capacity(self):

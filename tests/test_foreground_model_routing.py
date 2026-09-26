@@ -4163,7 +4163,9 @@ def test_agent_fallback_request_uses_candidate_context_budget(
     # Each candidate has its own window and full output/schema reservation.
     # Compaction keeps a checkpoint plus the goal, not just the latest user.
     backup_schema = requests_by_round[0][1]["kwargs"]["tools"]
-    expected_limit = int(backup_context * .85) - 4096 - agent_loop.schema_token_estimate(backup_schema)
+    backup_output_tokens = requests_by_round[0][1]["kwargs"]["max_tokens"]
+    assert backup_output_tokens == (4096 if backup_context == 16384 else 32768)
+    expected_limit = int(backup_context * .85) - backup_output_tokens - agent_loop.schema_token_estimate(backup_schema)
     assert ("route prompt for backup-model", expected_limit) in checkpoint_limits
     assert len(fallback_messages) == expected_fallback_message_count
     assert any(message.get("_agent_working_summary") for message in fallback_messages) == (backup_context == 16384)
@@ -4269,7 +4271,7 @@ def test_agent_fallback_checkpoint_preserves_goal_without_rewriting_history(monk
     assert metrics["working_context"]["compactions"] == 1
     expected_limit = (
         int(65536 * .85)
-        - max(1024, agent_loop.MIN_AGENT_OUTPUT_TOKENS)
+        - requests[2]["kwargs"]["max_tokens"]
         - agent_loop.schema_token_estimate(requests[2]["kwargs"]["tools"])
     )
     assert metrics["working_context"]["auto_compact_threshold"] == round(100 * expected_limit / 65536, 1)

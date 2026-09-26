@@ -2534,6 +2534,13 @@
                 <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
               </div>
               <div class="settings-row">
+                <label class="settings-label" for="set-agentOutputTokens" data-i18n="Agent output tokens per request">Agent output tokens per request</label>
+                <div style="display:flex;flex-direction:column;gap:4px;max-width:520px;">
+                  <input id="set-agentOutputTokens" type="number" inputmode="numeric" min="4096" max="131072" step="1024" value="32768" class="settings-select" style="width:120px;" aria-label="Agent output tokens per request">
+                  <span class="admin-toggle-sub" data-i18n="Includes thinking. Default 32,768; smaller model windows use the largest safe budget.">Includes thinking. Default 32,768; smaller model windows use the largest safe budget.</span>
+                </div>
+              </div>
+              <div class="settings-row">
                 <label class="settings-label" for="set-goalMaxRounds">Max steps per Goal attempt</label>
                 <input id="set-goalMaxRounds" type="text" inputmode="numeric" placeholder="200" class="settings-select" style="width:120px;">
               </div>

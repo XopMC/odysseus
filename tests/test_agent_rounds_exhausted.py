@@ -60,6 +60,83 @@ def _run_loop(monkeypatch, round_text, max_rounds=2, *, active_goal=None, sessio
     return _types(_collect(gen))
 
 
+def test_reasoning_only_empty_output_retries_within_configured_budget(monkeypatch):
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        al, "get_setting",
+        lambda key, default=None: 4096 if key == "agent_output_token_budget" else default,
+    )
+    requests = []
+
+    async def stream(_candidates, _messages, **kwargs):
+        requests.append(kwargs["max_tokens"])
+        if len(requests) < 3:
+            yield 'data: {"delta":"still reasoning","thinking":true}\n\n'
+            yield ('event: error\ndata: '
+                   '{"error":"All model candidates returned no substantive output",'
+                   '"status":502,"error_category":"empty_output"}\n\n')
+        else:
+            yield 'data: {"delta":"42"}\n\n'
+            yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "qwen-local", [{"role": "user", "content": "Investigate this multi-step project and report the verified result"}],
+        max_rounds=4, context_length=131840, relevant_tools=set(),
+    )))
+
+    assert requests == [4096, 4096, 4096]
+    assert any(event.get("delta") == "42" for event in events)
+    assert not any(event.get("type") == "agent_terminal" and event.get("data", {}).get("failed")
+                   for event in events)
+
+
+def test_empty_output_without_reasoning_keeps_one_bounded_retry():
+    assert al._unusable_output_retry_budget(4096, 0, "empty_output", 131840,
+                                            reasoning_seen=False) == 4096
+    assert al._unusable_output_retry_budget(4096, 1, "empty_output", 131840,
+                                            reasoning_seen=False) == 0
+    assert al._unusable_output_retry_budget(4096, 0, "empty_output", 8192,
+                                            reasoning_seen=True) == 4096
+    assert al._unusable_output_retry_budget(4096, 0, "timeout", 131840,
+                                            reasoning_seen=True) == 0
+
+
+def test_all_agent_models_default_to_32k_and_setting_can_lower_it(monkeypatch):
+    _patch_common(monkeypatch)
+    requests = []
+
+    async def stream(_candidates, _messages, **kwargs):
+        requests.append(kwargs["max_tokens"])
+        yield 'data: {"delta":"A verified result"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    _collect(al.stream_agent_loop(
+        "http://x/v1", "plain-coder",
+        [{"role": "user", "content": "Investigate this multi-step project and report the verified result"}],
+        max_rounds=2, context_length=131840, relevant_tools=set(),
+    ))
+
+    assert requests == [32768]
+    assert al._default_agent_output_reserve(32768, 0) < 32768
+    assert al._default_agent_output_reserve(131840, 0, desired_tokens=8192) == 8192
+    assert al._unusable_output_retry_budget(32768, 0, "empty_output", 131840,
+                                            reasoning_seen=True) == 32768
+
+    monkeypatch.setattr(
+        al, "get_setting",
+        lambda key, default=None: 8192 if key == "agent_output_token_budget" else default,
+    )
+    requests.clear()
+    _collect(al.stream_agent_loop(
+        "http://x/v1", "qwen3.8-reasoning",
+        [{"role": "user", "content": "Investigate this multi-step project and report the verified result"}],
+        max_rounds=2, context_length=131840, relevant_tools=set(),
+    ))
+    assert requests == [8192]
+
+
 def test_output_limit_continues_same_run_without_silent_completion(monkeypatch):
     _patch_common(monkeypatch)
     requests = []

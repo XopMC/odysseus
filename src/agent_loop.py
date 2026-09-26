@@ -90,6 +90,7 @@ logger = logging.getLogger(__name__)
 # budget on thinking before returning a final answer or a structured tool call.
 # Never let an implicit provider default (commonly 2K) truncate an Agent round.
 MIN_AGENT_OUTPUT_TOKENS = 4096
+DEFAULT_AGENT_OUTPUT_TOKENS = 32768
 
 
 def _trim_context_compat(trim_fn, messages, context_length, **kwargs):
@@ -3519,6 +3520,57 @@ def _append_tool_results(
         messages.append(untrusted_result)
 
 
+def _default_agent_output_reserve(window: int, schema_tokens: int,
+                                  requested_window: int = 0, *,
+                                  desired_tokens: int = DEFAULT_AGENT_OUTPUT_TOKENS,
+                                  safety_tokens: int = 1024,
+                                  safety_percent: int = 5) -> int:
+    """Default to 32K completion tokens for every Agent model that can fit it.
+
+    The actual backend/model window remains authoritative. On smaller models,
+    reserve only the space left after schemas, safety and a minimum input area.
+    Recalculate this request-scoped value after every route/model switch.
+    """
+    usable_window = min(window, requested_window or window)
+    # Below 64K, a 32K-oriented reserve starves long tool histories and can
+    # force compaction before a small model has seen even its recent evidence.
+    if usable_window < 65536:
+        return 0
+    safety = safety_tokens + math.ceil(usable_window * safety_percent / 100)
+    available_output = usable_window - safety - schema_tokens - 8192
+    if available_output < MIN_AGENT_OUTPUT_TOKENS:
+        return 0
+    return min(desired_tokens, available_output)
+
+
+def _unusable_output_retry_budget(
+    current_tokens: int,
+    retries: int,
+    category: str,
+    context_window: int,
+    *,
+    reasoning_seen: bool,
+    budget_ceiling: int = DEFAULT_AGENT_OUTPUT_TOKENS,
+) -> int:
+    """Bound a retry after a local model spends its answer budget on thinking.
+
+    A reasoning-only completion is not a usable answer, but repeating the same
+    4K-token request just reproduces the exhaustion. Increase only this run's
+    next request reserve; never change the owner's saved context policy.
+    """
+    if category not in {"empty_output", "degenerate_output"}:
+        return 0
+    if retries >= (2 if category == "empty_output" and reasoning_seen else 1):
+        return 0
+    current = max(MIN_AGENT_OUTPUT_TOKENS, int(current_tokens or 0))
+    if category != "empty_output" or not reasoning_seen:
+        return current
+    window = max(0, int(context_window or 0))
+    cap = max(current, min(budget_ceiling,
+                           max(MIN_AGENT_OUTPUT_TOKENS, window // 4)))
+    return min(max(current * 2, 8192), cap)
+
+
 def _agent_round_tps_measurement(
     output_tokens: int,
     *,
@@ -4037,11 +4089,6 @@ async def stream_agent_loop(
     """
 
     wall_started = time.monotonic()
-    try:
-        _caller_requested_output_tokens = int(max_tokens or 0)
-    except (TypeError, ValueError):
-        _caller_requested_output_tokens = 0
-
     run_security = ToolRunSecurityContext(
         external_untrusted_context_seen=(
             bool(external_untrusted_context_seen)
@@ -5772,6 +5819,7 @@ async def stream_agent_loop(
         if isinstance(item, dict) and item.get("id")
     }
     _model_output_retries = 0
+    _retry_output_reserve = 0
     for round_num in range(1, max_rounds + 1):
         # All usage from the prior round is finalized before this boundary.
         # Fence the next model request, never an in-flight tool or model call.
@@ -5981,6 +6029,24 @@ async def stream_agent_loop(
             return
         _context_profile_for_generation = _context_profile
         _configured_policy = ContextPolicy.from_dict(_context_profile['effective']) if _context_profile else None
+        _schema_tokens = schema_token_estimate(all_tool_schemas)
+        try:
+            _agent_output_setting = int(get_setting(
+                "agent_output_token_budget", DEFAULT_AGENT_OUTPUT_TOKENS,
+            ))
+        except (TypeError, ValueError, OverflowError):
+            _agent_output_setting = DEFAULT_AGENT_OUTPUT_TOKENS
+        _agent_output_setting = max(
+            MIN_AGENT_OUTPUT_TOKENS, min(131072, _agent_output_setting),
+        )
+        _round_default_output_reserve = _default_agent_output_reserve(
+            _last_route_context_length or context_length or 8192,
+            _schema_tokens,
+            _configured_policy.requested_window if _configured_policy else 0,
+            desired_tokens=_agent_output_setting,
+            safety_tokens=_configured_policy.safety_tokens if _configured_policy else 1024,
+            safety_percent=_configured_policy.safety_percent if _configured_policy else 5,
+        )
         if _configured_policy:
             # Existing chat/owner profiles may reserve less than the minimum
             # completion budget. Raise only the effective per-request reserve;
@@ -5988,6 +6054,8 @@ async def stream_agent_loop(
             # (including fallbacks) sees the same effective value.
             _effective_output_reserve = max(
                 MIN_AGENT_OUTPUT_TOKENS, _configured_policy.output_reserve,
+                _retry_output_reserve,
+                _round_default_output_reserve,
             )
             if _effective_output_reserve != _configured_policy.output_reserve:
                 from dataclasses import replace as _replace_policy
@@ -6004,15 +6072,19 @@ async def stream_agent_loop(
             max_tokens = min(
                 max(
                     MIN_AGENT_OUTPUT_TOKENS,
-                    _caller_requested_output_tokens or _configured_policy.output_reserve,
+                    _retry_output_reserve,
+                    _round_default_output_reserve,
                 ),
                 _configured_policy.output_reserve,
             )
         else:
-            max_tokens = max(MIN_AGENT_OUTPUT_TOKENS, _caller_requested_output_tokens)
+            max_tokens = max(
+                MIN_AGENT_OUTPUT_TOKENS,
+                _retry_output_reserve,
+                _round_default_output_reserve,
+            )
         # Shape the growing WORKING history on every round, not only at the
         # beginning of a chat turn. The full transcript remains untouched.
-        _schema_tokens = schema_token_estimate(all_tool_schemas)
         try:
             _hard_cap = int(get_setting("agent_input_token_hard_max", 200000) or 200000)
         except (TypeError, ValueError):
@@ -6363,6 +6435,8 @@ async def stream_agent_loop(
         async def _candidate_request(index, candidate_url, candidate_model, candidate_headers):
             nonlocal _last_route_request_messages, _last_route_context_length, _engineering_presented_names
             nonlocal _last_route_endpoint_url
+            candidate_max_tokens = max_tokens
+            candidate_policy = _configured_policy
             if index == 0:
                 state = _active_route_state
             else:
@@ -6387,11 +6461,14 @@ async def stream_agent_loop(
                 route_context = budget_context_for_model(candidate_url, candidate_model, fallback=context_length) or context_length or 8192
                 _route_context_lengths[(candidate_url, candidate_model)] = route_context
                 candidate_schema_tokens = schema_token_estimate(_tool_schemas_for_route(state))
-                candidate_limit = input_limit(route_context, max_tokens,
+                candidate_max_tokens = max(MIN_AGENT_OUTPUT_TOKENS,
+                    _default_agent_output_reserve(route_context, candidate_schema_tokens,
+                                                  desired_tokens=_agent_output_setting))
+                candidate_limit = input_limit(route_context, candidate_max_tokens,
                                               candidate_schema_tokens,
                                               max(1, _hard_cap))
                 if _explicit_budget not in (0, 6000):
-                    candidate_limit = min(candidate_limit, max(1, _explicit_budget - max(max_tokens or 1024, 512) - candidate_schema_tokens))
+                    candidate_limit = min(candidate_limit, max(1, _explicit_budget - candidate_max_tokens - candidate_schema_tokens))
                 async def summarize_candidate(prompt):
                     return await llm_call_async(candidate_url, candidate_model, prompt,
                         temperature=.2, max_tokens=4096, headers=candidate_headers,
@@ -6425,8 +6502,25 @@ async def stream_agent_loop(
                         headers=candidate_headers, timeout=_configured_policy.effective_summary_timeout_seconds,
                         max_retries=1, session_id=session_id, require_answer_content=True)
                 candidate_window = await asyncio.to_thread(budget_context_for_model, candidate_url, candidate_model, fallback=0)
+                candidate_schema_tokens = schema_token_estimate(_tool_schemas_for_route(state))
+                candidate_max_tokens = max(MIN_AGENT_OUTPUT_TOKENS,
+                    _default_agent_output_reserve(
+                        candidate_window, candidate_schema_tokens,
+                        _configured_policy.requested_window,
+                        desired_tokens=_agent_output_setting,
+                        safety_tokens=_configured_policy.safety_tokens,
+                        safety_percent=_configured_policy.safety_percent,
+                    ))
+                candidate_profile = {
+                    **_context_profile_for_generation,
+                    'effective': {
+                        **_context_profile_for_generation['effective'],
+                        'output_reserve': candidate_max_tokens,
+                    },
+                }
+                candidate_policy = ContextPolicy.from_dict(candidate_profile['effective'])
                 candidate_messages, info = await shape_request(state['messages'], _tool_schemas_for_route(state),
-                    _context_profile_for_generation, candidate_window, configured_summary, hard_input_max=max(1, _hard_cap))
+                    candidate_profile, candidate_window, configured_summary, hard_input_max=max(1, _hard_cap))
                 state.update(messages=candidate_messages, working_limit=info['trigger_messages'],
                     schema_tokens=schema_token_estimate(_tool_schemas_for_route(state)),
                     working_compacted=info['status'] == 'compacted', before_tokens=info['before_tokens'])
@@ -6465,7 +6559,7 @@ async def stream_agent_loop(
                 from fastapi import HTTPException
                 if owner_policy(owner) != _context_profile:
                     raise HTTPException(409, 'Context policy changed before dispatch')
-                _final_budget = _configured_policy.budget(state['context_length'],
+                _final_budget = candidate_policy.budget(state['context_length'],
                     schema_tokens=schema_token_estimate(candidate_tools), hard_input_max=max(1, _hard_cap))
                 if estimate_tokens(request_messages) * (_context_calibration if index == 0 else 1) > _final_budget.hard_messages:
                     raise HTTPException(413, 'Configured context budget exceeded')
@@ -6476,7 +6570,7 @@ async def stream_agent_loop(
             return {
                 "messages": request_messages,
                 "kwargs": {
-                    **({'max_tokens': min(max_tokens or _configured_policy.output_reserve, _configured_policy.output_reserve)} if _configured_policy else {}),
+                    "max_tokens": candidate_max_tokens,
                     "tools": candidate_tools or None,
                     "tool_choice_none": state["ody_doc_finetune_mode"],
                     "temperature": (
@@ -6652,15 +6746,24 @@ async def stream_agent_loop(
                 # verified checkpoint instead of turning a transient decode
                 # loop into a terminal Agent/Goal failure. Never retry an
                 # arbitrary provider error or bypass a model-request budget.
-                if (error_data.get("error_category") in {"degenerate_output", "empty_output"}
-                        and _model_output_retries < 1 and round_num < max_rounds
+                _next_output_budget = _unusable_output_retry_budget(
+                    max_tokens,
+                    _model_output_retries,
+                    error_data.get("error_category"),
+                    _last_route_context_length or context_length or 8192,
+                    reasoning_seen=bool(round_reasoning.strip()),
+                    budget_ceiling=_agent_output_setting,
+                )
+                if (_next_output_budget and round_num < max_rounds
                         and not native_tool_calls and not _request_budget_hit):
                     _model_output_retries += 1
+                    _retry_output_reserve = _next_output_budget
                     _retry_model_output_round = True
                     _retry_model_output_reason = error_data["error_category"]
                     logger.warning(
-                        "[agent] retrying unusable model output once from verified checkpoint round=%s category=%s",
+                        "[agent] retrying unusable model output from verified checkpoint round=%s category=%s output_budget=%s retry=%s",
                         round_num, _retry_model_output_reason,
+                        _retry_output_reserve, _model_output_retries,
                     )
                     break
                 terminal_error = {
@@ -7164,6 +7267,9 @@ async def stream_agent_loop(
             temperature = _requested_temperature
             yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": _retry_model_output_reason + "_retry"})}\n\n'
             continue
+        # The larger reserve belongs only to recovery requests, not every
+        # subsequent normal round after the model has produced a usable step.
+        _retry_output_reserve = 0
         if _request_budget_hit:
             full_response += "\n\n[Agent paused: model request limit reached.]"
             break
