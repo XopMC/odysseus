@@ -107,6 +107,19 @@ explicitly.
 - **Context continuity** — approval, Stop, pause and provider errors retain the
   last model-visible checkpoint; the displayed percentage cannot fall unless
   an explicit compaction succeeds.
+- **Agent generation ceiling** — Settings → Agent output tokens per request
+  defaults to **131,072**, including thinking. The actual request is limited by
+  the selected model's remaining window after prompt, schemas and safety margin.
+  This ceiling is separate from the stable context-compaction output reserve;
+  a 128K setting does not reserve the whole input window. Existing saved choices
+  remain unchanged until edited.
+- **Long-running children** — child agents continue across execution slices and
+  ten consecutive provider/transport retries from committed checkpoints. The
+  legacy `delegate_subagent.timeout_seconds` field is accepted but no longer
+  imposes an aggregate task deadline. Individual model/tool timeouts, explicit
+  cancellation, permission gates and uncertain-effect fencing remain enforced.
+  A web-process restart still interrupts active children; partial work and
+  durable context remain inspectable, not automatically re-executed.
 - **Long-run harness profiles** — `Performance` combines file mutation and its
   exact verification command into one sealed action and replaces repeatedly
   transmitted large tool results with owner-scoped, content-addressed recall

@@ -25,11 +25,11 @@ def test_agent_output_budget_setting_is_wired_end_to_end():
     frontend = (root / "static/js/settings.js").read_text(encoding="utf-8")
     backend = (root / "routes/auth_routes.py").read_text(encoding="utf-8")
 
-    assert DEFAULT_SETTINGS["agent_output_token_budget"] == 32768
+    assert DEFAULT_SETTINGS["agent_output_token_budget"] == 131072
     assert 'id="set-agentOutputTokens"' in markup
     assert 'for="set-agentOutputTokens"' in markup
     assert '"agent_output_token_budget": (4096, 131072)' in backend
-    assert "settings.agent_output_token_budget ?? 32768" in frontend
+    assert "settings.agent_output_token_budget ?? 131072" in frontend
     assert "payload.agent_output_token_budget = outputTokens" in frontend
     assert "outputTokensInput.addEventListener('change', save)" in frontend
-    assert "current.agent_output_token_budget ?? 32768" in frontend
+    assert "current.agent_output_token_budget ?? 131072" in frontend

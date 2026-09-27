@@ -872,6 +872,7 @@ def test_child_timeout_persists_actionable_error_instead_of_blank(monkeypatch, c
         yield 'data: [DONE]\n\n'
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+    monkeypatch.setattr("src.subagent_runtime._retry_delay", lambda attempt: 0)
 
     async def scenario():
         child = await runtime.spawn(
@@ -883,15 +884,16 @@ def test_child_timeout_persists_actionable_error_instead_of_blank(monkeypatch, c
         await runtime._tasks[child["child_id"]]
         row = runtime.get(owner, session_id, child["child_id"])
         assert row["status"] == "failed"
-        assert "60s deadline" in row["error"]
+        assert "Model transport timed out" in row["error"]
         assert "No result was verified" in row["error"]
+        assert row["metrics"]["provider_retries"] == 10
         events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
         assert any(event["kind"] == "status" and
-                   "60s deadline" in event["payload"].get("error", "") for event in events)
+                   "Model transport timed out" in event["payload"].get("error", "") for event in events)
 
     try:
         asyncio.run(scenario())
-        assert "exceeded its 60s model deadline" in caplog.text
+        assert "stopped after recovery" in caplog.text
         assert "Traceback (most recent call last)" not in caplog.text
     finally:
         db = SessionLocal()

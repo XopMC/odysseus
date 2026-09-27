@@ -90,7 +90,10 @@ logger = logging.getLogger(__name__)
 # budget on thinking before returning a final answer or a structured tool call.
 # Never let an implicit provider default (commonly 2K) truncate an Agent round.
 MIN_AGENT_OUTPUT_TOKENS = 4096
-DEFAULT_AGENT_OUTPUT_TOKENS = 32768
+DEFAULT_AGENT_OUTPUT_TOKENS = 131072
+# Context reservation is not a generation cap. Unused input capacity can be
+# borrowed by generation without forcing compaction just to reserve 128K.
+DEFAULT_AGENT_OUTPUT_RESERVE = 32768
 
 
 def _trim_context_compat(trim_fn, messages, context_length, **kwargs):
@@ -3536,7 +3539,7 @@ def _default_agent_output_reserve(window: int, schema_tokens: int,
                                   desired_tokens: int = DEFAULT_AGENT_OUTPUT_TOKENS,
                                   safety_tokens: int = 1024,
                                   safety_percent: int = 5) -> int:
-    """Default to 32K completion tokens for every Agent model that can fit it.
+    """Reserve stable generation headroom independently of the output ceiling.
 
     The actual backend/model window remains authoritative. On smaller models,
     reserve only the space left after schemas, safety and a minimum input area.
@@ -3551,7 +3554,19 @@ def _default_agent_output_reserve(window: int, schema_tokens: int,
     available_output = usable_window - safety - schema_tokens - 8192
     if available_output < MIN_AGENT_OUTPUT_TOKENS:
         return 0
-    return min(desired_tokens, available_output)
+    return min(desired_tokens, DEFAULT_AGENT_OUTPUT_RESERVE, available_output)
+
+
+def _agent_completion_budget(window: int, prompt_tokens: int, ceiling: int, *,
+                             requested_window: int = 0, safety_tokens: int = 1024,
+                             safety_percent: int = 5) -> int:
+    """Fit the configured thinking+answer ceiling in this exact request window."""
+    usable_window = min(window, requested_window or window)
+    safety = safety_tokens + math.ceil(usable_window * safety_percent / 100)
+    available = usable_window - safety - max(0, math.ceil(prompt_tokens))
+    if available < 1:
+        raise ValueError('No generation space remains in the model context window')
+    return min(max(1, int(ceiling)), available)
 
 
 def _unusable_output_retry_budget(
@@ -6492,7 +6507,15 @@ async def stream_agent_loop(
         if _configured_telemetry:
             _working_context['context_policy'] = _configured_telemetry
             _working_context['auto_compact_enabled'] = _configured_policy.auto_compact
+        max_tokens = _agent_completion_budget(
+            _last_route_context_length or context_length or 8192,
+            _estimated_prompt, _agent_output_setting,
+            requested_window=_configured_policy.requested_window if _configured_policy else 0,
+            safety_tokens=_configured_policy.safety_tokens if _configured_policy else 1024,
+            safety_percent=_configured_policy.safety_percent if _configured_policy else 5,
+        )
         _working_context['generation_budget_tokens'] = max_tokens
+        _working_context['configured_generation_budget_tokens'] = _agent_output_setting
         _working_context['harness_profile'] = _efficiency_profile_name()
         if _economic_decision:
             _working_context['economic_compaction'] = _economic_decision.to_dict()
@@ -6659,6 +6682,15 @@ async def stream_agent_loop(
                     schema_tokens=schema_token_estimate(candidate_tools), hard_input_max=max(1, _hard_cap))
                 if estimate_tokens(request_messages) * (_context_calibration if index == 0 else 1) > _final_budget.hard_messages:
                     raise HTTPException(413, 'Configured context budget exceeded')
+            candidate_max_tokens = _agent_completion_budget(
+                state['context_length'] or 8192,
+                math.ceil(estimate_tokens(request_messages) * (_context_calibration if index == 0 else 1))
+                + schema_token_estimate(candidate_tools),
+                _agent_output_setting,
+                requested_window=candidate_policy.requested_window if candidate_policy else 0,
+                safety_tokens=candidate_policy.safety_tokens if candidate_policy else 1024,
+                safety_percent=candidate_policy.safety_percent if candidate_policy else 5,
+            )
             state["tools"] = candidate_tools
             if _engineering_registry is not None:
                 _engineering_presented_names = state['registry_catalog']['names']
@@ -6692,7 +6724,7 @@ async def stream_agent_loop(
         # which kills a wedged/silent endpoint. This wall-clock deadline is the
         # complementary cap for the rare stream that trickles bytes forever and
         # so never trips the inactivity timeout. Generous — only catches runaway.
-        _round_deadline = time.time() + max(agent_stream_timeout * 4, 1200)
+        _round_deadline = time.time() + max(agent_stream_timeout * 4, 1200, max_tokens / 10)
         _round_start = time.time()
         _round_first_event_logged = False
         _round_first_token_logged = False
@@ -6853,7 +6885,7 @@ async def stream_agent_loop(
                 if (_next_output_budget and round_num < max_rounds
                         and not native_tool_calls and not _request_budget_hit):
                     _model_output_retries += 1
-                    _retry_output_reserve = _next_output_budget
+                    _retry_output_reserve = min(_next_output_budget, DEFAULT_AGENT_OUTPUT_RESERVE)
                     _retry_model_output_round = True
                     _retry_model_output_reason = error_data["error_category"]
                     logger.warning(

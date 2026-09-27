@@ -1,6 +1,7 @@
 """Recovery must retain work without replaying an uncertain tool action."""
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -171,3 +172,71 @@ def test_repetition_validation_failure_is_not_ten_provider_retries(harness, monk
     result = run(harness)
     assert result["status"] == "failed"
     assert calls == 1  # agent_loop owns the bounded, changed-prompt repair
+
+
+def test_progressing_child_continues_past_legacy_task_deadline(harness, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(children, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    calls = []
+    async def stream(*args, **kwargs):
+        calls.append(args[2])
+        if len(calls) == 1:
+            clock[0] = 7200.0
+            yield 'data: {"delta":"Verified partial work"}\n\n'
+            yield event("context_checkpoint", messages=[{"role": "user", "content": "retained work"}])
+            yield event("rounds_exhausted", resource="model_rounds")
+        else:
+            yield 'data: {"delta":"Verified final result"}\n\n'
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    result = run(harness)
+    assert result["status"] == "completed"
+    assert len(calls) == 2
+    assert calls[1][1]["content"] == "retained work"
+    assert "Verified partial work" in result["result"]
+
+
+def test_raw_transport_timeout_gets_ten_retries_not_task_deadline(harness, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(children, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    calls = []
+    async def stream(*args, **kwargs):
+        calls.append(1)
+        clock[0] += 1800
+        if len(calls) <= 10:
+            raise asyncio.TimeoutError()
+        yield 'data: {"delta":"Recovered final result"}\n\n'
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    assert run(harness)["status"] == "completed"
+    assert len(calls) == 11
+
+
+def test_policy_denial_is_not_retried_as_http_403(harness, monkeypatch):
+    calls = []
+    async def stream(*args, **kwargs):
+        calls.append(1)
+        yield event("agent_terminal", data={"failure": {
+            "status": 403, "kind": "permission_denied", "message": "Denied by owner policy"}})
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    assert run(harness)["status"] == "failed"
+    assert len(calls) == 1
+
+
+def test_explicit_cancel_preserves_partial_result(harness, monkeypatch):
+    async def scenario():
+        ready = asyncio.Event()
+        async def stream(*args, **kwargs):
+            yield 'data: {"delta":"Verified partial result"}\n\n'
+            ready.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+        task = asyncio.create_task(harness._run_child(
+            child_id="child", owner="qa", session_id="s", endpoint_url="http://model",
+            model="worker", headers={}, timeout_seconds=5, workspace=None, access_mode="full_access"))
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        row = harness.get("qa", "s", "child")
+        assert row["status"] == "cancelled"
+        assert row["result"] == "Verified partial result"
+    asyncio.run(scenario())

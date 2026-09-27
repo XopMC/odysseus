@@ -14,6 +14,7 @@ import logging
 import re
 import time
 import uuid
+import httpx
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional
@@ -584,7 +585,10 @@ class SubagentRuntime:
                                 if isinstance(terminal, dict) and (terminal.get("failed") or terminal.get("failure")):
                                     failure = terminal.get("failure") or {}
                                     raise ChildStreamFailure(failure)
-            deadline = time.monotonic() + timeout_seconds
+            # A child is a mini-goal, not one inference call. Accept the legacy
+            # timeout argument without killing useful work across rounds/tools.
+            # Provider inactivity and individual tool timeouts remain enforced
+            # by those layers; explicit user cancellation still fences us.
             system_message = copy.deepcopy(messages[0])
             initial_messages = copy.deepcopy(messages)
             while True:
@@ -592,10 +596,7 @@ class SubagentRuntime:
                 round_slice_exhausted = False
                 attempt_output_start = len(output_parts)
                 try:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError()
-                    await asyncio.wait_for(consume(), timeout=remaining)
+                    await consume()
                     if round_slice_exhausted:
                         if checkpoint is None or tool_since_checkpoint:
                             raise RuntimeError("Subagent round slice ended without a safe checkpoint")
@@ -605,9 +606,16 @@ class SubagentRuntime:
                         })
                         continue
                     break
-                except ChildStreamFailure as exc:
+                except (ChildStreamFailure, asyncio.TimeoutError, httpx.TimeoutException, httpx.NetworkError) as raw_exc:
+                    exc = raw_exc if isinstance(raw_exc, ChildStreamFailure) else ChildStreamFailure({
+                        "status": 504 if isinstance(raw_exc, (asyncio.TimeoutError, httpx.TimeoutException)) else 503,
+                        "kind": "provider_transport",
+                        "message": ("Model transport timed out. No result was verified."
+                                    if isinstance(raw_exc, (asyncio.TimeoutError, httpx.TimeoutException))
+                                    else "Model network error. No result was verified."),
+                    })
                     if not exc.retryable or tool_since_checkpoint or consecutive_failures >= 10:
-                        raise
+                        raise exc
                     consecutive_failures += 1
                     provider_retries += 1
                     await flush(force=True)
@@ -620,8 +628,7 @@ class SubagentRuntime:
                         "status": exc.status, "reason": str(exc)[:160],
                         "checkpoint_messages": len(checkpoint or []),
                     })
-                    await asyncio.sleep(min(_retry_delay(consecutive_failures),
-                                            max(0.0, deadline - time.monotonic())))
+                    await asyncio.sleep(_retry_delay(consecutive_failures))
             await flush(force=True)
             final = "".join(output_parts).strip()
             if waiting_payload:
@@ -648,16 +655,11 @@ class SubagentRuntime:
             raise
         except Exception as exc:
             await flush(force=True)
-            if isinstance(exc, asyncio.TimeoutError):
-                # A busy backend reaching the child deadline is an expected
-                # operational failure, not an uncaught server traceback.
-                logger.warning("Subagent %s exceeded its %ss model deadline", child_id, timeout_seconds)
+            if isinstance(exc, ChildStreamFailure):
+                logger.warning("Subagent %s stopped after recovery: kind=%s status=%s", child_id, exc.kind, exc.status)
             else:
                 logger.warning("Subagent %s failed: %s", child_id, type(exc).__name__, exc_info=True)
             safe_error = (
-                f"Subagent model request exceeded its {timeout_seconds}s deadline; "
-                "the selected model may be busy. No result was verified."
-                if isinstance(exc, asyncio.TimeoutError) else
                 str(exc)[:1000] or f"Subagent failed ({type(exc).__name__}); no result was verified."
             )
             self._update_with_event(

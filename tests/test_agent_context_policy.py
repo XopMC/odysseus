@@ -115,13 +115,27 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0]['kwargs']['max_tokens'], 6000)
         self.assertEqual(sent[0]['_stream_max_tokens'], 6000)
 
-    async def test_default_agent_output_setting_is_32k_on_large_model(self):
+    async def test_explicit_agent_output_setting_can_remain_32k(self):
         self.save({'output_reserve': 4096})
         sent, _summaries, chunks = await self.run_agent(
             window=131840, agent_output_setting=32768)
         self.assertEqual(sent[0]['kwargs']['max_tokens'], 32768)
         self.assertEqual(sent[0]['_stream_max_tokens'], 32768)
         self.assertIn('"generation_budget_tokens": 32768', chunks)
+
+    async def test_128k_ceiling_does_not_starve_input_and_fits_each_route(self):
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                sent, summaries, chunks = await self.run_agent(
+                    window=131840, agent_output_setting=131072, fallback=fallback)
+                budget = sent[0]['kwargs']['max_tokens']
+                self.assertGreater(budget, 32768)
+                self.assertLess(budget, 131072)
+                self.assertFalse(summaries)
+                self.assertIn('"configured_generation_budget_tokens": 131072', chunks)
+                events = [json.loads(line[6:]) for line in chunks.splitlines() if line.startswith('data: {')]
+                usage = next(e['data'] for e in events if e.get('type') == 'context_usage')
+                self.assertEqual(usage['context_policy']['output_reserve'], 32768)
 
     async def test_chat_policy_shapes_agent_without_changing_other_chats(self):
         from contextlib import contextmanager

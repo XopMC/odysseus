@@ -1723,7 +1723,7 @@ async function initAgentSettings() {
     var settings = await res.json();
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
-    if (outputTokensInput) outputTokensInput.value = settings.agent_output_token_budget ?? 32768;
+    if (outputTokensInput) outputTokensInput.value = settings.agent_output_token_budget ?? 131072;
     if (goalRoundsInput) goalRoundsInput.value = settings.goal_max_rounds ?? 200;
     if (goalTokensInput) goalTokensInput.value = settings.goal_max_total_tokens ?? 0;
     if (goalRequestsInput) goalRequestsInput.value = settings.goal_max_model_requests ?? 0;
@@ -1759,7 +1759,7 @@ async function initAgentSettings() {
   async function save() {
     var tools = clampInt(toolsInput.value, 0, 1000, 0);
     var rounds = roundsInput ? clampInt(roundsInput.value, 1, 200, 20) : null;
-    var outputTokens = outputTokensInput ? clampInt(outputTokensInput.value, 4096, 131072, 32768) : null;
+    var outputTokens = outputTokensInput ? clampInt(outputTokensInput.value, 4096, 131072, 131072) : null;
     var goalRounds = goalRoundsInput ? clampInt(goalRoundsInput.value, 1, 200, 200) : null;
     var goalTokens = goalTokensInput ? clampInt(goalTokensInput.value, 0, 10000000, 0) : null;
     var goalRequests = goalRequestsInput ? clampInt(goalRequestsInput.value, 0, 10000, 0) : null;
@@ -1821,7 +1821,7 @@ async function initAgentSettings() {
         if (currentResponse.ok) {
           const current = await currentResponse.json();
           if (subagentMode) subagentMode.value = current.agent_subagents_mode || 'off';
-          if (outputTokensInput) outputTokensInput.value = current.agent_output_token_budget ?? 32768;
+          if (outputTokensInput) outputTokensInput.value = current.agent_output_token_budget ?? 131072;
           setSelectedModels(current.agent_subagent_models || '');
           setSubagentModelLimits(current.agent_subagent_model_limits || {});
           if (subagentModelsRow) subagentModelsRow.hidden = subagentMode?.value !== 'selected_models';
@@ -1862,7 +1862,7 @@ async function initAgentSettings() {
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
     (curR != null ? ' · ' + curR + ' steps/message' : '') +
-    (outputTokensInput ? ' · ' + (parseInt(outputTokensInput.value, 10) || 32768) + ' output tokens/request' : '') +
+    (outputTokensInput ? ' · ' + (parseInt(outputTokensInput.value, 10) || 131072) + ' output tokens/request' : '') +
     (supInput && supInput.checked ? ' · supervisor on' : '');
 
 }

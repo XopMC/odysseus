@@ -102,7 +102,7 @@ def test_empty_output_without_reasoning_keeps_one_bounded_retry():
                                             reasoning_seen=True) == 0
 
 
-def test_all_agent_models_default_to_32k_and_setting_can_lower_it(monkeypatch):
+def test_all_agent_models_default_to_128k_and_setting_can_lower_it(monkeypatch):
     _patch_common(monkeypatch)
     requests = []
 
@@ -115,14 +115,14 @@ def test_all_agent_models_default_to_32k_and_setting_can_lower_it(monkeypatch):
     _collect(al.stream_agent_loop(
         "http://x/v1", "plain-coder",
         [{"role": "user", "content": "Investigate this multi-step project and report the verified result"}],
-        max_rounds=2, context_length=131840, relevant_tools=set(),
+        max_rounds=2, context_length=262144, relevant_tools=set(),
     ))
 
-    assert requests == [32768]
+    assert requests == [131072]
     assert al._default_agent_output_reserve(32768, 0) < 32768
     assert al._default_agent_output_reserve(131840, 0, desired_tokens=8192) == 8192
     assert al._unusable_output_retry_budget(32768, 0, "empty_output", 131840,
-                                            reasoning_seen=True) == 32768
+                                            reasoning_seen=True, budget_ceiling=32768) == 32768
 
     monkeypatch.setattr(
         al, "get_setting",
@@ -135,6 +135,14 @@ def test_all_agent_models_default_to_32k_and_setting_can_lower_it(monkeypatch):
         max_rounds=2, context_length=131840, relevant_tools=set(),
     ))
     assert requests == [8192]
+
+
+def test_generation_ceiling_borrows_free_window_without_reserving_it_all():
+    assert al._default_agent_output_reserve(131840, 4000, desired_tokens=131072) == 32768
+    assert al._agent_completion_budget(131840, 20000, 131072) == 104224
+    assert al._agent_completion_budget(262144, 20000, 131072) == 131072
+    assert al._agent_completion_budget(131840, 20000, 8192) == 8192
+    assert al._agent_completion_budget(262144, 20000, 131072, requested_window=65536) == 41235
 
 
 def test_output_limit_continues_same_run_without_silent_completion(monkeypatch):

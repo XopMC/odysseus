@@ -680,7 +680,7 @@ const RU = Object.freeze({
   'routed via server':'через сервер', 'API (direct)':'API (напрямую)', 'browser→provider':'браузер→провайдер',
   'Tool call limit':'Лимит вызовов инструментов', 'Max steps per message':'Максимум шагов на сообщение',
   'Agent output tokens per request':'Токены ответа агента на запрос',
-  'Includes thinking. Default 32,768; smaller model windows use the largest safe budget.':'Включая размышления. По умолчанию 32 768; при меньшем окне модели используется максимально безопасный бюджет.',
+  'Includes thinking. Default 131,072; limited by space remaining after the prompt. Separate from context reservation.':'Включая размышления. По умолчанию 131 072; ограничивается свободным местом после запроса. Это не резерв контекста.',
   'Max steps per Goal attempt':'Максимум шагов на попытку цели',
   'Max model tokens per Goal attempt':'Максимум токенов модели на попытку цели',
   'Max model requests per Goal attempt':'Максимум запросов к модели на попытку цели',
