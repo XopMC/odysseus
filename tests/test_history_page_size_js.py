@@ -41,7 +41,7 @@ def test_idle_live_sync_only_probes_history_after_rendered_count_changes():
 
     assert "const renderedCount = await refreshSessionMessageCount(sessionId);" in check
     assert "const renderedCountChanged" in check
-    guarded_history = check.split("if (renderedCountChanged) {", 1)[1]
+    guarded_history = check.split("if (renderedCountChanged && !(preservedReplay && info.status === 'streaming')) {", 1)[1]
     assert "_historyUrl(sessionId, { limit: 1 })" in guarded_history
 
 
