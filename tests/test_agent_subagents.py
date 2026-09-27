@@ -1,7 +1,7 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -72,7 +72,7 @@ def test_child_runtime_has_stable_file_and_verification_tool_core():
     }
 
 
-def test_restart_fences_children_owned_by_the_previous_worker(monkeypatch):
+def test_restart_fences_expired_children_owned_by_the_previous_worker(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     store = sessionmaker(bind=engine)
@@ -84,7 +84,7 @@ def test_restart_fences_children_owned_by_the_previous_worker(monkeypatch):
         id="c" * 32, parent_session_id="s", owner="alice", ordinal=1,
         name="Subagent 1", objective="check", assigned_context="", model="m",
         endpoint_id="ep", status="running", slot=1, worker_id="previous-worker",
-        heartbeat_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        heartbeat_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=91),
     ))
     db.commit(); db.close()
     restarted = SubagentRuntime()

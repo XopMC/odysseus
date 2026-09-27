@@ -226,8 +226,18 @@ async def _run_followup(rec: dict) -> bool:
 
 
 async def _loop():
+    from time import monotonic
+    last_child_recovery = float("-inf")
     while True:
         try:
+            if monotonic() - last_child_recovery >= 30:
+                from src.subagent_runtime import runtime as children
+                expired = await asyncio.to_thread(children.recover_stale)
+                last_child_recovery = monotonic()
+                if expired:
+                    from src.subagent_delivery import backfill_terminal_deliveries, dispatch_if_idle
+                    for child_owner, child_session in await asyncio.to_thread(backfill_terminal_deliveries):
+                        await dispatch_if_idle(child_owner, child_session)
             from src.chat_work_store import store as chat_work_store
             from src.goal_controller import dispatch_goal_continuation
             questions = await asyncio.to_thread(chat_work_store.expired_goal_questions)

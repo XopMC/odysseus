@@ -16,11 +16,12 @@ import re
 import time
 import uuid
 import httpx
-from datetime import datetime, timezone
+from contextvars import ContextVar
+from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional
 
-from src.database import ChatSubagentEvent, ChatSubagentRun, Session, SessionLocal
+from src.database import ChatSubagentEvent, ChatSubagentRun, ChatToolIntent, ChatWorkEvent, Session, SessionLocal
 from src.harness_efficiency import CORE_AGENT_TOOLS
 from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 from sqlalchemy import or_
@@ -32,6 +33,39 @@ logger = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"queued", "running", "waiting_user", "stopping"}
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 CHILD_CORE_TOOLS = CORE_AGENT_TOOLS | {"publish_subagent_evidence"}
+CHILD_LEASE_SECONDS = 90
+CHILD_HEARTBEAT_SECONDS = 15
+_execution_lease = ContextVar("subagent_execution_lease", default=None)
+
+
+class ChildLeaseLost(RuntimeError):
+    """A fenced executor must not overwrite its successor or dispatch tools."""
+
+
+def _locked_child(db, child_id, owner):
+    # Reserve SQLite's writer before SELECT; on other engines lock the row.
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    row = db.query(ChatSubagentRun).filter(
+        ChatSubagentRun.id == child_id,
+        ChatSubagentRun.owner == (owner or ""),
+    ).with_for_update().first()
+    lease = _execution_lease.get()
+    if lease and lease[:2] == (child_id, owner or ""):
+        cutoff = _utcnow() - timedelta(seconds=CHILD_LEASE_SECONDS)
+        if (row is None or row.worker_id != lease[2]
+                or row.status not in ACTIVE_STATUSES
+                or row.heartbeat_at is None or row.heartbeat_at < cutoff):
+            raise ChildLeaseLost("Child execution lease is no longer current")
+    return row
+
+
+def _check_cancelled_transition(row, changes):
+    lease = _execution_lease.get()
+    if (lease and lease[:2] == (row.id, row.owner)
+            and row.cancel_requested
+            and changes.get("status") not in (None, "cancelled", "stopping")):
+        raise asyncio.CancelledError()
 
 
 class ChildStreamFailure(RuntimeError):
@@ -144,22 +178,46 @@ class SubagentRuntime:
             return 0
         db = SessionLocal()
         try:
-            cutoff = datetime.fromtimestamp(time.time() - 90, tz=timezone.utc).replace(tzinfo=None)
+            if db.get_bind().dialect.name == "sqlite":
+                db.execute(text("BEGIN IMMEDIATE"))
+            cutoff = _utcnow() - timedelta(seconds=CHILD_LEASE_SECONDS)
             rows = db.query(ChatSubagentRun).filter(
-                ChatSubagentRun.status.in_(ACTIVE_STATUSES),
+                # A user-input wait has no executing task/heartbeat. It is
+                # durable state, not proof that a live worker lease expired.
+                ChatSubagentRun.status.in_({"queued", "running", "stopping"}),
                 or_(
                     ChatSubagentRun.worker_id.is_(None),
-                    ChatSubagentRun.worker_id != self._worker_id,
                     ChatSubagentRun.heartbeat_at.is_(None),
                     ChatSubagentRun.heartbeat_at < cutoff,
                 ),
-            ).all()
+            ).with_for_update().all()
             for row in rows:
+                # A dead executor may have dispatched a mutation but missed
+                # its receipt. Fence exactly those effects before releasing
+                # capacity or making the interruption deliverable to a parent.
+                from src.chat_work_store import _storage_owner
+                intents = db.query(ChatToolIntent).filter_by(
+                    owner=_storage_owner(row.owner), session_id=row.parent_session_id,
+                    run_id=row.id, status="intent",
+                ).with_for_update().all()
+                for intent in intents:
+                    intent.status = "unknown"
+                    intent.revision += 1
+                    db.add(ChatWorkEvent(
+                        session_id=intent.session_id, owner=intent.owner,
+                        kind="effect_unknown", entity_id=intent.id, revision=intent.revision,
+                        payload={"intent_id": intent.id, "status": "unknown"},
+                    ))
                 row.status = "interrupted"
                 row.error = "Web process restarted while the subagent was active"
                 row.finished_at = _utcnow()
                 row.slot = None
                 row.revision += 1
+                db.add(ChatSubagentEvent(
+                    child_id=row.id, parent_session_id=row.parent_session_id,
+                    owner=row.owner, kind="status",
+                    payload={"status": "interrupted", "reason": "worker_lease_expired"},
+                ))
             db.commit()
             self._recovered = True
             return len(rows)
@@ -167,13 +225,19 @@ class SubagentRuntime:
             db.close()
 
     def recover_stale(self) -> int:
-        """Fence children from a previous web worker during app startup."""
+        """Fence expired leases, never a healthy executor in another process."""
+        self._recovered = False
         return self._recover_stale()
 
     def _event(self, child_id: str, owner: Optional[str], session_id: str,
                kind: str, payload: dict) -> int:
         db = SessionLocal()
         try:
+            lease = _execution_lease.get()
+            if lease and lease[:2] == (child_id, owner or ""):
+                row = _locked_child(db, child_id, owner)
+                if kind == "tool_start" and (row.cancel_requested or row.removed):
+                    raise asyncio.CancelledError()
             event = ChatSubagentEvent(
                 child_id=child_id, parent_session_id=session_id,
                 owner=owner or "", kind=kind, payload=payload or {},
@@ -188,12 +252,10 @@ class SubagentRuntime:
     def _update(self, child_id: str, owner: Optional[str], **changes) -> Optional[dict]:
         db = SessionLocal()
         try:
-            row = db.query(ChatSubagentRun).filter(
-                ChatSubagentRun.id == child_id,
-                ChatSubagentRun.owner == (owner or ""),
-            ).first()
+            row = _locked_child(db, child_id, owner)
             if row is None:
                 return None
+            _check_cancelled_transition(row, changes)
             for key, value in changes.items():
                 setattr(row, key, value)
             row.revision = int(row.revision or 0) + 1
@@ -208,13 +270,10 @@ class SubagentRuntime:
         """Commit a child state transition and its replay event atomically."""
         db = SessionLocal()
         try:
-            row = db.query(ChatSubagentRun).filter(
-                ChatSubagentRun.id == child_id,
-                ChatSubagentRun.owner == (owner or ""),
-                ChatSubagentRun.parent_session_id == session_id,
-            ).first()
-            if row is None:
+            row = _locked_child(db, child_id, owner)
+            if row is None or row.parent_session_id != session_id:
                 return None
+            _check_cancelled_transition(row, changes)
             for key, value in changes.items():
                 setattr(row, key, value)
             row.revision = int(row.revision or 0) + 1
@@ -235,10 +294,7 @@ class SubagentRuntime:
         """Merge telemetry without letting a later heartbeat erase context data."""
         db = SessionLocal()
         try:
-            row = db.query(ChatSubagentRun).filter(
-                ChatSubagentRun.id == child_id,
-                ChatSubagentRun.owner == (owner or ""),
-            ).first()
+            row = _locked_child(db, child_id, owner)
             if row is None:
                 return None
             metrics = dict(row.metrics or {})
@@ -416,10 +472,80 @@ class SubagentRuntime:
             "message": "Subagent started asynchronously. Spawn remaining children before waiting.",
         }
 
+    async def _lease_heartbeat(self, child_id, owner, executing_task):
+        while True:
+            await asyncio.sleep(CHILD_HEARTBEAT_SECONDS)
+            try:
+                with SessionLocal() as db:
+                    current = _locked_child(db, child_id, owner)
+                    cancelled = current.cancel_requested or current.removed
+                if cancelled:
+                    executing_task.cancel()
+                    return
+                self._update(child_id, owner, heartbeat_at=_utcnow())
+            except ChildLeaseLost:
+                executing_task.cancel()
+                return
+            except Exception as exc:
+                # A transient storage failure must not silently kill the
+                # heartbeat task. Retry renewal; the unchanged lease deadline
+                # still fences execution if storage stays unavailable.
+                logger.warning("Child heartbeat renewal failed: child=%s kind=%s",
+                               child_id, type(exc).__name__)
+
     async def _run_child(self, *, child_id: str, owner: Optional[str], session_id: str,
                          endpoint_url: str, model: str, headers: dict,
                          timeout_seconds: int, workspace: Optional[str], access_mode: str,
                          resume_checkpoint: Optional[dict] = None) -> None:
+        # A distinct token per execution also fences an older waiting turn in
+        # the same process. Claim before any provider request or attachment read.
+        lease_id = uuid.uuid4().hex
+        with SessionLocal.begin() as db:
+            row = _locked_child(db, child_id, owner)
+            if (row is None or row.parent_session_id != session_id
+                    or row.status != "queued" or row.cancel_requested or row.removed
+                    or row.worker_id not in (None, self._worker_id)):
+                return
+            row.worker_id = lease_id
+            row.heartbeat_at = _utcnow()
+        task = asyncio.current_task()
+        task._odysseus_child_lease = lease_id
+        token = _execution_lease.set((child_id, owner or "", lease_id))
+        # Cover attachment preparation too, not just token generation.
+        heartbeat_task = asyncio.create_task(
+            self._lease_heartbeat(child_id, owner, task),
+            name=f"subagent-heartbeat-{child_id[:8]}",
+        )
+        try:
+            await self._run_claimed_child(
+                child_id=child_id, owner=owner, session_id=session_id,
+                endpoint_url=endpoint_url, model=model, headers=headers,
+                timeout_seconds=timeout_seconds, workspace=workspace,
+                access_mode=access_mode, resume_checkpoint=resume_checkpoint,
+            )
+        except ChildLeaseLost:
+            logger.info("Child executor fenced: %s", child_id)
+        except asyncio.CancelledError:
+            # Also cover cancellation during setup, before the stream-level
+            # cleanup handler is installed. A newer lease/terminal row wins.
+            try:
+                self._update_with_event(
+                    child_id, owner, session_id, "status", {"status": "cancelled"},
+                    status="cancelled", finished_at=_utcnow(),
+                    error="Stopped by user", slot=None,
+                )
+            except ChildLeaseLost:
+                pass
+            raise
+        finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            _execution_lease.reset(token)
+
+    async def _run_claimed_child(self, *, child_id: str, owner: Optional[str], session_id: str,
+                                 endpoint_url: str, model: str, headers: dict,
+                                 timeout_seconds: int, workspace: Optional[str], access_mode: str,
+                                 resume_checkpoint: Optional[dict] = None) -> None:
         from src.agent_loop import stream_agent_loop
 
         db = SessionLocal()
@@ -528,13 +654,6 @@ class SubagentRuntime:
                 })
             last_flush = time.monotonic()
 
-        async def heartbeat():
-            while True:
-                await asyncio.sleep(15)
-                self._update(child_id, owner, heartbeat_at=_utcnow())
-
-        heartbeat_task = asyncio.create_task(heartbeat(), name=f"subagent-heartbeat-{child_id[:8]}")
-
         try:
             waiting_payload = None
             # Only a persisted post-tool ledger makes a retry safe. Never
@@ -548,7 +667,7 @@ class SubagentRuntime:
             async def consume():
                 nonlocal waiting_payload, tool_since_checkpoint, checkpoint
                 nonlocal consecutive_failures, round_slice_exhausted
-                async for frame in stream_agent_loop(
+                model_stream = stream_agent_loop(
                     endpoint_url, model, messages, headers=headers or {},
                     session_id=session_id, owner=owner, workspace=workspace,
                     access_mode=access_mode or "", history_session=history,
@@ -572,68 +691,74 @@ class SubagentRuntime:
                     tool_policy=config.get("tool_policy"),
                     external_untrusted_context_seen=bool(config.get("external_untrusted_context_seen")),
                     delegated_credential=bool(config.get("delegated_credential")),
-                ):
-                    frame_is_error = any(line.strip() == "event: error" for line in str(frame).splitlines())
-                    for line in str(frame).splitlines():
-                        if not line.startswith("data: "):
-                            continue
-                        raw = line[6:]
-                        if raw == "[DONE]":
-                            continue
-                        try:
-                            event = json.loads(raw)
-                        except Exception:
-                            continue
-                        if not isinstance(event, dict):
-                            continue
-                        if frame_is_error or (event.get("error") and not event.get("type")):
-                            raise ChildStreamFailure(event)
-                        if "delta" in event and not event.get("type"):
-                            text = str(event.get("delta") or "")
-                            if event.get("thinking"):
-                                reasoning_parts.append(text); pending_thinking.append(text)
+                )
+                try:
+                    async for frame in model_stream:
+                        frame_is_error = any(line.strip() == "event: error" for line in str(frame).splitlines())
+                        for line in str(frame).splitlines():
+                            if not line.startswith("data: "):
+                                continue
+                            raw = line[6:]
+                            if raw == "[DONE]":
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except Exception:
+                                continue
+                            if not isinstance(event, dict):
+                                continue
+                            if frame_is_error or (event.get("error") and not event.get("type")):
+                                raise ChildStreamFailure(event)
+                            if "delta" in event and not event.get("type"):
+                                text = str(event.get("delta") or "")
+                                if event.get("thinking"):
+                                    reasoning_parts.append(text); pending_thinking.append(text)
+                                else:
+                                    output_parts.append(text); pending_delta.append(text)
+                                await flush()
                             else:
-                                output_parts.append(text); pending_delta.append(text)
-                            await flush()
-                        else:
-                            await flush(force=True)
-                            kind = str(event.get("type") or "event")
-                            if kind == "tool_start":
-                                tool_since_checkpoint = True
-                            if kind == "ask_user":
-                                waiting_payload = event.get("data") or event
-                            if kind == "metrics":
-                                self._merge_metrics(child_id, owner, event.get("data") or {})
-                            self._event(child_id, owner, session_id, kind, event)
-                            if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
-                                # _event committed the ledger before it becomes
-                                # eligible for recovery. Copies isolate the next
-                                # loop's prompt mutations from durable evidence.
-                                if tool_since_checkpoint or checkpoint != event["messages"]:
-                                    consecutive_failures = 0
-                                checkpoint = copy.deepcopy(event["messages"])
-                                history.context_checkpoint = copy.deepcopy(checkpoint)
-                                history.context_checkpoint_count = int(event.get("compactions") or 0)
-                                tool_since_checkpoint = False
-                                self._merge_metrics(child_id, owner, {
-                                    "checkpoint_messages": len(checkpoint),
-                                    "checkpoint_hash": event.get("ledger_hash"),
-                                    "context_compactions": history.context_checkpoint_count,
-                                })
-                            if kind == "rounds_exhausted":
-                                round_slice_exhausted = True
-                            # stream_agent_loop uses a typed terminal event for
-                            # failures that must stop safely (for example an
-                            # unbuildable context checkpoint).  [DONE] still
-                            # follows that event, so treating it as an ordinary
-                            # timeline record would incorrectly publish the
-                            # child as completed.  Persist the evidence first,
-                            # then fail the child without transport retry.
-                            if kind == "agent_terminal":
-                                terminal = event.get("data") or {}
-                                if isinstance(terminal, dict) and (terminal.get("failed") or terminal.get("failure")):
-                                    failure = terminal.get("failure") or {}
-                                    raise ChildStreamFailure(failure)
+                                await flush(force=True)
+                                kind = str(event.get("type") or "event")
+                                if kind == "tool_start":
+                                    tool_since_checkpoint = True
+                                if kind == "ask_user":
+                                    waiting_payload = event.get("data") or event
+                                if kind == "metrics":
+                                    self._merge_metrics(child_id, owner, event.get("data") or {})
+                                self._event(child_id, owner, session_id, kind, event)
+                                if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
+                                    # _event committed the ledger before it becomes
+                                    # eligible for recovery. Copies isolate the next
+                                    # loop's prompt mutations from durable evidence.
+                                    if tool_since_checkpoint or checkpoint != event["messages"]:
+                                        consecutive_failures = 0
+                                    checkpoint = copy.deepcopy(event["messages"])
+                                    history.context_checkpoint = copy.deepcopy(checkpoint)
+                                    history.context_checkpoint_count = int(event.get("compactions") or 0)
+                                    tool_since_checkpoint = False
+                                    self._merge_metrics(child_id, owner, {
+                                        "checkpoint_messages": len(checkpoint),
+                                        "checkpoint_hash": event.get("ledger_hash"),
+                                        "context_compactions": history.context_checkpoint_count,
+                                    })
+                                if kind == "rounds_exhausted":
+                                    round_slice_exhausted = True
+                                # stream_agent_loop uses a typed terminal event for
+                                # failures that must stop safely (for example an
+                                # unbuildable context checkpoint).  [DONE] still
+                                # follows that event, so treating it as an ordinary
+                                # timeline record would incorrectly publish the
+                                # child as completed.  Persist the evidence first,
+                                # then fail the child without transport retry.
+                                if kind == "agent_terminal":
+                                    terminal = event.get("data") or {}
+                                    if isinstance(terminal, dict) and (terminal.get("failed") or terminal.get("failure")):
+                                        failure = terminal.get("failure") or {}
+                                        raise ChildStreamFailure(failure)
+                finally:
+                    # Close provider/tool generators before publishing a terminal
+                    # state or releasing capacity, including body-side fencing.
+                    await model_stream.aclose()
             # A child is a mini-goal, not one inference call. Accept the legacy
             # timeout argument without killing useful work across rounds/tools.
             # Provider inactivity and individual tool timeouts remain enforced
@@ -702,6 +827,8 @@ class SubagentRuntime:
                 error="Stopped by user", slot=None,
             )
             raise
+        except ChildLeaseLost:
+            raise
         except Exception as exc:
             await flush(force=True)
             if isinstance(exc, ChildStreamFailure):
@@ -716,16 +843,40 @@ class SubagentRuntime:
                 {"status": "failed", "error": safe_error},
                 status="failed", finished_at=_utcnow(), error=safe_error, slot=None,
             )
-        finally:
-            heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
-
     async def _finalize_unexpected(self, child_id: str, owner: Optional[str], task: asyncio.Task):
         # An old waiting turn's done callback may run after guidance already
         # created its successor. It must not evict the new task/configuration.
         if self._tasks.get(child_id) is not task:
             return
         self._tasks.pop(child_id, None)
+        lease_id = getattr(task, "_odysseus_child_lease", None)
+        if not lease_id:
+            # No execution lease means no authority over a running successor.
+            # Only our exact unstarted reservation can be finalized here.
+            with SessionLocal.begin() as db:
+                current = _locked_child(db, child_id, owner)
+                if (current is not None and current.worker_id == self._worker_id
+                        and current.status in {"queued", "stopping"}):
+                    cancelled = task.cancelled() or current.cancel_requested
+                    current.status = "cancelled" if cancelled else "failed"
+                    current.error = "Stopped by user" if cancelled else "Child could not acquire its execution lease"
+                    current.finished_at, current.slot = _utcnow(), None
+                    current.revision += 1
+                    db.add(ChatSubagentEvent(
+                        child_id=child_id, parent_session_id=current.parent_session_id,
+                        owner=owner or "", kind="status", payload={"status": current.status},
+                    ))
+            if not task.cancelled():
+                task.exception()  # Retrieve a setup exception; never replay work.
+            self._configs.pop(child_id, None)
+            return
+        if lease_id:
+            with SessionLocal() as db:
+                current = db.query(ChatSubagentRun).filter_by(
+                    id=child_id, owner=owner or "").first()
+                if current is None or current.worker_id != lease_id:
+                    self._configs.pop(child_id, None)
+                    return
         row = self._get_any(owner, child_id)
         if row and row["status"] == "waiting_user":
             return
@@ -739,11 +890,18 @@ class SubagentRuntime:
                         error = str(exc)[:1000]
                 except Exception:
                     pass
-            self._update_with_event(
-                child_id, owner, row["session_id"], "status",
-                {"status": "failed", "error": error},
-                status="failed", error=error, finished_at=_utcnow(), slot=None,
-            )
+            token = _execution_lease.set((child_id, owner or "", lease_id)) if lease_id else None
+            try:
+                self._update_with_event(
+                    child_id, owner, row["session_id"], "status",
+                    {"status": "failed", "error": error},
+                    status="failed", error=error, finished_at=_utcnow(), slot=None,
+                )
+            except ChildLeaseLost:
+                return
+            finally:
+                if token is not None:
+                    _execution_lease.reset(token)
             row = self._get_any(owner, child_id)
         if (row and row["status"] in {"completed", "failed", "interrupted"}
                 and re.fullmatch(r"[0-9a-f]{32}", str(row.get("parent_run_id") or ""))):
@@ -900,24 +1058,20 @@ class SubagentRuntime:
                                 child_id: str, text: str):
         db = SessionLocal()
         try:
-            row = db.query(ChatSubagentRun).filter(
-                ChatSubagentRun.owner == (owner or ""),
-                ChatSubagentRun.parent_session_id == session_id,
-                ChatSubagentRun.id == child_id,
-                ChatSubagentRun.removed.is_(False),
-            ).first()
-            if row is None:
+            row = _locked_child(db, child_id, owner)
+            if row is None or row.parent_session_id != session_id or row.removed:
                 return None, "Subagent not found"
-            if row.status in TERMINAL_STATUSES:
-                return row.status, "Completed subagents cannot receive guidance"
+            if row.status in TERMINAL_STATUSES or row.cancel_requested or row.status == "stopping":
+                return row.status, "Stopped or completed subagents cannot receive guidance"
             should_resume = row.status == "waiting_user"
             guidance = list(row.guidance or [])
             guidance.append({"id": uuid.uuid4().hex, "text": text,
                              "created_at": _utcnow().isoformat() + "Z"})
             row.guidance = guidance[-100:]
             row.revision += 1
+            claim = {"revision": row.revision, "worker_id": row.worker_id} if should_resume else False
             db.commit()
-            return should_resume, None
+            return claim, None
         finally:
             db.close()
 
@@ -962,7 +1116,16 @@ class SubagentRuntime:
                 checkpoint = self._continuation_checkpoint(owner, session_id, child_id)
             except ValueError as exc:
                 return {"error": str(exc), "exit_code": 1, "status": "waiting_user"}
-            self._update(child_id, owner, status="queued", heartbeat_at=_utcnow())
+            with SessionLocal.begin() as db:
+                row = _locked_child(db, child_id, owner)
+                if (row is None or row.parent_session_id != session_id
+                        or row.status != "waiting_user" or row.removed or row.cancel_requested
+                        or row.revision != should_resume["revision"]
+                        or row.worker_id != should_resume["worker_id"]):
+                    return {"error": "Subagent changed before resume; refresh its status",
+                            "exit_code": 1, "policy": "stale_revision"}
+                row.status, row.heartbeat_at, row.worker_id = "queued", _utcnow(), self._worker_id
+                row.revision += 1
             task = asyncio.create_task(self._run_child(
                 child_id=child_id, owner=owner, session_id=session_id,
                 endpoint_url=config["endpoint_url"], model=config["model"],
@@ -978,19 +1141,27 @@ class SubagentRuntime:
         return {"child_id": child_id, "status": "accepted", "exit_code": 0}
 
     async def stop(self, owner: Optional[str], session_id: str, child_id: str) -> dict:
-        row = self.get(owner, session_id, child_id)
-        if not row:
-            return {"error": "Subagent not found", "exit_code": 1}
-        if row["status"] in TERMINAL_STATUSES:
-            return {**row, "exit_code": 0}
-        if row["status"] == "waiting_user":
-            self._update(child_id, owner, status="cancelled", cancel_requested=True,
-                         finished_at=_utcnow(), error="Stopped by user", slot=None)
-            self._event(child_id, owner, session_id, "status", {"status": "cancelled"})
+        # Decide and persist atomically: completion may race a Stop from a
+        # different browser/process. Never turn an already terminal row active.
+        with SessionLocal.begin() as db:
+            row = _locked_child(db, child_id, owner)
+            if row is None or row.parent_session_id != session_id or row.removed:
+                return {"error": "Subagent not found", "exit_code": 1}
+            if row.status in TERMINAL_STATUSES:
+                return {**_public(row, include_result=True), "exit_code": 0}
+            waiting = row.status == "waiting_user"
+            row.status = "cancelled" if waiting else "stopping"
+            row.cancel_requested = True
+            row.revision += 1
+            if waiting:
+                row.finished_at, row.error, row.slot = _utcnow(), "Stopped by user", None
+            db.add(ChatSubagentEvent(
+                child_id=child_id, parent_session_id=session_id, owner=owner or "",
+                kind="status", payload={"status": row.status},
+            ))
+        if waiting:
             self._configs.pop(child_id, None)
             return {**(self.get(owner, session_id, child_id) or {}), "exit_code": 0}
-        self._update(child_id, owner, status="stopping", cancel_requested=True)
-        self._event(child_id, owner, session_id, "status", {"status": "stopping"})
         task = self._tasks.get(child_id)
         if task:
             task.cancel()
@@ -1002,8 +1173,11 @@ class SubagentRuntime:
                 return {**(self.get(owner, session_id, child_id) or {}),
                         "pending_stop": True, "exit_code": 0}
         else:
-            self._update(child_id, owner, status="interrupted", finished_at=_utcnow(),
-                         error="Worker process is unavailable", slot=None)
+            # Another healthy web process may own the task. Its heartbeat
+            # observes cancellation, while the slot remains reserved until it
+            # acknowledges Stop (or its lease expires). Never free a live slot.
+            return {**(self.get(owner, session_id, child_id) or {}),
+                    "pending_stop": True, "exit_code": 0}
         return {**(self.get(owner, session_id, child_id) or {}), "exit_code": 0}
 
     async def remove(self, owner: Optional[str], session_id: str, child_id: str) -> dict:

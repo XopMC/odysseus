@@ -469,3 +469,96 @@ Additional open observations for the next audit slice:
   170,902 bytes vs <1,024. Patched test file then **10 passed**. Full suite on
   integrated source: **7,542 passed, 25 skipped, 115 subtests**, 9 existing
   warnings, 210.35s, exit0 (`/tmp/odysseus-list-metrics-full.log`).
+
+## 20:34–20:41 UTC — exact bounded-list release and two-browser verification
+
+- SHA `2f4983b16bb3b8b1ecff70972b1fcfea9ed841e0` matches local Git,
+  public-fork main/master, Jetson checkout and production image revision label.
+  Final candidate was built from `git archive` of that exact SHA so local
+  deployment override/rollback files cannot enter its build context. Repeated
+  isolated no-network tests on that final image: **84 passed**, 6.34s. Its
+  alternate-port redirect resolves to HTTP200. Static JS syntax all passed.
+- Pre-switch gate: zero running durable runs, zero queued/running/stopping/
+  waiting_user children. Online `app-pre-2f4983b.db` (858,030,080 bytes) and
+  `teams-pre-2f4983b.db` (5,230,592 bytes) integrity checks passed, mode0600.
+  Compose backup retained. App-only switch; no network/helper policy changes.
+- Production `release-2f4983b` started **20:34:32.162 UTC**. Initial startup
+  HTTP unavailable / HTTPS502 recorded honestly; application startup completed
+  at20:35:29, then HTTP/HTTPS200 and Docker healthy/zero restarts. Do not count
+  this warmup as uninterrupted availability.
+- Same six real safe QA children: list payload now **36,971 bytes** vs695,282
+  before (18.8x smaller). Metrics 748/68/746/745/752/746 bytes. Child6 detail
+  metrics still81,384 bytes and result still3,388 characters; both compare
+  exactly equal to stored data. Runtime source SHA256 equals checkout:
+  `928a761f53436f46336e4d37d50bf424dfdc46a0409510072ab76710023352e2`.
+- Actual Safari reload: 0 active/6 total panel, child6 detailed reasoning opens.
+  Independently authenticated Opera same QA chat: Plan6/6, 247 rendered messages,
+  context13.5%, panel0/6 and child6 detail reasoning. Native AX/coordinate clicks
+  did not visibly toggle Opera's panel; keyboard Shift-Tab/Return and navigation
+  to the named Open control did. Record the input-automation limitation, not an
+  unproven product fix. No children relaunched and no messages deleted.
+- Content-free post-startup logs through20:41: zero SQLite locked, Traceback,
+  HTTP500 or ERROR lines. One Docker sample:23.90%CPU,817.6MiB (not a sustained
+  performance or six-hour acceptance claim). Temporary candidate removed.
+- Overall Goal stays active. Ordinary checkpoint reuse, durable child restart,
+  full background-followup context/policy and continuous final-image soak remain
+  open; the list optimization does not close these unrelated requirements.
+- Cleanup after reference checks: removed obsolete release-7e70366 image and
+  candidate-2f4983b tag; kept current release-2f4983b and rollback67c9d86.
+  These app images are rebuildable; no database, chat, workspace or backup was
+  deleted. Final Docker status healthy/zero restarts.
+
+## 20:44–21:04 UTC — child executor fencing prerequisite
+
+- Previous Goal turn was progress: release2f4983b verified list/detail on real
+  Jetson/Safari/Opera. Goal remains active. Current runtime rechecked healthy,
+  zero restarts and no active runs/children before working on this slice.
+- Confirmed `_recover_stale` killed a healthy foreign executor solely because
+  worker_id differed, regardless of its fresh heartbeat. Old executor writes
+  were not fenced and could subsequently publish results or begin another tool.
+  Two regressions run against the exact prior HEAD failed for those intended
+  reasons (fresh child interrupted; stale executor advanced past tool_start).
+- Candidate now claims a unique per-execution lease before attachment/model
+  work; owner/lease/status/heartbeat are checked under the writer reservation
+  before worker mutations and events. Lease renewal covers setup plus inference.
+  Transient heartbeat write failure is retried without extending the old lease
+  deadline; an expired or replaced lease cancels the executing coroutine.
+  This is a 90s executor-liveness lease renewed every15s, NOT a task/generation
+  deadline; long useful reasoning and the 131,072-token setting are unchanged.
+- Stop is an atomic owner/session transition. A remote worker retains the slot
+  until cancellation acknowledgement/expiry; a late final answer or question
+  cannot change stopping back to completed/waiting_user. Pending tool_start is
+  rejected before the generator advances to its effect. Partial output remains.
+- Independent review reproduced three further races before release: late
+  completion overwrote Stop, rejected-claim finalizer overwrote a successor,
+  and waiting-answer resume overwrote concurrent Stop. Fixed with locked
+  cancellation checks, exact unstarted-reservation cleanup, and revision/lease
+  CAS for resume. Dedicated regressions cover each interleaving.
+- Expiry atomically promotes ONLY exact child owner/session/run pending effect
+  intents to unknown before interruption/delivery; completed receipts and other
+  owners/runs are untouched. This prevents automatic repetition of an uncertain
+  mutation; it is not a provider failure or a use of the ten-model-retry budget.
+- Periodic background sweep checks expiry every30s and then uses the existing
+  fenced parent-delivery path. A durable waiting_user question has no executing
+  heartbeat and is not classified as a dead process. Current-process answer
+  resumes the exact checkpoint; restart credential reconstruction remains OPEN.
+- New suite:18 passed, including two-executor real-DB barriers, blocked-model
+  and setup cancellation, stale-finalizer, completed-receipt isolation, and
+  background sweep ordering. Related suite before the final extra sweep test:
+  93 passed. Initial fixture error was missing parent-row flush (FK rejection),
+  corrected in test setup; not counted as a product pass. Earlier full passes
+  7547/7556/7557 preceded later review corrections; final frozen-tree full pass
+  is running separately and must be used for release evidence.
+- Automatic child process-restart resume is NOT implemented by this patch.
+  Required next: non-secret durable execution config, exact endpoint identity
+  (not fuzzy resolver or url-hash guess), refreshed owner credentials/privileges,
+  original restrictions intersected with current policy, original host binding,
+  parent Goal lineage/cancellation, checkpoint and guidance cursors. Never store
+  raw headers or restore old full-access authority from a snapshot.
+- Final cancellation-order regression additionally holds provider cleanup at a
+  deterministic barrier: the model slot stays reserved until `aclose()` finishes.
+  Explicit generator close now runs before terminal publication/retry, including
+  body-side Stop/lease rejection. Final new suite19 cases; related suites95 pass.
+- Final source frozen after review/cleanup fix: **7,561 passed,25 skipped,
+  115 subtests**,9 existing warnings,208.87s,exit0. Log:
+  `/tmp/odysseus-child-leases-release-full.log`. Static JS syntax/diff checks green.
