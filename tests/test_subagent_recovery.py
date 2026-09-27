@@ -240,3 +240,62 @@ def test_explicit_cancel_preserves_partial_result(harness, monkeypatch):
         assert row["status"] == "cancelled"
         assert row["result"] == "Verified partial result"
     asyncio.run(scenario())
+
+
+def test_answer_resumes_exact_compacted_child_ledger(harness, monkeypatch):
+    ledger = [{"role": "user", "content": "retained original task"},
+              {"role": "assistant", "content": "", "tool_calls": [{"id": "question-1"}]},
+              {"role": "tool", "tool_call_id": "question-1", "content": "Choose A or B"}]
+    harness._configs["child"].update(endpoint_url="http://model", model="worker", headers={},
+                                     timeout_seconds=60, workspace=None, access_mode="full_access")
+    requests = []
+    async def stream(*args, **kwargs):
+        requests.append((args[2], kwargs))
+        if len(requests) == 1:
+            yield 'data: {"delta":"Prior verified work"}\n\n'
+            yield event("tool_start", tool="ask_user")
+            yield event("tool_output", tool="ask_user", output="Choose A or B")
+            yield event("context_checkpoint", messages=ledger, compactions=3)
+            yield event("ask_user", data={"question": "Choose A or B"})
+        else:
+            yield 'data: {"delta":"Final verified A"}\n\n'
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    async def scenario():
+        await harness._run_child(child_id="child", owner="qa", session_id="s",
+            endpoint_url="http://model", model="worker", headers={}, timeout_seconds=60,
+            workspace=None, access_mode="full_access")
+        assert harness.get("qa", "s", "child")["status"] == "waiting_user"
+        assert harness._continuation_checkpoint("other", "s", "child") is None
+        reply = await harness.message("qa", "s", "child", "A")
+        assert reply["exit_code"] == 0
+        await harness._tasks["child"]
+        row = harness.get("qa", "s", "child")
+        assert row["status"] == "completed"
+        assert "Prior verified work" in row["result"] and "Final verified A" in row["result"]
+    asyncio.run(scenario())
+    assert requests[1][0][1:-1] == ledger
+    assert requests[1][0][-1] == {"role": "user", "content": "A"}
+    assert requests[1][1]["initial_context_compactions"] == 3
+    assert "write_file" in requests[1][1]["disabled_tools"]
+
+
+def test_child_resume_rejects_unsettled_effect_instead_of_replaying(harness):
+    harness._event("child", "qa", "s", "context_checkpoint", {
+        "messages": [{"role": "user", "content": "safe retained task"}]})
+    harness._event("child", "qa", "s", "tool_start", {"tool": "write_file"})
+    with pytest.raises(ValueError, match="no committed checkpoint"):
+        harness._continuation_checkpoint("qa", "s", "child")
+
+
+def test_prior_wait_turn_callback_cannot_evict_resumed_child(harness):
+    async def scenario():
+        old = asyncio.create_task(asyncio.sleep(0))
+        await old
+        successor = asyncio.create_task(asyncio.Event().wait())
+        harness._tasks["child"] = successor
+        await harness._finalize_unexpected("child", "qa", old)
+        assert harness._tasks["child"] is successor
+        assert "child" in harness._configs
+        successor.cancel()
+        await asyncio.gather(successor, return_exceptions=True)
+    asyncio.run(scenario())

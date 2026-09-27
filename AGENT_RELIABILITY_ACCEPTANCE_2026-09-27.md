@@ -69,3 +69,27 @@ workspace. Use the configured Qwen3.8 27b route, avoiding busy model :2.
 Observe real Safari creation/input, tool execution, parallel children, parent
 work, Plan updates, checkpoint/compaction, reload and second-client attachment.
 Do not confuse elapsed idle monitoring with sustained active-run acceptance.
+
+## Primary-source comparison (2026-09-27)
+
+- [Codex mailbox wait](https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs):
+  a wait timeout is not child cancellation. Odysseus now separates joining from
+  lifetime, removing the aggregate model-selected child deadline. This source
+  does not imply that every provider request must be unbounded.
+- [Codex compaction](https://github.com/openai/codex/blob/main/codex-rs/core/src/compact.rs):
+  persisted replacement history should match live history. Our live QA exposed
+  summary-only downgrade and route-view divergence; corrected with immediate
+  durable post-compaction ledger and both-route restoration.
+- [Claude subagent resumption](https://code.claude.com/docs/en/sub-agents#resume-subagents)
+  and [API errors](https://code.claude.com/docs/en/sub-agents#api-errors-in-subagents):
+  documentation describes resumable transcripts and reporting partial work on
+  failure. Candidate restores a waiting child's exact tool ledger; finalizer
+  identity fencing prevents an older wait turn evicting its resumed successor.
+  Process-restart recovery is still OPEN: durable execution config, refreshed
+  authorization and unsettled-effect reconciliation are prerequisites.
+- [ZCode subagents](https://zcode.z.ai/en/docs/subagents): the documented background
+  mode permits parent work and automatically returns child results; model/tool
+  selection and isolated contexts are explicit. This is documentation evidence,
+  not a verified implementation or performance claim. Odysseus QA has directly
+  exercised independent child contexts/tools and autonomous delegation; repeat
+  durable delivery/reload checks on the final image before full acceptance.

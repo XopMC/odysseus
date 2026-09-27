@@ -378,7 +378,8 @@ class SubagentRuntime:
 
     async def _run_child(self, *, child_id: str, owner: Optional[str], session_id: str,
                          endpoint_url: str, model: str, headers: dict,
-                         timeout_seconds: int, workspace: Optional[str], access_mode: str) -> None:
+                         timeout_seconds: int, workspace: Optional[str], access_mode: str,
+                         resume_checkpoint: Optional[dict] = None) -> None:
         from src.agent_loop import stream_agent_loop
 
         db = SessionLocal()
@@ -425,13 +426,21 @@ class SubagentRuntime:
             endpoint_url=endpoint_url, model=model, headers=headers or {},
             context_checkpoint=None, context_checkpoint_count=0,
         )
+        if resume_checkpoint:
+            ledger = copy.deepcopy(resume_checkpoint["messages"])
+            guidance = str(existing_guidance[-1].get("text") or "") if existing_guidance else ""
+            messages = [messages[0], *ledger]
+            if guidance:
+                messages.append({"role": "user", "content": guidance})
+            history.context_checkpoint = copy.deepcopy(ledger)
+            history.context_checkpoint_count = int(resume_checkpoint.get("compactions") or 0)
         config = self._configs.get(child_id, {})
         disabled = set(config.get("disabled_tools") or set()) | {
             "delegate_subagent", "manage_subagents", "create_session",
             "send_to_session", "manage_session", "complete_goal",
             "update_goal_progress", "get_goal",
         }
-        output_parts: list[str] = []
+        output_parts: list[str] = [prior_result + "\n\n"] if resume_checkpoint and prior_result else []
         reasoning_parts: list[str] = []
         pending_delta: list[str] = []
         pending_thinking: list[str] = []
@@ -672,6 +681,10 @@ class SubagentRuntime:
             await asyncio.gather(heartbeat_task, return_exceptions=True)
 
     async def _finalize_unexpected(self, child_id: str, owner: Optional[str], task: asyncio.Task):
+        # An old waiting turn's done callback may run after guidance already
+        # created its successor. It must not evict the new task/configuration.
+        if self._tasks.get(child_id) is not task:
+            return
         self._tasks.pop(child_id, None)
         row = self._get_any(owner, child_id)
         if row and row["status"] == "waiting_user":
@@ -868,6 +881,28 @@ class SubagentRuntime:
         finally:
             db.close()
 
+    def _continuation_checkpoint(self, owner, session_id, child_id):
+        """Exact execution ledger, never the bounded public inspection excerpt."""
+        with SessionLocal() as db:
+            events = db.query(ChatSubagentEvent).filter(
+                ChatSubagentEvent.owner == (owner or ""),
+                ChatSubagentEvent.parent_session_id == session_id,
+                ChatSubagentEvent.child_id == child_id,
+            )
+            checkpoint = events.filter(ChatSubagentEvent.kind == "context_checkpoint").order_by(
+                ChatSubagentEvent.id.desc()).first()
+            last_tool = events.filter(ChatSubagentEvent.kind == "tool_start").order_by(
+                ChatSubagentEvent.id.desc()).first()
+            if last_tool and (checkpoint is None or last_tool.id > checkpoint.id):
+                raise ValueError("A child tool has no committed checkpoint; inspect its outcome before resuming")
+            if checkpoint is None:
+                return None  # Legacy text-only wait; no effects to repeat.
+            payload = checkpoint.payload or {}
+            ledger = payload.get("messages")
+            if not isinstance(ledger, list) or not ledger:
+                raise ValueError("Child execution checkpoint is unavailable")
+            return copy.deepcopy(payload)
+
     async def message(self, owner: Optional[str], session_id: str, child_id: str, text: str) -> dict:
         text = str(text or "").strip()
         if not text or len(text) > 20000:
@@ -883,12 +918,17 @@ class SubagentRuntime:
             if not config:
                 return {"error": "Subagent runtime was restarted; start a new child", "exit_code": 1,
                         "status": "interrupted"}
+            try:
+                checkpoint = self._continuation_checkpoint(owner, session_id, child_id)
+            except ValueError as exc:
+                return {"error": str(exc), "exit_code": 1, "status": "waiting_user"}
             self._update(child_id, owner, status="queued", heartbeat_at=_utcnow())
             task = asyncio.create_task(self._run_child(
                 child_id=child_id, owner=owner, session_id=session_id,
                 endpoint_url=config["endpoint_url"], model=config["model"],
                 headers=config["headers"], timeout_seconds=config["timeout_seconds"],
                 workspace=config["workspace"], access_mode=config["access_mode"],
+                resume_checkpoint=checkpoint,
             ), name=f"odysseus-subagent-{child_id[:8]}-resume")
             self._tasks[child_id] = task
             task.add_done_callback(lambda done, cid=child_id, own=owner: asyncio.create_task(
