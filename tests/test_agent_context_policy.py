@@ -48,7 +48,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     async def run_agent(self, messages=None, *, window=65536, fallback=False, change_before_dispatch=False, session_id=None,
                         summary_impl=None, utility_route=None, window_error=None, request_max_tokens=4096,
-                        agent_output_setting=4096, policy_enabled=True):
+                        agent_output_setting=4096, policy_enabled=True, backend_usage=False):
         from src import agent_loop, tool_execution, team_runtime
         sent, summaries = [], []
         async def summary(*args, **kwargs):
@@ -64,6 +64,8 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             sent_request['_stream_max_tokens'] = kwargs.get('max_tokens')
             sent.append(sent_request)
             yield 'data: ' + json.dumps({'delta': 'Verified reply'}) + '\n\n'
+            if backend_usage:
+                yield 'data: ' + json.dumps({'type': 'usage', 'data': {'input_tokens': 5000, 'output_tokens': 50}}) + '\n\n'
             yield 'data: [DONE]\n\n'
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, {'ODYSSEUS_ENGINEERING_ENABLED': '1', 'ODYSSEUS_CONTEXT_POLICY_ENABLED': '1' if policy_enabled else '0'}))
@@ -136,6 +138,15 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
                 events = [json.loads(line[6:]) for line in chunks.splitlines() if line.startswith('data: {')]
                 usage = next(e['data'] for e in events if e.get('type') == 'context_usage')
                 self.assertEqual(usage['context_policy']['output_reserve'], 32768)
+
+    async def test_backend_usage_preserves_request_budget_annotations(self):
+        _, _, chunks = await self.run_agent(window=131840, agent_output_setting=131072, backend_usage=True)
+        snapshots = [json.loads(line[6:])['data'] for line in chunks.splitlines()
+                     if line.startswith('data: {') and json.loads(line[6:]).get('type') == 'context_usage']
+        self.assertEqual(snapshots[-1]['source'], 'backend')
+        self.assertEqual(snapshots[-1]['configured_generation_budget_tokens'], 131072)
+        self.assertEqual(snapshots[-1]['generation_budget_tokens'], snapshots[0]['generation_budget_tokens'])
+        self.assertEqual(snapshots[-1]['context_policy']['output_reserve'], 32768)
 
     async def test_chat_policy_shapes_agent_without_changing_other_chats(self):
         from contextlib import contextmanager

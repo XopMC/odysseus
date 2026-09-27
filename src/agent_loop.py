@@ -7051,7 +7051,7 @@ async def stream_agent_loop(
                         _estimated_input = estimate_tokens(_last_route_request_messages) + _schema_tokens
                         if _estimated_input > 0:
                             _context_calibration = max(1.0, round_input / _estimated_input)
-                        _working_context = context_snapshot(
+                        _working_context = {**_working_context, **context_snapshot(
                             model=_round_actual_model, context_length=_last_route_context_length, endpoint_url=_last_route_endpoint_url,
                             prompt_tokens=round_input, output_tokens=round_output,
                             source="backend", round_num=round_num,
@@ -7059,7 +7059,7 @@ async def stream_agent_loop(
                             auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else True,
                             route_revision=_route_revision,
                             tool_inventory_revision=_tool_inventory_revision,
-                        )
+                        )}
                         yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
                         # Backend-reported TRUE generation speed (llama.cpp
                         # timings.predicted_per_second) — pure decode, excludes
