@@ -6507,6 +6507,7 @@ async def stream_agent_loop(
         if _configured_telemetry:
             _working_context['context_policy'] = _configured_telemetry
             _working_context['auto_compact_enabled'] = _configured_policy.auto_compact
+        _planned_output_reserve = max_tokens
         max_tokens = _agent_completion_budget(
             _last_route_context_length or context_length or 8192,
             _estimated_prompt, _agent_output_setting,
@@ -6691,6 +6692,7 @@ async def stream_agent_loop(
                 safety_tokens=candidate_policy.safety_tokens if candidate_policy else 1024,
                 safety_percent=candidate_policy.safety_percent if candidate_policy else 5,
             )
+            state["generation_budget_tokens"] = candidate_max_tokens
             state["tools"] = candidate_tools
             if _engineering_registry is not None:
                 _engineering_presented_names = state['registry_catalog']['names']
@@ -6885,7 +6887,7 @@ async def stream_agent_loop(
                 if (_next_output_budget and round_num < max_rounds
                         and not native_tool_calls and not _request_budget_hit):
                     _model_output_retries += 1
-                    _retry_output_reserve = min(_next_output_budget, DEFAULT_AGENT_OUTPUT_RESERVE)
+                    _retry_output_reserve = min(_next_output_budget, _planned_output_reserve)
                     _retry_model_output_round = True
                     _retry_model_output_reason = error_data["error_category"]
                     logger.warning(
@@ -7112,6 +7114,8 @@ async def stream_agent_loop(
                             _last_route_context_length = answering_state["context_length"]
                             _working_limit = answering_state.get("working_limit", _working_limit)
                             _schema_tokens = answering_state.get("schema_tokens", _schema_tokens)
+                            max_tokens = answering_state.get("generation_budget_tokens", max_tokens)
+                            _round_deadline = max(_round_deadline, time.time() + max_tokens / 10)
                             _context_calibration = 1.0
                             _fallback_schemas = answering_state.get("tools") or _tool_schemas_for_route(answering_state)
                             _tool_inventory_revision, _presented_tool_names = _tool_inventory_for_route(
@@ -7140,6 +7144,8 @@ async def stream_agent_loop(
                                 route_revision=_route_revision,
                                 tool_inventory_revision=_tool_inventory_revision,
                             )
+                            _working_context['generation_budget_tokens'] = max_tokens
+                            _working_context['configured_generation_budget_tokens'] = _agent_output_setting
                             yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
                             mcp_schemas = answering_state["mcp_schemas"]
                             _relevant_tools = answering_state["relevant_tools"]

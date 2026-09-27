@@ -81,3 +81,114 @@ remain to be verified. Do not label this early activity a successful full soak.
   editable settings field retained. Implement AFTER replay repairs; keep actual
   model window constraints explicit, and validate interaction with context
   reserves before changing live defaults. This requirement remains OPEN.
+
+## 17:20–17:31 UTC: replay repair and a second failure discovered live
+
+- `95dcf070e125272bc0bfcf76d6b81e7508aac4d9` passed local full pytest
+  **7,480 passed, 25 skipped, 113 subtests**, JS syntax and real isolated Chromium
+  active-run 10K-event replay. Exact Jetson candidate: **138 passed**.
+- QA Goal was explicitly paused, stuck child 2 cancelled through Safari;
+  children 1 and 3 completed. All durable parent/child runs were terminal before
+  app-only switch. Online app/teams SQLite backups passed integrity checks;
+  host QA workspace archived as `backups/qa-workspace-pre-95dcf07.tar.gz`.
+- Production changed to `release-95dcf07` at 17:25 UTC. HTTP and HTTPS returned
+  200 after startup. No networking/proxy configuration changes.
+- Actual Safari reload still exposed only the final stopped round. This was
+  NOT accepted as repaired history. Deeper shape checks showed 53-element round
+  arrays contained 52 empty slots: `_persist_timeline_v2` had reconstructed them
+  from its 5,000-event inline preview, then overwritten canonical metadata.
+  Full durable event files remain intact. Previously noted "53 rounds" was an
+  array length, not evidence of 53 non-empty restored cards.
+- Follow-up `a54c599` reconstructs terminal rounds from a sequential scan of
+  the full committed replay log; only inline timeline preview stays bounded.
+  Regression with 5,100 late thinking frames retains early text, thinking and
+  completed tool output; local and isolated Jetson focused suites **79 passed**.
+  Full suite, rollout and actual history restoration verification still pending.
+- Captured child 2 reasoning had 285 repeats of one long sentence and no tools.
+  Revised bounded guard detects its real saved stream at character 114,903.
+  This is distinct from legitimate long output by children 1 and 3. A synthetic
+  guard pass alone was insufficient: its earlier shorter window missed this loop.
+
+## 17:35–17:40 UTC: restored real history, then resume failure
+
+- `a54c599ea9be2f7895bad514236a8d579df43f0d` full pytest **7,481 passed,
+  25 skipped, 113 subtests**, focused Jetson 79 passed, candidate HTTP 200.
+  Deployed only the app after zero-active-run gate and verified SQLite backups.
+- Reprojected ONLY the safe QA assistant row from its existing 46,680-event
+  durable log. Result: **53 non-empty round texts, 53 non-empty reasoning slots,
+  53 tool cards**. No command/model execution occurred during recovery.
+- Safari real reload displayed **54 msgs**, old rounds and tools. Independently
+  authenticated Opera reload matched. Clicked the same old 22:07 thinking block
+  in both browsers; both loaded the same content and **0.1s / 355 tok** artifact.
+- Safari Resume created attempt 2 but failed context shaping before model work:
+  old full-history request 70,943 estimated tokens; summary attempt 71,388.
+  Goal moved to waiting_user with context_uncompactable. This is a FAILED resume,
+  not an acceptance pass or a model-provider outage.
+- Root causes: compaction event downgraded the durable ledger to summary-only
+  until another tool completed; legacy summary restore changed `ctx.messages`
+  but left actual `route_messages` on full history. Candidate now commits the
+  complete post-compaction ledger immediately and restores both route views.
+- Added regression exposed another checkpoint defect: summary/untrusted markers
+  were discarded by ledger serialization. Corrected with a narrow provenance
+  whitelist; permission metadata is explicitly not restored. Fresh focused
+  recovery/context suite **76 passed**, final full-suite/candidate/live checks pending.
+
+## Resume candidate verification
+
+- Final candidate `5ac55939dfffae9de04a5b91e5d649496ddf2aa3`: local full pytest
+  **7,483 passed, 25 skipped, 113 subtests**, exit 0; JS syntax/diff check clean.
+  Exact isolated Jetson image: **76 passed**, alternate-port HTTP 200.
+- Prior intermediate full run exposed the missing summary/provenance marker
+  assertion (one failure); fixed the implementation rather than weakening the
+  test, then reran the full suite. Intermediate `cf54757` was never production.
+- Before switching: zero running parents/children. Separate app/teams SQLite
+  backups `*-pre-5ac5593.db` passed integrity checks, permissions 0600.
+
+## 17:48–17:54 UTC: live resume and two-browser recovery passed for this slice
+
+- Production `release-5ac5593` started 17:48:13 UTC; healthy, zero restarts.
+- Real Safari Resume continued the same QA Goal as attempt 3 / run
+  `cd8a712f55e34bf0baf0f3c41ff25f78`. It remained active while executing actual
+  READ_FILE, MANAGE_SUBAGENTS, PYTHON and UPDATE_PLAN_STEP tools. Model recovered
+  from a stale step-ID error and advanced the saved Plan from 0/10 to 3/10.
+- Durable cursor advanced 84 → 3,325 → 3,501; checkpoint ledger contained
+  18, then 25 messages (not summary-only). No automatic success was inferred.
+- Reloaded Safari DURING work, then independently authenticated Opera DURING
+  work. Both recovered current tools/reasoning and remained attached to the
+  active Goal. Opera screenshot showed **64 msgs**, **30.3%**, latest 22:53
+  round; Safari later showed **32.9%** with continuing model work, not frozen 1.
+- In Opera, native upward scroll loaded earlier 22:07–22:09 saved rounds while
+  the model continued. Clicking Scroll to bottom returned to the live stream.
+- Latest health probe responded HTTP 200 in 6.6 ms. Earlier paused sample CPU
+  4.89%, RSS 1.231 GiB is a point sample, not a sustained performance guarantee.
+- This verifies the reported disappearance/reconnect/resume slice. The larger
+  Goal, 128K default request, child deadline/restart lifecycle and sustained
+  final-image soak remain OPEN. Do not mark the entire project accepted.
+
+## Next candidate: 128K ceiling and mini-goal lifetime
+
+- Previous turn is progress: release, restored durable history, live Safari /
+  Opera reload and working Goal continuation were directly verified.
+- QA attempt 3 continues; durable cursor 6,885 → 11,230 → 13,518. Actual host
+  test files changed while local checks ran; no user main chat was accessed.
+- Default `agent_output_token_budget` is now 131,072 in code and editable UI.
+  Stable context reservation remains separate; dispatch computes the ceiling
+  from the exact route's available window, prompt, schemas and safety margin.
+  Existing saved 32K preference still requires an explicit live settings edit
+  AFTER the new image is deployed. It has not yet been changed on old production.
+- Removed model-supplied aggregate child lifetime deadline. Legacy argument is
+  explicitly deprecated, not silently presented as enforced. Model inactivity,
+  individual tool timeouts, cancellation, policy gates and unknown-effect fences
+  stay in place. Raw model transport timeout/network failures also enter ten
+  retries only when no unsettled tool action exists.
+- Tests cover a progressing child beyond two elapsed hours, long elapsed retry
+  cycles, exact ten retries, explicit Stop retaining partial work, policy denial
+  and unknown effects. Restart still fences old children; full automatic restart
+  recovery remains a separate OPEN requirement.
+- Initial full suite found a real small-window retry regression (borrowed output
+  capacity incorrectly became next-round reserved space), now repaired. Four
+  fallback assertions also encoded the old output-equals-reserve contract;
+  changed them to assert exact per-route free-space ceilings AND unchanged
+  compaction reserves, including truthful fallback telemetry.
+- Fresh affected suite: **254 passed**. Final full-suite and Jetson candidate /
+  actual Safari settings verification are pending; no deployment claimed yet.

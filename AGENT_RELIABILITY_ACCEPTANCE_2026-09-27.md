@@ -42,16 +42,16 @@ browser acceptance pending.
 
 | Requirement | State / required evidence |
 |---|---|
-| Child mini-goal lifecycle, including model-selected deadlines | Partial; whole-run deadline still exists; distinguish explicit user budgets from model defaults before changing semantics |
+| Child mini-goal lifecycle, including model-selected deadlines | Candidate removes the model-supplied aggregate deadline; progress/retry/cancel tests pass, live final-image verification pending |
 | Real provider interruption after completed effects | Unit/integration covered; live safe fixture pending |
-| Parent and child tools/permissions | Existing inheritance retained; real project verification pending |
+| Parent and child tools/permissions | Real QA children 1/3 completed files and checks with inherited host policy; child 2 reasoning loop identified and stopped, guard verified against captured stream |
 | Restart recovery and durable child configuration | Open; restart currently marks child interrupted and delivers retained work |
 | Independent context and automatic compaction | Open live test; investigate observed 35% vs configured 75% without conflating threshold basis or economic compaction |
 | Parent works while children run, receives results asynchronously | Existing mechanism; realistic multi-module workload pending |
 | Goal ordinary-question timeout vs permission gates | Existing prior slice; recheck new realistic fixture |
 | Plan follows current revision over long work/compaction | Existing prior slice; long-run acceptance pending |
-| Safari reload and independently authenticated second browser | Pending on final image under active work |
-| Newest history, accurate counts and live/replay parity | Pending on realistic large fixture; synthetic history alone is insufficient |
+| Safari reload and independently authenticated second browser | Passed active QA reload/old thinking/scroll-return on release-5ac5593; repeat after next release |
+| Newest history, accurate counts and live/replay parity | Restored 53 lost round views from full journal; active counter reached 64 in Opera, next release and broader sustained acceptance remain open |
 | Comparison with Codex, Claude and ZCode | Research started; map concrete gaps rather than adopting features speculatively |
 | Git/Jetson exact image, regression and rollback verification | Pending current slice |
 

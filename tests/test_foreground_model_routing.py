@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 from types import SimpleNamespace
 
 import httpx
@@ -4162,13 +4163,17 @@ def test_agent_fallback_request_uses_candidate_context_budget(
     }
     assert trim_budgets == [(primary_context, 4096)]
     fallback_messages = requests_by_round[0][1]["messages"]
-    # Each candidate has its own window and full output/schema reservation.
+    # Each candidate has its own stable reserve and a separate output ceiling.
     # Compaction keeps a checkpoint plus the goal, not just the latest user.
     backup_schema = requests_by_round[0][1]["kwargs"]["tools"]
     backup_output_tokens = requests_by_round[0][1]["kwargs"]["max_tokens"]
-    assert backup_output_tokens == (4096 if backup_context == 16384 else 32768)
+    backup_reserve = 4096 if backup_context == 16384 else 32768
+    assert backup_output_tokens == min(131072, backup_context - 1024 - math.ceil(backup_context * .05)
+                                      - len(fallback_messages) * 1000
+                                      - agent_loop.schema_token_estimate(backup_schema))
+    assert backup_output_tokens > backup_reserve
     from src.context_policy import ContextPolicy
-    expected_limit = ContextPolicy(output_reserve=backup_output_tokens).budget(
+    expected_limit = ContextPolicy(output_reserve=backup_reserve).budget(
         backup_context, schema_tokens=agent_loop.schema_token_estimate(backup_schema)).trigger_messages
     assert ("route prompt for backup-model", expected_limit) in checkpoint_limits
     assert len(fallback_messages) == expected_fallback_message_count
@@ -4274,7 +4279,9 @@ def test_agent_fallback_checkpoint_preserves_goal_without_rewriting_history(monk
     assert metrics["working_context"]["context_length"] == 65536
     assert metrics["working_context"]["compactions"] == 1
     from src.context_policy import ContextPolicy
-    expected_limit = ContextPolicy(output_reserve=requests[2]["kwargs"]["max_tokens"]).budget(65536).trigger_messages
+    expected_limit = ContextPolicy(output_reserve=32768).budget(65536).trigger_messages
+    assert metrics["working_context"]["generation_budget_tokens"] == requests[2]["kwargs"]["max_tokens"]
+    assert metrics["working_context"]["configured_generation_budget_tokens"] == 131072
     assert metrics["working_context"]["auto_compact_threshold"] == round(100 * expected_limit / 65536, 1)
     snapshots = [json.loads(chunk[6:])["data"] for chunk in chunks if '"type": "context_usage"' in chunk]
     assert not any(s["model"] == "failed-backup-model" for s in snapshots)
