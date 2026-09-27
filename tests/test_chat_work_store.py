@@ -406,7 +406,8 @@ def test_active_goal_prompt_requires_durable_question_not_prose():
     })
     assert "call `ask_user`" in note
     assert "a prose question is not a wait state" in note
-    assert "no choice is received until a new user answer exists" in note
+    assert "no answer arrives within one minute" in note
+    assert "never tool approval" in note
 
 
 def test_goal_revision_preserves_audit_and_advances_attempt(owned_chat):
@@ -448,6 +449,63 @@ def test_goal_prose_checkpoint_does_not_reset_provider_failure_budget(owned_chat
     parked = work.record_goal_failure("alice", owned_chat, "Empty model output")
     assert parked["failure_count"] == 3
     assert parked["status"] == "waiting_user"
+
+
+def test_goal_http_provider_failures_retry_ten_times_then_pause(owned_chat):
+    work = ChatWorkStore()
+    work.ensure_goal("alice", owned_chat, "Harmless model retry check")
+    prior = work.record_goal_failure("alice", owned_chat, "Earlier non-provider failure")
+    assert prior["failure_count"] == 1
+    for count in range(1, 10):
+        goal = work.record_goal_failure(
+            "alice", owned_chat, "Model request failed (HTTP 500)",
+            {"reason": "provider_http", "run_failure": {"status": 500}},
+        )
+        assert goal["failure_count"] == count
+        assert goal["status"] == "active"
+    goal = work.record_goal_failure(
+        "alice", owned_chat, "Model request failed (HTTP 403)",
+        {"reason": "provider_http", "run_failure": {"status": 403}},
+    )
+    assert goal["failure_count"] == 10
+    assert goal["status"] == "paused"
+
+
+def test_ordinary_goal_question_auto_resumes_after_one_minute(owned_chat, monkeypatch):
+    from datetime import timedelta
+    from src import chat_work_store as work_module
+
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Harmless question timeout check")
+    waiting = work.update_goal(
+        "alice", owned_chat, "Waiting for an answer",
+        {"question_id": "q-1", "question": "Which safe option?"}, waiting_user=True,
+    )
+    assert waiting["status"] == "waiting_user"
+    assert not any(item["session_id"] == owned_chat for item in work.expired_goal_questions())
+
+    current = work_module.utcnow_naive()
+    monkeypatch.setattr(work_module, "utcnow_naive", lambda: current + timedelta(seconds=61))
+    candidates = [item for item in work.expired_goal_questions() if item["session_id"] == owned_chat]
+    assert len(candidates) == 1
+    resumed = work.resume_expired_goal_question("alice", owned_chat, goal["id"], waiting["revision"])
+    assert resumed["status"] == "active"
+    assert resumed["checkpoint"]["auto_decide_question_id"] == "q-1"
+    assert work.resume_expired_goal_question("alice", owned_chat, goal["id"], waiting["revision"]) is None
+
+
+def test_goal_permission_wait_never_auto_resumes(owned_chat, monkeypatch):
+    from datetime import timedelta
+    from src import chat_work_store as work_module
+
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Wait for explicit approval")
+    waiting = work.update_goal("alice", owned_chat, "Permission required",
+                               {"reason": "permission_required"}, waiting_user=True)
+    current = work_module.utcnow_naive()
+    monkeypatch.setattr(work_module, "utcnow_naive", lambda: current + timedelta(hours=1))
+    assert not any(item["session_id"] == owned_chat for item in work.expired_goal_questions())
+    assert work.resume_expired_goal_question("alice", owned_chat, goal["id"], waiting["revision"]) is None
 
 
 def test_manual_goal_resume_dispatch_failure_waits_immediately(owned_chat):

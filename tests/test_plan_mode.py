@@ -107,3 +107,14 @@ def test_active_plan_note_pins_checklist():
     # Empty input → no note (so we never inject a blank pin).
     assert build_active_plan_note("") == ""
     assert build_active_plan_note("   ") == ""
+def test_current_plan_checklist_uses_latest_status_and_ids():
+    from src.agent_loop import current_plan_checklist
+
+    plan = {"status": "executing", "steps": [
+        {"id": "step-a", "text": "First check", "status": "done"},
+        {"id": "step-b", "text": "Second check", "status": "in_progress"},
+    ]}
+    checklist = current_plan_checklist(plan)
+    assert "- [x] First check (step_id: step-a)" in checklist
+    assert "- [ ] Second check (step_id: step-b)" in checklist
+    assert current_plan_checklist({**plan, "status": "cancelled"}) == ""

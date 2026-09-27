@@ -65,6 +65,30 @@ def test_parallel_children_can_record_same_round_tool_ordinal(inbox):
     assert first["id"] != second["id"]
 
 
+def test_operator_reconciles_logged_pre_spawn_failure_without_replay(inbox):
+    store, factory = inbox
+    intent = store.record_intent("alice", "owned-chat", "c" * 32,
+                                 "round-51-tool-0", "bash", "#!bg\necho safe")
+    unknown = store.mark_unknown("alice", "owned-chat", intent["id"])
+    evidence = hashlib.sha256(b"Popen ENOENT cwd; no child created").hexdigest()
+    with pytest.raises(WorkConflict):
+        store.reconcile_proven_not_started(
+            "alice", "owned-chat", intent["id"], expected_revision=unknown["revision"],
+            run_id="d" * 32, tool_call_id="round-51-tool-0", evidence_sha256=evidence,
+        )
+    settled = store.reconcile_proven_not_started(
+        "alice", "owned-chat", intent["id"], expected_revision=unknown["revision"],
+        run_id="c" * 32, tool_call_id="round-51-tool-0", evidence_sha256=evidence,
+    )
+    assert settled["status"] == "no_retry"
+    assert store.unknown("alice", "owned-chat") == []
+    from core.database import ChatToolIntent
+    with factory() as db:
+        receipt = db.query(ChatToolIntent).filter_by(id=intent["id"]).one().receipt
+    assert receipt["server_non_dispatch"]["evidence_sha256"] == evidence
+    assert "safe" not in json.dumps(receipt)
+
+
 def test_reconciliation_is_cas_fenced_and_never_dispatches(inbox):
     store, _factory = inbox
     intent = store.record_intent("alice", "owned-chat", "b" * 32, "call-2", "write_file", "path+body")

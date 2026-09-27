@@ -1558,7 +1558,18 @@ async def _execute_tool_block_impl(
         _is_bg, _bg_cmd = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
-            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
+            try:
+                rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
+            except FileNotFoundError:
+                # Popen failed before creating the child (for example because
+                # a selected workspace was removed). No command ran, so this
+                # is a definite tool failure, not an unknown side effect.
+                # Do not leak the workspace path into the model or UI.
+                return "bash (background): NOT STARTED", {
+                    "error": "Background command was not started: its working directory or shell is unavailable.",
+                    "code": "workspace_unavailable", "exit_code": 1,
+                    "outcome_unknown": False, "retryable": False,
+                }
             short = _bg_cmd.strip().split(chr(10))[0][:80]
             desc = f"bash (background): {short}"
             result = {

@@ -804,7 +804,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "search_chats": "- ```search_chats``` — Search past session transcripts for direct conversation evidence. Use when user asks 'did we discuss X?', 'find the conversation about Y', or when prior chat context is more appropriate than persistent memory.",
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
     "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
-    "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; calling this ENDS your turn and their choice comes back as your next message. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
+    "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; for an active Goal, if no answer arrives within one minute, the server resumes you to choose the safest useful option. This is never approval for a tool effect. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
     "create_plan": "- ```create_plan``` — In Plan mode, persist a structured read-only plan for approval. Args: {\"title\":\"...\",\"steps\":[{\"id\":\"step-1\",\"text\":\"...\",\"status\":\"pending\",\"required\":true}]}. This never executes work.",
     "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
     "update_plan_step": "- ```update_plan_step``` — Update one stable active-plan step only after doing and checking it. Args: {\"step_id\":\"...\",\"status\":\"pending|in_progress|done|blocked\",\"summary\":\"...\",\"files_changed\":[],\"decisions\":[],\"verification\":[],\"next_work\":[]}.",
@@ -3990,6 +3990,20 @@ def build_active_plan_note(approved_plan: str) -> str:
     )
 
 
+def current_plan_checklist(plan: Optional[dict]) -> str:
+    """Render only the current durable Plan revision for the next model round."""
+    if not isinstance(plan, dict) or plan.get("status") not in {"approved", "executing"}:
+        return ""
+    steps = plan.get("steps") or []
+    if not isinstance(steps, list):
+        return ""
+    return "\n".join(
+        f"- [{'x' if step.get('status') == 'done' else ' '}] "
+        f"{str(step.get('text') or '')} (step_id: {str(step.get('id') or '')})"
+        for step in steps if isinstance(step, dict)
+    )[:8192]
+
+
 def build_active_goal_note(goal: Optional[dict]) -> str:
     """Pin durable goal state without confusing it with Plan mode."""
     if not isinstance(goal, dict) or goal.get("status") not in {"active", "waiting_user"}:
@@ -4001,7 +4015,8 @@ def build_active_goal_note(goal: Optional[dict]) -> str:
         "stop merely because one model response ended. Persist meaningful milestones with "
         "`update_goal_progress`. If a real permission, budget, or user decision is required, "
         "call `ask_user` with explicit choices so the server enters waiting_user; "
-        "a prose question is not a wait state, and no choice is received until a new user answer exists. "
+        "a prose question is not a wait state. If no answer arrives within one minute, "
+        "the server resumes you to choose the safest useful option; this is never tool approval. "
         "For other blockers, set waiting_user=true and state the exact blocker. The ONLY successful terminal "
         "action is `complete_goal`, and it requires concrete verification evidence. Never "
         "repeat a command whose side effect has an unknown outcome.\n\n"
@@ -5135,9 +5150,13 @@ async def stream_agent_loop(
             )
             _prepend_agent_directive(route_messages, (
                 "## SUBAGENTS\n"
+                "When a task has genuinely independent parts and the child budget permits, decide yourself "
+                "whether to delegate them; the user need not request subagents explicitly. "
                 "delegate_subagent starts a child asynchronously and returns its child_id immediately. If the user "
                 "asks for N subagents, call delegate_subagent exactly N times with distinct objectives BEFORE waiting, "
-                "so every child works in parallel. Continue any independent parent work, then call manage_subagents "
+                "so every child works in parallel. Continue independent parent work while children run; their "
+                "completed results arrive at a later model-round boundary. Only join when your next action truly "
+                "depends on those results. Then call manage_subagents "
                 "action='wait' with all child_ids; it wakes on the first completion by default, so collect remaining "
                 "children later and use wait_for='all' only for the final join. "
                 "Never use create_session for subagents; create_session only creates a separate user-visible chat. "
@@ -5861,6 +5880,14 @@ async def stream_agent_loop(
         native_tool_calls = []  # populated if model uses function calling
 
         _round_had_correction = False
+        if approved_plan and session_id and not child_run_id:
+            try:
+                from src.chat_work_store import store as _plan_work_store
+                _current_plan = _plan_work_store.get(owner, session_id).get("plan")
+                if _current_plan is not None:
+                    approved_plan = current_plan_checklist(_current_plan) or None
+            except Exception:
+                logger.exception("Failed to refresh durable Plan revision for model round")
         if active_goal and session_id:
             try:
                 from src.chat_work_store import store as _chat_work_store
@@ -5889,6 +5916,45 @@ async def stream_agent_loop(
                     _round_had_correction = True
             except Exception:
                 logger.exception("Failed to refresh active Goal guidance")
+
+        # Deliver completed children into a still-running parent at the next
+        # model boundary. The old idle-only dispatcher could leave the parent
+        # waiting on manage_subagents even though a result was already durable.
+        # Claim is owner-scoped and idempotent; acknowledge only after the
+        # checkpoint event has been consumed by the outer stream persister.
+        if session_id and not child_run_id and _subagent_mode in {"same_model", "selected_models"}:
+            _child_delivery_token = None
+            try:
+                from src.subagent_delivery import claim_pending, claimed_summary, mark_delivered
+                from src.prompt_security import untrusted_context_message
+                _child_delivery_token = await asyncio.to_thread(claim_pending, owner, session_id)
+                if _child_delivery_token:
+                    _child_summary = await asyncio.to_thread(
+                        claimed_summary, owner, session_id, _child_delivery_token,
+                    )
+                    if _child_summary:
+                        messages.append(untrusted_context_message("completed subagent results", _child_summary))
+                        _child_checkpoint = _durable_model_checkpoint(messages)
+                        _child_encoded = json.dumps(
+                            _child_checkpoint, ensure_ascii=False, separators=(",", ":"), default=str,
+                        )
+                        yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _child_checkpoint, "ledger_hash": hashlib.sha256(_child_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions}, ensure_ascii=False)}\n\n'
+                        await asyncio.to_thread(
+                            mark_delivered, owner, session_id, _child_delivery_token,
+                            lineage_run_id or run_security.run_id,
+                        )
+                        _round_had_correction = True
+                    else:
+                        from src.subagent_delivery import release_claim
+                        await asyncio.to_thread(release_claim, owner, session_id, _child_delivery_token)
+            except Exception:
+                logger.exception("Failed to merge completed subagent result into active parent")
+                if _child_delivery_token:
+                    try:
+                        from src.subagent_delivery import release_claim
+                        await asyncio.to_thread(release_claim, owner, session_id, _child_delivery_token)
+                    except Exception:
+                        logger.exception("Failed to release child delivery claim")
 
         # Child-agent guidance is injected only at model-round boundaries.  It
         # never mutates the parent's history/checkpoint and cannot interrupt an

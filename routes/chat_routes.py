@@ -3023,14 +3023,20 @@ def setup_chat_routes(
                                             else:
                                                 active_goal = chat_work_store.record_goal_failure(
                                                     _user, session, failure_message,
-                                                    {"run_failure": terminal_metadata["failure"]},
+                                                    {"run_failure": terminal_metadata["failure"],
+                                                     **({"reason": "provider_http"} if failure_status is not None else {})},
                                                 )
                                             goal_failure_recorded_in_stream = True
                                             yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                                         except WorkNotFound:
                                             pass
                                     terminal_content = full_response.strip()
-                                    failure_note = f"[Agent stopped: {failure_message}]"
+                                    if active_goal and active_goal.get("status") == "active":
+                                        failure_note = f"[This model request failed: {failure_message}. Goal remains active and will retry automatically.]"
+                                    elif active_goal and active_goal.get("status") == "paused":
+                                        failure_note = f"[Goal paused after repeated model failures: {failure_message}]"
+                                    else:
+                                        failure_note = f"[Agent stopped: {failure_message}]"
                                     if terminal_content:
                                         terminal_content = f"{terminal_content}\n\n{failure_note}"
                                     else:

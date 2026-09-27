@@ -72,6 +72,12 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
         "allow_bash": "true" if prior.get("allow_bash") is True else "false",
         "allow_web_search": "true" if prior.get("allow_web_search") is True else "false",
     }
+    if reason == "question_timeout":
+        form["message"] += (
+            "\nThe user did not answer your ordinary question within one minute. "
+            "Choose the best safe option from available evidence and continue. "
+            "This timeout is not approval for any tool effect or permission request."
+        )
     from src.subagent_delivery import claim_pending, release_claim
     delivery_token = await asyncio.to_thread(claim_pending, owner, session_id)
     if delivery_token:

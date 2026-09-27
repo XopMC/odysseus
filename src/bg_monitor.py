@@ -228,6 +228,24 @@ async def _run_followup(rec: dict) -> bool:
 async def _loop():
     while True:
         try:
+            from src.chat_work_store import store as chat_work_store
+            from src.goal_controller import dispatch_goal_continuation
+            questions = await asyncio.to_thread(chat_work_store.expired_goal_questions)
+            for question in questions:
+                try:
+                    resumed = await asyncio.to_thread(
+                        chat_work_store.resume_expired_goal_question,
+                        question["owner"], question["session_id"],
+                        question["goal_id"], question["revision"],
+                    )
+                    if resumed:
+                        await dispatch_goal_continuation(
+                            question["owner"], question["session_id"],
+                            reason="question_timeout", expected_goal_id=resumed["id"],
+                            expected_attempt=resumed["attempt"],
+                        )
+                except Exception:
+                    logger.exception("Goal question timeout recovery failed")
             for rec in bg_jobs.pending_followups():
                 try:
                     if await _run_followup(rec):

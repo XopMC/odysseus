@@ -417,6 +417,52 @@ class ChatWorkStore:
             db.flush()
             return _public_goal(row)
 
+    def expired_goal_questions(self, timeout_seconds=60, limit=100):
+        """Return only identifiers for ordinary unanswered Goal questions."""
+        cutoff = utcnow_naive() - timedelta(seconds=max(1, int(timeout_seconds)))
+        with SessionLocal() as db:
+            rows = db.query(ChatGoal).filter(
+                ChatGoal.status == "waiting_user", ChatGoal.updated_at <= cutoff,
+            ).order_by(ChatGoal.updated_at.desc()).limit(max(1, min(int(limit), 100))).all()
+            return [
+                {"owner": None if row.owner == _SINGLE_USER_OWNER_KEY else row.owner,
+                 "session_id": row.session_id, "goal_id": row.id,
+                 "revision": row.revision, "question_id": checkpoint.get("question_id")}
+                for row in rows
+                for checkpoint in [dict(row.checkpoint or {})]
+                if checkpoint.get("_wait_reason") == "ask_user"
+                and isinstance(checkpoint.get("question_id"), str)
+            ]
+
+    def resume_expired_goal_question(self, owner, session_id, goal_id, expected_revision,
+                                     *, timeout_seconds=60):
+        """CAS timeout of ask_user only; never infer approval for an effect."""
+        cutoff = utcnow_naive() - timedelta(seconds=max(1, int(timeout_seconds)))
+        with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
+            _session(db, owner, session_id)
+            row = db.query(ChatGoal).filter_by(
+                owner=_storage_owner(owner), session_id=session_id, id=goal_id,
+                status="waiting_user", revision=expected_revision,
+            ).first()
+            if row is None or not row.updated_at or row.updated_at > cutoff:
+                return None
+            checkpoint = dict(row.checkpoint or {})
+            question_id = checkpoint.get("question_id")
+            if checkpoint.get("_wait_reason") != "ask_user" or not isinstance(question_id, str):
+                return None
+            row.status = "active"
+            row.progress = "No answer arrived in one minute; continuing with a safe model decision."
+            row.checkpoint = {
+                **{key: value for key, value in checkpoint.items() if key != "_wait_reason"},
+                "auto_decide_question_id": question_id,
+            }
+            row.revision += 1
+            self._event(db, owner, session_id, "goal_question_timed_out", row.id, row.revision,
+                        {"question_id": question_id, "timeout_seconds": timeout_seconds})
+            db.flush()
+            return _public_goal(row)
+
     def add_goal_guidance(self, owner, session_id, message):
         """Durably append human guidance without pausing the active Goal."""
         message = _clean_text(message, "goal guidance", 12000)
@@ -584,6 +630,7 @@ class ChatWorkStore:
             if not waiting_user and reset_failures:
                 row.failure_count = 0
                 row.last_error = None
+                row.failure_key = None
             row.revision += 1
             self._event(db, owner, session_id, "goal_progress", row.id, row.revision, {"progress": progress, "checkpoint": checkpoint or {}, "status": row.status})
             db.flush()
@@ -611,6 +658,11 @@ class ChatWorkStore:
             # Count failed attempts, not identical error strings. Providers
             # can alternate timeout/503/schema errors without any successful
             # work; changing wording must not reset the retry budget.
+            provider_http = (checkpoint or {}).get("reason") == "provider_http"
+            failure_key = "provider_http" if provider_http else "other"
+            if row.failure_key and row.failure_key != failure_key:
+                row.failure_count = 0
+            row.failure_key = failure_key
             row.failure_count = int(row.failure_count or 0) + 1
             row.last_error = error
             row.lease_token = None
@@ -618,8 +670,9 @@ class ChatWorkStore:
             row.progress = "Model attempt failed; the server will retry automatically."
             if checkpoint is not None:
                 row.checkpoint = {**dict(row.checkpoint or {}), **checkpoint}
-            if force_wait_user or row.failure_count >= 3:
-                row.status = "waiting_user"
+            failure_limit = 10 if provider_http else 3
+            if force_wait_user or row.failure_count >= failure_limit:
+                row.status = "paused" if provider_http and not force_wait_user else "waiting_user"
                 checkpoint_failed = (checkpoint or {}).get("reason") == "context_compaction"
                 dispatch_failed = (checkpoint or {}).get("reason") == "continuation_dispatch_failed"
                 dispatch_code = (checkpoint or {}).get("failure_code")
@@ -632,6 +685,8 @@ class ChatWorkStore:
                     if dispatch_failed else
                     "Context checkpoint failed repeatedly; check the summarizer or context policy before resuming."
                     if checkpoint_failed else
+                    "The model endpoint failed ten consecutive requests; Goal paused."
+                    if provider_http else
                     "The model endpoint failed repeatedly; user attention is required."
                 )
                 row.checkpoint = {
@@ -709,6 +764,7 @@ class ChatWorkStore:
                 return _public_goal(row)
             row.failure_count = 0
             row.last_error = None
+            row.failure_key = None
             row.revision += 1
             self._event(
                 db, owner, session_id, "goal_retry_recovered", row.id, row.revision,

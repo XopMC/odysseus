@@ -57,3 +57,27 @@ def test_missing_read_file_is_not_found_without_exposing_host_path(monkeypatch, 
         owner="alice", workspace=str(tmp_path), security_context=ToolRunSecurityContext()))
     assert result["error_category"] == "not_found"
     assert str(tmp_path) not in result["error"]
+
+
+def test_background_bash_missing_workspace_is_definite_not_started(monkeypatch, tmp_path):
+    from src import bg_jobs, host_execution, tool_execution
+
+    missing = tmp_path / "removed-workspace"
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(host_execution, "enabled_for", lambda owner: False)
+
+    def launch(_command, *, session_id, cwd):
+        assert cwd == str(missing)
+        raise FileNotFoundError(2, "No such file or directory", str(missing))
+
+    monkeypatch.setattr(bg_jobs, "launch", launch)
+    description, result = asyncio.run(tool_execution.execute_tool_block(
+        SimpleNamespace(tool_type="bash", content="#!bg\nprintf 42"),
+        owner="alice", session_id="safe-test-chat", workspace=str(missing),
+        security_context=tool_execution.NO_TOOL_SECURITY_CONTEXT,
+    ))
+    assert description == "bash (background): NOT STARTED"
+    assert result["code"] == "workspace_unavailable"
+    assert result["outcome_unknown"] is False
+    assert result["exit_code"] == 1
+    assert str(missing) not in result["error"]

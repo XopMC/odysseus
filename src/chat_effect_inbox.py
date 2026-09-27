@@ -186,6 +186,44 @@ class ChatEffectInbox:
             db.flush()
             return _public(row)
 
+    def reconcile_proven_not_started(self, owner, session_id, intent_id, *,
+                                     expected_revision, run_id, tool_call_id,
+                                     evidence_sha256):
+        """Operator-only repair for a logged failure before process creation.
+
+        No action payload is re-run. The exact log evidence is hashed and the
+        original action is fenced from same-Goal retries. This method is not
+        exposed as a user or model tool.
+        """
+        if (type(expected_revision) is not int or expected_revision < 1
+                or not isinstance(run_id, str) or not _HEX32.fullmatch(run_id)
+                or not isinstance(tool_call_id, str) or not tool_call_id
+                or not isinstance(evidence_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256)):
+            raise ValueError("Exact intent and SHA-256 evidence required")
+        with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
+            row = self._row(db, owner, session_id, intent_id)
+            if (row.status != "unknown" or row.revision != expected_revision
+                    or row.run_id != run_id or row.tool_call_id != tool_call_id):
+                raise WorkConflict("Unknown tool intent changed; re-inspect before repair")
+            receipt = {
+                "kind": "server_proven_not_started", "intent_id": row.id,
+                "run_id": row.run_id, "tool_call_id": row.tool_call_id,
+                "action_hash": row.action_hash, "evidence_sha256": evidence_sha256,
+                "previous_revision": row.revision,
+                "recorded_at": utcnow_naive().isoformat(),
+            }
+            row.status = "no_retry"
+            row.revision += 1
+            row.receipt = {**dict(row.receipt or {}), "server_non_dispatch": receipt}
+            row.receipt_hash = hashlib.sha256(json.dumps(
+                row.receipt, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            self._event(db, row, "effect_reconciled")
+            db.flush()
+            return _public(row)
+
     def record_result(self, owner, session_id, intent_id, result):
         if not isinstance(result, dict):
             raise ValueError("Tool result must be an object")

@@ -5570,35 +5570,13 @@ function appendStreamErrorGuidance(container, error) {
           snapshotCursor = acceptedCursor;
           if (!page.has_more || (hasSnapshotCursor && next >= snapshotLastSeq)) break;
         }
-        // Start at a durable round boundary. Otherwise the first visible
-        // thinking/tool card would be a severed tail of the previous round.
-        // A single exceptionally long round keeps the full replay path until
-        // it can be paged without losing its leading deltas.
+        // Prefer a durable round boundary when one is in the bounded tail.
+        // A single very long round may not have one in its last 200 events:
+        // show its current tail now instead of fetching the whole run from
+        // sequence zero (which can hide live activity for minutes).
         if (olderReplayCursor !== null && snapshotEvents.length) {
           const firstStep = snapshotEvents.findIndex(item => item?.data?.type === 'agent_step');
-          if (firstStep < 0) {
-            snapshotEvents = [];
-            snapshotCursor = -1;
-            olderReplayCursor = null;
-            let fullAfter = -1;
-            while (isCurrentView()) {
-              const response = await fetch(
-                `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}/events?after_seq=${fullAfter}&limit=200`,
-                { signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store' },
-              );
-              if (!response.ok) throw new Error(`Replay snapshot HTTP ${response.status}`);
-              const page = await response.json();
-              if (snapshotRunId && page.run_id && String(page.run_id) !== snapshotRunId) {
-                throw new Error('Active run changed during replay snapshot');
-              }
-              snapshotEvents.push(...(Array.isArray(page.events) ? page.events : []));
-              const next = Number(page.next_cursor);
-              if (!Number.isInteger(next) || next <= fullAfter) break;
-              fullAfter = next;
-              snapshotCursor = next;
-              if (!page.has_more) break;
-            }
-          } else if (firstStep > 0) {
+          if (firstStep > 0) {
             olderReplayCursor = Number(snapshotEvents[firstStep].seq);
             snapshotEvents = snapshotEvents.slice(firstStep);
           }
