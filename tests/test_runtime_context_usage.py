@@ -629,6 +629,8 @@ def test_live_request_keeps_observed_threshold_over_saved_next_request(monkeypat
 
     assert data['auto_compact_threshold'] == 72
     assert data['observed_auto_compact_threshold'] == 72
+    assert data['effective_auto_compact_threshold'] == 72
+    assert data['configured_auto_compact_threshold'] == 60
     assert data['auto_compact_enabled'] is True
 
 

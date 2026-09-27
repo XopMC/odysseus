@@ -18,8 +18,18 @@ def history():
 
 
 def test_budget_includes_entire_output_and_tool_schema_reserve():
-    assert ac.input_limit(131072, 32768, 2000, 200000) == int(131072 * .85) - 32768 - 2000
-    assert ac.input_limit(262144, 8192, 2000, 200000) == 189808
+    from src.context_policy import ContextPolicy
+    for window, output, schema, hard in [(131072, 32768, 2000, 200000),
+                                        (262144, 8192, 2000, 200000),
+                                        (131840, 32768, 7000, 65536)]:
+        budget = ContextPolicy(output_reserve=output).budget(window, schema_tokens=schema, hard_input_max=hard)
+        assert ac.input_limit(window, output, schema, hard) == budget.trigger_messages
+
+
+def test_input_cap_does_not_subtract_output_reserve_twice():
+    # 65,536 is an INPUT cap, not a combined input/output window. At 75%
+    # the full input trigger is 49,152, less its separately counted schemas.
+    assert ac.input_limit(131840, 32768, 7000, 65536) == 49152 - 7000
 
 
 def test_compacts_mid_tool_run_without_losing_goal_or_pairs():

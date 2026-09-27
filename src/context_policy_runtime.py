@@ -29,8 +29,9 @@ def owner_policy(owner, *, session_id=None):
         record = ContextPolicyStore(get_runtime().store).get(owner, session_id=session_id or '')
     except NotFound as exc:
         raise ValueError('Chat context policy is unavailable') from exc
-    if not record['configured']:
-        return None
+    # Enabled defaults are a policy too. Returning None here made the Agent
+    # use a legacy 85% formula until the owner saved an otherwise no-op edit,
+    # while the settings and ordinary Chat already displayed the 75% default.
     if not record['valid']:
         raise ValueError('Stored context policy is invalid; update the profile')
     return record

@@ -1388,6 +1388,12 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             if effective_trigger_tokens is None and ctx_len:
                 effective_trigger_tokens = int(ctx_len * float(display_threshold) / 100)
                 effective_trigger_percent = float(display_threshold)
+            if active and observed_threshold is not None and ctx_len:
+                # Runtime includes the selected route's output/schema reserves
+                # and hard input cap. A default/profile-only preview must not
+                # replace that measured run's actual compaction threshold.
+                effective_trigger_percent = float(observed_threshold)
+                effective_trigger_tokens = round(ctx_len * effective_trigger_percent / 100)
             return {
                 "session_id": session_id,
                 "model": session.model,

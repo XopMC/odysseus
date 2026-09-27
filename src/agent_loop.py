@@ -6272,7 +6272,8 @@ async def stream_agent_loop(
         # An explicit ContextPolicy is the single authority for trigger,
         # retention and target. Running the economics compactor first caused
         # duplicate summarizer calls and model-slot contention on long Goals.
-        if _efficiency_enabled("online_context_compact") and not _context_profile:
+        _explicit_context_profile = bool(_context_profile and _context_profile.get("configured", True))
+        if _efficiency_enabled("online_context_compact") and not _explicit_context_profile:
             from src.context_compaction_economics import decide as _economic_compaction_decide
             try:
                 _keep_recent = max(1000, int(get_setting("agent_online_compact_keep_recent_tokens", 20_000) or 20_000))
@@ -6333,7 +6334,7 @@ async def stream_agent_loop(
                         _economic_decision = _replace_dataclass(
                             _economic_decision, compact=False, reason="native_no_reduction",
                         )
-        if _context_profile and _compact_status != "compacted":
+        if _context_profile and _compact_status == "unchanged":
             try:
                 from src.model_context import budget_context_for_model
                 _policy_window = await asyncio.to_thread(budget_context_for_model, endpoint_url, model, fallback=0)
@@ -6464,7 +6465,7 @@ async def stream_agent_loop(
         _working_context = context_snapshot(
             model=model, context_length=_last_route_context_length, endpoint_url=endpoint_url,
             prompt_tokens=_estimated_prompt, source="estimated", round_num=round_num,
-            limit=_working_limit, compactions=_context_compactions,
+            limit=_working_limit + _schema_tokens, compactions=_context_compactions,
             auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else True,
             route_revision=_route_revision,
             tool_inventory_revision=_tool_inventory_revision,
@@ -7001,7 +7002,7 @@ async def stream_agent_loop(
                             model=_round_actual_model, context_length=_last_route_context_length, endpoint_url=_last_route_endpoint_url,
                             prompt_tokens=round_input, output_tokens=round_output,
                             source="backend", round_num=round_num,
-                            limit=_working_limit, compactions=_context_compactions,
+                            limit=_working_limit + _schema_tokens, compactions=_context_compactions,
                             auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else True,
                             route_revision=_route_revision,
                             tool_inventory_revision=_tool_inventory_revision,
@@ -7083,7 +7084,7 @@ async def stream_agent_loop(
                                 model=model, context_length=_last_route_context_length, endpoint_url=_last_route_endpoint_url,
                                 prompt_tokens=estimate_tokens(_last_route_request_messages) + _schema_tokens,
                                 source="estimated", round_num=round_num,
-                                limit=_working_limit, compactions=_context_compactions,
+                                limit=_working_limit + _schema_tokens, compactions=_context_compactions,
                                 auto_compact_enabled=_configured_policy.auto_compact if _configured_policy else True,
                                 route_revision=_route_revision,
                                 tool_inventory_revision=_tool_inventory_revision,

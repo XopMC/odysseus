@@ -3456,6 +3456,7 @@ def test_toolless_multi_round_agent_persists_round_route_provenance(monkeypatch)
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr("src.model_context.budget_context_for_model", lambda *args, **kwargs: 131072)
 
     async def fake_stream(candidates, messages, **kwargs):
         nonlocal calls
@@ -4031,7 +4032,8 @@ def test_approved_exact_action_cannot_execute_twice_when_model_repeats(monkeypat
     ("primary_context", "backup_context", "expected_fallback_message_count"),
     [
         (65536, 16384, 3),
-        (16384, 65536, 22),
+        (16384, 65536, 3),
+        (16384, 131072, 22),
     ],
 )
 def test_agent_fallback_request_uses_candidate_context_budget(
@@ -4165,10 +4167,12 @@ def test_agent_fallback_request_uses_candidate_context_budget(
     backup_schema = requests_by_round[0][1]["kwargs"]["tools"]
     backup_output_tokens = requests_by_round[0][1]["kwargs"]["max_tokens"]
     assert backup_output_tokens == (4096 if backup_context == 16384 else 32768)
-    expected_limit = int(backup_context * .85) - backup_output_tokens - agent_loop.schema_token_estimate(backup_schema)
+    from src.context_policy import ContextPolicy
+    expected_limit = ContextPolicy(output_reserve=backup_output_tokens).budget(
+        backup_context, schema_tokens=agent_loop.schema_token_estimate(backup_schema)).trigger_messages
     assert ("route prompt for backup-model", expected_limit) in checkpoint_limits
     assert len(fallback_messages) == expected_fallback_message_count
-    assert any(message.get("_agent_working_summary") for message in fallback_messages) == (backup_context == 16384)
+    assert any(message.get("_agent_working_summary") for message in fallback_messages) == (expected_fallback_message_count == 3)
     assert fallback_messages[0]["content"] == "route prompt for backup-model"
     assert any(
         message == {"role": "user", "content": latest_user}
@@ -4269,11 +4273,8 @@ def test_agent_fallback_checkpoint_preserves_goal_without_rewriting_history(monk
     assert metrics["working_context"]["model"] == "backup-model"
     assert metrics["working_context"]["context_length"] == 65536
     assert metrics["working_context"]["compactions"] == 1
-    expected_limit = (
-        int(65536 * .85)
-        - requests[2]["kwargs"]["max_tokens"]
-        - agent_loop.schema_token_estimate(requests[2]["kwargs"]["tools"])
-    )
+    from src.context_policy import ContextPolicy
+    expected_limit = ContextPolicy(output_reserve=requests[2]["kwargs"]["max_tokens"]).budget(65536).trigger_messages
     assert metrics["working_context"]["auto_compact_threshold"] == round(100 * expected_limit / 65536, 1)
     snapshots = [json.loads(chunk[6:])["data"] for chunk in chunks if '"type": "context_usage"' in chunk]
     assert not any(s["model"] == "failed-backup-model" for s in snapshots)

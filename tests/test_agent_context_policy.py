@@ -48,7 +48,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     async def run_agent(self, messages=None, *, window=65536, fallback=False, change_before_dispatch=False, session_id=None,
                         summary_impl=None, utility_route=None, window_error=None, request_max_tokens=4096,
-                        agent_output_setting=4096):
+                        agent_output_setting=4096, policy_enabled=True):
         from src import agent_loop, tool_execution, team_runtime
         sent, summaries = [], []
         async def summary(*args, **kwargs):
@@ -66,7 +66,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             yield 'data: ' + json.dumps({'delta': 'Verified reply'}) + '\n\n'
             yield 'data: [DONE]\n\n'
         with ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, {'ODYSSEUS_ENGINEERING_ENABLED': '1', 'ODYSSEUS_CONTEXT_POLICY_ENABLED': '1'}))
+            stack.enter_context(patch.dict(os.environ, {'ODYSSEUS_ENGINEERING_ENABLED': '1', 'ODYSSEUS_CONTEXT_POLICY_ENABLED': '1' if policy_enabled else '0'}))
             stack.enter_context(patch.object(team_runtime, 'get_runtime', return_value=SimpleNamespace(store=self.team)))
             stack.enter_context(patch.object(agent_loop, 'get_setting', side_effect=lambda key, default=None:
                                       agent_output_setting if key == 'agent_output_token_budget' else default))
@@ -106,6 +106,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         sent, _summaries, chunks = await self.run_agent(request_max_tokens=0)
         self.assertEqual(sent[0]['_stream_max_tokens'], 4096)
         self.assertIn('"generation_budget_tokens": 4096', chunks)
+        self.assertIn('"context_policy":', chunks)
 
     async def test_agent_output_setting_controls_budget_above_minimum_with_profile_reserve(self):
         self.save({'output_reserve': 8192})
@@ -384,7 +385,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
             agent_loop, 'compact_working_context',
             new=AsyncMock(return_value=(still_full, 'compacted')),
         ) as compact:
-            sent, _, chunks = await self.run_agent(history)
+            sent, _, chunks = await self.run_agent(history, policy_enabled=False)
         events = [json.loads(line[6:]) for line in chunks.splitlines() if line.startswith('data: {')]
         failed = [event for event in events if event.get('type') == 'context_compaction_failed']
         self.assertEqual(compact.await_count, 1)
@@ -449,7 +450,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / 'src/agent_loop.py').read_text()
         self.assertIn(
-            'if _efficiency_enabled("online_context_compact") and not _context_profile:',
+            'if _efficiency_enabled("online_context_compact") and not _explicit_context_profile:',
             source,
         )
 

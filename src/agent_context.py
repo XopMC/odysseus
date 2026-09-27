@@ -13,8 +13,16 @@ logger = logging.getLogger(__name__)
 
 
 def input_limit(context_length, output_reserve, schema_tokens=0, hard_max=200000):
-    return max(1, min(int(context_length * .85), hard_max)
-               - max(512, output_reserve or 0) - schema_tokens)
+    """Legacy adapter to the same usable-input policy used by saved profiles."""
+    from src.context_policy import ContextPolicy
+    policy = ContextPolicy(output_reserve=max(512, output_reserve or 0))
+    try:
+        return policy.budget(int(context_length), schema_tokens=int(schema_tokens),
+                             hard_input_max=int(hard_max)).trigger_messages
+    except ValueError:
+        # No room for schemas/input: force shaping to fail closed, never send
+        # a request larger than a tiny backend can hold.
+        return 1
 
 
 def schema_token_estimate(tools):
