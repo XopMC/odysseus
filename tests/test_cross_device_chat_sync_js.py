@@ -73,7 +73,7 @@ def test_metadata_only_approval_revision_reconciles_without_count_change():
     assert "node.dataset.approvalId !== key" in renderer
 
 
-@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "idle_live_count", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k", "replay_lazy_older"])
+@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "idle_live_count", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_stall_after_output", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k", "replay_lazy_older"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):
         pytest.skip("node is not installed")
@@ -207,13 +207,18 @@ def test_cross_device_subscription_lifecycle(scenario):
           pendingHeaders.resolve(response);await first;
           assert.equal(box.children.length,0,'old headers must not append into new chat');
           assert(cancelled>0,'discarded response subscription must close');
-        }else if(scenario==='replay_stall'){
+        }else if(scenario==='replay_stall'||scenario==='replay_stall_after_output'){
+          if(scenario==='replay_stall_after_output'){
+            let firstChunk=true;
+            reader.read=()=>firstChunk?(firstChunk=false,Promise.resolve({done:false,value:new TextEncoder().encode('id: 0\ndata: {"delta":"Useful work must survive a disconnect"}\n\n')})):pendingRead.promise;
+          }
           pendingHeaders.resolve(response);await flush();
           now+=46000;
           await Promise.all(timers.map(x=>x.fn()));await flush();await first;
           assert(requests[0].options.signal.aborted,'silent replay must reconnect instead of hanging forever');
           assert(cancelled>0,'watchdog must release reader');
-          assert.equal(box.children.length,0,'dead replay placeholder must not duplicate the retry');
+          assert.equal(box.children.length,scenario==='replay_stall_after_output'?1:0,'useful work survives; empty placeholders do not');
+          if(scenario==='replay_stall_after_output')assert(box.children[0].dataset.replayPreserved);
           assert.equal(requests.filter(x=>/\/stop\//.test(x.url)).length,0,'stall recovery must not stop remote run');
         }else if(scenario==='replay_lazy_older'){
           await flush();await flush();
@@ -265,7 +270,7 @@ def test_cross_device_subscription_lifecycle(scenario):
           assert.equal(lastAnswer.innerHTML,'[answer fixture]','the newest replayed answer remains visible');
           assert.equal(canonicalRefreshes,0,'a live replay must not force history refresh mid-run');
           if(count<100000){
-            pendingRead.resolve({done:true});await first;
+            pendingRead.resolve({done:false,value:new TextEncoder().encode('data: [DONE]\n\n')});await first;
             assert.equal(canonicalRefreshes,1);
             assert.equal(box.children.length,0,'completed replay reconciles canonical history');
           }
@@ -299,7 +304,7 @@ def test_cross_device_subscription_lifecycle(scenario):
           assert.equal(box.children[0].querySelector('.stream-content').innerHTML.includes('private chain'),false,'thinking chunks must not render as answer text');
           assert.equal(canonicalRefreshes,0,'still-live rendering must not wait for canonical completion');
           assert.equal(composer.value,'unsent draft');
-          pendingRead.resolve({done:true});await first;
+          pendingRead.resolve({done:false,value:new TextEncoder().encode('data: [DONE]\n\n')});await first;
           assert.equal(canonicalRefreshes,1);
           assert.equal(box.children.length,0,'canonical refresh removes every temporary replay bubble');
         }else if(scenario==='replay_canonical'){

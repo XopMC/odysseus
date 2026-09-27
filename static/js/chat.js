@@ -5551,7 +5551,7 @@ function appendStreamErrorGuidance(container, error) {
         let after = tailStart - 1;
         olderReplayCursor = tailStart > 0 ? tailStart : null;
         const activity = snapshot.activity_snapshot;
-        const hasActivity = Array.isArray(activity?.events) && activity.events.length > 0;
+        const hasActivity = hasSnapshotCursor && Array.isArray(activity?.events) && activity.events.length > 0;
         if (hasActivity && hasSnapshotCursor) {
           snapshotEvents = activity.events;
           snapshotCursor = snapshotLastSeq;
@@ -5631,6 +5631,7 @@ function appendStreamErrorGuidance(container, error) {
       try { await res.body.cancel(); } catch (_) {}
       return false;
     }
+    const preservedReplayNodes = Array.from(box.querySelectorAll?.('[data-replay-preserved]') || []);
     // Capture the reader's position before replay cards increase scrollHeight.
     // scrollHistory() may schedule its actual scroll on the next animation
     // frame, so measuring after the first holder has been appended can mistake
@@ -5871,6 +5872,15 @@ function appendStreamErrorGuidance(container, error) {
         }
         if (!snapshotTailPlaced) {
           snapshotTailPlaced = true;
+          // A failed subscriber leaves its last useful view on screen. Swap
+          // it only after a verified replacement snapshot has been rendered.
+          if (snapshotEvents.length) {
+            for (const node of replayHolders) {
+              _flushIncrementalStreamRender(node.querySelector('.stream-content'));
+            }
+            replayThinkingThrottle?.flush();
+            for (const node of preservedReplayNodes) node.remove();
+          }
           if (shouldFollowSnapshot && !snapshotUserScrolledUp) box.scrollTop = box.scrollHeight;
         }
         return liveReader.read();
@@ -5888,6 +5898,7 @@ function appendStreamErrorGuidance(container, error) {
     let metricsData = null;
     let replayError = null;
     let canonicalTerminalSeen = false;
+    let explicitReplayDone = false;
     let replayTool = null;
     let replayThread = null;
     let nextDeltaStartsRound = false;
@@ -6177,6 +6188,7 @@ function appendStreamErrorGuidance(container, error) {
           if (!line) continue;
           const payload = line.slice(6);
           if (payload === '[DONE]') {
+            explicitReplayDone = true;
             try { await reader.cancel(); } catch (_) {}
             break readLoop;
           }
@@ -6397,6 +6409,21 @@ function appendStreamErrorGuidance(container, error) {
     _flushIncrementalStreamRender(contentDiv);
     if (replayThinkingThrottle) finishReplayThinking();
     cleanup();
+    const stillSameReplayView = sessionModule.getCurrentSessionId() === sessionId
+      && (viewToken == null || sessionModule.getSessionViewToken?.() === viewToken)
+      && _streamGenerations.get(sessionId) === resumeGeneration;
+    if (stillSameReplayView && !explicitReplayDone && !canonicalTerminalSeen && !replayError
+        && (roundText.trim() || replayThinking.trim() || replayToolsByCallId.size || replayHolders.length > 1)) {
+      if (cleanupOlderListener) { cleanupOlderListener(); cleanupOlderListener = null; }
+      for (const node of replayNodes) {
+        if (node.dataset) node.dataset.replayPreserved = snapshotRunId || resumeRunId || 'pending';
+        node.querySelectorAll?.('.agent-thread-node').forEach(toolNode => {
+          if (toolNode._waveInterval) clearInterval(toolNode._waveInterval);
+          if (toolNode._elapsedTicker) clearInterval(toolNode._elapsedTicker);
+        });
+      }
+      return true;
+    }
     if (isCurrentView()) {
       const finishedResumeSubmitBtn = document.querySelector?.('.send-btn');
       if (finishedResumeSubmitBtn) updateSubmitButton('idle', finishedResumeSubmitBtn);
@@ -6428,7 +6455,9 @@ function appendStreamErrorGuidance(container, error) {
     if (onThisSession && sessionModule.refreshSessionHistory) {
       if (_resumingStreams.get(sessionId) === subscription) _resumingStreams.delete(sessionId);
       const refreshed = await sessionModule.refreshSessionHistory(sessionId, { allowBusy: true });
-      if (!refreshed) removeReplayHolders();
+      // Failed canonical reconciliation is not permission to erase the only
+      // visible copy of a finished run. A later successful refresh replaces it.
+      if (refreshed !== false) removeReplayHolders();
       return true;
     }
 

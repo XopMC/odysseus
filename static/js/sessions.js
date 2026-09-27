@@ -3076,7 +3076,8 @@ async function _checkServerStream(sessionId, { ensureAfterInFlight = false } = {
     // remaining source of steady background I/O. A changed authoritative count
     // already proves that the visible transcript changed, so reconcile the
     // bounded tail directly instead of paying for a second limit=1 aggregate.
-    if (renderedCountChanged) {
+    const preservedReplay = document.querySelector?.('#chat-history [data-replay-preserved]');
+    if (renderedCountChanged && !(preservedReplay && info.status === 'streaming')) {
       if (renderedCount !== null) {
         await refreshSessionHistory(sessionId);
       } else {
