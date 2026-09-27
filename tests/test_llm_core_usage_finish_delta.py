@@ -37,7 +37,18 @@ def test_long_reasoning_sentence_loop_is_detected_across_subword_chunks():
             assert 'degenerate_output' in event
             break
     assert detected_at is not None and detected_at < len(phrase) * 20
-    assert len(guard.reasoning_tail) <= 8192
+    assert len(guard.reasoning_tail) <= 32768
+
+
+def test_multi_paragraph_reasoning_cycle_is_detected():
+    # The observed QA failure repeats a whole multi-paragraph interpretation
+    # of conflicting criteria, not a short phrase inside a 96-token window.
+    cycle = " ".join(f"paragraphword{n}" for n in range(180)) + ". "
+    guard = llm_core._DegenerateStreamGuard("fixture-model")
+    text = cycle * 100
+    hit = next((i for i in range(0, len(text), 3)
+                if guard.check(text[i:i+3], thinking=True)), None)
+    assert hit is not None and hit < len(cycle) * 15
 
 
 def test_long_distinct_reasoning_does_not_trigger_the_phrase_guard():

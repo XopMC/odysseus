@@ -432,13 +432,17 @@ class _DegenerateStreamGuard:
             # Providers split words across token chunks. Scan reconstructed
             # bounded text, not isolated subword fragments. Long sentence
             # loops evade the old 96-token / 4-gram guard completely.
-            self.reasoning_tail = (self.reasoning_tail + text)[-8192:]
+            self.reasoning_tail = (self.reasoning_tail + text)[-32768:]
             self.reasoning_scan_chars += len(text)
-            if self.reasoning_scan_chars >= 512 and self.total_chars >= 2048:
+            if self.reasoning_scan_chars >= 1024 and self.total_chars >= 4096:
                 self.reasoning_scan_chars = 0
-                words = [word.lower() for word in _DEGENERATE_WORD_RE.findall(self.reasoning_tail)][-512:]
+                words = [word.lower() for word in _DEGENERATE_WORD_RE.findall(self.reasoning_tail)][-2048:]
                 counts = Counter(tuple(words[i:i + 8]) for i in range(max(0, len(words) - 7)))
-                reasoning_repeats = max(counts.values(), default=0)
+                repeated_fraction = sum(count - 1 for count in counts.values()) / max(1, len(words) - 7)
+                # A repeated definition inside otherwise fresh reasoning is
+                # not a loop. Require most of the recent reasoning to repeat.
+                if repeated_fraction >= .6:
+                    reasoning_repeats = max(counts.values(), default=0)
         tokens = [t.lower() for t in _DEGENERATE_WORD_RE.findall(text) if len(t) >= 2]
         if not tokens and reasoning_repeats < 10:
             return None
