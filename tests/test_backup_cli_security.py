@@ -1,4 +1,5 @@
 import io
+import sqlite3
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ def _load_backup_cli():
 def _patch_repo(module, monkeypatch, root: Path):
     monkeypatch.setattr(module, "_REPO_ROOT", root)
     monkeypatch.setattr(module, "_DATA_DIR", root / "data")
+    monkeypatch.setattr(module, "_BACKUP_DIR", root / "backups")
 
 
 def _restore_args(path: Path):
@@ -74,6 +76,105 @@ def test_snapshot_rejects_output_inside_data_dir(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit):
         backup._reject_output_inside_data(data / "self.tar.gz")
+
+
+def test_wal_snapshot_restore_excludes_post_snapshot_commit(tmp_path, monkeypatch):
+    backup = _load_backup_cli()
+    repo = tmp_path / "repo"
+    data = repo / "data"
+    data.mkdir(parents=True)
+    _patch_repo(backup, monkeypatch, repo)
+    archive = tmp_path / "snapshot.tar.gz"
+    db_path = data / "app.db"
+    (data / "notes-wal").write_text("ordinary user file", encoding="utf-8")
+    original_copy = backup._sqlite_safe_copy
+    writer = sqlite3.connect(db_path)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE evidence (value TEXT)")
+        writer.execute("INSERT INTO evidence VALUES ('at_snapshot')")
+        writer.commit()
+
+        def copy_then_commit(src, dst):
+            original_copy(src, dst)
+            writer.execute("INSERT INTO evidence VALUES ('after_snapshot')")
+            writer.commit()
+            # The directory walk must exclude every staged DB sidecar,
+            # including one appearing after the backup API call finishes.
+            Path(str(src) + "-journal").write_bytes(b"stale journal")
+
+        monkeypatch.setattr(backup, "_sqlite_safe_copy", copy_then_commit)
+        backup.cmd_snapshot(SimpleNamespace(
+            out=str(archive), include_research=True,
+            include_attachments=True, pretty=False,
+        ))
+        assert Path(str(db_path) + "-wal").exists()
+        assert Path(str(db_path) + "-shm").exists()
+        with tarfile.open(archive, "r:gz") as tar:
+            assert set(tar.getnames()) == {"data/app.db", "data/notes-wal"}
+    finally:
+        writer.close()
+
+    backup.cmd_restore(_restore_args(archive))
+    restored = sqlite3.connect(data / "app.db")
+    try:
+        assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert restored.execute("SELECT value FROM evidence").fetchall() == [("at_snapshot",)]
+    finally:
+        restored.close()
+    assert (data / "notes-wal").read_text(encoding="utf-8") == "ordinary user file"
+
+
+@pytest.mark.parametrize("failure_at", ["source_connect", "destination_connect", "backup"])
+def test_sqlite_snapshot_failure_closes_handles_without_raw_copy(tmp_path, monkeypatch, failure_at):
+    backup = _load_backup_cli()
+    src, dst = tmp_path / "source.db", tmp_path / "staged.db"
+    src.write_bytes(b"must never be copied as a fallback")
+    handles = []
+    connect = sqlite3.connect
+
+    class BrokenBackupConnection(sqlite3.Connection):
+        def backup(self, target, **kwargs):
+            raise sqlite3.OperationalError("injected backup failure")
+
+    def connect_with_failure(path):
+        if ((failure_at == "source_connect" and path == str(src))
+                or (failure_at == "destination_connect" and path == str(dst))):
+            raise sqlite3.OperationalError("injected connection failure")
+        connection = connect(path, factory=BrokenBackupConnection)
+        handles.append(connection)
+        return connection
+
+    monkeypatch.setattr(backup.sqlite3, "connect", connect_with_failure)
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        backup._sqlite_safe_copy(src, dst)
+    assert len(handles) == {"source_connect": 0, "destination_connect": 1, "backup": 2}[failure_at]
+    for connection in handles:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    assert not dst.exists() or dst.read_bytes() != src.read_bytes()
+
+
+def test_invalid_sqlite_aborts_snapshot_before_overwriting_archive(tmp_path, monkeypatch):
+    backup = _load_backup_cli()
+    repo = tmp_path / "repo"
+    data = repo / "data"
+    data.mkdir(parents=True)
+    (data / "app.db").write_bytes(b"not a SQLite database")
+    _patch_repo(backup, monkeypatch, repo)
+    archive = tmp_path / "existing.tar.gz"
+    archive.write_bytes(b"previous backup")
+    emitted = []
+    monkeypatch.setattr(backup, "emit", lambda payload, args: emitted.append(payload))
+
+    with pytest.raises(sqlite3.DatabaseError):
+        backup.cmd_snapshot(SimpleNamespace(
+            out=str(archive), include_research=True,
+            include_attachments=True, pretty=False,
+        ))
+    assert archive.read_bytes() == b"previous backup"
+    assert emitted == []
 
 
 def test_restore_rejects_symlink_escape(tmp_path, monkeypatch):

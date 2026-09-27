@@ -26,8 +26,9 @@ Jetson network, VPN and Wi-Fi configuration are outside scope.
 - Round-slice exhaustion continues from that ledger rather than declaring the
   child's earlier progress prose a final answer.
 - Partial output survives failure and is delivered as explicitly incomplete.
-  Parent `manage_subagents action=read` includes a bounded, owner-scoped context
-  excerpt. Full child ledger/timeline remains the durable audit record.
+  Parent `manage_subagents action=read` returns pageable retained output;
+  `include_recovery_context=true` adds a bounded, owner-scoped context excerpt.
+  Full child ledger/timeline remains the durable audit record.
 - Terminal `failure` is honored even without the legacy `failed` boolean.
 
 Focused regression: 93 passed (recovery, child runtime, delivery, agent rounds).

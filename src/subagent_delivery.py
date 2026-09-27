@@ -213,7 +213,8 @@ def claimed_summary(owner: str | None, session_id: str, token: str) -> str | Non
                 ) if key in metrics},
                 "inspection": (
                     "This child did not complete. Its partial output is NOT verified completion. "
-                    "Use manage_subagents action=read with child_id for retained context, "
+                    "Use manage_subagents action=read with child_id for retained output "
+                    "(follow next_result_offset), include_recovery_context=true for a context excerpt, "
                     "and action=list_evidence for published findings before continuing its work."
                     if child.status != "completed" else ""
                 ),

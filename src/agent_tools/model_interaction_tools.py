@@ -338,9 +338,42 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
     if action == "list":
         return {"subagents": runtime.list(owner, session_id), "exit_code": 0}
     if action in {"read", "view"}:
+        offset = payload.get("result_offset", 0)
+        limit = payload.get("result_limit", 6000)
+        include_context = payload.get("include_recovery_context", False)
+        if (type(offset) is not int or offset < 0 or type(limit) is not int
+                or not 1 <= limit <= 12000 or type(include_context) is not bool):
+            return {"error": "Invalid result_offset, result_limit or include_recovery_context",
+                    "exit_code": 1}
         row = runtime.get(owner, session_id, child_id)
-        return ({**row, "recovery_context": runtime.recovery_context(owner, session_id, child_id),
-                 "exit_code": 0} if row else {"error": "Subagent not found", "exit_code": 1})
+        if not row:
+            return {"error": "Subagent not found", "exit_code": 1}
+        # The REST record includes large metrics/objective/guidance before its
+        # result. The generic formatter caps structured extras at 8K; returning
+        # that record hid the deliverable and even labelled it "Session created".
+        # Expose a bounded, losslessly pageable text channel instead. Never use
+        # the public inspection excerpt as an execution checkpoint.
+        text = row.get("result") or ""
+        page = text[offset:offset + limit]
+        next_offset = offset + len(page) if offset + len(page) < len(text) else None
+        result = {
+            "child_id": row["child_id"], "status": row["status"],
+            "content": page, "size": len(page), "result_total_chars": len(text),
+            "result_offset": offset, "next_result_offset": next_offset,
+            "result_truncated": next_offset is not None,
+            "result_missing": row.get("result_missing", False),
+            "error": row.get("error") or "", "exit_code": 0,
+            "untrusted_content": True,
+            "next_action": (
+                "Read the next page with manage_subagents action=read and next_result_offset "
+                "as result_offset. Do not resend the task or use send_to_session."
+                if next_offset is not None else
+                "Retained child output is fully read. Verify its claims against tool/file evidence."
+            ),
+        }
+        if include_context:
+            result["recovery_context"] = runtime.recovery_context(owner, session_id, child_id)
+        return result
     if action == "message":
         return await runtime.message(owner, session_id, child_id, payload.get("message") or "")
     if action == "stop":

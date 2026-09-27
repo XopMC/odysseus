@@ -26,6 +26,7 @@ quiet_logs()
 
 import argparse, json, logging, os, shutil, sqlite3, subprocess, sys, tarfile, tempfile
 from datetime import datetime
+from contextlib import closing
 from pathlib import Path, PurePosixPath
 
 _DATA_DIR = _REPO_ROOT / "data"
@@ -41,19 +42,11 @@ _SKIP_PATTERNS = {
 
 
 def _sqlite_safe_copy(src: Path, dst: Path) -> None:
-    """Use SQLite's `.backup` API instead of a file copy so a write
-    in-flight doesn't corrupt the snapshot. Falls back to plain copy
-    if the file isn't a SQLite DB."""
-    try:
-        src_conn = sqlite3.connect(str(src))
-        dst_conn = sqlite3.connect(str(dst))
-        with dst_conn:
-            src_conn.backup(dst_conn)
-        src_conn.close()
-        dst_conn.close()
-    except Exception:
-        # Not a SQLite DB or backup unsupported — fall back.
-        dst.write_bytes(src.read_bytes())
+    """Take a consistent SQLite snapshot or fail without copying live pages."""
+    with closing(sqlite3.connect(str(src))) as src_conn:
+        with closing(sqlite3.connect(str(dst))) as dst_conn:
+            with dst_conn:
+                src_conn.backup(dst_conn)
 
 
 def _reject_output_inside_data(out_path: Path) -> None:
@@ -96,8 +89,17 @@ def cmd_snapshot(args):
             _sqlite_safe_copy(db, staged)
             db_map[db] = staged
 
+        # Each staged database is self-contained. Live sidecars belong to a
+        # different point in time and can replay later writes over the snapshot.
+        sqlite_sidecars = {
+            Path(str(db) + suffix)
+            for db in db_map
+            for suffix in ("-wal", "-shm", "-journal")
+        }
         with tarfile.open(out_path, "w:gz") as tar:
             for p in sorted(_DATA_DIR.rglob("*")):
+                if p in sqlite_sidecars:
+                    continue
                 if not p.is_file() or p.is_symlink():
                     continue
                 rel = p.relative_to(_DATA_DIR.parent)

@@ -192,3 +192,95 @@ remain to be verified. Do not label this early activity a successful full soak.
   compaction reserves, including truthful fallback telemetry.
 - Fresh affected suite: **254 passed**. Final full-suite and Jetson candidate /
   actual Safari settings verification are pending; no deployment claimed yet.
+
+## 18:35 onward: 128K and child-lifecycle release verified live
+
+- Final code/Git main+master/Jetson checkout: `c90b415a70cb949862a951f67db2f24bbf9f90db`,
+  production `release-c90b415`. Local full suite **7,494 passed, 25 skipped,
+  115 subtests**; exact isolated Jetson image **185 passed**. Alternate-port
+  HTTP 200; before app-only switch both parent and child active counts were zero.
+  App/teams backups `*-pre-c90b415.db` passed integrity checks, mode 0600;
+  host QA workspace archived separately. Runtime source SHA256s match checkout.
+- Actual Safari Settings → Agent tools: changed the existing saved 32,768 value
+  to **131,072** using clicks/paste/Tab. UI value and persisted settings.json
+  matched. This was a user-requested edit, not a silent default migration.
+- Resumed safe QA as attempt 5, run `efa7044ab9ff422aa092dc0a44c1fa1f`.
+  Actual context telemetry recorded configured ceiling **131,072**, effective
+  generation budget **90,955**, window **131,840**, input occupancy **33,831**.
+  The physical window cap is explicit; the old 32K generation cap is gone.
+- Reloaded Safari and independently authenticated Opera during this run;
+  both showed the active Goal/Plan and current tools/thinking, and matched
+  **31.2% / 41,190 tokens** after synchronizing. No new duplicate run.
+- Parent autonomously created children 4 (:4) and 5 (:5) at 18:03:50, ~0.1s
+  apart, while continuing its own work. Both completed. Child 5 had 24 distinct
+  tool calls, 23 checkpoints and a compaction; this was not a thinking loop.
+- Entered additional safe read-only review guidance through Safari. It was
+  persisted and reached the working checkpoint. Parent delegated child 6 (:3)
+  with an actual recorded **timeout_seconds=5** (tool-start seq 643).
+  Child `b560edc702cb4d69b59f6dd915045993` ran **18:40:48–18:44:29 UTC** and
+  completed: 11 tool starts/results, 7 checkpoints, 3,388 result characters.
+  This directly verifies useful work survives the legacy five-second task limit.
+- Removed **213** unused versioned Odysseus image tags after checking each
+  commit exists and no container uses its image. Kept production and rollback
+  `release-5ac5593`, all databases/backups and non-matching image tags. No global
+  Docker prune or network/VPN/Wi-Fi modification was performed.
+- One external read-only diagnostic using SQLite's five-second default busy
+  timeout reported `database is locked`. Production log aggregate had zero
+  corresponding lock errors/tracebacks/HTTP 500; next read took 2ms and health
+  6.6ms. Database uses DELETE journal mode. Investigate contention; this is not
+  proof of a failed model run, nor proof of sustained contention acceptance.
+- Same-worker child question-resume now uses the exact committed ledger and
+  fences obsolete task callbacks (regression covered). Live question-resume,
+  process-restart recovery, remaining full-Goal audit and final six-hour
+  interactive soak are still OPEN. Do not mark the Goal complete.
+
+Additional open observations for the next audit slice:
+
+- Actual context popup shows 75% of usable input and 37.3% effective full-window
+  trigger, consistent with the saved 65,536 input cap and 131,840 serving window.
+  Its separate "Messages" row still counts canonical turns (3), while the
+  header counts rendered rounds. Clarify or unify that row; don't call this a
+  frozen header counter or change the saved cap silently.
+- Final child-6 panel was opened by real Safari click: it explicitly showed
+  completed, with 0 active / 6 total children. Parent remained active.
+- Production start timestamp: **2026-09-27 18:34:20 UTC**. Post-release HTTP and
+  HTTPS health both 200, zero restarts; point sample CPU 16.32%, RSS 1.274 GiB.
+- The old automation id `odysseus-safe-6h-soak` view tool renders an app card but
+  exposes no saved fields; `$CODEX_HOME` is unset and the conventional automation
+  directory is absent here. No new minute probe or replacement automation was
+  started in this slice. Do not infer continuous six-hour monitoring from older
+  probe logs or stale heartbeat prompts. The active Codex Goal remains open.
+
+## 19:01–19:12 UTC — live result-read defect and replay recheck
+
+- Real Safari QA reload retained current activity; header advanced 230 → 238.
+  Independently authenticated Opera reload recovered the same current rounds,
+  count 239 → 243. Scrolling older rounds and clicking their thinking disclosure
+  loaded the saved 23:57 reasoning (287 tokens), not an empty card.
+- Live parent repeatedly tried to retrieve child 6's already-completed result,
+  then incorrectly tried send_to_session. The child stored 3,388 result characters
+  after 81,384 characters of metrics. The generic tool formatter truncated its
+  structured extras at 8,000 characters and falsely labelled the record
+  "Session created". The result itself was durable, but invisible to the model.
+- Deterministic baseline formatter reproduction: result absent, 8,135 formatted
+  characters, false session-created label. Patched result-first read: result
+  present, 417 formatted characters, no false label. Added bounded Unicode-safe
+  result paging, explicit recovery-context opt-in, owner-scope forwarding and
+  invalid-input tests. REST/UI full child record stays unchanged.
+- QA Goal independently reached completed/attempt 5/revision 19. No active
+  durable runs remained at the check. Independently ran its actual host project
+  tests: **85 tests, OK**, 0.875 seconds, exit 0. This validates that project test
+  suite only, not the whole harness or all project acceptance requirements.
+- SQLite contention local reproduction: a held 6-second DELETE-journal writer
+  made an external 5-second reader fail while the application's 30-second reader
+  succeeded. This is not proof of an app failure. Do not enable WAL casually.
+- Audit additionally reproduced backup corruption of snapshot semantics: a live
+  WAL copied beside a staged DB replayed a later transaction during restore.
+  Backup now excludes staged DB sidecars and fails closed on backup errors;
+  deterministic snapshot/later-commit/restore and handle-cleanup tests pass.
+  Production journal mode, network, VPN and Wi-Fi remain unchanged.
+- Focused child suites: **71 passed**. Combined backup/result/delivery: **30
+  passed**. Fresh full suite: **7,510 passed, 25 skipped, 115 subtests**, exit 0,
+  216.66 seconds; JS syntax and diff checks green. Exact candidate, release and
+  post-release model read still pending at this entry. No acceptance completion
+  is claimed.
