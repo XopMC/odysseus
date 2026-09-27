@@ -32,7 +32,11 @@ Jetson network, VPN and Wi-Fi configuration are outside scope.
 
 Focused regression: 93 passed (recovery, child runtime, delivery, agent rounds).
 The HTTP-after-tool recovery test failed on the prior implementation, then passed.
-Full suite, isolated Jetson candidate and final-image browser acceptance pending.
+Isolated Jetson candidate: 93 passed, alternate-port health HTTP 200.
+Full suite: 7,467 passed, 25 skipped, 113 subtests; one repository-layout failure
+because this ledger was initially placed in `docs/` (reserved for non-Markdown
+site assets). Moved to the repository root; no test weakened. Final-image
+browser acceptance pending.
 
 ## Remaining acceptance requirements
 
