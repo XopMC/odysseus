@@ -191,6 +191,14 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Continue verification', str(sent[0]['messages']))
         self.assertLess(len(str(sent[0]['messages'])), len(str(history)))
         self.assertIn('"compacted"', chunks)
+        events = [json.loads(line[6:]) for line in chunks.splitlines()
+                  if line.startswith('data: {')]
+        compacted_index = next(i for i, event in enumerate(events) if event.get('type') == 'compacted')
+        checkpoint = events[compacted_index + 1]
+        self.assertEqual(checkpoint['type'], 'context_checkpoint')
+        self.assertTrue(checkpoint['messages'])
+        self.assertIn('Original requirement', str(checkpoint['messages']))
+        self.assertTrue(any(item.get('_agent_working_summary') for item in checkpoint['messages']))
 
     async def test_stalled_utility_summary_leaves_time_for_selected_model(self):
         self.save({'trigger_percent': 60, 'target_percent': 45,

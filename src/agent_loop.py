@@ -6426,6 +6426,14 @@ async def stream_agent_loop(
                     logger.exception("Failed to persist compaction settlement marker")
                     _pending_compaction_settlement = None
             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "duration_ms": round(max(0.0, time.monotonic() - _compaction_boundary_started) * 1000, 1), "checkpoint": checkpoint, "economic_decision": (_economic_decision.to_dict() if _economic_decision else None), "settlement": _pending_compaction_settlement})}\n\n'
+            # Commit the exact new ledger before starting the next model call.
+            # Pause during its thinking must not fall back to a summary-only
+            # checkpoint and accidentally feed the full transcript on resume.
+            _checkpoint_messages = _durable_model_checkpoint(messages)
+            _checkpoint_encoded = json.dumps(
+                _checkpoint_messages, ensure_ascii=False, separators=(",", ":"), default=str,
+            )
+            yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _checkpoint_messages, "ledger_hash": hashlib.sha256(_checkpoint_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions}, ensure_ascii=False)}\n\n'
         elif _compact_status in {"failed", "uncompactable"}:
             # Do not silently drop evidence and continue an audit as if the
             # summary succeeded. The user can retry after the provider recovers.

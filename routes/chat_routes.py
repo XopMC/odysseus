@@ -125,6 +125,19 @@ def _restore_goal_checkpoint_messages(ctx, ledger: list, *, answer_question: str
     ctx.route_messages = [dict(item) for item in restored]
 
 
+def _restore_goal_summary_checkpoint(ctx, summary: str) -> None:
+    """Restore legacy summary checkpoints on both route views, not full history."""
+    original_goal = next((dict(item) for item in ctx.messages
+                          if item.get("role") == "user"
+                          and not item.get("_agent_injected")
+                          and (item.get("metadata") or {}).get("trusted") is not False), None)
+    checkpoint_message = untrusted_context_message("durable agent working checkpoint", summary)
+    checkpoint_message["_context_pinned"] = True
+    checkpoint_message["_agent_working_summary"] = True
+    ledger = ([original_goal] if original_goal else []) + [checkpoint_message]
+    _restore_goal_checkpoint_messages(ctx, ledger)
+
+
 def _stream_failure_status(chunk: str) -> Optional[int]:
     """Extract a provider status without retaining provider-supplied detail."""
 
@@ -1705,15 +1718,9 @@ def setup_chat_routes(
                         ctx, ledger, answer_question=goal_answer_question,
                     )
                 else:
-                    checkpoint_message = untrusted_context_message(
-                        "durable agent working checkpoint",
-                        str(durable_checkpoint.get("summary") or ""),
+                    _restore_goal_summary_checkpoint(
+                        ctx, str(durable_checkpoint.get("summary") or ""),
                     )
-                    checkpoint_message["_context_pinned"] = True
-                    insert_at = len(ctx.messages)
-                    if ctx.messages and ctx.messages[-1].get("role") == "user":
-                        insert_at -= 1
-                    ctx.messages.insert(insert_at, checkpoint_message)
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 

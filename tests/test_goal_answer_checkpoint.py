@@ -8,6 +8,25 @@ import src.agent_loop as agent_loop
 from routes.chat_routes import _restore_goal_checkpoint_messages
 
 
+def test_legacy_summary_resume_replaces_both_route_histories():
+    from types import SimpleNamespace
+    from routes.chat_routes import _restore_goal_summary_checkpoint
+    preface = [{"role": "system", "content": "fresh runtime policy"}]
+    original = {"role": "user", "content": "original task"}
+    old = preface + [original, {"role": "assistant", "content": "old bulky history " * 1000},
+                     {"role": "user", "content": "continue"}]
+    ctx = SimpleNamespace(messages=list(old), route_messages=list(old), preface=preface)
+    _restore_goal_summary_checkpoint(ctx, "verified work and remaining steps")
+    assert ctx.messages == ctx.route_messages
+    assert ctx.messages[0] == preface[0]
+    assert original in ctx.messages
+    assert ctx.messages[-1] == old[-1]
+    assert not any("old bulky" in str(item) for item in ctx.messages)
+    checkpoint = next(item for item in ctx.messages if item.get("_agent_working_summary"))
+    assert checkpoint["metadata"]["trusted"] is False
+    assert "verified work" in checkpoint["content"]
+
+
 def test_goal_answer_replaces_both_foreground_message_views():
     question = "Сколько будет 2 + 2?"
     old_ledger = [{"role": "user", "content": "old task"}]

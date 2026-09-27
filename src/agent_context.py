@@ -292,7 +292,7 @@ async def compact_working_context(messages, limit, summarize, *, policy=None, ta
             "Working context summary did not reduce tokens: before=%s after=%s",
             estimate_tokens(messages), estimate_tokens(compacted),
         )
-        return messages, "failed"
+        return messages, "uncompactable" if policy is not None else "failed"
     if estimate_tokens(compacted) > (target_limit if policy is not None else limit):
         logger.info(
             "Working context result exceeds target: after=%s target=%s",
