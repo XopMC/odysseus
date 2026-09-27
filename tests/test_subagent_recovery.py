@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.database import Base, ChatSubagentRun, Session
+from core.database import Base, ChatSubagentEvent, ChatSubagentRun, Session
 from src import subagent_runtime as children
 
 
@@ -162,7 +162,7 @@ def test_recovery_context_is_bounded_and_owner_scoped(harness):
     assert harness.recovery_context("qa", "other", "child") == {}
 
 
-def test_repetition_validation_failure_is_not_ten_provider_retries(harness, monkeypatch):
+def test_repetition_guard_retries_ten_times_before_stopping(harness, monkeypatch):
     calls = 0
     async def stream(*args, **kwargs):
         nonlocal calls
@@ -171,7 +171,50 @@ def test_repetition_validation_failure_is_not_ten_provider_retries(harness, monk
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
     result = run(harness)
     assert result["status"] == "failed"
-    assert calls == 1  # agent_loop owns the bounded, changed-prompt repair
+    assert calls == 11
+    with children.SessionLocal() as db:
+        retries = db.query(ChatSubagentEvent).filter_by(child_id="child", kind="output_retry").all()
+        assert len(retries) == 10
+        assert all(item.payload["reason"] == "degenerate_output" for item in retries)
+
+
+def test_repetition_guard_continues_from_checkpoint_and_completes(harness, monkeypatch):
+    calls = []
+    async def stream(*args, **kwargs):
+        calls.append((args[2], kwargs))
+        if len(calls) == 1:
+            yield event("context_checkpoint", messages=[{"role": "user", "content": "retained child task"}])
+            yield event("agent_terminal", data={"failed": True, "failure": {
+                "status": 422, "kind": "degenerate_output", "message": "Repeated output"}})
+        else:
+            assert calls[-1][0][1]["content"] == "retained child task"
+            assert "repeated itself" in calls[-1][0][-1]["content"]
+            yield "data: " + json.dumps({"delta": "Verified final result"}) + chr(10) * 2
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    result = run(harness)
+    assert result["status"] == "completed"
+    assert "Verified final result" in result["result"]
+    assert len(calls) == 2
+    assert calls[1][1]["temperature"] < calls[0][1]["temperature"]
+    with children.SessionLocal() as db:
+        retry = db.query(ChatSubagentEvent).filter_by(child_id="child", kind="output_retry").one()
+        assert retry.payload["attempt"] == 1 and retry.payload["retry_limit"] == 10
+
+
+def test_repetition_repair_checkpoint_survives_child_process_recovery(harness):
+    harness._event("child", "qa", "s", "context_checkpoint", {
+        "messages": [{"role": "user", "content": "durable objective"}],
+        "compactions": 2,
+    })
+    harness._event("child", "qa", "s", "output_retry", {
+        "attempt": 3, "retry_limit": 10, "reason": "degenerate_output",
+        "instruction": "Continue concisely without repeating.",
+        "messages": [{"role": "user", "content": "durable objective"}],
+    })
+    recovered = harness._continuation_checkpoint("qa", "s", "child")
+    assert recovered["messages"] == [{"role": "user", "content": "durable objective"}]
+    assert recovered["output_retries"] == 3
+    assert recovered["output_repair_instruction"] == "Continue concisely without repeating."
 
 
 def test_progressing_child_continues_past_legacy_task_deadline(harness, monkeypatch):

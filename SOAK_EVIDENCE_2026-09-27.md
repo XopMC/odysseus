@@ -748,3 +748,51 @@ This entry does not close the overall Goal or establish a six-hour soak.
   claim yet. Current image remains6029532 while work is active.
 - Generation cap remains131072. No network/VPN/Wi-Fi changes. Final-image
   sustained acceptance remains OPEN; no new continuous six-hour probe established.
+
+## 22:59 UTC candidate ready; production switch gated
+
+- Exact local/public-fork main/master/Jetson checkout:
+  `bed980333ec2e7e3ec117cf5c40d741ea83933a4`. Candidate built from exact Git
+  archive, revision label verified. Final affected suite294 passed locally and
+  in isolated no-network Jetson image. Alternate-port login redirect302 resolved
+  toHTTP200. Temporary candidate container stopped; candidate image retained.
+- Production still `release-6029532`,healthy,zero restarts. One durable parent
+  and two children active; no production switch performed during that work.
+- Provider one-token probe also confirmed exact :5 route HTTP400 model_not_found,
+  matching its new child's ten retries. User choice requested to restore :3/:5
+  or choose currently available models; no unauthorized replacement or loading.
+- Safe QA cursor64347 matched durable64347; children10/11 remained active and12
+  failed. No claim that V2 project passed acceptance. Attempt to refresh the old
+  heartbeat returned "Automation does not exist ... may have been deleted
+  manually". It was not silently recreated; no scheduled monitoring claim.
+
+## 23:00–23:16 UTC: output repair, compaction recovery, and live restart
+
+- Repetition-guard failures in a child now restart from its latest safe checkpoint
+  with a focused anti-repeat instruction and lower temperature. Up to ten such
+  quality retries are durably recorded and restored after a process restart.
+  Unknown/unsettled tool effects are still never replayed. Focused suite313 passed.
+- Real parent run c593311... had completed seven successful compactions. At 23:13 it
+  stopped after the post-compaction recovery plan was saved/executed because the
+  settlement helper returned false; content-free logs show only
+  "Compaction settlement could not be committed". Read-only DB evidence later
+  shows that generation25 was already settled before this duplicate
+  acknowledgement, so the retry was incorrectly treated as failure. Settlement
+  is now idempotent for an existing already-settled generation; duplicate/stale
+  generation regression cases pass in the focused suite.
+- The test Goal progress became waiting_user with exact durable message
+  "Context checkpoint failed repeatedly; check the summarizer or context policy
+  before resuming". It was not an ask_user question and no input window existed.
+  Following the user's standing instruction to resume a paused test Goal, actual
+  Opera click on Continue Goal started attempt2, run
+  5540e4e83efa4f71a93a3f63c868d7a2. The run advanced from cursor5 to2912.
+- Safari reload and independently authenticated Opera show the same safe chat,
+  369 visible messages, active Goal attempt2, Plan0/10 executing and 21–23%
+  context after compaction. No second run or content loss observed. Three
+  children from attempt1 remain productive; terminal deliveries are
+  session-scoped and may be consumed by the next Goal model-round boundary.
+- Production remains release-6029532: active Goal and child runs prevent a
+  safe image switch. Updated full suite is running at
+  /tmp/odysseus-bed9803-final-full.log; do not use previous7701 result as
+  evidence for these final two fixes. Candidate/release and six-hour final-image
+  acceptance remain open.

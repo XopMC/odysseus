@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"queued", "running", "waiting_user", "stopping", "recovering"}
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 CHILD_CORE_TOOLS = CORE_AGENT_TOOLS | {"publish_subagent_evidence"}
+MAX_CHILD_OUTPUT_RETRIES = 10
 CHILD_LEASE_SECONDS = 90
 CHILD_HEARTBEAT_SECONDS = 15
 _execution_lease = ContextVar("subagent_execution_lease", default=None)
@@ -773,13 +774,21 @@ class SubagentRuntime:
                 checkpoint = copy.deepcopy(messages[1:])
             consecutive_failures = int((resume_checkpoint or {}).get("consecutive_provider_failures") or 0)
             provider_retries = int((resume_checkpoint or {}).get("provider_retries") or 0)
+            output_retries = int((resume_checkpoint or {}).get("output_retries") or 0)
+            output_repair_instruction = str((resume_checkpoint or {}).get("output_repair_instruction") or "")
+            child_temperature = 0.3
             round_slice_exhausted = False
             child_attempt_id = ""
             async def consume():
                 nonlocal waiting_payload, tool_since_checkpoint, checkpoint
                 nonlocal consecutive_failures, round_slice_exhausted
+                nonlocal output_retries, output_repair_instruction, child_temperature
+                if output_repair_instruction:
+                    messages.append({"role": "system", "content": output_repair_instruction})
+                    output_repair_instruction = ""
                 model_stream = stream_agent_loop(
                     endpoint_url, model, messages, headers=headers or {},
+                    temperature=child_temperature,
                     session_id=session_id, owner=owner, workspace=workspace,
                     access_mode=access_mode or "", history_session=history,
                     disabled_tools=disabled, max_rounds=200, max_tool_calls=0,
@@ -839,9 +848,12 @@ class SubagentRuntime:
                                 if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
                                     if tool_since_checkpoint or checkpoint != event["messages"]:
                                         consecutive_failures = 0
+                                        output_retries = 0
+                                        child_temperature = 0.3
                                     event = {**event, "guidance_ids": sorted(guidance_seen),
                                              "consecutive_provider_failures": consecutive_failures,
-                                             "provider_retries": provider_retries}
+                                             "provider_retries": provider_retries,
+                                             "output_retries": output_retries}
                                 self._event(child_id, owner, session_id, kind, event)
                                 if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
                                     # _event committed the ledger before it becomes
@@ -903,6 +915,26 @@ class SubagentRuntime:
                                     if isinstance(raw_exc, (asyncio.TimeoutError, httpx.TimeoutException))
                                     else "Model network error. No result was verified."),
                     })
+                    if (exc.kind == "degenerate_output" and not tool_since_checkpoint
+                            and output_retries < MAX_CHILD_OUTPUT_RETRIES):
+                        output_retries += 1
+                        child_temperature = max(0.05, 0.3 / (1 + output_retries))
+                        output_repair_instruction = (
+                            "Your previous generation repeated itself and was discarded. Continue the assigned "
+                            "mini-goal from the latest committed checkpoint. Do not repeat prior prose or "
+                            "reasoning. Take one concrete, concise next action with the available tools, then "
+                            "verify it; if the objective is complete, return a short evidence-based result."
+                        )
+                        messages = ([copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
+                                    if checkpoint is not None else copy.deepcopy(initial_messages))
+                        await flush(force=True)
+                        self._event(child_id, owner, session_id, "output_retry", {
+                            "attempt": output_retries, "retry_limit": MAX_CHILD_OUTPUT_RETRIES,
+                            "reason": "degenerate_output", "temperature": child_temperature,
+                            "messages": copy.deepcopy(messages), "instruction": output_repair_instruction,
+                        })
+                        await asyncio.sleep(_retry_delay(output_retries))
+                        continue
                     if not exc.retryable or tool_since_checkpoint or consecutive_failures >= 10:
                         raise exc
                     consecutive_failures += 1
@@ -1214,7 +1246,9 @@ class SubagentRuntime:
                 raise ValueError("A child tool has no committed checkpoint; inspect its outcome before resuming")
             retry = events.filter(ChatSubagentEvent.kind == "transport_retry").order_by(
                 ChatSubagentEvent.id.desc()).first()
-            if checkpoint is None and retry is None:
+            output_retry = events.filter(ChatSubagentEvent.kind == "output_retry").order_by(
+                ChatSubagentEvent.id.desc()).first()
+            if checkpoint is None and retry is None and output_retry is None:
                 return None  # Legacy text-only wait; no effects to repeat.
             payload = copy.deepcopy(checkpoint.payload or {}) if checkpoint else {}
             ledger = payload.get("messages")
@@ -1223,6 +1257,11 @@ class SubagentRuntime:
             if retry and (checkpoint is None or retry.id > checkpoint.id):
                 for key in ("consecutive_provider_failures", "provider_retries"):
                     payload[key] = int((retry.payload or {}).get(key) or 0)
+            if output_retry and (checkpoint is None or output_retry.id > checkpoint.id):
+                retry_payload = output_retry.payload or {}
+                payload["output_retries"] = int(retry_payload.get("attempt") or 0)
+                payload["output_repair_instruction"] = str(retry_payload.get("instruction") or "")
+                payload["messages"] = copy.deepcopy(retry_payload.get("messages") or ledger or [])
             return payload
 
     async def message(self, owner: Optional[str], session_id: str, child_id: str, text: str) -> dict:

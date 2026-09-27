@@ -26,6 +26,8 @@ def test_compaction_marker_is_durable_and_settled(monkeypatch):
     assert restored["generation"] == 2
     assert restored["rebuild_marker"]["mandatory"] is True
     assert ledger.settle("alice", "s", 2) is True
+    assert ledger.settle("alice", "s", 2) is True
+    assert ledger.settle("alice", "s", 1) is True
     assert ledger.pending("alice", "s") is None
     db = store(); rows = db.query(ChatContextCompaction).order_by(ChatContextCompaction.generation).all()
     assert [row.status for row in rows] == ["settled", "settled"]

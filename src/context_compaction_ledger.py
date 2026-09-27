@@ -142,7 +142,15 @@ def settle(owner: Optional[str], session_id: str, generation: int, *, child_id: 
             ChatContextCompaction.session_id == session_id,
             ChatContextCompaction.generation == int(generation),
         ).order_by(ChatContextCompaction.created_at.desc()).first()
-        if not row or row.status != "pending_settlement":
+        if not row:
+            return False
+        # Recovery and a model-requested plan tool may both acknowledge the
+        # same durable checkpoint. A previous successful commit is already
+        # sufficient evidence; turning this duplicate acknowledgement into
+        # failure would stop an otherwise recovered long-running Goal.
+        if row.status == "settled":
+            return True
+        if row.status != "pending_settlement":
             return False
         settled_at = utcnow_naive()
         # A plan rebuilt after generation N necessarily covers the checkpoint
