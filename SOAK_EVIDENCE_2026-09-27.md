@@ -374,7 +374,7 @@ Additional open observations for the next audit slice:
   Picker browse/vet, send-time binding and explicit file-path inference now
   validate on the execution host. No model-advertised tool or privilege added.
 - Selected cwd propagates to foreground Python/shell, file/checkpoint tools and
-  encoded background requests. Local SSH wrappers start in a valid local data
+  encoded background requests. Local SSH wrappers start in a valid local package
   directory, not a nonexistent host path inside Docker. Regression exposed this
   dispatch distinction before release. No global host default is overwritten.
 - Exact approval uses its sealed workspace, not a mutable composer path; Deny
@@ -392,3 +392,8 @@ Additional open observations for the next audit slice:
   working-ledger restore. A safe fix needs an owner-scoped exact-run anchor AND
   transcript-edit validation; simply reusing the latest checkpoint can restore
   deleted/edited messages. Still open, not mixed into this workspace patch.
+- Isolated candidate uncovered a clean-image issue missed by the warm Mac
+  checkout: the default agent data working directory may not exist yet. The
+  transport wrapper now starts from its installed package directory; only its
+  JSON request uses the host cwd. First candidate: 101 passed/1 failed; never
+  deployed. Keep this failure as evidence, not a flaky retry.

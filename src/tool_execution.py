@@ -614,10 +614,10 @@ def vet_workspace(raw: str) -> Optional[str]:
     return resolved
 
 
-def agent_cwd(*, ignore_workspace=False) -> str:
+def agent_cwd() -> str:
     """Working directory for agent subprocesses (bash/python/background jobs):
     the active workspace when set, else the persistent data dir."""
-    workspace = None if ignore_workspace else get_active_workspace()
+    workspace = get_active_workspace()
     if workspace:
         return workspace
     resolved = os.path.realpath(_AGENT_WORKDIR)
@@ -1579,7 +1579,7 @@ async def _execute_tool_block_impl(
             try:
                 # SSH itself starts locally; its encoded request carries the
                 # remote cwd. A host-only directory cannot be Popen's local cwd.
-                launch_cwd = agent_cwd(ignore_workspace=True) if host_background else agent_cwd()
+                launch_cwd = os.path.dirname(os.path.abspath(host_execution.__file__)) if host_background else agent_cwd()
                 rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=launch_cwd)
             except FileNotFoundError:
                 # Popen failed before creating the child (for example because
