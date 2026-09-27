@@ -808,7 +808,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_models",
-            "description": "List all available AI models across configured endpoints. Optionally filter by keyword.",
+            "description": "Show cached AI models and their configured endpoints without probing providers. Live inventory is refreshed by opening the model picker or endpoint settings. Optionally filter by keyword.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -74,7 +74,7 @@ class LSPTests(unittest.TestCase):
     def test_timeout_and_malformed_length_terminate_process(self):
         for params in ({'timeout': True}, {'malformed': True}):
             with self.subTest(params=params):
-                broker = Broker([sys.executable, '-u', '-c', SERVER], self.temp.name, lambda _: True, timeout=.1)
+                broker = Broker([sys.executable, '-u', '-c', SERVER], self.temp.name, lambda _: True, timeout=1.0)
                 broker.start();proc=broker.proc
                 with self.assertRaises((RuntimeError, TimeoutError, __import__('queue').Empty)):
                     broker.request('textDocument/hover', params)

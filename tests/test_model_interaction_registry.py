@@ -8,7 +8,9 @@ session_id/owner from the ctx, and (3) tool_execution.py dispatches them
 through the registry rather than the legacy dispatch_ai_tool elif.
 """
 import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import src.ai_interaction as ai_interaction
 import src.llm_core as llm_core
@@ -88,6 +90,54 @@ def test_list_models_no_endpoints(monkeypatch):
 
     res = asyncio.run(mit.ListModelsTool().execute("", {}))
     assert res == {"results": "No enabled model endpoints configured."}
+
+
+def test_list_models_uses_cached_inventory_and_hides_hidden_models(monkeypatch):
+    endpoint = SimpleNamespace(
+        is_enabled=True, name="LM Studio", endpoint_kind="local",
+        cached_models=json.dumps(["qwen3.8-27b", "hidden-model"]),
+        pinned_models=json.dumps(["qwen3.8-27b-worker"]),
+        hidden_models=json.dumps(["hidden-model"]),
+    )
+    class _Q:
+        def filter(self, *a, **k):
+            return self
+        def all(self):
+            return [endpoint]
+    class _S:
+        def query(self, *a, **k):
+            return _Q()
+        def close(self):
+            pass
+    monkeypatch.setattr(database, "SessionLocal", lambda: _S())
+
+    result = asyncio.run(mit.ListModelsTool().execute("qwen", {}))
+    assert "Cached model inventory" in result["results"]
+    assert "qwen3.8-27b" in result["results"]
+    assert "qwen3.8-27b-worker" in result["results"]
+    assert "hidden-model" not in result["results"]
+
+
+def test_list_models_empty_cache_does_not_probe_provider(monkeypatch):
+    endpoint = SimpleNamespace(
+        is_enabled=True, name="LM Studio", endpoint_kind="local",
+        cached_models="[]", pinned_models="[]", hidden_models="[]",
+    )
+    class _Q:
+        def filter(self, *a, **k):
+            return self
+        def all(self):
+            return [endpoint]
+    class _S:
+        def query(self, *a, **k):
+            return _Q()
+        def close(self):
+            pass
+    monkeypatch.setattr(database, "SessionLocal", lambda: _S())
+
+    result = asyncio.run(mit.ListModelsTool().execute("", {}))
+    assert "No cached models found" in result["results"]
+    assert "endpoint settings" in result["results"]
 
 
 def test_dispatched_via_registry_not_dispatch_ai_tool():

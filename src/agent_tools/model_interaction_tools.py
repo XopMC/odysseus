@@ -435,16 +435,10 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
 
 
 async def list_models(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """List all available models across configured endpoints.
-
-    Content = optional filter keyword.
-    """
+    """Show cached model inventory only; live probes belong to explicit UI refreshes."""
     import json
-    import httpx
     from src.database import SessionLocal, ModelEndpoint
-    from src.llm_core import _detect_provider, ANTHROPIC_MODELS
     from src.auth_helpers import owner_filter
-    from src.endpoint_resolver import resolve_endpoint_runtime, build_headers, build_models_url
 
     keyword = content.strip().lower() if content.strip() else None
 
@@ -462,47 +456,33 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
 
         for ep in endpoints:
             try:
-                base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-            except Exception:
-                continue
-            provider = _detect_provider(base)
-            headers = build_headers(api_key, base)
-
-            model_ids = []
-            if provider == "anthropic":
-                model_ids = list(ANTHROPIC_MODELS)
-            else:
-                try:
-                    models_url = build_models_url(base)
-                    if models_url:
-                        r = httpx.get(models_url, headers=headers, timeout=5)
-                        r.raise_for_status()
-                        data = r.json()
-                        model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-                        if not model_ids:
-                            model_ids = [
-                                m.get("name") or m.get("model")
-                                for m in (data.get("models") or [])
-                                if m.get("name") or m.get("model")
-                            ]
-                    else:
-                        model_ids = json.loads(ep.cached_models or "[]")
-                except Exception:
-                    model_ids = ["(endpoint offline)"]
+                cached = json.loads(ep.cached_models or "[]")
+                pinned = json.loads(ep.pinned_models or "[]")
+                hidden = set(json.loads(ep.hidden_models or "[]"))
+                if not isinstance(cached, list) or not isinstance(pinned, list):
+                    continue
+                model_ids = list(dict.fromkeys(
+                    model for model in [*cached, *pinned]
+                    if isinstance(model, str) and model and model not in hidden
+                ))
+            except (TypeError, ValueError):
+                model_ids = []
 
             if keyword:
                 model_ids = [m for m in model_ids if keyword in m.lower() or keyword in (ep.name or "").lower()]
 
             if model_ids:
-                result_lines.append(f"\n**{ep.name or base}** ({provider}):")
+                endpoint_kind = str(getattr(ep, "endpoint_kind", None) or "configured")
+                result_lines.append(f"\n**{ep.name or 'Configured endpoint'}** ({endpoint_kind}; cached inventory):")
                 for mid in model_ids:
-                    result_lines.append(f"  - `{mid}`")
+                    result_lines.append("  - " + mid)
                     total_models += 1
 
         if not result_lines:
-            return {"results": "No models found" + (f" matching '{keyword}'" if keyword else "") + "."}
+            return {"results": "No cached models found" + (f" matching '{keyword}'" if keyword else "")
+                    + ". Refresh inventory in the model picker or endpoint settings."}
 
-        header = f"Available models ({total_models} total):"
+        header = f"Cached model inventory ({total_models} total; refresh in the model picker or endpoint settings for live results):"
         return {"results": header + "\n".join(result_lines)}
     except Exception as e:
         logger.error(f"list_models failed: {e}")
