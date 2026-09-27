@@ -2625,6 +2625,13 @@ export function removeAskUserCards(root) {
   scope.querySelectorAll('.ask-user-card').forEach((node) => node.remove());
 }
 
+/** A Goal timeout resolves ordinary questions, never exact tool approvals. */
+export function removeOrdinaryAskUserCards(root) {
+  const scope = root || document.getElementById('chat-history') || document;
+  scope.querySelectorAll('.ask-user-card[data-ask-user-kind="question"]')
+    .forEach((node) => node.remove());
+}
+
 // While a choice card is visible, let plain 1–3 activate the corresponding
 // rendered option. Reuse the option's click path so the question keeps its
 // existing submission semantics. Tool approval cards are excluded: that card

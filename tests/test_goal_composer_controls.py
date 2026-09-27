@@ -35,6 +35,9 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert "bindUiText(objective, 'Your next message becomes the active goal.')" in work
     assert "bindThinkingLabels(body)" in renderer
     assert "bindThinkingLabels(b)" in renderer
+    assert 'removeOrdinaryAskUserCards' in work
+    assert "goal.checkpoint?._wait_reason !== 'ask_user'" in work
+    assert '.ask-user-card[data-ask-user-kind="question"]' in renderer
     sessions = (root / "static" / "js" / "sessions.js").read_text()
     assert "window.chatWork?.refresh?.(null);" in sessions
     routes = (root / "routes" / "chat_routes.py").read_text()
@@ -166,14 +169,17 @@ def test_waiting_goal_reply_does_not_preview_a_new_objective():
           document:{getElementById:()=>null}, console, setTimeout, clearTimeout, setInterval, clearInterval});
         const work=new vm.SourceTextModule(fs.readFileSync(process.argv[1],'utf8'),{context});
         await work.link(spec=>new vm.SyntheticModule(
-              spec.includes('runHealth') ? ['describeProgressHealth','describeUiLongTasks','describeBudgetWarnings','createUiLongTaskMonitor']
-            : ['bindUiText','t','unbindUiText'], function(){
-              if(spec.includes('runHealth')){
+                  spec.includes('runHealth') ? ['describeProgressHealth','describeUiLongTasks','describeBudgetWarnings','createUiLongTaskMonitor']
+                : spec.includes('chatRenderer') ? ['removeOrdinaryAskUserCards']
+                : ['bindUiText','t','unbindUiText'], function(){
+                  if(spec.includes('runHealth')){
                     this.setExport('describeProgressHealth',()=>null);
                     this.setExport('describeUiLongTasks',()=>null);
                     this.setExport('describeBudgetWarnings',()=>[]);
                     this.setExport('createUiLongTaskMonitor',()=>({start(){},stop(){}}));
-              }else{
+                  }else if(spec.includes('chatRenderer')){
+                    this.setExport('removeOrdinaryAskUserCards',()=>{});
+                  }else{
                 this.setExport('bindUiText',()=>{});this.setExport('t',x=>x);
                 this.setExport('unbindUiText',()=>{});
               }

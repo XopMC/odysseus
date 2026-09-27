@@ -1,5 +1,6 @@
 import { bindUiText, t, unbindUiText } from './i18n.js';
 import { describeProgressHealth, describeUiLongTasks, describeBudgetWarnings, createUiLongTaskMonitor } from './runHealth.js?v=20260924budgetwarn1';
+import { removeOrdinaryAskUserCards } from './chatRenderer.js?v=20260925thinkempty1';
 
 const api = window.location.origin;
 let snapshot = { plan: null, goal: null, cursor: 0 };
@@ -149,6 +150,9 @@ function renderGoal() {
     ['goal-work-pause', 'goal-work-resume', 'goal-work-cancel', 'goal-work-quick-pause', 'goal-work-quick-resume', 'goal-work-quick-cancel'].forEach(id => { if (el(id)) el(id).hidden = true; });
     if (el('goal-mode-status-toggle')) el('goal-mode-status-toggle').hidden = !draftEnabled;
     return;
+  }
+  if (goal.status !== 'waiting_user' || goal.checkpoint?._wait_reason !== 'ask_user') {
+    removeOrdinaryAskUserCards();
   }
   unbindUiText(el('goal-work-state'));
   unbindUiText(el('goal-work-objective'));

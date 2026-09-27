@@ -175,7 +175,10 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       const i18n=new vm.SyntheticModule(['bindUiText','unbindUiText','t'],function(){
         this.setExport('bindUiText',()=>{});this.setExport('unbindUiText',()=>{});this.setExport('t',x=>x);
       },{context});
-      await work.link(spec=>spec.includes('runHealth')?health:i18n);await work.evaluate();
+      const renderer=new vm.SyntheticModule(['removeOrdinaryAskUserCards'],function(){
+        this.setExport('removeOrdinaryAskUserCards',()=>{});
+      },{context});
+      await work.link(spec=>spec.includes('runHealth')?health:spec.includes('chatRenderer')?renderer:i18n);await work.evaluate();
       const api=work.namespace.default;
       assert.equal(typeof api.refreshRunHealth,'function');
       assert.equal(typeof api.refreshWait,'function');
