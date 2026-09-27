@@ -38,6 +38,7 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
     assert 'removeOrdinaryAskUserCards' in work
     assert "goal.checkpoint?._wait_reason !== 'ask_user'" in work
     assert '.ask-user-card[data-ask-user-kind="question"]' in renderer
+    assert "else if (role === 'assistant') removeOrdinaryAskUserCards(box);" in renderer
     sessions = (root / "static" / "js" / "sessions.js").read_text()
     assert "window.chatWork?.refresh?.(null);" in sessions
     routes = (root / "routes" / "chat_routes.py").read_text()

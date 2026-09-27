@@ -2917,10 +2917,13 @@ export function addMessage(role, content, modelName, metadata) {
     // the main Safari pause in long Agent chats.
     const renderStartNode = box.lastElementChild;
 
-    // Loading a later user message means any earlier ask_user card was
-    // answered.  This also removes the live card as soon as a manual reply is
-    // appended, even when the user did not click one of its buttons.
+    // A later user reply answers an earlier choice. A later assistant turn
+    // after the question means the agent resumed (for example after the
+    // server's one-minute Goal timeout). History can finish rendering after
+    // the Goal panel refresh, so clear the stale ordinary card here as well.
+    // Never infer or remove approval for an effectful tool from a later turn.
     if (role === 'user') removeAskUserCards(box);
+    else if (role === 'assistant') removeOrdinaryAskUserCards(box);
 
     var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
