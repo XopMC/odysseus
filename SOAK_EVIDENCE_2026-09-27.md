@@ -284,3 +284,45 @@ Additional open observations for the next audit slice:
   216.66 seconds; JS syntax and diff checks green. Exact candidate, release and
   post-release model read still pending at this entry. No acceptance completion
   is claimed.
+
+## 19:15 UTC release and newly exposed live-thinking buffering
+
+- Published exact `c41a6b9a2192c1a6995ef71559dffcec3f4d8aac` to public-fork
+  main/master and Jetson checkout. Isolated no-network candidate **83 passed**;
+  alternate-port login redirect followed to HTTP 200. Verified online app/teams
+  backups `*-pre-c41a6b9.db`, confirmed zero active runs, switched app only.
+  Production started 19:15:41 UTC. During ~54-second startup HTTP was 000/HTTPS
+  502; after application startup both 200, Docker healthy, zero restarts.
+  Runtime changed-file SHA256s match checkout. Candidate container removed.
+- Real Safari sent a read-only child-result verification prompt in the existing
+  safe QA chat. Run `0317ba40d958480c86d9e9e23fac6d65` actually invoked
+  manage_subagents; its 3,388-character tool output exactly equals the durable
+  child-6 result (exit 0). No child re-execution occurred. Thus result delivery
+  was exercised by the real model, not just a unit test.
+- User reported 17K generated tokens while the UI still showed no tokens.
+  Fallback adapter buffered all candidate thinking until ordinary content or a
+  complete tool call. Durable replay later received **17,391 thinking frames /
+  69,664 characters**. Aggregated 8-word shingles were 99.3% unique, maximum
+  repeated shingle count 7; this does not establish a mechanical repetition
+  loop (nor prove semantic usefulness). No thinking text needed for this check.
+- Correction to an initial hypothesis: the provider repetition guard is BELOW
+  this buffer and was not disabled. The defect is live visibility, delayed
+  persistence and availability to downstream consumers, not absence of that
+  guard. Explicitly stopped only this QA request via Safari; journal preserved,
+  status stopped with matching live/durable cursor 17,585.
+- New regression uses an async barrier: first thinking must arrive before
+  final content is permitted. It failed on c41a6b9 (timeout), passed after the
+  single-candidate streaming fix. Thinking-only output still produces an error,
+  not success; no duplicate reasoning on errors. Cancellation closes provider.
+  Multiple-candidate fallback attribution behavior is deliberately unchanged.
+- Additional OPEN finding: after restart the ordinary request emitted
+  workspace_rejected for the host-only `/tmp/odysseus-long-qa-20260927`; route
+  validation checked container filesystem. This read-only check did not mutate
+  files. Fix needs trusted-host-aware validation without bypassing owner/path
+  authorization. New ordinary turns also reassembled ~190K estimated tokens
+  before compaction; checkpoint reuse after Goal completion needs investigation.
+- Thinking candidate keeps single-route model attribution, authoritative usage
+  and finish reason even when the provider subsequently fails or emits no usable
+  answer. Review caught the existing terminal-usage drop; regression added.
+  Affected transport suites: **162 passed**. First full pass before the final
+  usage/cancellation tests: 7,513 passed; final exact-state full pass is running.

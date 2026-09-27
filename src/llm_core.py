@@ -4076,6 +4076,12 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
 
                 delta = event_data.get("delta")
                 event_type = event_data.get("type")
+                if len(cands) == 1 and event_type in {"model_actual", "usage", "finish_reason"}:
+                    # Single-route accounting/attribution is authoritative
+                    # even when the model ultimately returns thinking only.
+                    # Do not lose the final usage frame behind empty_output.
+                    yield chunk
+                    continue
                 if event_type == "tool_call_progress" and not emitted:
                     # Speculative UI-only status: do not commit a fallback
                     # candidate until a complete tool call or text arrives.
@@ -4097,6 +4103,18 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                 )
                 if (isinstance(delta, str) and delta.strip()
                         and event_data.get("thinking") is True and not emitted):
+                    if len(cands) == 1:
+                        # With no alternate route there is nothing to select:
+                        # expose thinking immediately to the UI and durable
+                        # log. Holding a 128K thinking budget until final prose
+                        # made an active model look silent and left its partial
+                        # work unavailable to replay/child checkpoint consumers.
+                        # Thinking still does NOT establish a usable answer.
+                        for metadata_chunk in pending_metadata:
+                            yield metadata_chunk
+                        pending_metadata.clear()
+                        yield chunk
+                        continue
                     # Reasoning is useful replay evidence, not a final answer
                     # or complete tool call. Keep it candidate-local until a
                     # substantive response commits this route. Otherwise a

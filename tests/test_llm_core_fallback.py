@@ -553,6 +553,97 @@ def test_reasoning_only_terminal_preserves_thinking_then_reports_empty(monkeypat
     assert not any('[DONE]' in chunk for chunk in chunks)
 
 
+def test_single_route_thinking_is_live_before_final_content(monkeypatch):
+    async def run():
+        release = asyncio.Event()
+        closed = []
+        thinking = 'data: {"delta":"working now", "thinking":true}\n\n'
+        async def stream(*args, **kwargs):
+            try:
+                yield thinking
+                await release.wait()
+                yield 'data: {"delta":"answer"}\n\n'
+                yield 'data: [DONE]\n\n'
+            finally:
+                closed.append(True)
+        monkeypatch.setattr(llm_core, "stream_llm", stream)
+        result = llm_core.stream_llm_with_fallback([("http://local/v1", "m", {})], [])
+        try:
+            # A whole-stream collection cannot detect minutes of invisible
+            # thinking or delayed persistence of an active generation.
+            first = await asyncio.wait_for(anext(result), 0.2)
+            assert first == thinking
+            release.set()
+            rest = [chunk async for chunk in result]
+            assert not any("working now" in chunk for chunk in rest)
+            assert any('"answer"' in chunk for chunk in rest)
+        finally:
+            release.set()
+            await result.aclose()
+        assert closed == [True]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("terminal", [
+    'data: [DONE]\n\n',
+    'event: error\ndata: {"status":503,"error":"unavailable"}\n\n',
+])
+def test_single_route_thinking_is_not_success_or_duplicated_on_error(monkeypatch, terminal):
+    thinking = 'data: {"delta":"analysis", "thinking":true}\n\n'
+    async def stream(*args, **kwargs):
+        yield thinking
+        yield terminal
+    monkeypatch.setattr(llm_core, "stream_llm", stream)
+    async def run():
+        return [chunk async for chunk in llm_core.stream_llm_with_fallback(
+            [("http://local/v1", "m", {})], [])]
+    chunks = asyncio.run(run())
+    assert chunks.count(thinking) == 1
+    assert sum(chunk.startswith("event: error") for chunk in chunks) == 1
+    assert not any("[DONE]" in chunk for chunk in chunks)
+
+
+def test_stopping_live_thinking_closes_provider_without_waiting_for_answer(monkeypatch):
+    closed = []
+    async def stream(*args, **kwargs):
+        try:
+            yield 'data: {"delta":"partial reasoning", "thinking":true}\n\n'
+            await asyncio.Event().wait()
+        finally:
+            closed.append(True)
+    monkeypatch.setattr(llm_core, "stream_llm", stream)
+    async def run():
+        result = llm_core.stream_llm_with_fallback([("http://local/v1", "m", {})], [])
+        assert "partial reasoning" in await asyncio.wait_for(anext(result), 0.2)
+        await result.aclose()
+    asyncio.run(run())
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("terminal", [
+    'data: [DONE]\n\n',
+    'event: error\ndata: {"status":503,"error":"unavailable"}\n\n',
+])
+def test_single_route_keeps_usage_after_thinking_on_terminal_failure(monkeypatch, terminal):
+    frames = [
+        'data: {"type":"model_actual","model":"served"}\n\n',
+        'data: {"delta":"analysis", "thinking":true}\n\n',
+        'data: {"type":"usage","data":{"output_tokens":4000}}\n\n',
+        'data: {"type":"finish_reason","reason":"length"}\n\n',
+    ]
+    async def stream(*args, **kwargs):
+        for frame in frames:
+            yield frame
+        yield terminal
+    monkeypatch.setattr(llm_core, "stream_llm", stream)
+    async def run():
+        return [chunk async for chunk in llm_core.stream_llm_with_fallback(
+            [("http://local/v1", "m", {})], [])]
+    chunks = asyncio.run(run())
+    assert chunks[:-1] == frames
+    assert chunks[-1].startswith("event: error")
+
+
 def test_explicit_foreground_policy_respects_adapter_ineligible_override(monkeypatch):
     calls = []
     terminal = 'event: error\ndata: {"status": 502, "error": "local adapter failure", "fallback_eligible": false}\n\n'
