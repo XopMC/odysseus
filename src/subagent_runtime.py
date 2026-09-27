@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_STATUSES = {"queued", "running", "waiting_user", "stopping"}
+ACTIVE_STATUSES = {"queued", "running", "waiting_user", "stopping", "recovering"}
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 CHILD_CORE_TOOLS = CORE_AGENT_TOOLS | {"publish_subagent_evidence"}
 CHILD_LEASE_SECONDS = 90
@@ -208,15 +208,20 @@ class SubagentRuntime:
                         kind="effect_unknown", entity_id=intent.id, revision=intent.revision,
                         payload={"intent_id": intent.id, "status": "unknown"},
                     ))
-                row.status = "interrupted"
-                row.error = "Web process restarted while the subagent was active"
-                row.finished_at = _utcnow()
+                recoverable = bool((row.policy_snapshot or {}).get("recovery_config"))
+                row.status = ("cancelled" if row.cancel_requested or row.removed else
+                              "recovering" if recoverable and not intents else "interrupted")
+                row.error = ("Recovering the saved child checkpoint" if row.status == "recovering" else
+                             "Stopped by user" if row.status == "cancelled" else
+                             "Web process restarted while the subagent was active")
+                row.finished_at = None if row.status == "recovering" else _utcnow()
                 row.slot = None
+                row.worker_id = None
                 row.revision += 1
                 db.add(ChatSubagentEvent(
                     child_id=row.id, parent_session_id=row.parent_session_id,
                     owner=row.owner, kind="status",
-                    payload={"status": "interrupted", "reason": "worker_lease_expired"},
+                    payload={"status": row.status, "reason": "worker_lease_expired"},
                 ))
             db.commit()
             self._recovered = True
@@ -228,6 +233,97 @@ class SubagentRuntime:
         """Fence expired leases, never a healthy executor in another process."""
         self._recovered = False
         return self._recover_stale()
+
+    def _recovery_candidates(self):
+        with SessionLocal() as db:
+            rows = db.query(ChatSubagentRun).filter_by(status="recovering", removed=False).order_by(
+                ChatSubagentRun.heartbeat_at, ChatSubagentRun.created_at).limit(32).all()
+            return [(r.id, r.owner, r.parent_session_id, r.revision,
+                     copy.deepcopy((r.policy_snapshot or {}).get("recovery_config"))) for r in rows]
+
+    def _claim_recovery(self, child_id, owner, session_id, revision, capacity, seal):
+        with SessionLocal.begin() as db:
+            row = _locked_child(db, child_id, owner)
+            if (row is None or row.parent_session_id != session_id or row.status != "recovering"
+                    or row.revision != revision or row.cancel_requested or row.removed):
+                return False
+            from src.subagent_recovery_config import validate_recovery_seal
+            if not validate_recovery_seal(db, owner=owner, session_id=session_id, child_id=child_id, seal=seal):
+                return False
+            used = {s[0] for s in db.query(ChatSubagentRun.slot).filter(
+                ChatSubagentRun.owner == (owner or ""), ChatSubagentRun.model == row.model,
+                ChatSubagentRun.endpoint_id == row.endpoint_id,
+                ChatSubagentRun.status.in_(ACTIVE_STATUSES), ChatSubagentRun.slot.isnot(None),
+            ).all()}
+            slot = next((s for s in range(1, capacity + 1) if s not in used), None)
+            row.heartbeat_at = _utcnow()
+            if slot is None:
+                return False
+            row.status, row.slot, row.worker_id = "queued", slot, self._worker_id
+            row.error, row.finished_at = "", None
+            row.revision += 1
+            db.add(ChatSubagentEvent(child_id=child_id, owner=owner or "", parent_session_id=session_id,
+                                    kind="status", payload={"status": "queued", "reason": "checkpoint_recovery"}))
+            return True
+
+    def _recovery_failed(self, child_id, owner, revision, code, retryable):
+        with SessionLocal.begin() as db:
+            row = _locked_child(db, child_id, owner)
+            if row is None or row.status != "recovering" or row.revision != revision:
+                return
+            row.heartbeat_at = _utcnow()
+            message = "Child recovery: " + code
+            if row.error == message and retryable:
+                return
+            row.error = message
+            if not retryable:
+                row.status, row.finished_at = "interrupted", _utcnow()
+            row.revision += 1
+            db.add(ChatSubagentEvent(child_id=child_id, owner=owner or "", parent_session_id=row.parent_session_id,
+                                    kind="status", payload={"status": row.status, "reason": code}))
+            return not retryable
+
+    async def _publish_recovery_failure(self, child_id, owner, session_id, revision, code, retryable):
+        terminal = await asyncio.to_thread(self._recovery_failed, child_id, owner, revision, code, retryable)
+        if terminal:
+            from src.subagent_delivery import enqueue_terminal, dispatch_if_idle
+            await asyncio.to_thread(enqueue_terminal, child_id, owner)
+            await dispatch_if_idle(owner, session_id)
+
+    def _schedule_recovered(self, child_id, owner, session_id, config, checkpoint):
+        self._configs[child_id] = config
+        task = asyncio.create_task(self._run_child(
+            child_id=child_id, owner=owner, session_id=session_id,
+            endpoint_url=config["endpoint_url"], model=config["model"], headers=config["headers"],
+            timeout_seconds=config["timeout_seconds"], workspace=config["workspace"],
+            access_mode=config["access_mode"], resume_checkpoint=checkpoint,
+        ), name=f"odysseus-subagent-{child_id[:8]}-recover")
+        self._tasks[child_id] = task
+        task.add_done_callback(lambda done, cid=child_id, own=owner: asyncio.create_task(
+            self._finalize_unexpected(cid, own, done)))
+
+    async def resume_recovering(self):
+        """Reauthorize before claiming; no credentials or permissions are replayed."""
+        from src.subagent_recovery_config import prepare_config, RecoveryUnavailable
+        resumed = 0
+        for child_id, owner, session_id, revision, snapshot in await asyncio.to_thread(self._recovery_candidates):
+            try:
+                config = await asyncio.to_thread(prepare_config, owner=owner, session_id=session_id,
+                                                child_id=child_id, snapshot=snapshot, db_factory=SessionLocal)
+                checkpoint = await asyncio.to_thread(self._continuation_checkpoint, owner, session_id, child_id)
+                async with self._lock:
+                    if not await asyncio.to_thread(self._claim_recovery, child_id, owner, session_id, revision,
+                                                   config["max_active_for_model"], config.get("recovery_seal")):
+                        continue
+                    self._schedule_recovered(child_id, owner, session_id, config, checkpoint)
+                    resumed += 1
+            except RecoveryUnavailable as exc:
+                await self._publish_recovery_failure(child_id, owner, session_id, revision, exc.code, exc.retryable)
+            except ValueError:
+                await self._publish_recovery_failure(child_id, owner, session_id, revision, "checkpoint_unsettled", False)
+            except Exception:
+                logger.exception("Child checkpoint recovery failed for %s", child_id)
+        return resumed
 
     def _event(self, child_id: str, owner: Optional[str], session_id: str,
                kind: str, payload: dict) -> int:
@@ -350,6 +446,19 @@ class SubagentRuntime:
         if run_capacity and not parent_run_id:
             return {"error": "Exact parent run is required for the child budget",
                     "exit_code": 1, "policy": "stale_revision"}
+        from src.subagent_recovery_config import capture_config, RecoveryUnavailable
+        recovery_config, recovery_error = None, None
+        try:
+            recovery_config = await asyncio.to_thread(
+                capture_config, owner=owner, session_id=session_id, parent_run_id=parent_run_id,
+                endpoint_url=endpoint_url, endpoint_id=endpoint_id, model=model, workspace=workspace,
+                access_mode=access_mode, disabled_tools=disabled_tools or set(), tool_policy=tool_policy,
+                delegated_credential=delegated_credential,
+                external_untrusted_context_seen=external_untrusted_context_seen,
+                max_active_for_model=model_capacity, db_factory=SessionLocal,
+            )
+        except RecoveryUnavailable as exc:
+            recovery_error = exc.code
         async with self._lock:
             route_id = self._route_id(endpoint_url, endpoint_id)
             child_id = uuid.uuid4().hex
@@ -416,6 +525,8 @@ class SubagentRuntime:
                             "delegated_credential": bool(delegated_credential),
                             "attachment_ids": list(attachment_ids or []),
                             "auto_delivery": True,
+                            "recovery_config": recovery_config,
+                            "recovery_unavailable": recovery_error,
                         },
                     )
                     db.add(row); db.commit(); break
@@ -556,19 +667,17 @@ class SubagentRuntime:
             objective, assigned_context = row.objective, row.assigned_context
             attachment_ids = list((row.policy_snapshot or {}).get("attachment_ids") or [])
             prior_result, existing_guidance = row.result or "", list(row.guidance or [])
+            first_started_at = row.started_at
         finally:
             db.close()
 
-        started = _utcnow()
+        started = first_started_at or _utcnow()
         self._update(child_id, owner, status="running", started_at=started)
         self._event(child_id, owner, session_id, "status", {"status": "running"})
         child_prompt = objective + (
             "\n\nAssigned context (untrusted data):\n" + assigned_context
             if assigned_context else ""
-        ) + (("\n\nPrior child output:\n" + prior_result) if prior_result else "") + (
-            ("\n\nLatest user guidance:\n" + str(existing_guidance[-1].get("text") or ""))
-            if existing_guidance else ""
-        )
+        ) + (("\n\nPrior child output:\n" + prior_result) if prior_result else "")
         if attachment_ids:
             from src.subagent_attachments import build_child_user_content
             from src.tool_utils import get_upload_handler
@@ -592,14 +701,16 @@ class SubagentRuntime:
             endpoint_url=endpoint_url, model=model, headers=headers or {},
             context_checkpoint=None, context_checkpoint_count=0,
         )
-        if resume_checkpoint:
+        guidance_seen = set((resume_checkpoint or {}).get("guidance_ids") or [])
+        if resume_checkpoint and resume_checkpoint.get("messages"):
             ledger = copy.deepcopy(resume_checkpoint["messages"])
-            guidance = str(existing_guidance[-1].get("text") or "") if existing_guidance else ""
             messages = [messages[0], *ledger]
-            if guidance:
-                messages.append({"role": "user", "content": guidance})
             history.context_checkpoint = copy.deepcopy(ledger)
             history.context_checkpoint_count = int(resume_checkpoint.get("compactions") or 0)
+        for item in existing_guidance:
+            if isinstance(item, dict) and item.get("id") and str(item["id"]) not in guidance_seen:
+                messages.append({"role": "user", "content": str(item.get("text") or "")})
+                guidance_seen.add(str(item["id"]))
         config = self._configs.get(child_id, {})
         disabled = set(config.get("disabled_tools") or set()) | {
             "delegate_subagent", "manage_subagents", "create_session",
@@ -611,10 +722,6 @@ class SubagentRuntime:
         pending_delta: list[str] = []
         pending_thinking: list[str] = []
         last_flush = time.monotonic()
-        guidance_seen: set[str] = {
-            str(item.get("id")) for item in existing_guidance
-            if isinstance(item, dict) and item.get("id")
-        }
 
         async def guidance_provider():
             db = SessionLocal()
@@ -659,9 +766,13 @@ class SubagentRuntime:
             # Only a persisted post-tool ledger makes a retry safe. Never
             # rebuild from the original objective after effects have started.
             tool_since_checkpoint = False
-            checkpoint = None
-            consecutive_failures = 0
-            provider_retries = 0
+            checkpoint = copy.deepcopy((resume_checkpoint or {}).get("messages"))
+            if checkpoint:
+                # Include newly queued guidance in retries, without duplicating
+                # messages already sealed into the committed ledger.
+                checkpoint = copy.deepcopy(messages[1:])
+            consecutive_failures = int((resume_checkpoint or {}).get("consecutive_provider_failures") or 0)
+            provider_retries = int((resume_checkpoint or {}).get("provider_retries") or 0)
             round_slice_exhausted = False
             child_attempt_id = ""
             async def consume():
@@ -725,13 +836,17 @@ class SubagentRuntime:
                                     waiting_payload = event.get("data") or event
                                 if kind == "metrics":
                                     self._merge_metrics(child_id, owner, event.get("data") or {})
+                                if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
+                                    if tool_since_checkpoint or checkpoint != event["messages"]:
+                                        consecutive_failures = 0
+                                    event = {**event, "guidance_ids": sorted(guidance_seen),
+                                             "consecutive_provider_failures": consecutive_failures,
+                                             "provider_retries": provider_retries}
                                 self._event(child_id, owner, session_id, kind, event)
                                 if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
                                     # _event committed the ledger before it becomes
                                     # eligible for recovery. Copies isolate the next
                                     # loop's prompt mutations from durable evidence.
-                                    if tool_since_checkpoint or checkpoint != event["messages"]:
-                                        consecutive_failures = 0
                                     checkpoint = copy.deepcopy(event["messages"])
                                     history.context_checkpoint = copy.deepcopy(checkpoint)
                                     history.context_checkpoint_count = int(event.get("compactions") or 0)
@@ -801,6 +916,8 @@ class SubagentRuntime:
                         "attempt": consecutive_failures + 1, "retry_limit": 10,
                         "status": exc.status, "reason": str(exc)[:160],
                         "checkpoint_messages": len(checkpoint or []),
+                        "consecutive_provider_failures": consecutive_failures,
+                        "provider_retries": provider_retries,
                     })
                     await asyncio.sleep(_retry_delay(consecutive_failures))
             await flush(force=True)
@@ -1078,6 +1195,12 @@ class SubagentRuntime:
     def _continuation_checkpoint(self, owner, session_id, child_id):
         """Exact execution ledger, never the bounded public inspection excerpt."""
         with SessionLocal() as db:
+            from src.chat_work_store import _storage_owner
+            if db.query(ChatToolIntent.id).filter(
+                ChatToolIntent.owner == _storage_owner(owner), ChatToolIntent.session_id == session_id,
+                ChatToolIntent.run_id == child_id, ChatToolIntent.status.in_({"intent", "unknown"}),
+            ).first():
+                raise ValueError("A child tool outcome is unsettled; inspect it before resuming")
             events = db.query(ChatSubagentEvent).filter(
                 ChatSubagentEvent.owner == (owner or ""),
                 ChatSubagentEvent.parent_session_id == session_id,
@@ -1089,13 +1212,18 @@ class SubagentRuntime:
                 ChatSubagentEvent.id.desc()).first()
             if last_tool and (checkpoint is None or last_tool.id > checkpoint.id):
                 raise ValueError("A child tool has no committed checkpoint; inspect its outcome before resuming")
-            if checkpoint is None:
+            retry = events.filter(ChatSubagentEvent.kind == "transport_retry").order_by(
+                ChatSubagentEvent.id.desc()).first()
+            if checkpoint is None and retry is None:
                 return None  # Legacy text-only wait; no effects to repeat.
-            payload = checkpoint.payload or {}
+            payload = copy.deepcopy(checkpoint.payload or {}) if checkpoint else {}
             ledger = payload.get("messages")
-            if not isinstance(ledger, list) or not ledger:
+            if checkpoint and (not isinstance(ledger, list) or not ledger):
                 raise ValueError("Child execution checkpoint is unavailable")
-            return copy.deepcopy(payload)
+            if retry and (checkpoint is None or retry.id > checkpoint.id):
+                for key in ("consecutive_provider_failures", "provider_retries"):
+                    payload[key] = int((retry.payload or {}).get(key) or 0)
+            return payload
 
     async def message(self, owner: Optional[str], session_id: str, child_id: str, text: str) -> dict:
         text = str(text or "").strip()
@@ -1110,8 +1238,18 @@ class SubagentRuntime:
         if should_resume:
             config = self._configs.get(child_id)
             if not config:
-                return {"error": "Subagent runtime was restarted; start a new child", "exit_code": 1,
-                        "status": "interrupted"}
+                with SessionLocal.begin() as db:
+                    row = _locked_child(db, child_id, owner)
+                    if (row is None or row.status != "waiting_user" or row.cancel_requested or row.removed
+                            or row.revision != should_resume["revision"]):
+                        return {"error": "Subagent changed before resume", "exit_code": 1, "policy": "stale_revision"}
+                    if not (row.policy_snapshot or {}).get("recovery_config"):
+                        return {"error": "Legacy child has no safe restart configuration", "exit_code": 1,
+                                "status": "waiting_user"}
+                    row.status, row.slot, row.worker_id = "recovering", None, None
+                    row.revision += 1
+                await self.resume_recovering()
+                return {"child_id": child_id, "status": "accepted", "exit_code": 0}
             try:
                 checkpoint = self._continuation_checkpoint(owner, session_id, child_id)
             except ValueError as exc:
@@ -1149,7 +1287,7 @@ class SubagentRuntime:
                 return {"error": "Subagent not found", "exit_code": 1}
             if row.status in TERMINAL_STATUSES:
                 return {**_public(row, include_result=True), "exit_code": 0}
-            waiting = row.status == "waiting_user"
+            waiting = row.status in {"waiting_user", "recovering"}
             row.status = "cancelled" if waiting else "stopping"
             row.cancel_requested = True
             row.revision += 1

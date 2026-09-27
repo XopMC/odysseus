@@ -168,7 +168,7 @@ def compose_wait_panel(
 
     candidates = [
         child for child in (children or [])
-        if isinstance(child, dict) and child.get("status") in {"running", "queued", "waiting_user", "stopping"}
+        if isinstance(child, dict) and child.get("status") in {"running", "queued", "waiting_user", "stopping", "recovering"}
         and (not run_id or child.get("parent_run_id") == run_id)
     ]
     priority = {"running": 0, "waiting_user": 1, "stopping": 2, "queued": 3}

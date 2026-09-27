@@ -101,6 +101,18 @@ def test_cross_owner_and_unattached_historical_child_cannot_dispatch(monkeypatch
     db.close()
 
 
+def test_backfill_skips_delivered_history_but_revisits_pending(monkeypatch):
+    factory = _store(monkeypatch)
+    assert delivery.backfill_terminal_deliveries() == [("alice", "s")]
+    assert delivery.backfill_terminal_deliveries() == [("alice", "s")]
+    token = delivery.claim_pending("alice", "s")
+    assert delivery.backfill_terminal_deliveries() == [("alice", "s")]
+    delivery.mark_delivered("alice", "s", token, "r" * 32)
+    assert delivery.backfill_terminal_deliveries() == []
+    with factory() as db:
+        assert db.query(ChatSubagentDelivery).count() == 2
+
+
 def test_expired_claim_requeues_only_if_no_durable_run_used_token(monkeypatch):
     factory = _store(monkeypatch)
     delivery.enqueue_terminal("a" * 32, "alice")

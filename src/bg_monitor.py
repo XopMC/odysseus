@@ -49,7 +49,7 @@ def _background_result_message(rec):
     return untrusted_context_message("background job output", inject)
 
 
-async def _drain_agent(sess, messages, *, outcome=None):
+async def _drain_agent(sess, messages, *, outcome=None, prepared=None):
     """Run the agent loop headless against a session. Returns
     (final_prose, tool_events) — tool_events in the same shape the live chat
     saves, so the frontend rebuilds them as standard agent-thread tool cards.
@@ -64,14 +64,19 @@ async def _drain_agent(sess, messages, *, outcome=None):
     terminal = None
     saw_done = False
     max_rounds, max_tool_calls = _followup_limits()
+    options = dict(prepared or {})
+    endpoint_url = options.pop("endpoint_url", sess.endpoint_url)
+    model = options.pop("model", sess.model)
+    options.pop("messages", None)
+    options.setdefault("headers", getattr(sess, "headers", None))
+    options.setdefault("context_length", getattr(sess, "context_length", 0) or 0)
+    options.setdefault("owner", getattr(sess, "owner", None))
     async for chunk in stream_agent_loop(
-        sess.endpoint_url, sess.model, messages,
-        headers=getattr(sess, "headers", None),
-        context_length=getattr(sess, "context_length", 0) or 0,
+        endpoint_url, model, messages,
         session_id=sess.id,
         max_rounds=max_rounds,
         max_tool_calls=max_tool_calls,
-        owner=getattr(sess, "owner", None),
+        **options,
     ):
         # Provider errors have an `event: error` prelude rather than starting
         # with data. Ignoring those used to turn a failed stream into success.
@@ -189,16 +194,27 @@ async def _run_followup(rec: dict) -> bool:
     except Exception:
         pass
 
-    context = sess.get_context_messages()
-    context.append(_background_result_message(rec))
-
     outcome = {}
-    full, tool_events = await _drain_agent(sess, context, outcome=outcome)
+    from src.background_followup_context import prepare_background_followup, BackgroundFollowupContextError
+    try:
+        prepared = await asyncio.to_thread(prepare_background_followup, sess, rec)
+    except BackgroundFollowupContextError as exc:
+        # Deliver completed work even when its old authority cannot be safely
+        # reconstructed. Never turn missing provenance into container access.
+        outcome = {"status": "delivery_only", "reason": exc.code}
+        full = (f"[Background job {rec['id']} finished]\n\n{bg_jobs.result_text(rec)}\n\n"
+                "[Automatic continuation is unavailable under the current permissions. "
+                "The command result is saved; continue from this chat.]")
+        tool_events = []
+    else:
+        if agent_runs.is_active(sess.id):
+            return False
+        full, tool_events = await _drain_agent(sess, prepared["messages"], outcome=outcome, prepared=prepared)
     if outcome["status"] == "waiting_user":
         note = ("[Background continuation is waiting for your answer or approval. "
                 "The task is not completed.]")
         full = f"{full}\n\n{note}".strip()
-    elif outcome["status"] != "completed":
+    elif outcome["status"] not in {"completed", "delivery_only"}:
         note = (f"[Background continuation not completed ({outcome['reason']}). "
                 "Progress was saved; continue the task from this chat. "
                 "The background command will not be replayed automatically.]")
@@ -217,6 +233,8 @@ async def _run_followup(rec: dict) -> bool:
             "bg_job_id": rec["id"],
             "bg_result": bg_jobs.result_text(rec)[:4000],
             "bg_followup": outcome,
+            **({"trusted": False, "tool_gate_untrusted": True, "source": "background job output"}
+               if outcome["status"] == "delivery_only" else {}),
         },
     ))
     sm.save_sessions()
@@ -232,12 +250,12 @@ async def _loop():
         try:
             if monotonic() - last_child_recovery >= 30:
                 from src.subagent_runtime import runtime as children
-                expired = await asyncio.to_thread(children.recover_stale)
+                await asyncio.to_thread(children.recover_stale)
+                await children.resume_recovering()
                 last_child_recovery = monotonic()
-                if expired:
-                    from src.subagent_delivery import backfill_terminal_deliveries, dispatch_if_idle
-                    for child_owner, child_session in await asyncio.to_thread(backfill_terminal_deliveries):
-                        await dispatch_if_idle(child_owner, child_session)
+                from src.subagent_delivery import backfill_terminal_deliveries, dispatch_if_idle
+                for child_owner, child_session in await asyncio.to_thread(backfill_terminal_deliveries):
+                    await dispatch_if_idle(child_owner, child_session)
             from src.chat_work_store import store as chat_work_store
             from src.goal_controller import dispatch_goal_continuation
             questions = await asyncio.to_thread(chat_work_store.expired_goal_questions)

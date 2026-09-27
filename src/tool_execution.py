@@ -1576,11 +1576,27 @@ async def _execute_tool_block_impl(
         _is_bg, _bg_cmd = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
+            from src.background_followup_context import (
+                BackgroundFollowupContextError, capture_background_followup_context,
+            )
+            try:
+                followup_context = capture_background_followup_context(
+                    owner=owner, session_id=session_id, parent_run_id=parent_run_id,
+                    endpoint_url=current_endpoint_url, model=current_model,
+                    workspace=workspace, access_mode=access_mode,
+                    disabled_tools=parent_disabled_tools, tool_policy=parent_tool_policy,
+                    delegated_credential=delegated_credential, allowed_tools=parent_allowed_tools,
+                )
+            except BackgroundFollowupContextError:
+                # Execution was already authorized. Deliver its result, but do
+                # not invent authority for a later unattended model turn.
+                followup_context = None
             try:
                 # SSH itself starts locally; its encoded request carries the
                 # remote cwd. A host-only directory cannot be Popen's local cwd.
                 launch_cwd = os.path.dirname(os.path.abspath(host_execution.__file__)) if host_background else agent_cwd()
-                rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=launch_cwd)
+                rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=launch_cwd,
+                                     followup_context=followup_context)
             except FileNotFoundError:
                 # Popen failed before creating the child (for example because
                 # a selected workspace was removed). No command ran, so this
@@ -1593,12 +1609,19 @@ async def _execute_tool_block_impl(
                 }
             short = _bg_cmd.strip().split(chr(10))[0][:80]
             desc = f"bash (background): {short}"
+            continuation_notice = (
+                "You will be automatically re-invoked with its full output when it finishes, "
+                "provided the original execution context and current permissions remain valid. "
+                "Continue with other work, or end your turn now and resume when the result arrives. "
+                if followup_context else
+                "Its result will be delivered to this chat when it finishes. Automatic agent "
+                "continuation is unavailable because its execution context could not be preserved; "
+                "further work will need a new turn in this chat. Continue with other work or end your turn. "
+            )
             result = {
                 "output": (
                     f"Started background job `{rec['id']}`. It is running detached; "
-                    f"do NOT wait for it or poll it. You will be automatically re-invoked "
-                    f"with its full output when it finishes. Continue with other work, or "
-                    f"end your turn now and resume when the result arrives. If the user "
+                    f"do NOT wait for it or poll it. {continuation_notice}If the user "
                     f"later asks to check progress or stop it, call the manage_bg_jobs "
                     f"tool yourself (output or kill); do not tell them to run a tool "
                     f"command, and do not surface raw tool syntax in your reply."

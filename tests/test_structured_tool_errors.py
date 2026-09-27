@@ -66,7 +66,7 @@ def test_background_bash_missing_workspace_is_definite_not_started(monkeypatch, 
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(host_execution, "enabled_for", lambda owner: False)
 
-    def launch(_command, *, session_id, cwd):
+    def launch(_command, *, session_id, cwd, followup_context=None):
         assert cwd == str(missing)
         raise FileNotFoundError(2, "No such file or directory", str(missing))
 

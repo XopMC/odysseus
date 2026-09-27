@@ -138,6 +138,17 @@ def _restore_goal_summary_checkpoint(ctx, summary: str) -> None:
     _restore_goal_checkpoint_messages(ctx, ledger)
 
 
+def _restore_ordinary_checkpoint_messages(ctx, messages: list) -> None:
+    """Install a verified ledger+suffix while retaining fresh request context."""
+    import copy
+    preface = copy.deepcopy(ctx.preface)
+    project_context = [copy.deepcopy(item) for item in ctx.route_messages[len(preface):]
+                       if isinstance(item, dict)
+                       and (item.get("metadata") or {}).get("source") == "project memory and skills"]
+    ctx.messages = preface + project_context + copy.deepcopy(messages)
+    ctx.route_messages = copy.deepcopy(ctx.messages)
+
+
 def _stream_failure_status(chunk: str) -> Optional[int]:
     """Extract a provider status without retaining provider-supplied detail."""
 
@@ -395,6 +406,16 @@ def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], curre
     repaired = list(messages or [])
     repaired.append({"role": "user", "content": current})
     return repaired
+
+
+def _prepare_stream_messages(messages, current_message, *, tool_approval=False, child_delivery=False):
+    if tool_approval:
+        return list(messages)
+    if child_delivery:
+        # The internal delivery token was validated before context building.
+        # Results are new evidence, never new human authority or permissions.
+        return list(messages) + [untrusted_context_message("child-agent results", current_message)]
+    return _ensure_current_request_is_latest_user(messages, current_message)
 
 
 _WEB_FOLLOWUP_RE = re.compile(
@@ -1745,6 +1766,36 @@ def setup_chat_routes(
                         ctx, str(durable_checkpoint.get("summary") or ""),
                     )
 
+        elif (chat_mode == "agent" and not incognito and not compare_mode
+              and not tool_approval_continuation):
+            ordinary_messages = await asyncio.to_thread(
+                agent_runs.covered_checkpoint_messages, sess, ctx.user,
+            )
+            if ordinary_messages is not None:
+                _restore_ordinary_checkpoint_messages(ctx, ordinary_messages)
+
+        # Capture before generation, including for Goal runs that may complete
+        # on this attempt. Terminal validation refuses concurrent edits/guidance.
+        checkpoint_source = None
+        checkpoint_input_covered = not durable_checkpoint
+        if durable_checkpoint and await asyncio.to_thread(
+            agent_runs.covered_checkpoint_messages, sess, ctx.user,
+        ) is not None:
+            # The unchanged Goal restore includes only its latest user turn.
+            # Multiple new rows must not acquire coverage they never received.
+            covered_count = (durable_checkpoint.get("coverage") or {}).get("covered_count", 0)
+            checkpoint_input_covered = (
+                len(sess.history) == covered_count
+                or (len(sess.history) == covered_count + 1 and sess.history[-1].role == "user")
+            )
+        if (chat_mode == "agent" and not incognito and not compare_mode
+                and checkpoint_input_covered):
+            try:
+                from src.checkpoint_coverage import capture_source
+                checkpoint_source = await asyncio.to_thread(capture_source, sess, ctx.user)
+            except Exception:
+                logger.debug("Working checkpoint source unavailable", exc_info=True)
+
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 
         # Query active document — prefer explicit ID from frontend, fall back to session lookup
@@ -2159,10 +2210,10 @@ def setup_chat_routes(
                 if foreground_policy.enabled
                 else ctx.messages
             )
-            messages = (
-                list(context_source)
-                if tool_approval_continuation
-                else _ensure_current_request_is_latest_user(context_source, message)
+            messages = _prepare_stream_messages(
+                context_source, message,
+                tool_approval=tool_approval_continuation,
+                child_delivery=subagent_continuation,
             )
 
             # Auto-compact notification
@@ -3294,6 +3345,7 @@ def setup_chat_routes(
                 "allow_bash": str(allow_bash).lower() == "true",
                 "allow_web_search": bool(_search_enabled),
                 "goal": bool(active_goal),
+                "checkpoint_source": checkpoint_source,
                 **({"subagent_delivery_token": subagent_delivery_token}
                    if subagent_delivery_token else {}),
             },

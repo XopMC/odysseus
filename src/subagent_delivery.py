@@ -79,13 +79,20 @@ def backfill_terminal_deliveries() -> list[tuple[str | None, str]]:
         rows = db.query(
             ChatSubagentRun.id, ChatSubagentRun.owner,
             ChatSubagentRun.parent_session_id, ChatSubagentRun.policy_snapshot,
-        ).filter(
+        ).outerjoin(ChatSubagentDelivery, ChatSubagentDelivery.child_id == ChatSubagentRun.id).filter(
             ChatSubagentRun.status.in_(_TERMINAL),
             ChatSubagentRun.parent_run_id.isnot(None),
-        ).all()
+            ChatSubagentDelivery.child_id.is_(None),
+            ChatSubagentRun.policy_snapshot["auto_delivery"].as_boolean().is_(True),
+        ).order_by(ChatSubagentRun.created_at).limit(100).all()
+        # Reconcile pending claims too, but never load all historical child
+        # policy/metrics payloads at every monitor tick.
+        pending = db.query(ChatSubagentDelivery.owner, ChatSubagentDelivery.parent_session_id).filter(
+            ChatSubagentDelivery.status.in_({"pending", "claimed"}),
+        ).distinct().all()
     finally:
         db.close()
-    sessions: set[tuple[str | None, str]] = set()
+    sessions: set[tuple[str | None, str]] = {(owner or None, sid) for owner, sid in pending}
     for child_id, owner, session_id, snapshot in rows:
         if isinstance(snapshot, dict) and snapshot.get("auto_delivery"):
             enqueue_terminal(child_id, owner)

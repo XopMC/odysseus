@@ -1171,6 +1171,7 @@ async def _startup_event():
             }
             if recovered:
                 logger.info("[startup] recovered %d interrupted chat run(s)", len(recovered))
+            await subagent_runtime.resume_recovering()
             from src.subagent_delivery import (
                 backfill_terminal_deliveries, dispatch_if_idle,
             )

@@ -142,6 +142,7 @@ class _Run:
         "progress",
         "wait",
         "health_metrics",
+        "checkpoint_fresh", "checkpoint_tail", "saved_message_id", "coverage_failed",
     )
 
     def __init__(self) -> None:
@@ -177,6 +178,10 @@ class _Run:
         self.terminal_reason: Optional[str] = None
         self.rendered_rounds: set[int] = set()
         self.message_saved: bool = False
+        self.checkpoint_fresh = False
+        self.checkpoint_tail = []
+        self.saved_message_id = None
+        self.coverage_failed = False
         from src.run_activity_snapshot import RunActivitySnapshot
         self.activity = RunActivitySnapshot()
         self.progress = ProgressTracker(self.started_at)
@@ -438,6 +443,20 @@ def _publish(run: _Run, ev: str) -> None:
         ))
         if isinstance(payload, dict):
             observed_payload = payload
+            kind = payload.get("type")
+            if kind == "message_saved":
+                if run.saved_message_id is not None:
+                    run.coverage_failed = True
+                run.saved_message_id = payload.get("id")
+            if (payload.get("error") or kind in {"agent_terminal", "context_compaction_failed"}):
+                run.coverage_failed = True
+            if kind in {"tool_start", "compacted"}:
+                # A tool result must enter a subsequent complete checkpoint.
+                run.checkpoint_fresh = False
+            if (run.checkpoint_fresh and payload.get("delta")
+                    and not payload.get("thinking")
+                    and payload.get("channel") not in {"thinking", "thought"}):
+                run.checkpoint_tail.append(str(payload["delta"]))
         if isinstance(payload, dict) and payload.get("type") == "context_usage":
             event_type = "context_usage"
             snapshot = normalize_context_usage(payload.get("data"))
@@ -565,6 +584,8 @@ def _publish(run: _Run, ev: str) -> None:
                     }
             elif event_type == "context_checkpoint" and isinstance(payload.get("messages"), list):
                 messages = payload["messages"]
+                run.checkpoint_fresh = True
+                run.checkpoint_tail = []
                 checkpoint_compactions = int(payload.get("compactions") or 0)
                 if run.context_usage and not run.compaction_pending:
                     # The agent loop may have recreated its local counter for
@@ -1510,6 +1531,62 @@ def context_checkpoint_for_session(session_id: str) -> Optional[dict]:
     return dict(value)
 
 
+def covered_checkpoint_messages(session, owner) -> Optional[list]:
+    """Ordinary Agent follow-ups require exact owner/run/transcript coverage."""
+    from src.checkpoint_coverage import restore_messages
+    try:
+        run = _RUNS.get(session.id)
+        from core.database import ChatRunState, SessionLocal
+        with SessionLocal() as db:
+            row = db.query(ChatRunState).filter_by(session_id=session.id).order_by(
+                ChatRunState.started_at.desc(), ChatRunState.run_id.desc()).first()
+            if (row is None or row.status != "done"
+                    or row.owner != (owner or _SINGLE_USER_OWNER_KEY)):
+                return None
+            if run is not None:
+                if (run.status != "done" or run.run_id != row.run_id
+                        or (run.owner or None) != (owner or None)):
+                    return None
+                return restore_messages(session, owner, run.run_id,
+                                        run.continuation.get("working_checkpoint"))
+            return restore_messages(session, owner, row.run_id,
+                                    (row.continuation or {}).get("working_checkpoint"))
+    except Exception:
+        logger.debug("[agent-run] ordinary checkpoint coverage unavailable", exc_info=True)
+        return None
+
+
+def _seal_terminal_checkpoint(run: _Run, terminal_status: str) -> None:
+    if terminal_status != "done" or not run.checkpoint_fresh or run.coverage_failed:
+        return
+    checkpoint = run.continuation.get("working_checkpoint")
+    if not isinstance(checkpoint, dict) or not checkpoint.get("messages"):
+        return
+    try:
+        from src.checkpoint_coverage import seal_checkpoint
+        checkpoint = dict(checkpoint)
+        messages = list(checkpoint["messages"])
+        tail = "".join(run.checkpoint_tail)
+        if tail:
+            messages.append({"role": "assistant", "content": tail})
+        checkpoint["messages"] = messages
+        coverage = seal_checkpoint(
+            run.continuation.get("checkpoint_source"), run_id=run.run_id,
+            session_id=run.session_id, owner=run.owner,
+            saved_message_id=run.saved_message_id, checkpoint=checkpoint,
+        )
+        if coverage:
+            checkpoint["coverage"] = coverage
+            checkpoint["ledger_hash"] = hashlib.sha256(json.dumps(
+                messages, ensure_ascii=False, separators=(",", ":"), default=str,
+            ).encode()).hexdigest()
+            # Persist from the in-memory continuation too: subsequent state
+            # writes must not overwrite a seal added only to the database.
+            run.continuation["working_checkpoint"] = checkpoint
+    except Exception:
+        logger.debug("[agent-run] terminal checkpoint not sealed", exc_info=True)
+
+
 async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
                  prev_task: Optional[asyncio.Task] = None) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning
@@ -1580,6 +1657,27 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         # This is important for approval and Stop: history readers must never
         # observe the short stored-chat estimate in that handoff window.
         _persist_timeline_v2(session_id, run, status=terminal_status)
+        if (terminal_status == "done" and run.checkpoint_fresh
+                and not run.coverage_failed and run.continuation.get("checkpoint_source")):
+            sealing = asyncio.create_task(asyncio.to_thread(
+                _seal_terminal_checkpoint, run, terminal_status,
+            ))
+            cancelled_while_sealing = False
+            while not sealing.done():
+                try:
+                    await asyncio.shield(sealing)
+                except asyncio.CancelledError:
+                    # A replacement/Stop can arrive during the DB/hash work.
+                    # Join that worker before final persistence so it cannot
+                    # add a seal after we have marked this run interrupted.
+                    cancelled_while_sealing = True
+            if cancelled_while_sealing:
+                terminal_status = run.terminal_status = "stopped"
+                run.terminal_reason = run.terminal_reason or "cancelled"
+                checkpoint = run.continuation.get("working_checkpoint")
+                if isinstance(checkpoint, dict):
+                    checkpoint.pop("coverage", None)
+                _persist_timeline_v2(session_id, run, status=terminal_status)
         if hasattr(run.buffer, 'checkpoint'):
             try:
                 run.buffer.checkpoint(terminal_status)
@@ -1642,6 +1740,16 @@ def start(
            if isinstance(prior_continuation.get("working_checkpoint"), dict) else {}),
         **dict(continuation or {}),
     }
+    checkpoint = run.continuation.get("working_checkpoint")
+    if isinstance(checkpoint, dict):
+        # Inheritance is still available to Goal retries, but a replacement
+        # run cannot reuse its predecessor's terminal coverage as its own.
+        run.continuation["working_checkpoint"] = {
+            key: value for key, value in checkpoint.items() if key != "coverage"
+        }
+    source = run.continuation.get("checkpoint_source")
+    if isinstance(source, dict):
+        run.continuation["checkpoint_source"] = {**source, "run_id": run.run_id}
     _seed_context_ledger(run)
     if os.getenv('ODYSSEUS_DURABLE_CHAT_REPLAY') == '1':
         from src.chat_replay_log import ReplayLog

@@ -46,7 +46,7 @@ browser acceptance pending.
 | Child mini-goal lifecycle, including model-selected deadlines | Live child 6 ran 3m41 despite timeout_seconds=5 and completed 11 tools/7 checkpoints; semantic completion and broader final-image lifecycle acceptance remain open |
 | Real provider interruption after completed effects | Unit/integration covered; live safe fixture pending |
 | Parent and child tools/permissions | Real QA children 1/3 completed files and checks with inherited host policy; child 2 reasoning loop identified and stopped, guard verified against captured stream |
-| Restart recovery and durable child configuration | Open; restart currently marks child interrupted and delivers retained work |
+| Restart recovery and durable child configuration | Combined candidate implements non-secret config, fresh credentials/policy/host/parent checks, revision+authority-seal claim, same-child restart, durable guidance and retry counters. Focused tests pass; final-image large Goal evidence remains required. Legacy missing configuration and unknown effects fail closed |
 | Independent context and automatic compaction | Live child 5 retained 23 checkpoints and compacted once. Popup explains 75% of saved 65,536 usable-input cap = 37.3% of 131,840 window. Ordinary post-Goal checkpoint reuse remains open |
 | Parent works while children run, receives results asynchronously | TelemetryLab children 4/5 started 109ms apart while parent worked; child 6 real tools, final result readback and durable delivery verified. Restart recovery remains open |
 | Goal ordinary-question timeout vs permission gates | Existing prior slice; recheck new realistic fixture |
@@ -54,11 +54,11 @@ browser acceptance pending.
 | Safari reload and independently authenticated second browser | Passed active QA reload/old thinking/scroll-return on release-5ac5593; repeat after next release |
 | Newest history, accurate counts and live/replay parity | Restored 53 lost round views from full journal; active counter reached 64 in Opera, next release and broader sustained acceptance remain open |
 | Comparison with Codex, Claude and ZCode | Research started; map concrete gaps rather than adopting features speculatively |
-| Git/Jetson exact image, regression and rollback verification | release-67c9d86 exact Git/runtime/helper hashes, full 7,532 passed, isolated 102 passed, host-only cwd tools and cross-browser delivery verified; next slice must repeat release checks |
-| Subagent list polling stays bounded as output grows | Real six-child baseline 695,282 bytes. New fixed-size metrics projection passes 84 related tests; detail/result preserved. Final production byte comparison pending |
-| Ordinary follow-up preserves working context after Goal completion | Open: source coverage seal, exact owner/run anchor, edit/delete/concurrent-guidance invalidation, fresh authorization and chronological suffix required; no blind restore |
-| Background command continuation preserves selected workspace/policy | Command cwd/result delivery verified on host-only path. Direct bg_monitor follow-up lacks full foreground context; shared authorized continuation still required |
-| Continuous final-image six-hour interactive acceptance | Open; old probe logs are not proof for newer images; no continuous probe on release-67c9d86 established |
+| Git/Jetson exact image, regression and rollback verification | release-ce25ae0 exact Git/runtime hashes; full7,561 passed, isolated95 passed. Actual Safari parallel children/Python/delivery and Opera Stop plus both reloads passed; no global acceptance claim |
+| Subagent list polling stays bounded as output grows | Verified on production2f4983b: six-child list695,282 ->36,971 bytes; each metrics projection <1KiB. Detail81,384 bytes/result3,388 chars unchanged, actual Safari/Opera detail opens. DB JSON decoding/history cardinality not yet bounded |
+| Ordinary follow-up preserves working context after Goal completion | Combined candidate implements pre-generation source seal, exact owner/run/terminal anchor, edit/delete/concurrent-guidance invalidation, current-image suffix and fresh context. Unit/detached-run restart checks pass; old unsealed/system-summary history retains safe fallback, no retroactive coverage claim |
+| Background command continuation preserves selected workspace/policy | Combined candidate binds original job context and revalidates workspace/host/policy/credentials. Missing-provenance jobs deliver untrusted output without a new execution. Shared foreground/background multi-process run claim remains open |
+| Continuous final-image six-hour interactive acceptance | Open; old probe logs are not proof for newer images; no continuous probe on release-ce25ae0 established |
 
 ## Safe project acceptance fixture
 

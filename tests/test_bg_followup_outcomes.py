@@ -37,6 +37,8 @@ def _setup(monkeypatch, chunks):
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: False)
     monkeypatch.setattr(bg_monitor.bg_jobs, "result_text", lambda rec: "Job output")
     monkeypatch.setattr(chat_work_store.store, "get", lambda owner, session_id: {"goal": None})
+    monkeypatch.setattr("src.background_followup_context.prepare_background_followup",
+                        lambda sess, rec: {"messages": sess.get_context_messages()})
     monkeypatch.setattr(settings, "get_setting", lambda key, default=None: {
         "agent_max_rounds": 80, "agent_max_tool_calls": 25,
     }.get(key, default))
@@ -64,6 +66,21 @@ def test_active_goal_queues_untrusted_background_context_without_second_agent(mo
     assert (owner, session_id, job_id) == ("test-owner", "test-session", "job-goal")
     assert message["metadata"]["trusted"] is False
     assert "UNTRUSTED SOURCE DATA" in message["content"]
+
+
+def test_legacy_job_delivers_untrusted_result_without_new_execution(monkeypatch):
+    captured, session = _setup(monkeypatch, [{"delta": "must not run"}])
+    from src.background_followup_context import BackgroundFollowupContextError
+    def missing(*args):
+        raise BackgroundFollowupContextError("provenance_unavailable")
+    monkeypatch.setattr("src.background_followup_context.prepare_background_followup", missing)
+    assert asyncio.run(bg_monitor._run_followup({"id": "legacy", "session_id": session.id}))
+    assert "kwargs" not in captured
+    saved = captured["messages"][0]
+    assert saved.metadata["bg_followup"] == {"status": "delivery_only", "reason": "provenance_unavailable"}
+    assert saved.metadata["trusted"] is False
+    assert saved.metadata["tool_gate_untrusted"] is True
+    assert "Job output" in saved.content
 
 
 @pytest.mark.parametrize("event,status,reason", [

@@ -43,7 +43,7 @@ def setup_subagent_routes():
         rows = runtime.list(owner, session_id)
         return {
             "subagents": rows,
-            "active": sum(row["status"] in {"queued", "running", "waiting_user", "stopping"} for row in rows),
+            "active": sum(row["status"] in {"queued", "running", "waiting_user", "stopping", "recovering"} for row in rows),
             "max_active_per_model": MAX_ACTIVE_PER_MODEL,
             "max_active_on_parent_model": MAX_ACTIVE_ON_PARENT_MODEL,
             "latest_cursor": runtime.latest_cursor(owner, session_id),

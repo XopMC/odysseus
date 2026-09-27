@@ -1,7 +1,7 @@
 import { t } from './i18n.js';
 
 const api = window.location.origin;
-const activeStates = new Set(['queued', 'running', 'waiting_user', 'stopping']);
+const activeStates = new Set(['queued', 'running', 'waiting_user', 'stopping', 'recovering']);
 let sessionId = '';
 let rows = [];
 let cursor = 0;

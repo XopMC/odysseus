@@ -562,3 +562,97 @@ Additional open observations for the next audit slice:
 - Final source frozen after review/cleanup fix: **7,561 passed,25 skipped,
   115 subtests**,9 existing warnings,208.87s,exit0. Log:
   `/tmp/odysseus-child-leases-release-full.log`. Static JS syntax/diff checks green.
+
+## 21:15–21:23 UTC — executor-fencing release and actual browser exercise
+
+- Exact SHA `ce25ae01df649132c133caa71aad5726992d4bb1`: local/public-fork
+  main+master/Jetson checkout/production label agree. Candidate built from exact
+  git archive; isolated no-network Jetson **95 passed**,8.52s; alternate port200.
+  App/teams online backups `*-pre-ce25ae0.db` integrity checked and mode0600.
+  Pre-switch running/queued/running-child/stopping/waiting counts all zero.
+- App-only release started **21:15:57.153 UTC**. Startup initially returned
+  HTTP000/HTTPS502, then readiness HTTP200, healthy/zero restarts. Dedicated host
+  helper and VPN/Wi-Fi/network unchanged. Runtime SHA256 matches local:
+  subagent_runtime `f53571b447cc9446547258789608962eb3aa91808dff18bf3ff4dcaac44695e0`;
+  bg_monitor `dd84fa0581c35855429e896f6563ee18f775400a19f97316e024ffbc991ddbc2`.
+- Actual Safari typed/submitted bounded QA in existing safe chat
+  `f56ba884-9dec-4c00-97f1-73de6c3866e7`. Parent Qwen base created two independent
+  children and returned without joining. Parent run `c7328117d82648de97dffe0ad14c282b`
+  done/cursor231; :2 not used. Children started117ms apart:
+  A `6c1bffcceee842ebbf47f2ad74faed62` on:3 at21:17:55.137;
+  B `208e1bd068974bbfb47fd6cd2904da22` on:4 at21:17:55.254.
+- A completed at21:18:38.082. Durable Python tool_output stdout338350/exit0,
+  native effect receipts done, five committed ledger snapshots. Parent delivery
+  is delivered to fresh run `7594379ddd09408c9965a7d16b949730`,done/cursor183.
+  Both browsers show its actual338350 result after reload, while B was still
+  working. This proves background completion after the original parent ended.
+- Used independently authenticated Opera to select B's exact Stop by keyboard
+  and submit it. B became cancelled at21:19:09.047 with cancel_requested=True
+  and slot=None. Three completed Python receipts/checkpoints retained,25 thinking
+  batches retained. No unacknowledged intent/unknown effect in this QA chat.
+  Safari reload/open-detail showed B stopped with nonempty reasoning and both
+  children (0 active/2 total); Opera reload preserved result/status. Screenshot
+  showed11 messages and12.8% context, no blank page/overlay. Two-browser testing
+  is not a claim that production used two server processes: distributed races
+  were exercised separately by the real-DB two-executor tests.
+- A performed redundant verification (Python in rounds1/3; evidence publication
+  rounds2/4/5) before finishing. Distinct call IDs; model ledger contains actual
+  short evidence-ID/hash receipts and duplicate=True on the third publication.
+  Thus no demonstrated parser replay or missing result in that case; model
+  inefficiency remains worth watching, not falsely reported as a fixed loop.
+- Content-free post-startup checks: zero locked-DB/Traceback/HTTP500/ERROR lines;
+  global active runs/children0. Current ce25ae0 and rollback2f4983b retained.
+  Removed obsolete67c9d86 image and candidate tag only after reference checks;
+  no chat/workspace/database/backups removed (images rebuildable).
+- Overall Goal remains active. Full safe restart-resume configuration/auth,
+  ordinary post-Goal context reuse, background-followup parity and final-image
+  continuous six-hour acceptance are still open. No continuous probe on ce25ae0
+  has been established; elapsed time alone must not be called a soak pass.
+# Combined follow-up batch (2026-09-27 21:57 UTC, pending release)
+
+User requested a single integrated patch/test/release cycle and a substantial
+production QA Goal with parallel children, not another arithmetic acceptance.
+This entry does not close the overall Goal or establish a six-hour soak.
+
+- New children persist non-secret recovery configuration. Expired executors
+  enter `recovering` only when no pending effect was found. Fresh owner/model,
+  endpoint credentials, original execution host/workspace, access mode, tool
+  restrictions and parent lineage are checked before a revision/authority-seal
+  CAS reacquires a model slot. Explicit Stop wins; unsupported legacy children
+  are not silently reconstructed or replayed.
+- Guidance IDs and provider-failure counters accompany durable child ledgers.
+  Restart delivers all unconsumed guidance exactly once and does not reset the
+  ten-retry allowance. Unsettled tool boundaries remain fenced.
+- Ordinary Agent follow-ups may reuse a freshly sealed working ledger. The
+  seal is captured before generation and bound to owner/run/source prefix and
+  the exact saved terminal assistant row. Edits, deletes, unexpected concurrent
+  writes and legacy-compaction changes invalidate it. Current images, fresh
+  runtime context and untrusted asynchronous child results remain present.
+  Plain Chat and old unsealed checkpoints retain the existing safe fallback.
+- Background jobs now retain original execution provenance; automatic follow-up
+  revalidates credentials, policy and selected workspace. Legacy records without
+  that provenance deliver their output as explicitly untrusted data without
+  inventing authority to execute in the application container.
+- Terminal child delivery recovery scans only missing/pending deliveries, not
+  every delivered child's historical payload on each periodic sweep.
+- Focused regression runs passed (recovery/policy/lease/delivery/background
+  subsets); full integrated pytest with coverage started at ~21:57 UTC in
+  `/tmp/odysseus-combined-recovery-full.log`. Static JS syntax exit 0.
+- Production remains `release-ce25ae0`, healthy/zero restarts; immediately before
+  this batch's full suite, durable running runs=0 and active children=0.
+- Remaining architectural limitation: ordinary background headless continuation
+  still needs a session claim shared with foreground starts for multi-process
+  collision prevention. Fresh provenance alone is not proof of that fence.
+- Large-chat coverage hashing is off the event loop and streams per-row digests,
+  but ORM transcript reads still materialize rows; no constant-memory claim.
+- First full coverage run: 7,653 passed/25 skipped/115 subtests, one failure in
+  an existing test double whose background-launch signature lacked the new
+  optional `followup_context` argument. Updated that fake signature without
+  weakening its not-started/unknown-effect assertions; focused five cases pass.
+  Changed-line coverage is 90% (743 measured lines,74 uncovered), gate70 passes.
+  Final full-suite rerun is recorded separately; do not call the first run green.
+- Final integrated full pytest: **7,654 passed,25 skipped,115 subtests**,
+  9 existing warnings,215.42s,exit0. Log:
+  `/tmp/odysseus-combined-recovery-final.log`. All `static/**/*.js` and `.mjs`
+  passed `node --check`; `git diff --check` passed. No application source was
+  changed between the coverage run and the final rerun (only the test double).
