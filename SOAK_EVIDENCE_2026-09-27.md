@@ -796,3 +796,17 @@ This entry does not close the overall Goal or establish a six-hour soak.
   /tmp/odysseus-bed9803-final-full.log; do not use previous7701 result as
   evidence for these final two fixes. Candidate/release and six-hour final-image
   acceptance remain open.
+- Final integrated local pytest on the exact fix source completed: 7,701
+  passed/25 skipped/115 subtests,9 warnings,275.11s. Changed-Python-line
+  coverage96% (30 changed lines,1 uncovered),70% gate passed. Static JS syntax:
+  192 files passed. Logs: /tmp/odysseus-bed9803-final-full.log and
+  /tmp/odysseus-bed9803-final-coverage.xml.
+- After the manually resumed attempt2, the actual production image completed
+  another context compaction: generation28 (36,271 ->8,006 tokens) is settled;
+  Goal remains active, run cursor9715, UI Plan executing revision63. The resumed
+  production flow did not hit the duplicate-settlement edge again, but the edge
+  was reproduced in production previously and is covered by the new idempotency
+  regression test. Safari and Opera each show369 messages after reload.
+- Current pushed code SHA1ba6d1b is awaiting exact-archive Jetson candidate
+  verification; production is intentionally still release-6029532 while this
+  resumed Goal and two children run. No six-hour final-image soak is claimed.
