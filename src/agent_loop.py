@@ -2426,6 +2426,17 @@ def _durable_model_checkpoint(messages: List[Dict], max_chars: int = 1_500_000) 
         for key in ("name", "tool_call_id", "tool_calls"):
             if key in message:
                 record[key] = message[key]
+        # Keep evidence provenance and compaction identity, never permissions.
+        # Losing these markers makes a restored summary look like a fresh
+        # human instruction and causes repeated compaction to retain it verbatim.
+        for key in ("_agent_working_summary", "_context_pinned"):
+            if message.get(key) is True:
+                record[key] = True
+        metadata = message.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("trusted") is False:
+            record["metadata"] = {key: metadata[key] for key in
+                                  ("trusted", "source", "tool_gate_untrusted", "provenance_origin")
+                                  if key in metadata}
         records.append(record)
     encoded = json.dumps(records, ensure_ascii=False, separators=(",", ":"), default=str)
     if len(encoded) <= max_chars:

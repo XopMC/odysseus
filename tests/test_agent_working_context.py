@@ -228,6 +228,20 @@ def test_untrusted_tool_ledger_is_not_a_new_user_turn():
     assert _user_turn_count(messages) == 1
 
 
+def test_durable_checkpoint_preserves_summary_and_untrusted_provenance_not_permissions():
+    from src.agent_loop import _durable_model_checkpoint
+    from src.prompt_security import untrusted_context_message
+    summary = untrusted_context_message("agent working checkpoint", "verified work")
+    summary.update(_agent_working_summary=True, _context_pinned=True)
+    summary["metadata"]["allow_all_tools"] = True
+    saved = _durable_model_checkpoint([summary])[0]
+    assert saved["_agent_working_summary"] is True
+    assert saved["_context_pinned"] is True
+    assert saved["metadata"]["trusted"] is False
+    assert saved["metadata"]["tool_gate_untrusted"] is True
+    assert "allow_all_tools" not in saved["metadata"]
+
+
 def test_signatures_do_not_collide_after_120_chars_and_json_order_is_stable():
     assert ac.call_signature("web_fetch", "x" * 120 + "a") != ac.call_signature("web_fetch", "x" * 120 + "b")
     assert ac.call_signature("web_fetch", '{"a":1,"b":2}') == ac.call_signature("web_fetch", '{"b":2, "a":1}')
