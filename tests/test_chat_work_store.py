@@ -1134,6 +1134,38 @@ def test_stopped_long_run_keeps_timeline_tail_not_only_oldest_events(monkeypatch
     assert any(item["data"].get("delta") == "LATEST-TAIL-MARKER" for item in timeline["events"])
 
 
+def test_pause_preserves_early_rounds_outside_inline_timeline_tail(monkeypatch, owned_chat, tmp_path):
+    import core.database as database
+    from src.chat_replay_log import ReplayLog
+    monkeypatch.setattr(database, "SessionLocal", SessionLocal)
+    message_id = uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(ChatMessage(id=message_id, session_id=owned_chat, role="assistant",
+                           content="Partial", meta_data="{}", timestamp=datetime.utcnow()))
+    run = agent_runs._Run()
+    run.buffer = ReplayLog(tmp_path, run.run_id, owned_chat, create=True)
+    for payload in ({"type": "agent_step", "round": 1},
+                    {"delta": "EARLY-THOUGHT", "thinking": True},
+                    {"delta": "EARLY-ANSWER"},
+                    {"type": "tool_start", "tool": "python", "command": "print(42)"},
+                    {"type": "tool_output", "tool": "python", "output": "42", "exit_code": 0},
+                    {"type": "agent_step", "round": 2}):
+        agent_runs._publish(run, 'data: ' + json.dumps(payload) + '\n\n')
+    for _ in range(5100):
+        agent_runs._publish(run, 'data: {"delta":"later ","thinking":true}\n\n')
+    agent_runs._publish(run, 'data: ' + json.dumps({"type": "message_saved", "id": message_id}) + '\n\n')
+    run.status = "stopped"
+    agent_runs._persist_timeline_v2(owned_chat, run)
+    with SessionLocal() as db:
+        metadata = json.loads(db.query(ChatMessage).filter_by(id=message_id).one().meta_data)
+    assert metadata["timeline_v2"]["truncated"] is True
+    assert metadata["timeline_v2"]["events"][0]["seq"] > 5
+    assert metadata["round_reasonings"][0] == "EARLY-THOUGHT"
+    assert "EARLY-ANSWER" in metadata["round_texts"][0]
+    assert metadata["tool_events"][0]["output"] == "42"
+    assert metadata["rendered_message_count"] == 2
+
+
 def test_goal_prose_does_not_stop_detached_server_run(monkeypatch, owned_chat):
     # This fixture exercises Goal prose flow, not the separately tested effect
     # ledger. In-memory SQLite connections can differ after route fixtures.

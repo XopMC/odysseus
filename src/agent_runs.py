@@ -687,8 +687,21 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
         actual_endpoint_label = None
         round_timestamps = {}
         substantive = False
-        for item in events:
-            payload = item["data"]
+        # The bounded timeline is only an inline preview, never the source of
+        # canonical rounds. A long final thinking span can occupy its entire
+        # 5K-event tail. Reconstruct from the complete durable log in one pass
+        # or Stop/Pause would overwrite all preceding rounds with empty slots.
+        for event_seq, frame in enumerate(run.buffer):
+            raw = "\n".join(line[5:].lstrip() for line in frame.splitlines()
+                            if line.startswith("data:"))
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("type") == "message_saved" and payload.get("id"):
+                saved_message_id = str(payload["id"])
             replay = payload.get("_replay") if isinstance(payload.get("_replay"), dict) else {}
             raw_round = payload.get("round", replay.get("round", current_round))
             try:
@@ -729,7 +742,7 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
                     "output": "",
                     "exit_code": None,
                     "tool_call_id": tool_id,
-                    "_replay": {"run_id": run.run_id, "seq": item["seq"], "tool_call_id": tool_id},
+                    "_replay": {"run_id": run.run_id, "seq": event_seq, "tool_call_id": tool_id},
                 }
                 tools[tool_id] = event
                 tool_order.append(tool_id)
@@ -883,6 +896,8 @@ def _persist_timeline_v2(session_id: str, run: _Run, *, status: Optional[str] = 
                 "status": terminal_status,
                 "events": events,
                 "truncated": truncated,
+                "history_projection_version": 2,
+                "projected_event_count": len(run.buffer),
             }
             row.meta_data = json.dumps(metadata, ensure_ascii=False)
             # Bump the cheap Session revision used by message-count polling.

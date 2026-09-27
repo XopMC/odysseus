@@ -162,6 +162,22 @@ class ReplayLog:
     def __len__(self):
         return self.path('.index').stat().st_size // _WORD.size
 
+    def __iter__(self):
+        """Scan committed frames once, without reopening two files per token."""
+        count = len(self)
+        with self.path('.events').open('rb') as source:
+            for _ in range(count):
+                header = source.read(_WORD.size)
+                if len(header) != _WORD.size:
+                    raise ValueError('Incomplete replay frame header')
+                length = _WORD.unpack(header)[0]
+                if length > MAX_EVENT_BYTES:
+                    raise ValueError('Invalid replay frame')
+                frame = source.read(length)
+                if len(frame) != length:
+                    raise ValueError('Incomplete replay frame')
+                yield frame.decode('utf-8')
+
     def reasoning_sequences(self, round_number: int):
         """Return indexed thinking frames for a terminal run, without replaying every frame."""
         count = len(self)
