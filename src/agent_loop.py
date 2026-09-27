@@ -808,7 +808,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
     "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
     "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; for an active Goal, if no answer arrives within one minute, the server resumes you to choose the safest useful option. This is never approval for a tool effect. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
-    "create_plan": "- ```create_plan``` — In Plan mode, persist a structured read-only plan for approval. Args: {\"title\":\"...\",\"steps\":[{\"id\":\"step-1\",\"text\":\"...\",\"status\":\"pending\",\"required\":true}]}. This never executes work.",
+    "create_plan": "- ```create_plan``` — Persist the structured UI plan. In Plan mode it waits for approval; during an active Goal it starts tracking immediately. Args: {\"title\":\"...\",\"steps\":[{\"id\":\"step-1\",\"text\":\"...\",\"status\":\"pending\",\"required\":true}]}. Saving a PLAN.md file does not update the UI plan.",
     "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
     "update_plan_step": "- ```update_plan_step``` — Update one stable active-plan step only after doing and checking it. Args: {\"step_id\":\"...\",\"status\":\"pending|in_progress|done|blocked\",\"summary\":\"...\",\"files_changed\":[],\"decisions\":[],\"verification\":[],\"next_work\":[]}.",
     "get_goal": "- ```get_goal``` — Read the durable active goal, attempt number and checkpoint for this chat.",
@@ -2472,6 +2472,14 @@ def _prepend_agent_directive(messages: List[Dict], directive: str) -> List[Dict]
     return messages
 
 
+def _set_plan_directive(messages: List[Dict], checklist: Optional[str]) -> None:
+    """Replace the runtime Plan note without rebuilding tools or growing context."""
+    messages[:] = [item for item in messages if item.get("_agent_injected") != "active_plan"]
+    note = build_active_plan_note(checklist or "")
+    if note:
+        messages.insert(0, {"role": "system", "content": note, "_agent_injected": "active_plan"})
+
+
 def _is_odysseus_qwen_model(model: str) -> bool:
     return (model or "").lower().startswith("odysseus-qwen3")
 
@@ -4046,6 +4054,10 @@ def build_active_goal_note(goal: Optional[dict]) -> str:
         "For other blockers, set waiting_user=true and state the exact blocker. The ONLY successful terminal "
         "action is `complete_goal`, and it requires concrete verification evidence. Never "
         "repeat a command whose side effect has an unknown outcome.\n\n"
+        "For multi-step work, save the current structured UI plan with `create_plan` early, "
+        "before delegating implementation. This tool also works in Goal mode. A PLAN.md file "
+        "does not update that plan. A completed plan from an older Goal is not the plan for "
+        "this objective. Update each current step through `update_plan_step` after verification.\n\n"
         f"Objective: {str(goal.get('objective') or '').strip()}\n"
         f"Attempt: {int(goal.get('attempt') or 1)}\n"
         f"Latest progress: {str(goal.get('progress') or '').strip()}\n"
@@ -4158,6 +4170,7 @@ async def stream_agent_loop(
     # approval/taint integrity but is not the durable replay run ID. A later
     # replacement run must not reparent children created by this attempt.
     lineage_run_id = _canonical_tool_lineage_run_id(session_id, child_run_id)
+    _context_scope = {"child_id": child_run_id} if child_run_id else {}
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
@@ -5167,7 +5180,7 @@ async def stream_agent_loop(
         if plan_mode and not guide_only:
             _prepend_agent_directive(route_messages, PLAN_MODE_DIRECTIVE)
         elif approved_plan and approved_plan.strip() and not guide_only:
-            _prepend_agent_directive(route_messages, build_active_plan_note(approved_plan))
+            _set_plan_directive(route_messages, approved_plan)
         if active_goal and not guide_only:
             _prepend_agent_directive(route_messages, build_active_goal_note(active_goal))
         if _subagent_mode in {"same_model", "selected_models"} and not guide_only:
@@ -5380,7 +5393,7 @@ async def stream_agent_loop(
     if session_id:
         try:
             from src.context_compaction_ledger import pending as _pending_compaction
-            _pending_compaction_settlement = _pending_compaction(owner, session_id)
+            _pending_compaction_settlement = _pending_compaction(owner, session_id, **_context_scope)
             if _pending_compaction_settlement:
                 _context_compactions = max(
                     _context_compactions,
@@ -5410,7 +5423,7 @@ async def stream_agent_loop(
         _economic_cache_ratio = 12.5
     try:
         from src.context_efficiency_state import restore as _restore_efficiency_state
-        _economic_state = _restore_efficiency_state(owner, session_id, _economic_cache_ratio)
+        _economic_state = _restore_efficiency_state(owner, session_id, _economic_cache_ratio, **_context_scope)
         # Like SoL-Pi, one session keeps the ratio it started with even if the
         # setting changes or the selected model changes later.
         _economic_cache_ratio = float(_economic_state["cache_write_read_ratio"])
@@ -5426,7 +5439,7 @@ async def stream_agent_loop(
         try:
             from src.context_efficiency_state import record_correction as _record_economic_correction
             _economic_state = _record_economic_correction(
-                owner, session_id, _economic_cache_ratio,
+                owner, session_id, _economic_cache_ratio, **_context_scope,
             )
         except Exception:
             logger.exception("Failed to persist Online Context Compact correction")
@@ -5914,12 +5927,18 @@ async def stream_agent_loop(
         native_tool_calls = []  # populated if model uses function calling
 
         _round_had_correction = False
-        if approved_plan and session_id and not child_run_id:
+        if (approved_plan or active_goal or child_run_id) and session_id:
             try:
-                from src.chat_work_store import store as _plan_work_store
-                _current_plan = _plan_work_store.get(owner, session_id).get("plan")
+                if child_run_id:
+                    from src.child_plan_store import get as _get_child_plan
+                    _current_plan = _get_child_plan(owner, session_id, child_run_id)
+                else:
+                    from src.chat_work_store import store as _plan_work_store
+                    _current_plan = _plan_work_store.get(owner, session_id).get("plan")
                 if _current_plan is not None:
                     approved_plan = current_plan_checklist(_current_plan) or None
+                    if not guide_only and not plan_mode:
+                        _set_plan_directive(messages, approved_plan)
             except Exception:
                 logger.exception("Failed to refresh durable Plan revision for model round")
         if active_goal and session_id:
@@ -6015,7 +6034,7 @@ async def stream_agent_loop(
             try:
                 from src.context_efficiency_state import record_correction as _record_economic_correction
                 _economic_state = _record_economic_correction(
-                    owner, session_id, _economic_cache_ratio,
+                    owner, session_id, _economic_cache_ratio, **_context_scope,
                 )
                 _economic_boundary_pending = False
             except Exception:
@@ -6409,6 +6428,7 @@ async def stream_agent_loop(
                         repayment_tokens=max(
                             0, _economic_decision.archive_tokens - _economic_decision.memo_tokens
                         ),
+                        **_context_scope,
                     )
                 except Exception:
                     logger.exception("Failed to persist Online Context Compact state")
@@ -6433,6 +6453,7 @@ async def stream_agent_loop(
                         ledger_hash=checkpoint["ledger_hash"], before_tokens=_before_context,
                         after_tokens=estimate_tokens(messages),
                         economics=_economic_decision.to_dict() if _economic_decision else {},
+                        **_context_scope,
                     )
                     _context_compactions = max(
                         _context_compactions,
@@ -6795,6 +6816,7 @@ async def stream_agent_loop(
                 _economic_state = _record_provider_request(
                     owner, session_id, _economic_cache_ratio,
                     estimate_tokens(messages) + _schema_tokens,
+                    **_context_scope,
                 )
             except Exception:
                 logger.exception("Failed to record Online Context Compact request")
@@ -6907,7 +6929,7 @@ async def stream_agent_loop(
                     ),
                     "status": terminal_status,
                 }
-                if error_data.get("error_category") in {"degenerate_output", "empty_output"}:
+                if error_data.get("error_category") in {"degenerate_output", "empty_output", "provider_unload"}:
                     terminal_error["category"] = error_data["error_category"]
                 if full_response.strip() or round_reasoning.strip() or tool_events or round_texts:
                     _finalize_round_usage(include_empty=False)
@@ -7515,7 +7537,7 @@ async def stream_agent_loop(
                                 or (_pending_compaction_settlement.get("rebuild_marker") or {}).get("generation")
                                 or _context_compactions
                             )
-                            if not _settle_compaction(owner, session_id, _settlement_generation):
+                            if not _settle_compaction(owner, session_id, _settlement_generation, **_context_scope):
                                 raise RuntimeError("Compaction settlement could not be committed")
                             yield f'data: {json.dumps({"type": "plan_update", "data": _server_plan})}\n\n'
                             yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _settlement_generation, "settlement_id": _pending_compaction_settlement.get("id"), "recovery": "server_plan"})}\n\n'
@@ -7555,8 +7577,24 @@ async def stream_agent_loop(
                                 "_context_pinned": True,
                                 "_agent_private_recovery_plan": True,
                             }
+                            if child_run_id:
+                                from src.child_plan_store import get as _get_child_plan, save as _save_child_plan
+                                _prior_private = _get_child_plan(owner, session_id, child_run_id) or {}
+                                _saved_private = _save_child_plan(
+                                    owner, session_id, child_run_id, "Post-compaction child plan",
+                                    [{"id": f"child-recovery-{_settlement_generation}-{i}", "text": text,
+                                      "status": "pending", "required": True}
+                                     for i, text in enumerate((
+                                         "Re-read assigned objective and retained checkpoint",
+                                         "Finish the remaining assigned work",
+                                         "Verify the final result and report evidence",
+                                     ), 1)],
+                                    expected_revision=_prior_private.get("revision", 0), replace_terminal=True,
+                                )
+                                approved_plan = current_plan_checklist(_saved_private) or None
+                                yield f'data: {json.dumps({"type": "plan_update", "data": _saved_private})}\n\n'
                             messages.append(_private_plan)
-                            if not _settle_compaction(owner, session_id, _settlement_generation):
+                            if not _settle_compaction(owner, session_id, _settlement_generation, **_context_scope):
                                 messages.pop()
                                 raise RuntimeError("Compaction settlement could not be committed")
                             yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _settlement_generation, "settlement_id": _pending_compaction_settlement.get("id"), "recovery": "private_working_plan"})}\n\n'
@@ -8540,7 +8578,7 @@ async def stream_agent_loop(
                                 or (_pending_compaction_settlement.get("rebuild_marker") or {}).get("generation")
                                 or _context_compactions
                             )
-                            if _settle_compaction(owner, session_id, _settlement_generation):
+                            if _settle_compaction(owner, session_id, _settlement_generation, **_context_scope):
                                 yield f'data: {json.dumps({"type": "context_compaction_settled", "generation": _settlement_generation, "settlement_id": _pending_compaction_settlement.get("id")})}\n\n'
                             _pending_compaction_settlement = None
                         except Exception:
@@ -8691,6 +8729,8 @@ async def stream_agent_loop(
                 if (approved_plan and str(result["plan_update"].get("status") or "")
                         in {"done", "completed"}):
                     _plan_execution_complete = True
+                if active_goal or child_run_id:
+                    approved_plan = current_plan_checklist(result["plan_update"]) or None
                 yield (
                     f'data: {json.dumps({"type": "plan_update", "data": result["plan_update"]})}\n\n'
                 )
@@ -8999,8 +9039,12 @@ async def stream_agent_loop(
                     if _efficiency_enabled("online_context_compact"):
                         try:
                             from src.context_efficiency_state import record_boundary as _record_economic_boundary
-                            from src.chat_work_store import store as _chat_work_store
-                            _work_snapshot = _chat_work_store.get(owner, session_id) if session_id else {}
+                            if child_run_id:
+                                from src.child_plan_store import get as _get_child_plan
+                                _work_snapshot = {"plan": _get_child_plan(owner, session_id, child_run_id)}
+                            else:
+                                from src.chat_work_store import store as _chat_work_store
+                                _work_snapshot = _chat_work_store.get(owner, session_id) if session_id else {}
                             _plan_snapshot = ((_work_snapshot or {}).get("plan") or {}).get("steps") or []
                             _completed = next((step for step in _plan_snapshot
                                                if str(step.get("id") or "") == str(_plan_update.get("step_id") or "")), {})
@@ -9016,6 +9060,7 @@ async def stream_agent_loop(
                                                   if step.get("status") not in {"done", "completed"}],
                                     "round": round_num,
                                 },
+                                **_context_scope,
                             )
                         except Exception:
                             logger.exception("Failed to persist Online Context Compact boundary")

@@ -656,3 +656,95 @@ This entry does not close the overall Goal or establish a six-hour soak.
   `/tmp/odysseus-combined-recovery-final.log`. All `static/**/*.js` and `.mjs`
   passed `node --check`; `git diff --check` passed. No application source was
   changed between the coverage run and the final rerun (only the test double).
+
+## 22:08 UTC combined release and substantial live Goal
+
+- Exact Git public-fork main/master, Jetson checkout and production image:
+  `60295326fd9286191dfafa0224d5e0e1529c4e3e` (`release-6029532`). Candidate built
+  from `git archive` of that SHA,147 isolated no-network Jetson tests passed.
+  Alternate-port HTTP200. Online app/teams backups `*-pre-6029532.db` both
+  integrity=ok and0600; release gate running runs0/active children0.
+- App-only switch at `2026-09-27T22:08:31.873368298Z`; HTTP/HTTPS :5130 became200,
+  Docker healthy/zero restarts. Startup briefly returned empty replies; no claim
+  of zero downtime. Candidate container stopped/removed; ce25ae0 rollback kept,
+  older2f4983b image and redundant candidate6029532 tag removed (rebuildable).
+  Older historical candidate containers were observed exited4days; not running.
+- Actual Safari selected host QA workspace `/tmp/odysseus-long-qa-20260927`,
+  enabled Goal and entered a substantial V2 task in safe chat
+  `dcc12a48-6ca5-41ba-94e8-ea1f577f87a4`: resumable streaming import, UTC
+  aggregates, safe manifest/hash archive, CLI integration,150+ tests and100K-row
+  independent oracle/benchmark. Primary Qwen base; children :3/:4/:5,never :2.
+  Parent run `c593311690364515be22091ff5d0ecb1`, Goal active attempt1.
+- All three children started within375ms around22:15:05, while parent continued
+  real reads/edits. Each saved recovery_config successfully; no configuration
+  failure code. Child IDs: :3 `f4cb35d512bf422d8b7d7301e4083bb9`, :4
+  `325559f645b2494c82b71c08fb919909`, :5 `045410dbcb824e62aeb4caf0d018a12b`.
+- :3 completed three inspection tools, then ten retries exhausted onHTTP400.
+  Direct one-token request from Jetson using that safe child's ledger returned
+  `model_not_found`: endpoint no longer recognized the exact :3 identifier.
+  No unverified inference about who unloaded it. Failure/retained checkpoint
+  delivered to the parent; Safari guidance telling parent not to recreate:3
+  was accepted durably (guidance count1) without pausing the Goal.
+- :5 completed21 tools with a3185-character visible result and delivered to the
+  still-running parent. :4 remained productive (24 tools), not classified as a
+  loop solely from cumulative thinking token/character totals.
+- Independently authenticated Opera opened the same active Goal and reloaded:
+  current activity/context and active attempt1 remained visible. Safari screenshot
+  after guidance showed289messages and live tool cards; sparse native AX output
+  alone was NOT evidence that messages disappeared.
+
+## Live-discovered corrections under test (not yet deployed)
+
+- Plan mismatch: old terminal UI plan survived a new Goal, and create_plan's
+  documentation incorrectly described it as Plan-mode-only. New active-Goal
+  replacement is now allowed only from that exact running Goal lineage and
+  only when the terminal plan predates the new Goal. A same-Goal/stale caller
+  remains fenced. A focused pre-fix test failed for the intended reason.
+- The actual later create_plan error in QA was `Execute the plan before updating
+  step progress`, not "Plan is no longer mutable": the model proposed progress
+  while creating a fresh draft. Keep pending-step validation; clarify the tool
+  schema rather than silently granting fabricated completion.
+- Refreshing the approved_plan variable did not update the primary route's
+  already-built system prompt. Added replace-in-place runtime Plan notes and
+  active-Goal/private-child plan refresh; no accumulating copies or tool reload.
+- Confirmed child context namespace defect: :4 had exactly ONE compacted event,
+  but checkpoint compactions jumped0→21 from the parent ledger. Child-specific
+  compaction/EPR state and private Plan tools are being isolated by child_run_id,
+  owner/session and live executor lease. No evidence that this QA child actually
+  overwrote the parent Plan (zero child plan_update events); the shared handlers
+  nevertheless allowed it and require fencing.
+- Provider `model_not_found` underHTTP400 was reduced to a generic400 message.
+  Classify it as provider_unload with fixed safe text, preserving ten retries
+  and selected-route authority; never echo provider model lists/secrets.
+- Updated focused suite258 passed; combined isolation/Plan/LLM set290 passed.
+  Full integration run in `/tmp/odysseus-private-context-full.log` is pending.
+  Production remains6029532; do not interrupt current parent/child merely to
+  deploy these corrections. Overall Goal and final-image soak remain open.
+
+## 22:50–23:00 UTC integrated verification and ongoing V2
+
+- Integrated full suite on the follow-up application source: **7,696 passed,
+  25 skipped,115 subtests**,9 warnings,279.85s,exit0. Log:
+  `/tmp/odysseus-private-context-final.log`; changed Python line coverage89%,
+  gate70 passed. All192 static JS/mjs files passed syntax checks.
+- Added final regression cases (no application-source change): a completed
+  private/Goal plan leaves tools enabled, and the real child loop restores a
+  pending child compaction, persists its private plan, settles its own generation,
+  and includes the current Plan in the next request. Parent Plan/Goal unchanged.
+- Lease/context mismatch, including missing/nonchild lineage, fails closed before
+  routing any child Plan action to the parent store. Wrong owner/session,
+  sibling lease, cancellation and CAS failures retain the prior durable state.
+- Actual Safari reload retained the active Goal,343 visible-message count,
+  tool history and context. Safari/Opera independently matched29.2% at the same
+  observation; Opera reload later retained active attempt1 and Plan1/8.
+  Native AX sometimes omits the message subtree; screenshot confirms its presence.
+- The :4 child subsequently stopped on the existing repetition guard, not on
+  provider transport. Its1353-character partial result and tool/checkpoint audit
+  survived and was delivered to the still-running parent. :3,:4,:5 deliveries
+  all became delivered. Provider ten-retry policy does not disable output guards.
+- Actual Safari guidance was submitted during the same active Goal, asking the
+  parent to integrate retained results and avoid rereading unchanged files.
+  Parent started another three children at22:52:44; no successful V2 acceptance
+  claim yet. Current image remains6029532 while work is active.
+- Generation cap remains131072. No network/VPN/Wi-Fi changes. Final-image
+  sustained acceptance remains OPEN; no new continuous six-hour probe established.

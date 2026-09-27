@@ -895,7 +895,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_plan",
-            "description": "Persist a structured plan for user review while Plan mode is active. This does not execute the plan.",
+            "description": "Persist the structured UI plan. Plan mode waits for approval; an active Goal starts tracking the plan immediately. A PLAN.md file alone does not update the UI. New Goal plans use pending steps, then update_plan_step records progress.",
             "parameters": {
                 "type": "object",
                 "properties": {

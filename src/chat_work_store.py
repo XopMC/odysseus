@@ -15,7 +15,7 @@ import uuid
 from sqlalchemy import or_
 
 from core.database import (
-    ChatGoal, ChatMessage, ChatPlan, ChatWorkEvent, Session as DbSession, SessionLocal,
+    ChatGoal, ChatMessage, ChatPlan, ChatRunState, ChatWorkEvent, Session as DbSession, SessionLocal,
     reserve_sqlite_writer, utcnow_naive,
 )
 from src.run_wait_state import CONTEXT_FAILURE_CODES
@@ -210,7 +210,7 @@ class ChatWorkStore:
             } for row in rows]
 
     def save_plan(self, owner, session_id, title, steps, *, expected_revision=None,
-                  replace_terminal=False):
+                  replace_terminal=False, replace_previous_goal_plan_run_id=None):
         title = _clean_text(title or "Plan", "plan title", 1000)
         if isinstance(steps, str):
             steps = checklist_steps(steps)
@@ -229,6 +229,7 @@ class ChatWorkStore:
                 "status": status, "required": item.get("required") is not False,
             })
         with SessionLocal.begin() as db:
+            reserve_sqlite_writer(db)
             _session(db, owner, session_id)
             stored_owner = _storage_owner(owner)
             row = db.query(ChatPlan).filter_by(owner=stored_owner, session_id=session_id).first()
@@ -239,6 +240,20 @@ class ChatWorkStore:
                 db.add(row)
                 db.flush()
             else:
+                if replace_previous_goal_plan_run_id and row.status in {"cancelled", "done"}:
+                    goal = db.query(ChatGoal).filter_by(owner=stored_owner, session_id=session_id).first()
+                    origin_run = db.query(ChatRunState).filter_by(
+                        owner=stored_owner, session_id=session_id, run_id=replace_previous_goal_plan_run_id,
+                        status="running",
+                    ).first()
+                    # A new explicit Goal may replace its predecessor's plan;
+                    # a finished plan from this same Goal remains immutable.
+                    # Evaluate under the same writer lock as the Plan CAS.
+                    if (goal is not None and goal.status == "active" and goal.created_at
+                            and origin_run is not None and (origin_run.continuation or {}).get("goal") is True
+                            and origin_run.started_at and origin_run.started_at >= goal.created_at
+                            and row.updated_at and goal.created_at > row.updated_at):
+                        replace_terminal = True
                 if row.status in {"cancelled", "done"} and not replace_terminal:
                     raise WorkConflict("Plan is no longer mutable")
                 if expected_revision is not None and row.revision != expected_revision:

@@ -220,6 +220,31 @@ def test_post_compaction_recovery_plan_starts_from_pending_draft(owned_chat):
     assert [step["status"] for step in plan["steps"]] == ["in_progress", "pending"]
 
 
+@pytest.mark.parametrize("new_goal", [True, False])
+def test_create_plan_replaces_only_a_previous_goals_terminal_plan(owned_chat, new_goal):
+    from src.agent_tools.interaction_tools import CreatePlanTool
+    store = ChatWorkStore()
+    if not new_goal:
+        store.ensure_goal("alice", owned_chat, "Current task")
+    plan = store.save_plan("alice", owned_chat, "Old plan", [{"id": "old", "text": "Old step"}])
+    plan = store.plan_action("alice", owned_chat, "execute", plan["revision"])
+    plan = store.update_plan_step("alice", owned_chat, "old", "done")
+    if new_goal:
+        store.ensure_goal("alice", owned_chat, "New task")
+    from core.database import ChatRunState
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(run_id="new-" + owned_chat, session_id=owned_chat, owner="alice",
+                            status="running", continuation={"goal": True}))
+    _, result = asyncio.run(CreatePlanTool().execute(
+        json.dumps({"title": "New plan", "steps": [{"id": "new", "text": "New step"}]}),
+        {"owner": "alice", "session_id": owned_chat, "parent_run_id": "new-" + owned_chat},
+    ))
+    assert result["exit_code"] == (0 if new_goal else 1)
+    saved = store.get("alice", owned_chat)["plan"]
+    assert saved["status"] == ("executing" if new_goal else "done")
+    assert saved["steps"][0]["id"] == ("new" if new_goal else "old")
+
+
 def test_goal_stall_wait_reason_is_durable_owner_scoped_and_cleared_on_resume(owned_chat):
     store = ChatWorkStore()
     goal = store.ensure_goal("alice", owned_chat, "Harmless verification")

@@ -58,7 +58,7 @@ def test_record_never_reuses_generation_after_recovered_checkpoint(monkeypatch):
 def test_agent_settles_the_pending_marker_generation_not_local_counter():
     source = (Path(__file__).resolve().parents[1] / "src/agent_loop.py").read_text()
     assert '_pending_compaction_settlement.get("generation")' in source
-    assert '_settle_compaction(owner, session_id, _settlement_generation)' in source
+    assert '_settle_compaction(owner, session_id, _settlement_generation, **_context_scope)' in source
 
 
 def test_agent_server_recovery_plan_settles_before_continuing():
@@ -89,6 +89,6 @@ def test_subagent_uses_private_recovery_plan_without_mutating_parent_plan():
     )[0]
     assert '"_agent_private_recovery_plan": True' in branch
     assert '_work_store.save_plan' not in branch
-    assert 'if not _settle_compaction(owner, session_id, _settlement_generation)' in branch
+    assert 'if not _settle_compaction(owner, session_id, _settlement_generation, **_context_scope)' in branch
     assert '"recovery": "private_working_plan"' in branch
     assert '"reason": "private_recovery_plan"' in branch

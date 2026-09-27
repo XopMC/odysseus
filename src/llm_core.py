@@ -2371,8 +2371,9 @@ def _model_error_category(
         "json schema", "tool schema", "invalid schema", "function schema",
     )):
         return "schema_mismatch"
-    if status in (404, 503) and "model" in marker and any(
-        token in marker for token in ("not loaded", "unloaded", "not found", "unavailable")
+    if status in (400, 404, 503) and "model" in marker and any(
+        token in marker for token in ("not loaded", "unloaded", "not found", "unavailable",
+                                     "model_not_found", "invalid model identifier")
     ):
         return "provider_unload"
     if status in (408, 504):
@@ -3745,6 +3746,8 @@ def _safe_model_failure_message(category: Optional[str]) -> Optional[str]:
         return "Output repetition guard stopped generation. Try a different model or lower temperature."
     if category == "empty_output":
         return "The model returned no usable output. Try again or select another model."
+    if category == "provider_unload":
+        return "Selected model is unavailable on the endpoint. Refresh the model picker or choose another available model."
     return None
 
 

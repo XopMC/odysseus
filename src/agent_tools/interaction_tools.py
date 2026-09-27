@@ -10,6 +10,19 @@ def _scope(ctx):
     return ctx.get("owner"), ctx.get("session_id")
 
 
+def _child_plan_action(ctx, action, data):
+    from src.child_plan_store import child_id_for_context, execute_plan_action
+    child_id = child_id_for_context(ctx)
+    if child_id is None:
+        return None
+    owner, session_id = _scope(ctx)
+    plan = execute_plan_action(owner, session_id, child_id, action, data,
+                               plan_recovery=bool(ctx.get("plan_recovery")))
+    return {"plan_update": plan, "child_id": child_id, "scope": "child",
+            "output": "Private child plan updated and executing." if plan["status"] == "executing"
+                      else "Private child plan steps completed.", "exit_code": 0}
+
+
 class CreatePlanTool:
     async def execute(self, content, ctx):
         try:
@@ -17,6 +30,9 @@ class CreatePlanTool:
             owner, session_id = _scope(ctx)
             if not session_id:
                 raise ValueError("create_plan requires an active owned chat")
+            child_result = _child_plan_action(ctx, "create_plan", data)
+            if child_result is not None:
+                return "create_plan", child_result
             from src.chat_work_store import store
             plan = store.save_plan(
                 owner, session_id, str(data.get("title") or "Plan"),
@@ -25,6 +41,7 @@ class CreatePlanTool:
                 # terminal plan from an earlier generation. Ordinary API
                 # clients still fail closed unless they explicitly opt in.
                 replace_terminal=bool(ctx.get("plan_recovery")) if isinstance(ctx, dict) else False,
+                replace_previous_goal_plan_run_id=ctx.get("parent_run_id") if isinstance(ctx, dict) else None,
             )
             snapshot = store.get(owner, session_id)
             goal = snapshot.get("goal")
@@ -124,6 +141,10 @@ class UpdatePlanTool:
         owner, session_id = _scope(ctx)
         if session_id:
             try:
+                child_data = {**(parsed if isinstance(parsed, dict) else {}), "plan": plan}
+                child_result = _child_plan_action(ctx, "update_plan", child_data)
+                if child_result is not None:
+                    return desc, child_result
                 from src.chat_work_store import store
                 current = store.get(owner, session_id).get("plan")
                 saved = store.save_plan(
@@ -156,6 +177,9 @@ class UpdatePlanStepTool:
             owner, session_id = _scope(ctx)
             if not session_id:
                 raise ValueError("update_plan_step requires an active owned chat")
+            child_result = _child_plan_action(ctx, "update_plan_step", data)
+            if child_result is not None:
+                return "update_plan_step", child_result
             from src.chat_work_store import store
             plan = store.update_plan_step(
                 owner, session_id, str(data.get("step_id") or ""),

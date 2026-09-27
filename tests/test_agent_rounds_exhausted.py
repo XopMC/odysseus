@@ -233,7 +233,8 @@ def test_plan_mode_requires_tool_until_durable_plan_then_suppresses_more_tools(m
     assert any(event.get("type") == "plan_update" for event in events)
 
 
-def test_approved_plan_requires_progress_tool_until_plan_is_done(monkeypatch):
+@pytest.mark.parametrize("runtime", ["plan", "goal", "child"])
+def test_approved_plan_requires_progress_tool_until_plan_is_done(monkeypatch, runtime):
     _patch_common(monkeypatch)
     requests = []
 
@@ -250,14 +251,18 @@ def test_approved_plan_requires_progress_tool_until_plan_is_done(monkeypatch):
     async def execute(block, *_args, **_kwargs):
         assert block.tool_type == "update_plan_step"
         return ("update_plan_step", {
-            "plan_update": {"status": "done", "revision": 2},
+            "plan_update": {"status": "done", "revision": 2,
+                            "steps": [{"id": "one", "text": "Step one", "status": "done"}]},
             "output": "step updated",
         })
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
     monkeypatch.setattr(al, "execute_tool_block", execute)
     from src import context_efficiency_state
-    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args: {"cache_write_read_ratio": 12.5})
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args, **_kwargs: {"cache_write_read_ratio": 12.5})
+    from src import chat_work_store, child_plan_store
+    monkeypatch.setattr(chat_work_store.store, "get", lambda *_: {})
+    monkeypatch.setattr(child_plan_store, "get", lambda *_: None)
     from src import chat_effect_inbox
     monkeypatch.setattr(chat_effect_inbox.inbox, "unknown", lambda *_args: [])
     monkeypatch.setattr(chat_effect_inbox.inbox, "record_intent", lambda *_args: {"id": "safe-intent", "created": True})
@@ -269,13 +274,49 @@ def test_approved_plan_requires_progress_tool_until_plan_is_done(monkeypatch):
         max_rounds=3, relevant_tools={"update_plan_step"},
         approved_plan="- [ ] Step one (step_id: one)",
         session_id="fixture-chat", owner="alice",
+        active_goal={"id": "goal", "status": "active", "attempt": 1} if runtime == "goal" else None,
+        child_run_id="child" if runtime == "child" else None,
     ))
 
     assert len(requests) == 2
     assert requests[0]["tool_choice_required"] is True
     assert requests[0]["tool_choice_none"] is False
     assert requests[1]["tool_choice_required"] is False
-    assert requests[1]["tool_choice_none"] is True
+    assert requests[1]["tool_choice_none"] is (runtime == "plan")
+
+
+def test_goal_pins_a_plan_created_after_the_first_round(monkeypatch):
+    _patch_common(monkeypatch)
+    from src import chat_work_store
+    goal = {"id": "goal", "status": "active", "attempt": 1, "checkpoint": {},
+            "objective": "Build and verify a multi-step fixture"}
+    state = {"goal": goal, "plan": None}
+    monkeypatch.setattr(chat_work_store.store, "get", lambda *_: state)
+    from src import context_efficiency_state
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_: {"cache_write_read_ratio": 12.5})
+    requests = []
+    async def stream(_candidates, messages, **kwargs):
+        request = await kwargs["candidate_request_factory"](0, *_candidates[0])
+        requests.append(json.dumps(request["messages"]))
+        text = ('```create_plan\n{"title":"QA","steps":[{"id":"current-step",'
+                '"text":"Verify new module","status":"pending"}]}\n```') if len(requests) == 1 else "Working on the saved plan."
+        yield "data: " + json.dumps({"delta": text}) + "\n\n"
+        yield "data: [DONE]\n\n"
+    async def execute(block, *_args, **_kwargs):
+        state["plan"] = {"status": "executing", "revision": 2,
+                         "steps": [{"id": "current-step", "text": "Verify new module", "status": "in_progress"}]}
+        return block.tool_type, {"plan_update": state["plan"], "output": "Plan saved", "exit_code": 0}
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    _collect(al.stream_agent_loop(
+        "http://x/v1", "qwen-local", [{"role":"user", "content":"Build and verify the QA project"}],
+        session_id="qa", owner="alice", active_goal=goal, relevant_tools={"create_plan", "update_plan_step"},
+        max_rounds=2,
+    ))
+    assert len(requests) >= 2
+    assert "## ACTIVE PLAN" not in requests[0]
+    assert "## ACTIVE PLAN" in requests[1]
+    assert "step_id: current-step" in requests[1]
 
 
 def test_emits_rounds_exhausted_when_cap_hit_mid_task(monkeypatch):

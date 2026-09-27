@@ -1391,6 +1391,7 @@ def test_stream_transport_error_is_classified_without_leaking_provider_detail(
 @pytest.mark.parametrize("status,detail,category,may_fallback,retry_after", [
     (503, "context length exceeded; token=private-example", "context", False, None),
     (503, "model not loaded; token=private-example", "provider_unload", True, None),
+    (400, "Invalid model identifier; model_not_found; token=private-example", "provider_unload", False, None),
     (429, "rate limited; token=private-example", "rate_limit", True, None),
     (429, "rate limited", "rate_limit", True, "4"),
 ])
@@ -1882,6 +1883,7 @@ def test_nonstream_rate_limit_retries_with_server_delay(monkeypatch):
 @pytest.mark.parametrize(("status", "detail", "unknown", "category"), [
     (429, "too many requests", False, "rate_limit"),
     (404, "model is not loaded", False, "provider_unload"),
+    (400, "Invalid model identifier; model_not_found", False, "provider_unload"),
     (400, "invalid tool JSON schema", False, "schema_mismatch"),
     (400, "context length exceeded", False, "context"),
     (503, "service unavailable", False, "transport"),
