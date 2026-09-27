@@ -43,18 +43,22 @@ browser acceptance pending.
 
 | Requirement | State / required evidence |
 |---|---|
-| Child mini-goal lifecycle, including model-selected deadlines | Candidate removes the model-supplied aggregate deadline; progress/retry/cancel tests pass, live final-image verification pending |
+| Child mini-goal lifecycle, including model-selected deadlines | Live child 6 ran 3m41 despite timeout_seconds=5 and completed 11 tools/7 checkpoints; semantic completion and broader final-image lifecycle acceptance remain open |
 | Real provider interruption after completed effects | Unit/integration covered; live safe fixture pending |
 | Parent and child tools/permissions | Real QA children 1/3 completed files and checks with inherited host policy; child 2 reasoning loop identified and stopped, guard verified against captured stream |
 | Restart recovery and durable child configuration | Open; restart currently marks child interrupted and delivers retained work |
-| Independent context and automatic compaction | Open live test; investigate observed 35% vs configured 75% without conflating threshold basis or economic compaction |
-| Parent works while children run, receives results asynchronously | Existing mechanism; realistic multi-module workload pending |
+| Independent context and automatic compaction | Live child 5 retained 23 checkpoints and compacted once. Popup explains 75% of saved 65,536 usable-input cap = 37.3% of 131,840 window. Ordinary post-Goal checkpoint reuse remains open |
+| Parent works while children run, receives results asynchronously | TelemetryLab children 4/5 started 109ms apart while parent worked; child 6 real tools, final result readback and durable delivery verified. Restart recovery remains open |
 | Goal ordinary-question timeout vs permission gates | Existing prior slice; recheck new realistic fixture |
-| Plan follows current revision over long work/compaction | Existing prior slice; long-run acceptance pending |
+| Plan follows current revision over long work/compaction | TelemetryLab reached 6/6; premature complete_goal was rejected until Plan updated; Goal completed attempt5. Independent host suite 85 tests passed. Not global acceptance |
 | Safari reload and independently authenticated second browser | Passed active QA reload/old thinking/scroll-return on release-5ac5593; repeat after next release |
 | Newest history, accurate counts and live/replay parity | Restored 53 lost round views from full journal; active counter reached 64 in Opera, next release and broader sustained acceptance remain open |
 | Comparison with Codex, Claude and ZCode | Research started; map concrete gaps rather than adopting features speculatively |
-| Git/Jetson exact image, regression and rollback verification | Pending current slice |
+| Git/Jetson exact image, regression and rollback verification | release-67c9d86 exact Git/runtime/helper hashes, full 7,532 passed, isolated 102 passed, host-only cwd tools and cross-browser delivery verified; next slice must repeat release checks |
+| Subagent list polling stays bounded as output grows | Real six-child baseline 695,282 bytes. New fixed-size metrics projection passes 84 related tests; detail/result preserved. Final production byte comparison pending |
+| Ordinary follow-up preserves working context after Goal completion | Open: source coverage seal, exact owner/run anchor, edit/delete/concurrent-guidance invalidation, fresh authorization and chronological suffix required; no blind restore |
+| Background command continuation preserves selected workspace/policy | Command cwd/result delivery verified on host-only path. Direct bg_monitor follow-up lacks full foreground context; shared authorized continuation still required |
+| Continuous final-image six-hour interactive acceptance | Open; old probe logs are not proof for newer images; no continuous probe on release-67c9d86 established |
 
 ## Safe project acceptance fixture
 

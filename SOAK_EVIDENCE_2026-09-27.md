@@ -397,3 +397,75 @@ Additional open observations for the next audit slice:
   transport wrapper now starts from its installed package directory; only its
   JSON request uses the host cwd. First candidate: 101 passed/1 failed; never
   deployed. Keep this failure as evidence, not a flaky retry.
+
+## 20:06–20:13 UTC — host workspace release verified on actual Jetson/Safari
+
+- Final exact SHA `67c9d86bd0a513a0ee2169557a5416d9812e42eb` matches local,
+  public-fork main/master and Jetson checkout. Production `release-67c9d86`
+  started **20:06:37.979 UTC**, healthy/zero restarts; HTTP and HTTPS200.
+  Final full pytest **7,532 passed, 25 skipped, 115 subtests**, 201.50s, exit0.
+  Corrected isolated no-network candidate **102 passed**; alternate-port200.
+- Zero active runs/children before switch. Online app/teams backups
+  `*-pre-67c9d86.db` integrity checked, mode0600. Installed only Odysseus's
+  dedicated host_exec.py helper, atomically, retaining its exact rollback copy;
+  no service/network/VPN/Wi-Fi settings changed. Installed helper SHA256 equals
+  Git script: `503ebf2ed00e08365c1cdb662c5fe2841ba6e4bff333898c9476de1e75200b3f`.
+  Runtime host_execution/tool_execution hashes also equal checkout.
+- Actual Safari safe chat `f56ba884-9dec-4c00-97f1-73de6c3866e7`: entered
+  `/workspace set /tmp/odysseus-long-qa-20260927`, opened `/workspace pick`,
+  saw host folders data/telemetrylab/tests/tools and clicked Use this folder.
+  New tooltip correctly distinguishes host permissions from local confinement.
+- Sent read-only two-tool QA prompt with NO explicit cd/absolute paths in its
+  commands. Run `86af314d7dcb478ba930040920241a8b` done, cursor270; no
+  workspace_rejected event. Python returned selected cwd and True for relative
+  README.md. Host folder exists; the exact same path is ABSENT in the container
+  (`test -d` exit0 on host, exit1 in container), proving correct filesystem.
+- Real background pwd job `6a143ba11126` returned that same host cwd, exit0,
+  done/followed_up=True. Actual Safari and independently authenticated Opera
+  displayed its delivered result after reload. Restored the original empty
+  Safari workspace preference after this bounded test.
+- Post-startup content-free logs: zero SQLite-lock lines, Tracebacks or HTTP500;
+  no active durable runs. Removed unused candidate tags67c9d86/b07d6d7 and old
+  release-c41a6b9 image after verifying no container references; current67c9d86
+  and rollback7e70366 retained. Data/backups intact; removed images rebuildable.
+- Remaining related audit gap: `src/bg_monitor.py` calls stream_agent_loop
+  directly without workspace/tool-policy/access-mode context. Delivery of pwd
+  is verified, but a subsequent effectful continuation's full context/authority
+  parity is NOT. Investigate via shared durable continuation rather than blindly
+  copying privileges. Ordinary post-Goal checkpoint reuse, child process-restart
+  recovery, heavy child metrics and continuous six-hour final-image acceptance
+  remain open. This release does not complete the overall Goal.
+
+## 20:22 UTC onward — bounded subagent status polling
+
+- Previous turn made verified live progress (host workspace/cwd). Goal remains
+  active; neither the old probe logs nor the elapsed wall clock establish a
+  continuous six-hour acceptance window on release-67c9d86.
+- Read-only production baseline on the safe TelemetryLab chat: six terminal
+  children, serialized list **695,282 bytes**; per-child metrics were
+  76,336 / 68 / 213,746 / 87,832 / 202,750 / 81,384 bytes. This repeatedly sent
+  tool outputs, reasoning and historical text although the list UI uses only
+  status/name/model/objective. Actual Safari panel showed 0 active / 6 total.
+- List serialization now projects an explicit, fixed-size allowlist of numeric
+  health/context fields and bounded source/hash strings. Nested/arbitrary
+  provider payloads remain available only through the unchanged detail read.
+  No stored metrics, child results, permissions or statuses are modified.
+- Added real-SQLite owner/session/run-filter tests, full detail/result
+  preservation, every terminal/active status and malformed/unbounded values.
+  Integrated child regression suites: **84 passed**, exit0. Initial command
+  named a nonexistent test file (collection exit4); corrected using the actual
+  repository test filenames, not counted as a product failure or passing run.
+- This bounds response/context traffic, NOT database JSON decoding or the
+  number of historical child records; those remain separate performance work.
+- Ordinary post-Goal ledger reuse remains open. Additional audit constraint:
+  transcript coverage must be captured BEFORE generation and verified again
+  at terminal persistence, not merely hashed after completion. Otherwise an
+  edit/delete or unconsumed guidance during generation can be falsely sealed
+  as covered. Fresh authorization/preface, exact owner/run, unchanged legacy
+  compaction and all post-boundary messages must also be verified. No blind
+  checkpoint restore was introduced in this small polling fix.
+- Regression sensitivity checked against the exact previous HEAD module in an
+  isolated Python process (no source edits): the list-size test failed at
+  170,902 bytes vs <1,024. Patched test file then **10 passed**. Full suite on
+  integrated source: **7,542 passed, 25 skipped, 115 subtests**, 9 existing
+  warnings, 210.35s, exit0 (`/tmp/odysseus-list-metrics-full.log`).

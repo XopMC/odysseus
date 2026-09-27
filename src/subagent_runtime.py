@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -63,6 +64,45 @@ def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _list_metrics(metrics: Any) -> dict:
+    """Fixed-size operational projection; detailed provider payloads stay in read()."""
+    if not isinstance(metrics, dict):
+        return {}
+
+    def numbers(source, keys):
+        result = {}
+        for key in keys:
+            value = source.get(key)
+            if (type(value) in (int, float) and 0 <= value <= 10**18
+                    and math.isfinite(value)):
+                result[key] = value
+        return result
+
+    compact = numbers(metrics, (
+        "thinking_chars", "output_chars", "provider_retries", "checkpoint_messages",
+        "context_compactions", "input_tokens", "output_tokens", "total_tokens",
+        "response_time", "time_to_first_token", "tokens_per_second", "generation_time",
+        "request_context_tokens", "context_length", "context_percent", "prefill_tps",
+    ))
+    for key, limit in (("checkpoint_hash", 128), ("usage_source", 32), ("tps_source", 32)):
+        value = metrics.get(key)
+        if isinstance(value, str):
+            compact[key] = value[:limit]
+    context = metrics.get("working_context")
+    if isinstance(context, dict):
+        bounded_context = numbers(context, (
+            "used_tokens", "prompt_tokens", "context_length", "context_percent",
+            "compactions", "round", "context_revision", "auto_compact_threshold",
+        ))
+        if type(context.get("auto_compact_enabled")) is bool:
+            bounded_context["auto_compact_enabled"] = context["auto_compact_enabled"]
+        if context.get("source") in ("estimated", "backend"):
+            bounded_context["source"] = context["source"]
+        if bounded_context:
+            compact["working_context"] = bounded_context
+    return compact
+
+
 def _public(row: ChatSubagentRun, *, include_result: bool = False) -> dict:
     result_missing = row.status == "completed" and not (row.result or "").strip()
     result = {
@@ -77,7 +117,7 @@ def _public(row: ChatSubagentRun, *, include_result: bool = False) -> dict:
         "status": row.status,
         "result_missing": result_missing,
         "error": (row.error or "Subagent produced no visible final result") if result_missing else (row.error or ""),
-        "metrics": row.metrics or {},
+        "metrics": (row.metrics or {}) if include_result else _list_metrics(row.metrics),
         "revision": row.revision,
         "started_at": row.started_at.isoformat() + "Z" if row.started_at else None,
         "finished_at": row.finished_at.isoformat() + "Z" if row.finished_at else None,
