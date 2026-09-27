@@ -1347,7 +1347,8 @@ def normalize_context_usage(data) -> Optional[dict]:
             )
             if key in policy
         }
-    for key in ("prompt_tokens", "round", "compactions"):
+    for key in ("prompt_tokens", "round", "compactions", "generation_budget_tokens",
+                "configured_generation_budget_tokens"):
         value = data.get(key)
         if type(value) is int and value >= 0:
             result[key] = value

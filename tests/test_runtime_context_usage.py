@@ -26,6 +26,19 @@ def _publish(run, data):
     agent_runs._publish(run, "data: " + json.dumps({"type": "context_usage", "data": data}) + "\n\n")
 
 
+def test_generation_ceiling_and_actual_budget_survive_live_snapshot(monkeypatch):
+    run = agent_runs._Run()
+    monkeypatch.setattr(agent_runs, "_RUNS", {"a": run})
+    _publish(run, _snapshot(generation_budget_tokens=104224, configured_generation_budget_tokens=131072))
+    data = agent_runs.get_context_usage("a")
+    assert data["generation_budget_tokens"] == 104224
+    assert data["configured_generation_budget_tokens"] == 131072
+    bad = agent_runs.normalize_context_usage(_snapshot(generation_budget_tokens=True,
+                                                      configured_generation_budget_tokens="131072"))
+    assert "generation_budget_tokens" not in bad
+    assert "configured_generation_budget_tokens" not in bad
+
+
 def test_live_snapshot_is_exact_run_scoped_and_copied(monkeypatch):
     old, new, other = agent_runs._Run(), agent_runs._Run(), agent_runs._Run()
     monkeypatch.setattr(agent_runs, "_RUNS", {"a": new, "b": other})
