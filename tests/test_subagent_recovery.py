@@ -159,3 +159,15 @@ def test_recovery_context_is_bounded_and_owner_scoped(harness):
     assert all(m["truncated"] for m in context["tail"])
     assert harness.recovery_context("other", "s", "child") == {}
     assert harness.recovery_context("qa", "other", "child") == {}
+
+
+def test_repetition_validation_failure_is_not_ten_provider_retries(harness, monkeypatch):
+    calls = 0
+    async def stream(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield 'event: error\ndata: {"error":"repeated reasoning","status":422,"error_category":"degenerate_output"}\n\n'
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    result = run(harness)
+    assert result["status"] == "failed"
+    assert calls == 1  # agent_loop owns the bounded, changed-prompt repair

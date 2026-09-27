@@ -3327,7 +3327,7 @@ def setup_chat_routes(
     async def chat_run_snapshot(request: Request, session_id: str) -> Dict[str, Any]:
         """Owner-scoped run identity/cursor used before a cross-device attach."""
         _verify_session_owner(request, session_id)
-        snapshot = agent_runs.describe_run(session_id)
+        snapshot = agent_runs.describe_run(session_id, include_activity=True)
         if snapshot is None:
             raise HTTPException(404, "No run for this session")
         return snapshot

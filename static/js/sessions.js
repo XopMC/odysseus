@@ -3106,7 +3106,12 @@ async function _checkServerStream(sessionId, { ensureAfterInFlight = false } = {
 
     // Attach only after the saved user turn and any completed predecessor are
     // canonical. The replay then owns all in-flight reasoning/tool/text nodes.
-    if (window.chatModule?.resumeStream) await window.chatModule.resumeStream(sessionId);
+    // resumeStream resolves only when the entire run ends. Holding this
+    // discovery lock until then suppressed every later message-count probe.
+    // It reserves its own subscription synchronously, preventing duplicates.
+    if (window.chatModule?.resumeStream) {
+      void window.chatModule.resumeStream(sessionId).catch(() => {});
+    }
   } catch (_) {
     // Network loss is not task completion. Retry on the next visible tick.
   } finally {

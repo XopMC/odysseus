@@ -45,7 +45,7 @@ export function shouldBindLazyHistoryThinking(metadata, roundNumber, preservedRe
   return true;
 }
 
-function bindLazyHistoryThinking(root, metadata, roundNumber, fallbackReasoning = '') {
+export function bindLazyHistoryThinking(root, metadata, roundNumber, fallbackReasoning = '') {
   const runId = String(metadata?.timeline_v2?.run_id || '');
   if (!shouldBindLazyHistoryThinking(metadata, roundNumber, fallbackReasoning)) return;
   let section = root?.querySelector?.('.thinking-section');
@@ -3616,6 +3616,7 @@ const chatRenderer = {
   createMsgFooter,
   displayMetrics,
   historyRoundReasonings,
+  bindLazyHistoryThinking,
   addMessage,
   buildAttachCards,
   updateMessageAttachments,

@@ -38,13 +38,14 @@ class ChildStreamFailure(RuntimeError):
     def __init__(self, failure):
         failure = failure if isinstance(failure, dict) else {}
         super().__init__(str(failure.get("message") or failure.get("error") or "Subagent stream failed"))
-        self.kind = str(failure.get("kind") or failure.get("category") or "")
+        self.kind = str(failure.get("kind") or failure.get("category") or failure.get("error_category") or "")
         try:
             self.status = int(failure.get("status"))
         except (ValueError, TypeError):
             self.status = None
         self.retryable = (
-            self.kind not in {"unknown_side_effect", "context_compaction", "permission_denied"}
+            self.kind not in {"unknown_side_effect", "context_compaction", "permission_denied",
+                              "degenerate_output", "empty_output"}
             and ((self.status is not None and 400 <= self.status <= 599)
                  or any(marker in str(self).lower() for marker in (
                      "read timeout", "connection pool timeout", "upstream timeout",

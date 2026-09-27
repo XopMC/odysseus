@@ -73,7 +73,7 @@ def test_metadata_only_approval_revision_reconciles_without_count_change():
     assert "node.dataset.approvalId !== key" in renderer
 
 
-@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k", "replay_lazy_older"])
+@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "idle_live_count", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k", "replay_lazy_older"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):
         pytest.skip("node is not installed")
@@ -113,7 +113,7 @@ def test_cross_device_subscription_lifecycle(scenario):
       const window={location:{origin:'http://odysseus.test',hash:'',pathname:'/'},sessionModule:sm,innerWidth:1280,
         addEventListener:(key,fn)=>{(listeners[key]??=[]).push(fn);}};
       let remoteRunning=false,attached=0,remoteHistory=[];
-      window.chatModule={hasActiveStream:()=>false,resumeStream:async id=>{assert.equal(id,'chat-a');attached++;return true;}};
+      window.chatModule={hasActiveStream:()=>scenario==='idle_live_count'&&attached>0,resumeStream:async id=>{assert.equal(id,'chat-a');attached++;if(scenario==='idle_live_count')return new Promise(()=>{});return true;}};
       const reader={read:()=>pendingRead.promise,cancel:async()=>{cancelled++;pendingRead.resolve({done:true});}};
       const response={ok:true,headers:{get:()=>scenario==='replay_lazy_older'?'a'.repeat(32):scenario==='replay_corpus_100k'?'e'.repeat(32):'remote-run'},body:{getReader:()=>reader,cancel:reader.cancel}};
       const fixtureEvents=[];
@@ -190,8 +190,10 @@ def test_cross_device_subscription_lifecycle(scenario):
         assert.equal(appended.filter(x=>x[0]==='assistant').length,1,'canonical remote answer must render once');
         assert.equal(appended.filter(x=>x[0]==='user').length,1,'remote user turn must appear before replay');
         const historyFetches=requests.filter(x=>/\/api\/history\//.test(x.url)&&!x.url.endsWith('limit=1')).length;
+        const countProbes=requests.filter(x=>x.url.includes('/message-count')).length;
         remoteRunning=false;
         await Promise.all(timers.map(x=>x.fn()));await flush();
+        if(scenario==='idle_live_count')assert(requests.filter(x=>x.url.includes('/message-count')).length>countProbes,'live replay must not hold the count/discovery lock');
         assert.equal(requests.filter(x=>/\/api\/history\//.test(x.url)&&!x.url.endsWith('limit=1')).length,historyFetches,'unchanged canonical history must not reload');
         assert.equal(composer.value,'unsent draft','sync must preserve unsent input');
       }else{

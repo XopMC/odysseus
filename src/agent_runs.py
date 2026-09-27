@@ -78,6 +78,7 @@ def reasoning_artifact(session_id: str, run_id: str, round_number: int) -> Optio
         return None
 
     parts = []
+    total_chars = 0
     first_at = None
     last_at = None
     truncated = False
@@ -104,13 +105,14 @@ def reasoning_artifact(session_id: str, run_id: str, round_number: int) -> Optio
         ):
             continue
         value = str(payload.get("delta") or "")
-        if sum(len(part) for part in parts) + len(value) > max_chars:
-            remaining = max_chars - sum(len(part) for part in parts)
+        if total_chars + len(value) > max_chars:
+            remaining = max_chars - total_chars
             if remaining > 0:
                 parts.append(value[:remaining])
             truncated = True
             break
         parts.append(value)
+        total_chars += len(value)
         created_at = replay.get("created_at")
         if isinstance(created_at, (int, float)):
             first_at = created_at if first_at is None else min(first_at, created_at)
@@ -136,6 +138,7 @@ class _Run:
         "active_tool_call_id", "on_terminal", "context_revision", "terminal_status",
         "owner", "session_id", "continuation", "durable_seq", "ledger_hash", "terminal_at",
         "compaction_pending", "terminal_reason", "rendered_rounds", "message_saved",
+        "activity",
         "progress",
         "wait",
         "health_metrics",
@@ -174,6 +177,8 @@ class _Run:
         self.terminal_reason: Optional[str] = None
         self.rendered_rounds: set[int] = set()
         self.message_saved: bool = False
+        from src.run_activity_snapshot import RunActivitySnapshot
+        self.activity = RunActivitySnapshot()
         self.progress = ProgressTracker(self.started_at)
         self.wait = RunWaitTracker(self.started_at)
         from src.run_health_telemetry import RunHealthTelemetry
@@ -292,6 +297,7 @@ def _persist_run_state(run: _Run, *, status: Optional[str] = None, durable: bool
             row.ledger_hash = run.ledger_hash
             row.context_snapshot = dict(run.context_usage) if run.context_usage else None
             continuation = dict(run.continuation or {})
+            continuation["live_rendered_units"] = 0 if run.message_saved else len(run.rendered_rounds)
             if run.latest_context_observation:
                 continuation["latest_context_observation"] = dict(run.latest_context_observation)
             health = run.progress.snapshot(effective_status)
@@ -596,6 +602,8 @@ def _publish(run: _Run, ev: str) -> None:
         run.wait.observe(observed_payload)
         run.health_metrics.observe(observed_payload)
     run.buffer.append(ev)
+    if observed_payload is not None:
+        run.activity.observe(observed_payload, seq)
     if event_type in {"context_usage", "context_checkpoint", "compacted", "context_compaction_failed", "tool_start", "tool_output", "agent_terminal", "agent_step", "ask_user", "goal_update", "plan_update", "generated_image", "doc_update", "model_actual", "tool_inventory", "metrics", "budget_warning", "budget_exceeded", "rounds_exhausted"}:
         _persist_run_state(run)
     for q in list(run.subscribers):
@@ -995,7 +1003,7 @@ def _durable_wait_state(row) -> dict:
     return state
 
 
-def describe_run(session_id: str) -> Optional[dict]:
+def describe_run(session_id: str, *, include_activity=False) -> Optional[dict]:
     """Return the owner-gated route's public snapshot of the current run."""
     run = _RUNS.get(session_id)
     if run is None:
@@ -1020,7 +1028,8 @@ def describe_run(session_id: str) -> Optional[dict]:
                     "durable_seq": row.durable_seq,
                     "ledger_hash": row.ledger_hash,
                     "terminal_reason": (row.continuation or {}).get("terminal_reason"),
-                    "live_rendered_units": 0,
+                    "live_rendered_units": int((row.continuation or {}).get("live_rendered_units") or 0)
+                    if row.status == "running" else 0,
                     "progress_health": _durable_progress_health(row),
                     "health_metrics": dict((row.continuation or {}).get("health_metrics") or {}),
                     "wait_state": _durable_wait_state(row),
@@ -1030,6 +1039,7 @@ def describe_run(session_id: str) -> Optional[dict]:
             return None
     health = run.progress.snapshot(run.status)
     return {
+        **({"activity_snapshot": run.activity.snapshot()} if include_activity else {}),
         "run_id": run.run_id,
         "status": run.status,
         "started_at": run.started_at,
@@ -1190,6 +1200,7 @@ def event_page(session_id: str, *, after_seq: int = -1, limit: int = 100) -> Opt
                 "started_at": state.started_at.replace(tzinfo=timezone.utc).timestamp() if state.started_at else None,
                 "last_seq": len(log) - 1,
                 "next_seq": page.get("next_seq", after_seq),
+                "next_cursor": page.get("next_seq", after_seq),
                 "events": rows,
                 "has_more": page.get("has_more", False),
                 "context_usage": dict(state.context_snapshot or {}) or None,

@@ -25,6 +25,28 @@ def test_repetition_guard_reports_safe_cause_instead_of_generic_model_502():
     assert "alpha" not in payload["text"].lower()
 
 
+def test_long_reasoning_sentence_loop_is_detected_across_subword_chunks():
+    phrase = " ".join(f"reasoningword{n}" for n in range(36)) + ". "
+    text = phrase * 100
+    guard = llm_core._DegenerateStreamGuard("fixture-model")
+    detected_at = None
+    for offset in range(0, len(text), 3):
+        event = guard.check(text[offset:offset + 3], thinking=True)
+        if event:
+            detected_at = offset
+            assert 'degenerate_output' in event
+            break
+    assert detected_at is not None and detected_at < len(phrase) * 20
+    assert len(guard.reasoning_tail) <= 8192
+
+
+def test_long_distinct_reasoning_does_not_trigger_the_phrase_guard():
+    text = " ".join(f"distinctword{n}" for n in range(20000))
+    guard = llm_core._DegenerateStreamGuard("fixture-model")
+    for offset in range(0, len(text), 7):
+        assert guard.check(text[offset:offset + 7], thinking=True) is None
+
+
 class _FakeResp:
     def __init__(self, lines):
         self._lines = lines

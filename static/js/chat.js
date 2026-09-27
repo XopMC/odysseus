@@ -5550,7 +5550,14 @@ function appendStreamErrorGuidance(container, error) {
         const tailStart = hasSnapshotCursor ? Math.max(0, snapshotLastSeq - 199) : 0;
         let after = tailStart - 1;
         olderReplayCursor = tailStart > 0 ? tailStart : null;
-        while (isCurrentView()) {
+        const activity = snapshot.activity_snapshot;
+        const hasActivity = Array.isArray(activity?.events) && activity.events.length > 0;
+        if (hasActivity && hasSnapshotCursor) {
+          snapshotEvents = activity.events;
+          snapshotCursor = snapshotLastSeq;
+          olderReplayCursor = Number(activity.first_seq) > 0 ? Number(activity.first_seq) : null;
+        }
+        while (!hasActivity && isCurrentView()) {
           const pageResponse = await fetch(
             `${API_BASE}/api/chat/run/${encodeURIComponent(sessionId)}/events?after_seq=${after}&limit=200`,
             { signal: subscription.abortCtrl.signal, credentials: 'same-origin', cache: 'no-store' },
@@ -5563,7 +5570,7 @@ function appendStreamErrorGuidance(container, error) {
           const events = (Array.isArray(page.events) ? page.events : [])
             .filter(item => !hasSnapshotCursor || Number(item.seq) <= snapshotLastSeq);
           snapshotEvents.push(...events);
-          const next = Number(page.next_cursor);
+          const next = Number(page.next_cursor ?? page.next_seq);
           if (!Number.isInteger(next) || next <= after) break;
           const acceptedCursor = events.length ? Number(events[events.length - 1].seq) : after;
           after = acceptedCursor;
@@ -5574,7 +5581,7 @@ function appendStreamErrorGuidance(container, error) {
         // A single very long round may not have one in its last 200 events:
         // show its current tail now instead of fetching the whole run from
         // sequence zero (which can hide live activity for minutes).
-        if (olderReplayCursor !== null && snapshotEvents.length) {
+        if (!hasActivity && olderReplayCursor !== null && snapshotEvents.length) {
           const bounded = boundedInitialReplayTail(snapshotEvents, olderReplayCursor);
           olderReplayCursor = bounded.olderCursor;
           snapshotEvents = bounded.events;
@@ -6052,6 +6059,11 @@ function appendStreamErrorGuidance(container, error) {
         inner.innerHTML = markdownModule.mdToHtml(thinkingText);
       }
       if (String(thinkingText || '').trim()) section.dataset.replayThinkingFinalized = 'true';
+      if (holder._replayThinkingArtifactRound && !holder._replayThinkingArtifactBound) {
+        holder._replayThinkingArtifactBound = true;
+        chatRenderer.bindLazyHistoryThinking?.(holder, { timeline_v2: { run_id: snapshotRunId } },
+          holder._replayThinkingArtifactRound, thinkingText);
+      }
       section.querySelector('.thinking-content')?.classList.remove('expanded');
       section.querySelector('.thinking-toggle')?.classList.remove('expanded');
       const label = section.querySelector('.live-think-header-text');
@@ -6205,6 +6217,9 @@ function appendStreamErrorGuidance(container, error) {
                 replayThinkingStartedAt = Number(json._replay?.created_at || 0) * 1000 || Date.now();
               }
               replayThinkingSegmentId = String(json._replay?.segment_id || json.segment_id || timelineReducer.state?.segmentId || '');
+              if (json._replay?.preview_truncated) {
+                holder._replayThinkingArtifactRound = Number(json.round || json._replay.round || 1);
+              }
               replayThinking += json.delta;
               rich = true;
               renderReplayThinking();
@@ -6327,7 +6342,7 @@ function appendStreamErrorGuidance(container, error) {
             // original run-start timestamp (which made every old bubble show
             // the same minute on another device).
             nextRoundTimestamp = Number(json._replay?.created_at) || 0;
-            nextDeltaStartsRound = Boolean(roundText.trim() || replayTool || gotDelta);
+            nextDeltaStartsRound = Boolean(roundText.trim() || replayTool || gotDelta || replayThinking.trim());
             docFenceOpened = false;
             replayThinking = '';
             replayThinkingSegmentId = '';

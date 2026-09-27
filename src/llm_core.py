@@ -11,6 +11,7 @@ import re
 import os
 import math
 import random
+from collections import Counter
 from datetime import timezone
 from contextlib import asynccontextmanager
 from email.utils import parsedate_to_datetime
@@ -419,13 +420,27 @@ class _DegenerateStreamGuard:
         self.same_run = 0
         self.recent_tokens: List[str] = []
         self.total_chars = 0
+        self.reasoning_tail = ""
+        self.reasoning_scan_chars = 0
 
-    def check(self, text: str) -> Optional[str]:
+    def check(self, text: str, *, thinking: bool = False) -> Optional[str]:
         if not text:
             return None
         self.total_chars += len(text)
+        reasoning_repeats = 0
+        if thinking:
+            # Providers split words across token chunks. Scan reconstructed
+            # bounded text, not isolated subword fragments. Long sentence
+            # loops evade the old 96-token / 4-gram guard completely.
+            self.reasoning_tail = (self.reasoning_tail + text)[-8192:]
+            self.reasoning_scan_chars += len(text)
+            if self.reasoning_scan_chars >= 512 and self.total_chars >= 2048:
+                self.reasoning_scan_chars = 0
+                words = [word.lower() for word in _DEGENERATE_WORD_RE.findall(self.reasoning_tail)][-512:]
+                counts = Counter(tuple(words[i:i + 8]) for i in range(max(0, len(words) - 7)))
+                reasoning_repeats = max(counts.values(), default=0)
         tokens = [t.lower() for t in _DEGENERATE_WORD_RE.findall(text) if len(t) >= 2]
-        if not tokens:
+        if not tokens and reasoning_repeats < 10:
             return None
         for token in tokens:
             if token == self.last_token:
@@ -451,6 +466,10 @@ class _DegenerateStreamGuard:
                 reason = True
                 reason_code = "dominant_token_window"
                 repeated_count = count
+        if not reason and reasoning_repeats >= 10:
+            reason = True
+            reason_code = "repeated_reasoning_window"
+            repeated_count = reasoning_repeats
         if not reason and len(self.recent_tokens) >= 80:
             # Phrase loops are common on some local quantized MLX/MoE models:
             # "Also be a software developer mode?" repeated forever will not
@@ -459,8 +478,7 @@ class _DegenerateStreamGuard:
             # prose/list formatting is not interrupted.
             grams = [tuple(self.recent_tokens[i:i + 4]) for i in range(0, len(self.recent_tokens) - 3)]
             if grams:
-                top_gram = max(set(grams), key=grams.count)
-                gram_count = grams.count(top_gram)
+                gram_count = max(Counter(grams).values())
                 if gram_count >= 10:
                     reason = True
                     reason_code = "repeated_phrase_window"
@@ -3518,7 +3536,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                                 reasoning = (reasoning + thinking_part) if reasoning else thinking_part
                                             content = text_part
                                         if reasoning:
-                                            _degenerate = degenerate_guard.check(reasoning)
+                                            _degenerate = degenerate_guard.check(reasoning, thinking=True)
                                             if _degenerate:
                                                 yield _degenerate
                                                 return
@@ -3527,7 +3545,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             content = _strip_visible_chat_template_artifacts(content)
                                             if not content:
                                                 continue
-                                            _degenerate = degenerate_guard.check(content)
+                                            _degenerate = degenerate_guard.check(
+                                                content, thinking=bool(_in_think_tag or content.lstrip().lower().startswith('<think')),
+                                            )
                                             if _degenerate:
                                                 yield _degenerate
                                                 return
