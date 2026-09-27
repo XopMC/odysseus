@@ -2,8 +2,8 @@
 //
 // Workspace picker: browse server directories in a draggable modal, choose a
 // folder, and show it as a removable pill in the chat input bar. While set, the
-// chat request sends `workspace` so the agent's file/shell tools are confined
-// to that folder (see routes/chat_routes.py + src/tool_execution.py).
+// chat request sends `workspace` as the starting directory. Local file tools
+// enforce confinement; trusted-host tools and shell are not sandboxed by it.
 
 import Storage, { KEYS } from './storage.js';
 import uiModule from './ui.js';
@@ -41,7 +41,7 @@ export function syncWorkspaceIndicator(path) {
   if (pill) {
     pill.style.display = (path && !chat) ? '' : 'none';
     pill.classList.toggle('active', !!path);
-    if (path) pill.title = `Workspace: ${path}\nFile tools are confined here; shell commands start here but are not sandboxed and can reach outside it.\nClick to clear.`;
+    if (path) pill.title = `Workspace: ${path}\nStarting directory. Local file tools are confined here; trusted-host tools and shell are not sandboxed by this folder.\nClick to clear.`;
   }
   if (name) name.textContent = path ? _basename(path) : '';
   if (overflow) {
@@ -153,7 +153,7 @@ function _getModal() {
       <input type="text" class="styled-prompt-input workspace-cur" id="workspace-cur-path"
              spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off"
              placeholder="Type or paste a folder path, then press Enter" />
-      <p class="muted workspace-note">File tools are <strong>confined</strong> to this folder. Shell commands start here but are <strong>not sandboxed</strong> and can reach outside it. A workspace scopes the tools; it is not a security boundary.</p>
+      <p class="muted workspace-note">This is the starting directory. Local file tools are <strong>confined</strong> here. Trusted-host tools and shell are <strong>not sandboxed</strong> by this folder; their access follows the configured permissions.</p>
       <div class="modal-body workspace-body" id="workspace-body"></div>
       <div class="modal-footer workspace-footer">
         <button type="button" class="confirm-btn confirm-btn-secondary" id="workspace-cancel">Cancel</button>

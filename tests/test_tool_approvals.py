@@ -550,7 +550,8 @@ async def test_dispatcher_requires_armed_security_context_for_approval(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_revalidates_sealed_workspace(monkeypatch, tmp_path):
+@pytest.mark.parametrize("transport_down", [False, True])
+async def test_dispatcher_revalidates_sealed_workspace(monkeypatch, tmp_path, transport_down):
     import src.tool_execution as tool_execution
 
     store = ToolApprovalStore()
@@ -563,6 +564,10 @@ async def test_dispatcher_revalidates_sealed_workspace(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(tool_execution, "vet_workspace", lambda _path: None)
+    if transport_down:
+        def unavailable(*args):
+            raise ValueError("Host workspace validation unavailable")
+        monkeypatch.setattr(tool_execution, "vet_workspace_for_owner", unavailable)
 
     async def should_not_run(*args, **kwargs):
         raise AssertionError("invalid approved workspace reached implementation")

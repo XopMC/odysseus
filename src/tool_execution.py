@@ -614,16 +614,24 @@ def vet_workspace(raw: str) -> Optional[str]:
     return resolved
 
 
-def agent_cwd() -> str:
+def agent_cwd(*, ignore_workspace=False) -> str:
     """Working directory for agent subprocesses (bash/python/background jobs):
     the active workspace when set, else the persistent data dir."""
-    workspace = get_active_workspace()
+    workspace = None if ignore_workspace else get_active_workspace()
     if workspace:
         return workspace
     resolved = os.path.realpath(_AGENT_WORKDIR)
     if resolved not in _agent_readable_data_subdirs():
         raise RuntimeError("agent workspace is not a safe real directory")
     return resolved
+
+
+def vet_workspace_for_owner(raw, owner):
+    """Validate on the same filesystem that this owner's tools will use."""
+    from src import host_execution
+    if host_execution.enabled_for(owner):
+        return host_execution.vet_workspace(raw, owner=owner)
+    return vet_workspace(raw)
 
 
 async def _local_checkpointed_mutation(tool, content, *, owner, session_id, run_id, dispatch):
@@ -1125,7 +1133,14 @@ async def execute_tool_block(
                 },
             )
         sealed_workspace = exact_approval.pending.workspace
-        if sealed_workspace and vet_workspace(sealed_workspace) != sealed_workspace:
+        verified_workspace = sealed_workspace
+        if sealed_workspace:
+            try:
+                verified_workspace = await asyncio.to_thread(
+                    vet_workspace_for_owner, sealed_workspace, owner)
+            except (ValueError, OSError):
+                verified_workspace = None  # No claim/dispatch on an unavailable host.
+        if sealed_workspace and verified_workspace != sealed_workspace:
             return (
                 f"{getattr(block, 'tool_type', None)}: BLOCKED",
                 {
@@ -1533,7 +1548,9 @@ async def _execute_tool_block_impl(
     # Host mode is an explicit owner opt-in, AFTER every normal policy gate.
     # Background jobs retain the existing local lifecycle/auto-followup monitor.
     from src import host_execution
+    host_background = False
     if host_execution.enabled_for(owner) and tool in host_execution.TOOLS:
+        workspace_kwargs = {'workspace': workspace} if workspace else {}
         is_background, host_content = _split_bg_marker(content) if tool == 'bash' else (False, content)
         if not (is_background and session_id and host_content):
             if tool in ({'read_file', 'run_tests', 'run_lint', 'inspect_process', 'inspect_port', 'tail_log'}
@@ -1543,10 +1560,11 @@ async def _execute_tool_block_impl(
                     archive_scope = {'run_id': parent_run_id}
                 return f'{tool} (Jetson host)', await host_execution.execute(
                     tool, content, owner=owner, session_id=session_id,
-                    **archive_scope)
-            return f'{tool} (Jetson host)', await host_execution.execute(tool, content)
+                    **workspace_kwargs, **archive_scope)
+            return f'{tool} (Jetson host)', await host_execution.execute(tool, content, **workspace_kwargs)
         try:
-            content = '#!bg\n' + host_execution.background_command(tool, host_content)
+            content = '#!bg\n' + host_execution.background_command(tool, host_content, **workspace_kwargs)
+            host_background = True
         except (ValueError, TypeError) as exc:
             return f'{tool} (Jetson host): BLOCKED', {'error': str(exc), 'exit_code': 1}
 
@@ -1559,7 +1577,10 @@ async def _execute_tool_block_impl(
         if _is_bg and _bg_cmd:
             from src import bg_jobs
             try:
-                rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
+                # SSH itself starts locally; its encoded request carries the
+                # remote cwd. A host-only directory cannot be Popen's local cwd.
+                launch_cwd = agent_cwd(ignore_workspace=True) if host_background else agent_cwd()
+                rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=launch_cwd)
             except FileNotFoundError:
                 # Popen failed before creating the child (for example because
                 # a selected workspace was removed). No command ran, so this

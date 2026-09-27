@@ -326,3 +326,69 @@ Additional open observations for the next audit slice:
   answer. Review caught the existing terminal-usage drop; regression added.
   Affected transport suites: **162 passed**. First full pass before the final
   usage/cancellation tests: 7,513 passed; final exact-state full pass is running.
+
+## 19:36–19:41 UTC — exact final slice and real streaming acceptance
+
+- Exact local/public-fork main/master/Jetson checkout/image code:
+  `7e703661cf544f6997bcf1fe14241ec6b23b4b8f`, `odysseus:release-7e70366`.
+  Final full suite **7,516 passed, 25 skipped, 115 subtests**, 214.11s, exit 0.
+  Exact isolated Jetson image **173 passed**; alternate-port HTTP 200.
+  Runtime `src/llm_core.py` SHA256 equals checkout:
+  `ffa9d183e6527182bbb312c2901b8c960cde3a6fa80fbbbbf0e42773a085b76c`.
+- Production started **19:36:07.927 UTC**, application startup completed at
+  19:37:02. Verified fresh app/teams online backups `*-pre-7e70366.db`, mode0600,
+  zero-active-run gate before switching. HTTP/HTTPS200, Docker healthy/0restarts.
+- Created harmless arithmetic chat through actual Safari clicks/input:
+  `f56ba884-9dec-4c00-97f1-73de6c3866e7`, selected Qwen3.8 base model (:2 unused).
+  Run `5d975576beab467780f001ffcf1bee88`: observed **running**, durable seq605,
+  thinking already in journal, no final-text event. Safari visibly showed an
+  actively expanding thinking block (601 estimated tokens /21.9s).
+- Reloaded Safari during thinking and navigated independently authenticated
+  Opera to that same chat. Opera visibly showed continuing thinking before
+  final output (1,775 estimated tokens /62.2s); two messages, not a frozen one.
+  No cookie copying, extra model requests or tool/host permission expansion.
+- Finished normally: status done, live/durable cursor **5,111**. Journal contains
+  5,053 thinking frames, 42 text frames, zero tool calls. First thinking server
+  timestamp 1790537872.4010158; first final text 1790537949.8887832 — **77.49s
+  of reasoning was observable before the final response**, unlike old buffering.
+- Final answer `397077185014` with residues17/29/43/71 matches an independent
+  Python CRT calculation. Both browsers reloaded to the same final answer and
+  10.8% /14,197 backend tokens. Clicking the saved thinking disclosure in Opera
+  loaded its retained body successfully (77.5s/2,171 estimated thinking tokens).
+- Post-startup log counts: zero SQLite-lock messages, Tracebacks, HTTP500 lines;
+  active durable runs0. Removed only candidate tags7e70366/c41a6b9 and older
+  release tags c90b415/5ac5593 after validating container references. Current
+  release and c41a6b9 rollback retained; no DB/backups/network changes.
+- Six-hour continuous final-image acceptance is STILL OPEN. No new persistent
+  minute probe has been started; do not mistake these real point checks for
+  six continuous hours. Restart child recovery, trusted-host workspace routing,
+  ordinary-turn checkpoint reuse and heavy child-list metrics remain open.
+
+## Next slice — host workspace survives container replacement
+
+- Previous Goal turn was progress: released/tested actual live thinking and
+  child result delivery, while leaving broad acceptance open.
+- Reproduced selected host-only path rejected by container `vet_workspace`.
+  Added a private read-only workspace-info operation to the fixed SSH helper;
+  only the registered host owner after the existing admin gate can use it.
+  Picker browse/vet, send-time binding and explicit file-path inference now
+  validate on the execution host. No model-advertised tool or privilege added.
+- Selected cwd propagates to foreground Python/shell, file/checkpoint tools and
+  encoded background requests. Local SSH wrappers start in a valid local data
+  directory, not a nonexistent host path inside Docker. Regression exposed this
+  dispatch distinction before release. No global host default is overwritten.
+- Exact approval uses its sealed workspace, not a mutable composer path; Deny
+  works when host validation is offline. Revalidation failure before effectful
+  dispatch blocks without consuming the exact approval. Local-owner paths keep
+  local validation; no host-to-container fallback on validation failure.
+- Updated workspace help to avoid claiming trusted-host tools are sandboxed by
+  the selected folder. Root/sensitive binds, wrong-owner lookup, helper failure,
+  host-file parent inference, real-helper directory lookup and background cwd
+  regressions covered. Focused **236 passed**; full final pass running.
+- Earlier full pass: 7,528 passed/1 failed. Failure was the comparison tool's
+  prior assertion that host dispatch drops workspace (`{}`); updated it to
+  require the selected cwd. Did not weaken owner or execution-host assertions.
+- Separate context audit confirms ordinary turns after completed Goal bypass
+  working-ledger restore. A safe fix needs an owner-scoped exact-run anchor AND
+  transcript-edit validation; simply reusing the latest checkpoint can restore
+  deleted/edited messages. Still open, not mixed into this workspace patch.

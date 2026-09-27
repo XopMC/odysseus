@@ -32,9 +32,9 @@ def adapt_schemas(schemas, owner):
         return schemas
     result = copy.deepcopy(schemas)
     descriptions = {
-        'get_workspace': 'Return the configured default directory on the Jetson HOST. This is a starting directory, NOT a filesystem boundary. File tools accept absolute host paths subject to Unix permissions.',
-        'bash': 'Execute Bash on the Jetson HOST as its configured Unix user. Each call starts in the default host directory; use explicit cd or absolute paths. Foreground timeout 120 seconds; prefix a long job with #!bg on its own first line for tracked background execution. Never send a sudo password; root commands need human approval at /host-access.',
-        'python': 'Execute Python on the Jetson HOST, not in Docker. Use absolute host paths. Foreground timeout 120 seconds. Never send credentials or a sudo password.',
+        'get_workspace': 'Return the selected chat workspace on the Jetson HOST, or the configured default directory when none is selected. This is a starting directory, NOT a filesystem boundary. Relative paths start here; absolute host paths remain subject to Unix permissions.',
+        'bash': 'Execute Bash on the Jetson HOST as its configured Unix user. Each call starts in the selected chat workspace, or the configured default host directory. Foreground timeout 120 seconds; prefix a long job with #!bg on its own first line for tracked background execution. Never send a sudo password; root commands need human approval at /host-access.',
+        'python': 'Execute Python on the Jetson HOST, not in Docker. Each call starts in the selected chat workspace, or the configured default host directory. Foreground timeout 120 seconds. Never send credentials or a sudo password.',
         'read_file': 'Read a bounded window of a regular file on the Jetson HOST using an absolute path. Supports line or byte ranges, line numbers, SHA-256 and binary detection. For large UTF-8 files, returns a short preview plus an owner-scoped artifact handle. Not confined to the container workspace; Unix permissions apply. Maximum file size 2 MiB.',
         'write_file': 'Write a UTF-8 regular file on the Jetson HOST, using an absolute path. Unix permissions apply; not confined to the container workspace. Maximum 2 MiB. Existing symlink/hardlink writes are rejected.',
         'edit_file': 'Edit a unique exact string in a regular file on the Jetson HOST. Use an absolute path. Pass read_file.sha256 as expected_sha256 to reject stale content. Supported Python/JSON/JavaScript syntax is checked before the atomic replacement. Not confined to the container workspace; Unix permissions apply.',
@@ -84,7 +84,38 @@ def ssh_argv(remote_command=None):
             '-i', key, '--', target, remote_command]
 
 
-def request_for(tool, content, background=False):
+def workspace_info(raw, *, owner, browse=False):
+    if not enabled_for(owner):
+        raise PermissionError('Host workspace access requires the registered owner')
+    if (not isinstance(raw, str) or len(raw) > 4096
+            or any(c in raw for c in ('\x00', '\n', '\r')) or type(browse) is not bool):
+        raise ValueError('Invalid host workspace path')
+    try:
+        result = run_request({'tool': 'workspace_info', 'content': {'path': raw, 'browse': browse},
+                              'cwd': os.environ.get('ODYSSEUS_HOST_CWD', '/home/xopmc'), 'timeout': 10})
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise ValueError('Host workspace validation unavailable') from exc
+    if (result.get('exit_code') != 0 or type(result.get('is_directory')) is not bool
+            or not isinstance(result.get('path'), str)):
+        raise ValueError('Host workspace validation unavailable')
+    return result
+
+
+def _selectable_workspace(info):
+    from src.tool_execution import _is_sensitive_path, _is_app_state_path
+    path = info.get('path')
+    return (isinstance(path, str) and os.path.isabs(path) and '\x00' not in path
+            and len(path) <= 4096 and os.path.dirname(path) != path
+            and info.get('is_directory') is True
+            and not _is_sensitive_path(path) and not _is_app_state_path(path))
+
+
+def vet_workspace(raw, *, owner):
+    info = workspace_info(raw, owner=owner)
+    return info['path'] if _selectable_workspace(info) else None
+
+
+def request_for(tool, content, background=False, *, workspace=None):
     if tool not in TOOLS:
         raise ValueError('unsupported host tool')
     if tool in {'bash', 'python'}:
@@ -113,8 +144,11 @@ def request_for(tool, content, background=False):
         if tool == 'inspect_toolchain' and set(args) - {'endpoint_id'}:
             raise ValueError('unsupported toolchain arguments')
         timeout = 20
+    if workspace is not None and (not isinstance(workspace, str) or not os.path.isabs(workspace)
+                                  or any(c in workspace for c in ('\x00', '\n', '\r'))):
+        raise ValueError('Invalid bound host workspace')
     return {'tool': tool, 'content': content,
-            'cwd': os.environ.get('ODYSSEUS_HOST_CWD', '/home/xopmc'),
+            'cwd': workspace or os.environ.get('ODYSSEUS_HOST_CWD', '/home/xopmc'),
             'timeout': timeout}
 
 
@@ -176,7 +210,7 @@ def _archive_host_read(request, first, owner, session_id, run_id=None):
     return first
 
 
-async def execute(tool, content, *, owner=None, session_id=None, run_id=None):
+async def execute(tool, content, *, owner=None, session_id=None, run_id=None, workspace=None):
     # Agent/Goal host mutations use the same durable checkpoint transaction as
     # Team. Scope is the authenticated chat session; rollback remains fenced to
     # this owner + scope and the exact after-hash map returned by the mutation.
@@ -197,7 +231,7 @@ async def execute(tool, content, *, owner=None, session_id=None, run_id=None):
                 runner_args = args
                 op = 'file.rollback'
             else:
-                request = request_for(tool, content)
+                request = request_for(tool, content, workspace=workspace)
                 runner_args = {'cwd': request['cwd'], 'tool': tool, 'content': content}
                 if isinstance(run_id, str) and run_id:
                     runner_args['run_id'] = run_id[:200]
@@ -223,7 +257,7 @@ async def execute(tool, content, *, owner=None, session_id=None, run_id=None):
             return {'error': 'Invalid durable file checkpoint arguments',
                     'code': 'invalid_arguments', 'exit_code': 1}
     try:
-        request = request_for(tool, content)
+        request = request_for(tool, content, workspace=workspace)
     except (ValueError, TypeError, json.JSONDecodeError):
         return {'error': 'Invalid host tool arguments', 'code': 'invalid_arguments', 'exit_code': 1}
     try:
@@ -252,8 +286,8 @@ async def execute(tool, content, *, owner=None, session_id=None, run_id=None):
                 'retryable': False, 'exit_code': 1}
 
 
-def background_command(tool, content):
-    request = request_for(tool, content, background=True)
+def background_command(tool, content, *, workspace=None):
+    request = request_for(tool, content, background=True, workspace=workspace)
     encoded = base64.urlsafe_b64encode(json.dumps(request).encode()).decode()
     # Only ordinary task content belongs here: no password/token fields. Local
     # bg_jobs persists this command exactly as it already persists local scripts.

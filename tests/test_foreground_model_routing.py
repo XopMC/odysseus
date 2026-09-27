@@ -472,7 +472,8 @@ async def test_chat_stream_approval_restores_exact_shell_turn_toggle(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_denial_returns_control_resolution(monkeypatch):
+@pytest.mark.parametrize("workspace_unavailable", [False, True])
+async def test_chat_stream_denial_returns_control_resolution(monkeypatch, workspace_unavailable):
     from src.tool_capabilities import capabilities_for_action
 
     captured = {}
@@ -494,6 +495,12 @@ async def test_chat_stream_denial_returns_control_resolution(monkeypatch):
             "tool_approval_decision": "deny",
         }
     )
+
+    if workspace_unavailable:
+        def unavailable(*args):
+            raise HTTPException(503, "Host workspace unavailable")
+        monkeypatch.setattr(chat_routes, "_resolve_request_workspace", unavailable)
+        request._form["workspace"] = "/host-only/deleted-folder"
 
     response = await endpoint(request)
     chunks = [chunk async for chunk in response.body_iterator]

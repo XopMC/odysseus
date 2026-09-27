@@ -480,8 +480,11 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
     from src.tool_security import owner_is_admin_or_single_user
     if not owner_is_admin_or_single_user(get_current_user(request)):
         return "", ""
-    from src.tool_execution import vet_workspace
-    workspace = vet_workspace(requested) or ""
+    from src.tool_execution import vet_workspace_for_owner
+    try:
+        workspace = vet_workspace_for_owner(requested, get_current_user(request)) or ""
+    except (ValueError, OSError) as exc:
+        raise HTTPException(503, "Workspace validation unavailable; no model run was started") from exc
     return workspace, (requested if not workspace else "")
 
 
@@ -511,9 +514,23 @@ def _resolve_workspace_from_message_path(request, message: str) -> tuple[str, st
         return "", ""
 
     from src.tool_execution import vet_workspace
-
-    for match in _ABS_PATH_RE.finditer(text):
+    from src import host_execution
+    owner = get_current_user(request)
+    host_mode = host_execution.enabled_for(owner)
+    for index, match in enumerate(_ABS_PATH_RE.finditer(text)):
+        if index >= 8:  # Bound remote lookups in a long pasted user message.
+            break
         raw = match.group(1).rstrip(".,;:)]}")
+        if host_mode:
+            try:
+                info = host_execution.workspace_info(raw, owner=owner)
+                if info.get('is_file') is True:
+                    info = host_execution.workspace_info(os.path.dirname(info['path']), owner=owner)
+                if host_execution._selectable_workspace(info):
+                    return info['path'], ""
+            except (ValueError, OSError) as exc:
+                raise HTTPException(503, "Host workspace inference unavailable") from exc
+            continue
         expanded = os.path.realpath(os.path.expanduser(raw))
         candidates = [expanded]
         if os.path.isfile(expanded):
@@ -1140,9 +1157,14 @@ def setup_chat_routes(
         external_untrusted_context_seen = False
         tool_approval_continuation = False
         # Workspace: confine the agent's file/shell tools to this folder.
-        workspace, workspace_rejected = _resolve_request_workspace(
-            request, form_data.get("workspace")
-        )
+        if tool_approval_id:
+            # Approval/denial belongs to its sealed action, not the mutable
+            # composer folder. An offline host must not prevent Deny.
+            workspace, workspace_rejected = "", ""
+        else:
+            workspace, workspace_rejected = await asyncio.to_thread(
+                _resolve_request_workspace, request, form_data.get("workspace")
+            )
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
         if plan_mode or goal_mode:
             chat_mode = "agent"
@@ -1570,7 +1592,8 @@ def setup_chat_routes(
                     _workspace_agent_intent = False
                     logger.info("chat→agent auto-escalation: contextual browser/form follow-up")
             if not workspace and isinstance(message, str):
-                _auto_workspace, _ = _resolve_workspace_from_message_path(request, message)
+                _auto_workspace, _ = await asyncio.to_thread(
+                    _resolve_workspace_from_message_path, request, message)
                 if _auto_workspace:
                     workspace = _auto_workspace
                     chat_mode = "agent"

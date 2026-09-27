@@ -96,4 +96,4 @@ def test_registered_native_tools_dispatch_with_workspace_and_host_fence(monkeypa
         SimpleNamespace(tool_type=block.tool_type, content=block.content),
         owner="alice", workspace=str(tmp_path), security_context=ToolRunSecurityContext()))
     assert remote_result["execution_host"] == "jetson"
-    assert calls == [("compare_files", block.content, {})]
+    assert calls == [("compare_files", block.content, {"workspace": str(tmp_path)})]

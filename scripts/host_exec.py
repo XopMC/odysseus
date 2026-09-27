@@ -14,6 +14,34 @@ from host_files import handle as files_handle, toolchain as host_toolchain
 MAX_OUTPUT = 60000
 MAX_VERIFICATION_OUTPUT = 1024 * 1024
 _DIAGNOSTIC_TOOLS = frozenset({'inspect_process', 'inspect_port', 'tail_log'})
+
+
+def _workspace_info(content, default_cwd):
+    """Read-only control-plane directory lookup on this host, never in Docker."""
+    if not isinstance(content, dict) or set(content) - {'path', 'browse'}:
+        raise ValueError('invalid workspace arguments')
+    raw, browse = content.get('path', ''), content.get('browse', False)
+    if (not isinstance(raw, str) or len(raw) > 4096 or '\x00' in raw
+            or '\n' in raw or '\r' in raw or type(browse) is not bool):
+        raise ValueError('invalid workspace path')
+    path = os.path.realpath(os.path.expanduser(raw.strip() or default_cwd))
+    is_directory = os.path.isdir(path)
+    dirs, truncated = [], False
+    if browse and is_directory:
+        with os.scandir(path) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 5000 or len(dirs) >= 500:
+                    truncated = True
+                    break
+                if not entry.name.startswith('.') and entry.is_dir(follow_symlinks=False):
+                    dirs.append({'name': entry.name, 'path': os.path.join(path, entry.name)})
+    parent = os.path.dirname(path)
+    return {'path': path, 'is_directory': is_directory, 'is_file': os.path.isfile(path),
+            'parent': parent if parent != path else None,
+            'dirs': sorted(dirs, key=lambda item: item['name'].casefold()),
+            'truncated': truncated, 'exit_code': 0}
+
+
 def _process_identity(pid, proc_root='/proc'):
     if type(pid) is not int or not 1 <= pid <= 2_147_483_647:
         raise ValueError('invalid process id')
@@ -209,6 +237,8 @@ def _verification_command(tool, content, default_cwd):
 def execute(request):
     tool, content = request.get('tool'), request.get('content', '')
     cwd = os.path.expanduser(request.get('cwd') or '~')
+    if tool == 'workspace_info':
+        return _workspace_info(content, cwd)
     if tool == 'inspect_toolchain':
         return host_toolchain(content)
     if tool in _DIAGNOSTIC_TOOLS:

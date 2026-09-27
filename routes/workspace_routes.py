@@ -28,6 +28,19 @@ def setup_workspace_routes():
         if not owner_is_admin_or_single_user(owner):
             raise HTTPException(status_code=403, detail="Workspace browsing is admin-only")
 
+        from src import host_execution
+        if host_execution.enabled_for(owner):
+            try:
+                info = host_execution.workspace_info(path.strip(), owner=owner, browse=True)
+            except (ValueError, OSError) as exc:
+                raise HTTPException(503, "Host workspace browsing unavailable") from exc
+            if not info['is_directory']:
+                raise HTTPException(400, "Host workspace is not a directory")
+            return {key: info.get(key) for key in ('path', 'parent', 'dirs', 'truncated')} | {
+                'selectable': host_execution._selectable_workspace(info),
+                'execution_host': 'jetson',
+            }
+
         # Resolve symlinks so the reported path is canonical and the UI navigates
         # real directories (defends against symlink games in displayed paths).
         target = os.path.realpath(os.path.expanduser(path.strip() or "~"))
@@ -78,8 +91,11 @@ def setup_workspace_routes():
         owner = get_current_user(request)
         if not owner_is_admin_or_single_user(owner):
             raise HTTPException(status_code=403, detail="Workspace selection is admin-only")
-        from src.tool_execution import vet_workspace
-        resolved = vet_workspace(path)
+        from src.tool_execution import vet_workspace_for_owner
+        try:
+            resolved = vet_workspace_for_owner(path, owner)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(503, "Workspace validation unavailable") from exc
         return {"ok": resolved is not None, "path": resolved}
 
     return router
