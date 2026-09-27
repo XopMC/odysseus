@@ -509,6 +509,24 @@ def test_manage_subagents_wait_defaults_to_first_completion(monkeypatch):
     }), {"owner": "alice", "session_id": "s1"}))
     assert result["exit_code"] == 0
     assert captured["wait_for"] == "any"
+    assert captured["timeout_seconds"] == 15
+
+
+def test_manage_subagents_wait_caps_long_model_request(monkeypatch):
+    captured = {}
+
+    async def wait(owner, session_id, child_ids, **kwargs):
+        captured.update(kwargs)
+        return {"subagents": [{"child_id": "a", "status": "running"}],
+                "completed": False, "exit_code": 0}
+
+    monkeypatch.setattr("src.subagent_runtime.runtime.wait", wait)
+    result = asyncio.run(tools.manage_subagents(json.dumps({
+        "action": "wait", "child_ids": ["a"], "timeout_seconds": 600,
+    }), {"owner": "alice", "session_id": "s1"}))
+    assert captured["timeout_seconds"] == 30
+    assert result["wait_seconds"] == 30
+    assert "Continue independent parent work" in result["next_action"]
 
 
 def test_manage_subagents_wait_without_ids_uses_only_current_parent_run(monkeypatch):

@@ -409,7 +409,7 @@ class ChatWorkStore:
             if action == "resume":
                 row.checkpoint = {
                     key: value for key, value in dict(row.checkpoint or {}).items()
-                    if key != "_wait_reason"
+                    if key not in {"_wait_reason", "auto_decide_question_id"}
                 }
             row.revision += 1
             event_kind = {"pause": "goal_paused", "resume": "goal_resumed", "cancel": "goal_cancelled"}[action]
@@ -479,7 +479,11 @@ class ChatWorkStore:
             item = {"id": uuid.uuid4().hex, "text": message, "created_at": now.isoformat()}
             guidance.append(item)
             guidance = guidance[-100:]
-            row.checkpoint = {**dict(row.checkpoint or {}), "guidance": guidance}
+            row.checkpoint = {
+                **{key: value for key, value in dict(row.checkpoint or {}).items()
+                   if key != "auto_decide_question_id"},
+                "guidance": guidance,
+            }
             row.progress = "Additional user guidance received; continuing the active Goal."
             row.revision += 1
             db.add(ChatMessage(

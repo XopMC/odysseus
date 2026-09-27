@@ -492,6 +492,10 @@ def test_ordinary_goal_question_auto_resumes_after_one_minute(owned_chat, monkey
     assert resumed["status"] == "active"
     assert resumed["checkpoint"]["auto_decide_question_id"] == "q-1"
     assert work.resume_expired_goal_question("alice", owned_chat, goal["id"], waiting["revision"]) is None
+    from src.agent_loop import goal_question_timeout_guard
+    assert goal_question_timeout_guard(resumed) is True
+    guided = work.add_goal_guidance("alice", owned_chat, "My answer is 2")
+    assert goal_question_timeout_guard(guided["goal"]) is False
 
 
 def test_goal_permission_wait_never_auto_resumes(owned_chat, monkeypatch):

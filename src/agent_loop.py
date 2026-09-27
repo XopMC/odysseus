@@ -735,7 +735,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "delegate_subagent": f"- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {{\"objective\":\"...\",\"context\":\"only needed excerpt\",\"attachment_ids\":[\"explicit parent-chat upload ID\"],\"model\":\"auto|exact configured model\"}}. Files are never inherited implicitly; attachment IDs are checked against the parent chat and owner. Selected models are filled breadth-first. Maximum {MAX_ACTIVE_PER_MODEL} children per exact model, or 3 on the active chat model.",
-    "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or wait for several child_ids after all of them have been started. A terminal status alone is not a verdict: require a non-empty result or inspect explicit evidence; an empty result never verifies a claim.",
+    "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or briefly wait for several child_ids after all have started. Wait is bounded to 30 seconds; continue independent parent work on timeout. Finished results also arrive at model-round boundaries. A terminal status alone is not a verdict: require a non-empty result or inspect explicit evidence; an empty result never verifies a claim.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
@@ -4027,6 +4027,12 @@ def build_active_goal_note(goal: Optional[dict]) -> str:
     )
 
 
+def goal_question_timeout_guard(goal: Optional[dict]) -> bool:
+    """A resumed Goal must not immediately re-enter the same ask_user wait."""
+    checkpoint = goal.get("checkpoint") if isinstance(goal, dict) else None
+    return bool(isinstance(checkpoint, dict) and checkpoint.get("auto_decide_question_id"))
+
+
 def _detect_runaway_call(call_freq, threshold=15):
     """Tool name of a call signature repeated >= ``threshold`` times — a real
     runaway loop. Counts IDENTICAL repeated calls (same tool AND args), so a
@@ -5839,6 +5845,7 @@ async def stream_agent_loop(
     }
     _model_output_retries = 0
     _retry_output_reserve = 0
+    _auto_decide_question_guard = goal_question_timeout_guard(active_goal)
     for round_num in range(1, max_rounds + 1):
         # All usage from the prior round is finalized before this boundary.
         # Fence the next model request, never an in-flight tool or model call.
@@ -5892,6 +5899,8 @@ async def stream_agent_loop(
             try:
                 from src.chat_work_store import store as _chat_work_store
                 _goal_latest = _chat_work_store.get(owner, session_id).get("goal")
+                if not goal_question_timeout_guard(_goal_latest):
+                    _auto_decide_question_guard = False
                 _latest_guidance = ((_goal_latest or {}).get("checkpoint") or {}).get("guidance", [])
                 if not isinstance(_latest_guidance, list):
                     _latest_guidance = []
@@ -8193,7 +8202,22 @@ async def stream_agent_loop(
             blocked_by_disabled_tools = bool(
                 disabled_tools and not policy_names.isdisjoint(disabled_tools)
             )
-            if (
+            if block.tool_type == "ask_user" and _auto_decide_question_guard:
+                # The model may repeat the same question despite the timeout
+                # instruction. Return a normal tool result instead of writing
+                # another waiting_user checkpoint and burning a new minute.
+                # This never authorizes an effect or supplies a fake answer.
+                desc = "ask_user: ANSWER TIMED OUT"
+                result = {
+                    "output": (
+                        "No user answer arrived within one minute. This Goal already "
+                        "resumed from that question. Choose the safest useful option "
+                        "from available evidence and continue; do not ask again now. "
+                        "No permission or tool approval was granted."
+                    ),
+                    "exit_code": 0, "question_timeout": True,
+                }
+            elif (
                 (blocked_by_tool_policy or blocked_by_disabled_tools)
                 and not _ody_clamped_tool_allowed
             ):

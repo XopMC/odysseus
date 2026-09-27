@@ -356,11 +356,27 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
             ]
         if not isinstance(child_ids, list) or not child_ids:
             return {"error": "wait requires child_ids", "exit_code": 1}
-        return await runtime.wait(
+        try:
+            requested_wait = int(payload.get("timeout_seconds", 15))
+        except (TypeError, ValueError, OverflowError):
+            return {"error": "wait timeout_seconds must be an integer", "exit_code": 1}
+        bounded_wait = max(0, min(requested_wait, 30))
+        result = await runtime.wait(
             owner, session_id, child_ids,
-            timeout_seconds=payload.get("timeout_seconds", 600),
+            timeout_seconds=bounded_wait,
             wait_for=str(payload.get("wait_for") or "any"),
         )
+        if result.get("exit_code") == 0 and result.get("completed") is False:
+            result = {
+                **result,
+                "next_action": (
+                    "Children are still running. Continue independent parent work now; "
+                    "finished results will be delivered at a later model-round boundary. "
+                    "Wait again only if the next step requires a child result."
+                ),
+                "wait_seconds": bounded_wait,
+            }
+        return result
     if action == "list_evidence":
         from src.subagent_evidence import list_evidence
         return list_evidence(owner, session_id, child_id=child_id)

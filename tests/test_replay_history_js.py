@@ -17,7 +17,7 @@ def test_replay_history_page_shape_and_round_boundaries(count):
     script = r"""
       import assert from 'node:assert/strict';
       const {longReplayCorpus}=await import(process.argv[1]);
-      const {replayEventsToHistoryMessage,replayThinkingStats,splitReplayPageAtRoundBoundary}=await import(process.argv[2]);
+      const {boundedInitialReplayTail,replayEventsToHistoryMessage,replayThinkingStats,splitReplayPageAtRoundBoundary}=await import(process.argv[2]);
       const count=Number(process.argv[3]);
       let page=[],rounds=0,tools=0,first=[];
       const check=()=>{
@@ -49,6 +49,18 @@ def test_replay_history_page_shape_and_round_boundaries(count):
       assert.equal(replayEventsToHistoryMessage(split.completeRounds).metadata.round_texts.length,2);
       assert.equal(replayThinkingStats(10000,12000,'[thinking fixture]'),'2.0s · 5 tok');
       assert.equal(replayThinkingStats(10000,10000,'[thinking fixture]'),'0.0s · 5 tok');
+      const noBoundary=Array.from({length:200},(_,i)=>({seq:1000+i,data:{type:'delta',round:51,delta:'x'}}));
+      const bounded=boundedInitialReplayTail(noBoundary,1000);
+      assert.equal(bounded.events.length,200);
+      assert.equal(bounded.olderCursor,1000);
+      assert.equal(replayEventsToHistoryMessage(bounded.events).metadata.round_texts.length,1);
+      const withBoundary=boundedInitialReplayTail([
+        {seq:1000,data:{type:'delta',round:1,delta:'old'}},
+        {seq:1001,data:{type:'agent_step',round:2}},
+        {seq:1002,data:{type:'delta',round:2,delta:'current'}},
+      ],1000);
+      assert.equal(withBoundary.olderCursor,1001);
+      assert.equal(withBoundary.events.length,2);
       assert.ok(process.memoryUsage().heapUsed<256*1024*1024);
     """
     result = subprocess.run(

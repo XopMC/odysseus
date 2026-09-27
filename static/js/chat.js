@@ -23,7 +23,7 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { createTimelineReducer } from './timelineReducer.js';
-import { replayEventsToHistoryMessage, replayThinkingStats, splitReplayPageAtRoundBoundary } from './replayHistory.js?v=20260923replaycursor2';
+import { boundedInitialReplayTail, replayEventsToHistoryMessage, replayThinkingStats, splitReplayPageAtRoundBoundary } from './replayHistory.js?v=20260923replaycursor2';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
 import {
   createIncrementalDisplayProjector,
@@ -5575,11 +5575,9 @@ function appendStreamErrorGuidance(container, error) {
         // show its current tail now instead of fetching the whole run from
         // sequence zero (which can hide live activity for minutes).
         if (olderReplayCursor !== null && snapshotEvents.length) {
-          const firstStep = snapshotEvents.findIndex(item => item?.data?.type === 'agent_step');
-          if (firstStep > 0) {
-            olderReplayCursor = Number(snapshotEvents[firstStep].seq);
-            snapshotEvents = snapshotEvents.slice(firstStep);
-          }
+          const bounded = boundedInitialReplayTail(snapshotEvents, olderReplayCursor);
+          olderReplayCursor = bounded.olderCursor;
+          snapshotEvents = bounded.events;
         }
       }
     } catch (error) {

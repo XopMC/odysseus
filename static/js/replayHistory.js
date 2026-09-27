@@ -7,6 +7,18 @@ function eventData(item) {
   return item?.data && typeof item.data === 'object' ? item.data : item;
 }
 
+export function boundedInitialReplayTail(events, olderCursor) {
+  const rows = Array.isArray(events) ? events : [];
+  if (olderCursor === null || !rows.length) return { events: rows, olderCursor };
+  const firstStep = rows.findIndex(item => eventData(item)?.type === 'agent_step');
+  if (firstStep <= 0) return { events: rows, olderCursor };
+  const boundary = Number(rows[firstStep]?.seq);
+  return {
+    events: rows.slice(firstStep),
+    olderCursor: Number.isSafeInteger(boundary) ? boundary : olderCursor,
+  };
+}
+
 export function replayThinkingStats(startedAt, endedAt, text) {
   const start = Number(startedAt);
   const end = Number(endedAt);
