@@ -1021,7 +1021,8 @@ def test_no_retry_effect_is_feedback_not_dispatch_or_goal_stop(monkeypatch):
     assert not any(e.get("type") in {"tool_start", "agent_terminal"} for e in events)
 
 
-def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypatch):
+@pytest.mark.parametrize("attempt_id", [None, "a" * 32, "b" * 32])
+def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypatch, attempt_id):
     _patch_common(monkeypatch)
     from src.chat_effect_inbox import inbox
     from src import agent_runs
@@ -1041,6 +1042,7 @@ def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypat
     def record_intent(owner, session, run, call, name, content):
         order.append("intent")
         assert run == child_run_id
+        assert call == (f"attempt-{attempt_id}-round-1-tool-0" if attempt_id else "round-1-tool-0")
         assert (owner, session, name, content) == (
             "alice", "fixture-chat", "bash", "echo fixture")
         return {"id": "effect-1", "created": True}
@@ -1062,7 +1064,9 @@ def test_effect_intent_commits_before_tool_dispatch_and_result_settles(monkeypat
         session_id="fixture-chat", owner="alice", max_rounds=1,
         relevant_tools={"bash"}, access_mode="full_access",
         child_run_id=child_run_id,
+        child_attempt_id=attempt_id,
     )))
     assert order == ["intent", "dispatch", "receipt"]
-    assert any(e.get("type") == "tool_start" and e.get("tool_call_id") == "round-1-tool-0"
+    expected_call = f"attempt-{attempt_id}-round-1-tool-0" if attempt_id else "round-1-tool-0"
+    assert any(e.get("type") == "tool_start" and e.get("tool_call_id") == expected_call
                for e in events)

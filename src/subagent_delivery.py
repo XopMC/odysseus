@@ -197,12 +197,26 @@ def claimed_summary(owner: str | None, session_id: str, token: str) -> str | Non
             detail = (child.result if child.status == "completed" else child.error) or "No visible result"
             detail = str(detail)[:min(6000, remaining)]
             remaining -= len(detail)
+            partial = (str(child.result or "")[-min(4000, remaining):]
+                       if child.status != "completed" and remaining > 0 else "")
+            remaining -= len(partial)
+            metrics = child.metrics or {}
             lines.append(json.dumps({
                 "child_id": child.id,
                 "parent_run_id": child.parent_run_id,
                 "status": child.status,
                 "model": child.model,
                 "result_or_error": detail,
+                "partial_result": partial,
+                "recovery": {key: metrics[key] for key in (
+                    "checkpoint_hash", "checkpoint_messages", "context_compactions", "provider_retries",
+                ) if key in metrics},
+                "inspection": (
+                    "This child did not complete. Its partial output is NOT verified completion. "
+                    "Use manage_subagents action=read with child_id for retained context, "
+                    "and action=list_evidence for published findings before continuing its work."
+                    if child.status != "completed" else ""
+                ),
             }, ensure_ascii=False))
         return "\n".join(lines)
     finally:

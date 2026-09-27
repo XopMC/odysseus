@@ -339,7 +339,8 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
         return {"subagents": runtime.list(owner, session_id), "exit_code": 0}
     if action in {"read", "view"}:
         row = runtime.get(owner, session_id, child_id)
-        return ({**row, "exit_code": 0} if row else {"error": "Subagent not found", "exit_code": 1})
+        return ({**row, "recovery_context": runtime.recovery_context(owner, session_id, child_id),
+                 "exit_code": 0} if row else {"error": "Subagent not found", "exit_code": 1})
     if action == "message":
         return await runtime.message(owner, session_id, child_id, payload.get("message") or "")
     if action == "stop":

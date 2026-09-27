@@ -7,6 +7,7 @@ and may start more children before joining them through ``manage_subagents``.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -29,6 +30,33 @@ logger = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"queued", "running", "waiting_user", "stopping"}
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 CHILD_CORE_TOOLS = CORE_AGENT_TOOLS | {"publish_subagent_evidence"}
+
+
+class ChildStreamFailure(RuntimeError):
+    """Keep provider failures distinct from unknown effects and policy failures."""
+
+    def __init__(self, failure):
+        failure = failure if isinstance(failure, dict) else {}
+        super().__init__(str(failure.get("message") or failure.get("error") or "Subagent stream failed"))
+        self.kind = str(failure.get("kind") or failure.get("category") or "")
+        try:
+            self.status = int(failure.get("status"))
+        except (ValueError, TypeError):
+            self.status = None
+        self.retryable = (
+            self.kind not in {"unknown_side_effect", "context_compaction", "permission_denied"}
+            and ((self.status is not None and 400 <= self.status <= 599)
+                 or any(marker in str(self).lower() for marker in (
+                     "read timeout", "connection pool timeout", "upstream timeout",
+                     "network error", "cannot reach", "unreachable", "connection reset",
+                 )))
+        )
+
+
+def _retry_delay(attempt: int) -> float:
+    return min(30.0, 0.25 * (2 ** min(attempt - 1, 7)))
+
+
 def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -458,9 +486,17 @@ class SubagentRuntime:
 
         try:
             waiting_payload = None
-            tool_started = False
+            # Only a persisted post-tool ledger makes a retry safe. Never
+            # rebuild from the original objective after effects have started.
+            tool_since_checkpoint = False
+            checkpoint = None
+            consecutive_failures = 0
+            provider_retries = 0
+            round_slice_exhausted = False
+            child_attempt_id = ""
             async def consume():
-                nonlocal waiting_payload, tool_started
+                nonlocal waiting_payload, tool_since_checkpoint, checkpoint
+                nonlocal consecutive_failures, round_slice_exhausted
                 async for frame in stream_agent_loop(
                     endpoint_url, model, messages, headers=headers or {},
                     session_id=session_id, owner=owner, workspace=workspace,
@@ -469,6 +505,8 @@ class SubagentRuntime:
                     workload="subagent", _is_teacher_run=True,
                     guidance_provider=guidance_provider,
                     child_run_id=child_id,
+                    child_attempt_id=child_attempt_id,
+                    initial_context_compactions=history.context_checkpoint_count,
                     # The parent's selected tools are RAG hints for the parent
                     # objective, not a permission boundary. Each child must run
                     # tool retrieval against its own objective while retaining
@@ -498,7 +536,7 @@ class SubagentRuntime:
                         if not isinstance(event, dict):
                             continue
                         if frame_is_error or (event.get("error") and not event.get("type")):
-                            raise RuntimeError(str(event.get("error") or "Subagent stream failed"))
+                            raise ChildStreamFailure(event)
                         if "delta" in event and not event.get("type"):
                             text = str(event.get("delta") or "")
                             if event.get("thinking"):
@@ -510,12 +548,29 @@ class SubagentRuntime:
                             await flush(force=True)
                             kind = str(event.get("type") or "event")
                             if kind == "tool_start":
-                                tool_started = True
+                                tool_since_checkpoint = True
                             if kind == "ask_user":
                                 waiting_payload = event.get("data") or event
                             if kind == "metrics":
                                 self._merge_metrics(child_id, owner, event.get("data") or {})
                             self._event(child_id, owner, session_id, kind, event)
+                            if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
+                                # _event committed the ledger before it becomes
+                                # eligible for recovery. Copies isolate the next
+                                # loop's prompt mutations from durable evidence.
+                                if tool_since_checkpoint or checkpoint != event["messages"]:
+                                    consecutive_failures = 0
+                                checkpoint = copy.deepcopy(event["messages"])
+                                history.context_checkpoint = copy.deepcopy(checkpoint)
+                                history.context_checkpoint_count = int(event.get("compactions") or 0)
+                                tool_since_checkpoint = False
+                                self._merge_metrics(child_id, owner, {
+                                    "checkpoint_messages": len(checkpoint),
+                                    "checkpoint_hash": event.get("ledger_hash"),
+                                    "context_compactions": history.context_checkpoint_count,
+                                })
+                            if kind == "rounds_exhausted":
+                                round_slice_exhausted = True
                             # stream_agent_loop uses a typed terminal event for
                             # failures that must stop safely (for example an
                             # unbuildable context checkpoint).  [DONE] still
@@ -525,43 +580,47 @@ class SubagentRuntime:
                             # then fail the child without transport retry.
                             if kind == "agent_terminal":
                                 terminal = event.get("data") or {}
-                                if isinstance(terminal, dict) and terminal.get("failed"):
+                                if isinstance(terminal, dict) and (terminal.get("failed") or terminal.get("failure")):
                                     failure = terminal.get("failure") or {}
-                                    message = (
-                                        failure.get("message")
-                                        if isinstance(failure, dict)
-                                        else ""
-                                    )
-                                    raise RuntimeError(
-                                        str(message or "Subagent terminated with a failed checkpoint")
-                                    )
+                                    raise ChildStreamFailure(failure)
             deadline = time.monotonic() + timeout_seconds
-            for transport_attempt in range(2):
+            system_message = copy.deepcopy(messages[0])
+            initial_messages = copy.deepcopy(messages)
+            while True:
+                child_attempt_id = uuid.uuid4().hex
+                round_slice_exhausted = False
+                attempt_output_start = len(output_parts)
                 try:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise asyncio.TimeoutError()
                     await asyncio.wait_for(consume(), timeout=remaining)
+                    if round_slice_exhausted:
+                        if checkpoint is None or tool_since_checkpoint:
+                            raise RuntimeError("Subagent round slice ended without a safe checkpoint")
+                        messages = [copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
+                        self._event(child_id, owner, session_id, "continuation", {
+                            "reason": "round_slice_exhausted", "checkpoint_messages": len(checkpoint),
+                        })
+                        continue
                     break
-                except RuntimeError as exc:
-                    transient = any(marker in str(exc).lower() for marker in (
-                        "read timeout", "connection pool timeout", "upstream timeout",
-                        "network error", "cannot reach", "unreachable", "terminated",
-                    ))
-                    if transport_attempt or tool_started or not transient:
+                except ChildStreamFailure as exc:
+                    if not exc.retryable or tool_since_checkpoint or consecutive_failures >= 10:
                         raise
-                    # No tool was started, so replaying the model request cannot
-                    # duplicate an external side effect. Discard partial text,
-                    # preserve a visible retry event and retry exactly once.
-                    output_parts.clear(); reasoning_parts.clear()
-                    pending_delta.clear(); pending_thinking.clear()
+                    consecutive_failures += 1
+                    provider_retries += 1
+                    await flush(force=True)
                     waiting_payload = None
-                    history.context_checkpoint = None
-                    history.context_checkpoint_count = 0
+                    messages = ([copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
+                                if checkpoint is not None else copy.deepcopy(initial_messages))
+                    self._merge_metrics(child_id, owner, {"provider_retries": provider_retries})
                     self._event(child_id, owner, session_id, "transport_retry", {
-                        "attempt": 2, "reason": str(exc)[:160],
+                        "attempt": consecutive_failures + 1, "retry_limit": 10,
+                        "status": exc.status, "reason": str(exc)[:160],
+                        "checkpoint_messages": len(checkpoint or []),
                     })
-                    await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+                    await asyncio.sleep(min(_retry_delay(consecutive_failures),
+                                            max(0.0, deadline - time.monotonic())))
             await flush(force=True)
             final = "".join(output_parts).strip()
             if waiting_payload:
@@ -570,7 +629,7 @@ class SubagentRuntime:
                     "status": "waiting_user", "ask_user": waiting_payload,
                 }, status="waiting_user", result=final, error="")
                 return
-            if not final:
+            if not "".join(output_parts[attempt_output_start:]).strip():
                 # Thinking and successful transport completion are not a
                 # deliverable.  Never let a parent treat an empty child result
                 # as independent verification of the assigned objective.
@@ -647,6 +706,36 @@ class SubagentRuntime:
                 ChatSubagentRun.owner == (owner or ""), ChatSubagentRun.id == child_id,
             ).first()
             return _public(row, include_result=True) if row else None
+        finally:
+            db.close()
+
+    def recovery_context(self, owner: Optional[str], session_id: str, child_id: str) -> dict:
+        """A bounded inspection excerpt, never a replacement execution ledger."""
+        db = SessionLocal()
+        try:
+            row = db.query(ChatSubagentEvent).filter(
+                ChatSubagentEvent.owner == (owner or ""),
+                ChatSubagentEvent.parent_session_id == session_id,
+                ChatSubagentEvent.child_id == child_id,
+                ChatSubagentEvent.kind == "context_checkpoint",
+            ).order_by(ChatSubagentEvent.id.desc()).first()
+            if row is None:
+                return {}
+            payload = row.payload or {}
+            messages = payload.get("messages") or []
+            tail = []
+            remaining = 12000
+            for message in reversed(messages[-8:]):
+                encoded = json.dumps(message, ensure_ascii=False, default=str)
+                if remaining <= 0:
+                    break
+                excerpt = encoded[:min(4000, remaining)]
+                tail.append({"message_json": excerpt, "truncated": len(excerpt) != len(encoded)})
+                remaining -= len(excerpt)
+            return {"event_id": row.id, "ledger_hash": payload.get("ledger_hash"),
+                    "message_count": len(messages), "tail": list(reversed(tail)),
+                    "inspection_only": True, "untrusted": True,
+                    "note": "Partial context excerpt. Inspect tool evidence; do not replay old calls."}
         finally:
             db.close()
 

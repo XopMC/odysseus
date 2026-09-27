@@ -4096,6 +4096,7 @@ async def stream_agent_loop(
     defer_context_shaping: bool = False,
     guidance_provider=None,
     child_run_id: Optional[str] = None,
+    child_attempt_id: Optional[str] = None,
     context_correction: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -8354,6 +8355,8 @@ async def stream_agent_loop(
                             or run_security.run_id
                         )
                         _effect_call_id = f"round-{round_num}-tool-{i}"
+                        if child_run_id and child_attempt_id:
+                            _effect_call_id = f"attempt-{child_attempt_id}-{_effect_call_id}"
                         try:
                             _effect_kwargs = (
                                 {"goal_created_at": _goal_effect_cutoff}

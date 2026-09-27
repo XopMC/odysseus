@@ -61,6 +61,30 @@ def test_parallel_children_coalesce_into_one_claim_and_one_parent_run(monkeypatc
     db.close()
 
 
+def test_failed_child_delivers_partial_work_and_checkpoint_reference(monkeypatch):
+    import json
+    factory = _store(monkeypatch)
+    db = factory()
+    child = db.get(ChatSubagentRun, "a" * 32)
+    child.status = "failed"
+    child.error = "Provider HTTP 500 after retries"
+    child.result = "Implemented parser; 17 checks passed; exporter remains unfinished."
+    child.metrics = {"checkpoint_hash": "abc123", "checkpoint_messages": 40,
+                     "provider_retries": 10, "private_field": "must not propagate"}
+    db.commit(); db.close()
+    delivery.enqueue_terminal("a" * 32, "alice")
+    token = delivery.claim_pending("alice", "s")
+    summary = delivery.claimed_summary("alice", "s", token)
+    payload = json.loads(summary.splitlines()[-1])
+    assert payload["status"] == "failed"
+    assert payload["partial_result"].startswith("Implemented parser")
+    assert "HTTP 500" in payload["result_or_error"]
+    assert payload["recovery"]["checkpoint_hash"] == "abc123"
+    assert payload["recovery"]["provider_retries"] == 10
+    assert "manage_subagents" in payload["inspection"]
+    assert "private_field" not in summary
+
+
 def test_cross_owner_and_unattached_historical_child_cannot_dispatch(monkeypatch):
     factory = _store(monkeypatch)
     assert delivery.enqueue_terminal("a" * 32, "mallory") is False
