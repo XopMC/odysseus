@@ -406,6 +406,7 @@ if AUTH_ENABLED:
             # tool layer when it HTTP-loopbacks to admin-gated routes
             # (no admin cookie available in that context). Restricted to
             # loopback clients + matching token to keep it locked down.
+            internal_tool_authenticated = False
             try:
                 from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN as _ITT, INTERNAL_TOOL_USER
                 _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
@@ -421,9 +422,15 @@ if AUTH_ENABLED:
                     else:
                         request.state.current_user = INTERNAL_TOOL_USER
                     request.state.api_token = False
-                    return await call_next(request)
+                    internal_tool_authenticated = True
             except Exception as _e:
                 logger.warning("Internal tool auth header check failed", exc_info=_e)
+            # Keep downstream execution outside the credential-validation
+            # try/except. A route exception (for example a stale Goal lease)
+            # must retain its real status/diagnostic instead of being caught
+            # here and rewritten as an unauthenticated 401.
+            if internal_tool_authenticated:
+                return await call_next(request)
             # Allow DIRECT localhost requests (internal service calls from
             # heartbeats etc.). Tunnel/proxy-forwarded requests are excluded by
             # _is_trusted_loopback so LOCALHOST_BYPASS can't be abused over a

@@ -141,6 +141,7 @@ def test_real_auth_middleware_uses_application_relative_path(tmp_path):
         from starlette.routing import Route
 
         import app as app_module
+        from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
 
 
         class _AuthManager:
@@ -210,6 +211,44 @@ def test_real_auth_middleware_uses_application_relative_path(tmp_path):
             }
 
 
+        async def _internal_downstream_error_case():
+            manager = _AuthManager(configured=True)
+
+            class _Downstream:
+                def __init__(self):
+                    self.state = type("State", (), {"auth_manager": manager})()
+
+                async def __call__(self, _scope, _receive, _send):
+                    raise RuntimeError("downstream fixture failure")
+
+            downstream = _Downstream()
+            middleware = app_module.AuthMiddleware(downstream)
+            scope = _scope("", "/api/chat_stream", downstream)
+            scope["client"] = ("127.0.0.1", 4321)
+            scope["headers"] = [
+                (INTERNAL_TOOL_HEADER.lower().encode(), INTERNAL_TOOL_TOKEN.encode()),
+            ]
+            sent = []
+            request_sent = False
+
+            async def receive():
+                nonlocal request_sent
+                if request_sent:
+                    return {"type": "http.disconnect"}
+                request_sent = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def send(message):
+                sent.append(message)
+
+            try:
+                await middleware(scope, receive, send)
+            except BaseException as exc:
+                return {"raised": type(exc).__name__}
+            response_start = next(m for m in sent if m["type"] == "http.response.start")
+            return {"status": response_start["status"]}
+
+
         async def main():
             setup = await _case("/odysseus", "/api/auth/setup", configured=False)
             mounted_api = await _case("/odysseus", "/api/models", configured=True)
@@ -230,6 +269,7 @@ def test_real_auth_middleware_uses_application_relative_path(tmp_path):
                 configured=True,
             )
             default_api = await _case("", "/api/models", configured=True)
+            internal_error = await _internal_downstream_error_case()
             print("RESULT=" + json.dumps({
                 "setup": setup,
                 "mounted_api": mounted_api,
@@ -238,6 +278,7 @@ def test_real_auth_middleware_uses_application_relative_path(tmp_path):
                 "static_child": static_child,
                 "static_lookalike": static_lookalike,
                 "default_api": default_api,
+                "internal_error": internal_error,
             }, sort_keys=True))
 
 
@@ -281,3 +322,4 @@ def test_real_auth_middleware_uses_application_relative_path(tmp_path):
     }
     for name in ("mounted_api", "default_api"):
         assert payload[name] == {"status": 401, "location": None, "called": 0}
+    assert payload["internal_error"].get("raised") in {"RuntimeError", "ExceptionGroup"}

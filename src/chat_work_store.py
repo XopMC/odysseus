@@ -894,7 +894,7 @@ class ChatWorkStore:
             db.flush()
             return _public_goal(row)
 
-    def acquire_goal_lease(self, owner, session_id, ttl_seconds=90, *,
+    def acquire_goal_lease(self, owner, session_id, ttl_seconds=300, *,
                            expected_goal_id=None, expected_attempt=None):
         """Fence duplicate continuation controllers after reconnect/restart."""
         if (expected_goal_id is None) != (expected_attempt is None):
@@ -908,6 +908,10 @@ class ChatWorkStore:
         token = uuid.uuid4().hex
         with SessionLocal.begin() as db:
             _session(db, owner, session_id)
+            # Large sessions can spend well over a minute hydrating history
+            # and building the first request before /api/chat_stream consumes
+            # this lease. Keep the default at the bounded dispatch maximum so
+            # a valid autonomous continuation is not rejected as stale.
             expires = now + timedelta(seconds=max(15, min(int(ttl_seconds), 300)))
             # Conditional UPDATE makes lease acquisition a real CAS. Two web
             # workers recovering the same Goal cannot both observe an empty

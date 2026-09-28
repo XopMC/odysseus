@@ -80,6 +80,21 @@ def test_plan_goal_revision_lease_and_owner_isolation(owned_chat):
         store.get("bob", owned_chat)
 
 
+def test_default_goal_lease_covers_large_history_preflight(owned_chat, monkeypatch):
+    import src.chat_work_store as work_module
+
+    now = datetime(2026, 9, 28, 8, 0, 0)
+    monkeypatch.setattr(work_module, "utcnow_naive", lambda: now)
+    work = ChatWorkStore()
+    work.ensure_goal("alice", owned_chat, "Continue a long-running task")
+
+    token = work.acquire_goal_lease("alice", owned_chat)
+    assert token
+    metadata = work.wait_metadata("alice", owned_chat)
+    expires = datetime.fromisoformat(metadata["lease_expires_at"].removesuffix("Z"))
+    assert expires == now + timedelta(seconds=300)
+
+
 def test_paused_goal_cannot_be_completed_by_an_ordinary_agent_run(owned_chat):
     work = ChatWorkStore()
     goal = work.ensure_goal("alice", owned_chat, "Verify a harmless calculation")
