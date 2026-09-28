@@ -7,7 +7,7 @@ import json
 from core.database import ChatSubagentEvent, ChatSubagentRun, SessionLocal, utcnow_naive
 from src.chat_work_store import (
     PLAN_STATES, WorkConflict, WorkNotFound, _clean_string_list, _clean_text,
-    _stable_step_id, checklist_steps,
+    _reconcile_plan_steps, _stable_step_id, checklist_steps,
 )
 
 
@@ -96,13 +96,14 @@ def save(owner, session_id, child_id, title, steps, *, expected_revision=None, r
         _check_revision(current, expected_revision)
         if current and current.get("status") in {"done", "cancelled"} and not replace_terminal:
             raise WorkConflict("Child plan is no longer mutable")
-        old_by_text = {}
-        for step in (current or {}).get("steps", []):
-            old_by_text.setdefault(step["text"].strip().casefold(), []).append(step["id"])
-        for step in normalized:
-            matches = old_by_text.get(step["text"].strip().casefold(), [])
-            if matches:
-                step["id"] = matches.pop(0)
+        if current and current.get("steps"):
+            _reconcile_plan_steps(
+                normalized, current["steps"],
+                # As in parent Goals, post-compaction plan recovery must not
+                # erase verified child progress. replace_terminal only grants
+                # recovery from a completed/cancelled plan.
+                preserve_progress=current.get("status") == "executing",
+            )
         if len({step["id"] for step in normalized}) != len(normalized):
             raise ValueError("Plan step IDs must be unique")
         plan = {**(current or {}), "id": "child-plan-" + child_id,

@@ -120,6 +120,45 @@ def _stable_step_id(text, ordinal=1):
     return f"step-{digest}-{int(ordinal)}"
 
 
+def _reconcile_plan_steps(normalized, old_steps, *, preserve_progress=False):
+    """Keep opaque step identity and, for executing plans, durable progress.
+
+    Legacy ``update_plan`` clients send a whole markdown checklist whose
+    checkboxes may be stale or default to pending.  It is a plan-revision
+    adapter, not an alternate progress API; only ``update_plan_step`` may
+    change an executing step's status.
+    """
+    old_by_id = {
+        str(step.get("id")): step for step in old_steps
+        if isinstance(step, dict) and step.get("id")
+    }
+    old_by_text = {}
+    for old in old_steps:
+        if not isinstance(old, dict) or not old.get("id"):
+            continue
+        old_by_text.setdefault(
+            str(old.get("text", "")).strip().casefold(), []
+        ).append(old)
+    used_ids = set()
+    for step in normalized:
+        old = old_by_id.get(step.get("id"))
+        if old is None or str(old.get("id")) in used_ids:
+            old = next((candidate for candidate in old_by_text.get(
+                step["text"].strip().casefold(), []
+            ) if str(candidate.get("id")) not in used_ids), None)
+        if old is None:
+            continue
+        old_id = str(old["id"])
+        used_ids.add(old_id)
+        step["id"] = old_id
+        if preserve_progress:
+            step["status"] = old.get("status", "pending")
+            step["required"] = old.get("required", True)
+            for key in ("summary", "progress"):
+                if key in old:
+                    step[key] = old[key]
+
+
 class ChatWorkStore:
     def _event(self, db, owner, session_id, kind, entity_id, revision, payload):
         db.add(ChatWorkEvent(
@@ -259,28 +298,24 @@ class ChatWorkStore:
                 if expected_revision is not None and row.revision != expected_revision:
                     raise WorkConflict("Plan changed; reload")
                 row.revision += 1
-            # Legacy update_plan is an adapter.  Once execution has started it
-            # must not silently turn the plan back into a draft.  Reconcile
-            # omitted IDs by matching old text so old clients keep stable IDs.
+            # Legacy update_plan is an adapter. Once execution has started it
+            # must not silently reset or advance durable step progress. Reconcile
+            # IDs by explicit ID first, then matching text for old clients.
             if row is not None and row.steps:
-                old_by_text = {}
-                for old_step in row.steps:
-                    old_id = old_step.get("id")
-                    if old_id:
-                        old_by_text.setdefault(
-                            str(old_step.get("text", "")).strip().casefold(), []
-                        ).append(old_id)
-                for step in normalized:
-                    # Text is the only identity available to legacy clients;
-                    # preserve a previously authored opaque ID whenever it
-                    # matches, including old positional IDs such as step-1.
-                    matches = old_by_text.get(step["text"].strip().casefold()) or []
-                    if matches:
-                        step["id"] = matches.pop(0)
+                _reconcile_plan_steps(
+                    normalized, row.steps,
+                    # Recovery may replace an old terminal Plan, but a fresh
+                    # post-compaction projection of the currently executing
+                    # Plan must retain verified progress for matching steps.
+                    preserve_progress=row.status == "executing",
+                )
             step_ids = [step["id"] for step in normalized]
             if len(step_ids) != len(set(step_ids)):
                 raise ValueError("Plan step IDs must be unique")
-            prior_status = "draft" if replace_terminal else (row.status if row is not None else "draft")
+            replaces_finished_plan = bool(
+                replace_terminal and row is not None and row.status in {"cancelled", "done"}
+            )
+            prior_status = "draft" if replaces_finished_plan else (row.status if row is not None else "draft")
             if prior_status in {"draft", "approved"} and any(
                 step["status"] != "pending" for step in normalized
             ):
@@ -657,11 +692,13 @@ class ChatWorkStore:
 
     def record_goal_failure(self, owner, session_id, error, checkpoint=None, *,
                             force_wait_user=False, expected_goal_id=None,
-                            expected_attempt=None):
+                            expected_attempt=None, failure_attempts=1):
         """Persist bounded transport/model/checkpoint retry state."""
         error = _clean_text(error, "goal error", 2000)
         if checkpoint is not None and not isinstance(checkpoint, dict):
             raise ValueError("Goal checkpoint must be an object")
+        if type(failure_attempts) is not int or not 1 <= failure_attempts <= 10:
+            raise ValueError("Goal failure attempts must be between 1 and 10")
         if (expected_goal_id is None) != (expected_attempt is None):
             raise ValueError("Goal ID and attempt must be supplied together")
         with SessionLocal.begin() as db:
@@ -677,12 +714,15 @@ class ChatWorkStore:
             # Count failed attempts, not identical error strings. Providers
             # can alternate timeout/503/schema errors without any successful
             # work; changing wording must not reset the retry budget.
-            provider_http = (checkpoint or {}).get("reason") == "provider_http"
+            provider_http = (
+                (checkpoint or {}).get("reason") == "provider_http"
+                or (checkpoint or {}).get("failure_class") == "provider_http"
+            )
             failure_key = "provider_http" if provider_http else "other"
             if row.failure_key and row.failure_key != failure_key:
                 row.failure_count = 0
             row.failure_key = failure_key
-            row.failure_count = int(row.failure_count or 0) + 1
+            row.failure_count = int(row.failure_count or 0) + failure_attempts
             row.last_error = error
             row.lease_token = None
             row.lease_expires_at = None
@@ -695,11 +735,14 @@ class ChatWorkStore:
                 checkpoint_failed = (checkpoint or {}).get("reason") == "context_compaction"
                 dispatch_failed = (checkpoint or {}).get("reason") == "continuation_dispatch_failed"
                 dispatch_code = (checkpoint or {}).get("failure_code")
+                dispatch_retry_exhausted = dispatch_failed and (checkpoint or {}).get("retry_exhausted") is True
                 row.progress = (
                     "Goal continuation did not start. Choose a model for this chat, then retry explicitly."
                     if dispatch_failed and dispatch_code == "model_unselected" else
                     "Goal continuation did not start. Choose an available model endpoint, then retry explicitly."
                     if dispatch_failed and dispatch_code == "model_endpoint_unavailable" else
+                    "Goal continuation dispatcher failed ten attempts; Goal paused."
+                    if dispatch_retry_exhausted else
                     "Goal continuation did not start; inspect the endpoint and retry explicitly."
                     if dispatch_failed else
                     "Context checkpoint failed repeatedly; check the summarizer or context policy before resuming."

@@ -975,10 +975,10 @@ def test_action_observation_escalation_fences_active_goal_for_review(monkeypatch
 
     assert any(event.get("type") == "loop_breaker_triggered"
                and event.get("reason") == "repeated_action_observation" for event in events)
-    assert goal["status"] == "review_required"
+    assert goal["status"] == "active"
     assert goal["checkpoint"]["reason"] == "repeated_action_observation"
     assert any(event.get("type") == "goal_update"
-               and event.get("data", {}).get("status") == "review_required" for event in events)
+               and event.get("data", {}).get("status") == "active" for event in events)
 
 
 def test_goal_repeated_monologue_emits_explicit_stall_not_silent_question(monkeypatch):
@@ -1007,33 +1007,84 @@ def test_goal_repeated_monologue_emits_explicit_stall_not_silent_question(monkey
     )))
     assert any(e.get("type") == "loop_breaker_triggered"
                and e.get("reason") == "repeated_premature_stop" for e in events)
-    assert goal["status"] == "review_required"
+    assert goal["status"] == "active"
+    assert not any(e.get("type") == "goal_update" and e.get("data", {}).get("status") == "review_required"
+                   for e in events)
     assert not any(e.get("type") == "ask_user" for e in events)
 
 
-def test_unknown_prior_effect_fences_agent_before_dispatch(monkeypatch):
+def test_unknown_prior_effect_blocks_only_matching_action_and_keeps_goal_running(monkeypatch):
     _patch_common(monkeypatch)
     from src.chat_effect_inbox import inbox
     monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set())
+    calls = []
 
     async def stream(_candidates, _messages, **_kwargs):
-        yield 'data: {"delta":"```bash\\necho fixture\\n```"}\n\n'
+        calls.append(1)
+        if len(calls) == 1:
+            yield 'data: {"delta":"```bash\\necho fixture\\n```"}\n\n'
+        else:
+            yield 'data: {"delta":"Independent safe work can continue."}\n\n'
         yield 'data: [DONE]\n\n'
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
-    monkeypatch.setattr(inbox, "unknown", lambda owner, session: [{"id": "unsettled"}])
-    monkeypatch.setattr(inbox, "record_intent", lambda *args: (_ for _ in ()).throw(
-        AssertionError("must not create another effect intent")))
+    monkeypatch.setattr(inbox, "record_intent", lambda *args, **kwargs: {
+        "id": "unsettled", "created": False, "status": "unknown",
+    })
+    monkeypatch.setattr(al, "execute_tool_block", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("the exact uncertain side effect must not execute again")))
 
     events = _types(_collect(al.stream_agent_loop(
         "http://x/v1", "m", [{"role": "user", "content": "Run the fixture"}],
-        session_id="fixture-chat", owner="alice", max_rounds=1,
+        session_id="fixture-chat", owner="alice", max_rounds=2,
         relevant_tools={"bash"}, access_mode="full_access",
     )))
-    assert any(e.get("type") == "agent_terminal"
-               and e.get("data", {}).get("failure", {}).get("kind") == "unknown_side_effect"
-               for e in events), [e for e in events if e.get("type") == "tool_output"]
-    assert not any(e.get("type") == "tool_start" for e in events)
+    blocked = [e for e in events if e.get("type") == "tool_output"]
+    assert blocked and blocked[0].get("not_executed") is True
+    assert blocked[0].get("outcome_unknown") is True
+    assert any(e.get("type") == "tool_retry_blocked" for e in events)
+    assert any(e.get("delta") == "Independent safe work can continue." for e in events)
+    assert not any(e.get("type") == "agent_terminal" for e in events)
+
+
+def test_new_unknown_tool_outcome_is_reported_without_stopping_goal(monkeypatch):
+    _patch_common(monkeypatch)
+    from src.chat_effect_inbox import inbox
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set())
+    # The fixture intentionally has no persisted Chat row; this test exercises
+    # the active-run behavior after a newly executed tool returns an uncertain
+    # outcome, not the durable no-retry lookup.
+    monkeypatch.setattr(inbox, "no_retry_match", lambda *_args, **_kwargs: None)
+    calls = []
+
+    async def stream(_candidates, _messages, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            yield 'data: {"delta":"```bash\\necho fixture\\n```"}\n\n'
+        else:
+            yield 'data: {"delta":"Continuing with independent work."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    monkeypatch.setattr(inbox, "record_intent", lambda *args, **kwargs: {
+        "id": "effect-unknown", "created": True, "status": "intent",
+    })
+    monkeypatch.setattr(inbox, "record_result", lambda *args, **kwargs: {"status": "unknown"})
+
+    async def execute(block, *args, **kwargs):
+        return ("bash", {"error": "reply lost", "exit_code": 1, "outcome_unknown": True})
+
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "Run the fixture"}],
+        session_id="fixture-chat", owner="alice", max_rounds=2,
+        relevant_tools={"bash"}, access_mode="full_access",
+        active_goal={"id": "safe-goal", "status": "active", "attempt": 1,
+                     "created_at": "2026-09-25T10:00:00", "checkpoint": {}},
+    )))
+    assert any(e.get("type") == "tool_output" and e.get("outcome_unknown") is True for e in events)
+    assert any(e.get("delta") == "Continuing with independent work." for e in events)
+    assert not any(e.get("type") == "agent_terminal" for e in events)
 
 
 def test_no_retry_effect_is_feedback_not_dispatch_or_goal_stop(monkeypatch):

@@ -2979,21 +2979,36 @@ def setup_chat_routes(
                                     elif data.get("type") in {"budget_exceeded", "rounds_exhausted"} and active_goal:
                                         try:
                                             _round_cap = data.get("type") == "rounds_exhausted"
-                                            active_goal = chat_work_store.wait_on_goal_budget(
-                                                _user, session,
-                                                resource=data.get("resource") or ("model_rounds" if _round_cap else "tool_calls"),
-                                                used=data.get("used", data.get("rounds") if _round_cap else None),
-                                                limit=data.get("limit", data.get("rounds") if _round_cap else None),
-                                                run_id=data.get("run_id") or agent_runs.get_run_id(session),
-                                                expected_goal_id=active_goal.get("id"),
-                                                expected_attempt=active_goal.get("attempt"),
-                                                usage_source=(
-                                                    data.get("usage_source")
-                                                    if data.get("resource") == "model_tokens"
-                                                    and data.get("usage_source") in {"real", "estimated", "mixed"}
-                                                    else None
-                                                ),
-                                            )
+                                            if _round_cap:
+                                                # max_rounds is a safe execution
+                                                # slice, not a user decision. The
+                                                # detached terminal controller
+                                                # continues this same durable Goal.
+                                                active_goal = chat_work_store.update_goal(
+                                                    _user, session,
+                                                    "Agent round slice checkpointed; Goal will continue automatically.",
+                                                    {"reason": "round_slice_exhausted",
+                                                     "rounds": data.get("rounds")},
+                                                    reset_failures=False,
+                                                    expected_goal_id=active_goal.get("id"),
+                                                    expected_attempt=active_goal.get("attempt"),
+                                                )
+                                            else:
+                                                active_goal = chat_work_store.wait_on_goal_budget(
+                                                    _user, session,
+                                                    resource=data.get("resource") or "tool_calls",
+                                                    used=data.get("used"),
+                                                    limit=data.get("limit"),
+                                                    run_id=data.get("run_id") or agent_runs.get_run_id(session),
+                                                    expected_goal_id=active_goal.get("id"),
+                                                    expected_attempt=active_goal.get("attempt"),
+                                                    usage_source=(
+                                                        data.get("usage_source")
+                                                        if data.get("resource") == "model_tokens"
+                                                        and data.get("usage_source") in {"real", "estimated", "mixed"}
+                                                        else None
+                                                    ),
+                                                )
                                             yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
                                         except WorkConflict:
                                             # Another client already paused/cancelled this Goal.
@@ -3066,9 +3081,15 @@ def setup_chat_routes(
                                             or "Context checkpoint failed"
                                         )
                                     elif failure_kind == "unknown_side_effect":
-                                        failure_message = "A tool outcome is unknown; inspect it before continuing."
+                                        failure_message = (
+                                            "A tool outcome is unknown; the action was not replayed and "
+                                            "the Goal will continue with independent work."
+                                        )
                                     elif failure_kind == "effect_ledger":
-                                        failure_message = "The effect ledger is unavailable; no tool action was started."
+                                        failure_message = (
+                                            "The effect ledger could not be saved; no tool action was started. "
+                                            "The Goal will retry from its checkpoint."
+                                        )
                                     else:
                                         failure_message = _safe_model_failure_message(failure.get("category")) or (
                                             f"Model request failed (HTTP {failure_status})"
@@ -3084,12 +3105,13 @@ def setup_chat_routes(
                                     terminal_metadata["failure"] = sanitized_failure
                                     if active_goal:
                                         try:
-                                            if failure_kind == "unknown_side_effect":
+                                            if failure_kind in {"unknown_side_effect", "effect_ledger"}:
                                                 active_goal = chat_work_store.update_goal(
                                                     _user, session,
-                                                    "A tool outcome is unknown; inspect the effect inbox before continuing.",
-                                                    {"reason": "unknown_side_effect", "run_failure": terminal_metadata["failure"]},
-                                                    waiting_user=True,
+                                                    failure_message,
+                                                    {"reason": failure_kind,
+                                                     "run_failure": terminal_metadata["failure"]},
+                                                    reset_failures=False,
                                                 )
                                             elif failure_kind == "context_compaction":
                                                 active_goal = chat_work_store.record_goal_failure(
@@ -3310,7 +3332,13 @@ def setup_chat_routes(
                 # active. Bound their retry rate so a provider/policy problem
                 # cannot spin hundreds of model attempts while still allowing
                 # autonomous recovery when a summarizer route comes back.
-                await asyncio.sleep(min(60.0, 0.5 * (2 ** max(0, failures - 1))))
+                repeated_stalls = max(
+                    0, int((current_goal.get("checkpoint") or {}).get("premature_stop_runs") or 0),
+                )
+                await asyncio.sleep(max(
+                    min(60.0, 0.5 * (2 ** max(0, failures - 1))),
+                    min(30.0, 0.5 * (2 ** max(0, repeated_stalls - 1))),
+                ))
                 if agent_runs.is_active(session):
                     return
                 from src.goal_controller import dispatch_goal_continuation

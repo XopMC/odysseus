@@ -46,14 +46,18 @@ def _marker(generation, *, child=False):
         "mandatory": True,
         "required_tools": ["create_plan", "update_plan", "update_plan_step"],
         "instruction": (
-            "Online context compaction finished. Re-read the child objective and its saved checkpoint, "
-            "then rebuild the child's private remaining-work plan before continuing. "
-            "Use create_plan, update_plan, or update_plan_step for the child; do not modify the parent Goal or plan."
+            "Online context compaction finished. Re-read the child objective, saved checkpoint, "
+            "and current private plan. Rebuild the remaining-work view without resetting stable "
+            "step IDs or verified statuses. Use update_plan_step only after checking progress; "
+            "use update_plan only for an explicit full-plan revision/re-projection. Create a child "
+            "plan only if none exists; never modify the parent Goal or plan."
             if child else
-            "Online context compaction finished and the parent task is still active. "
-            "Before any other work, re-read the active goal/checkpoint and rebuild a fresh "
-            "remaining-work plan by calling create_plan, update_plan, or update_plan_step. "
-            "Do not continue execution or merely describe a plan until that tool call succeeds."
+            "Online context compaction finished and the parent task is still active. Before any "
+            "other work, re-read the active Goal, checkpoint, and current durable Plan. Rebuild the "
+            "remaining-work view while preserving stable step IDs and verified statuses. Use "
+            "update_plan_step only after checking progress; use legacy update_plan only for an "
+            "explicit full-plan revision/re-projection. Create a new plan only if none exists or "
+            "the objective was explicitly revised. Do not reset or duplicate an active Plan."
         ),
     }
 

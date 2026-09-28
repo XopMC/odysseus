@@ -119,6 +119,22 @@ def test_legacy_update_plan_starts_active_goal_plan_and_completion_waits_for_ste
     assert work.complete_goal("alice", owned_chat, "221", ["13 × 17 = 221"])["status"] == "completed"
 
 
+def test_legacy_update_plan_tool_reports_durable_not_requested_progress(owned_chat):
+    work = ChatWorkStore()
+    work.ensure_goal("alice", owned_chat, "Verify both Plan steps")
+    _name, created = asyncio.run(UpdatePlanTool().execute(
+        json.dumps({"plan": "- [ ] Inspect\n- [ ] Verify"}),
+        {"owner": "alice", "session_id": owned_chat},
+    ))
+    assert created["exit_code"] == 0
+    _name, projected = asyncio.run(UpdatePlanTool().execute(
+        json.dumps({"plan": "- [x] Inspect\n- [x] Verify"}),
+        {"owner": "alice", "session_id": owned_chat},
+    ))
+    assert [step["status"] for step in projected["plan_update"]["steps"]] == ["in_progress", "pending"]
+    assert "0/2" in projected["output"]
+
+
 def test_legacy_update_plan_without_active_goal_stays_draft(owned_chat):
     _name, result = asyncio.run(UpdatePlanTool().execute(
         json.dumps({"plan": "- [ ] Review first"}),
@@ -196,13 +212,38 @@ def test_action_loop_review_reason_survives_wait_metadata_and_panel(owned_chat):
     assert panel["recovery_action"] == "resume_goal"
 
 
-def test_legacy_plan_update_marks_terminal_when_all_required_steps_done(owned_chat):
+def test_legacy_plan_update_preserves_progress_and_cannot_advance_steps(owned_chat):
     work = ChatWorkStore()
+    work.ensure_goal("alice", owned_chat, "Complete and verify both steps")
     plan = work.save_plan("alice", owned_chat, "Arithmetic", "- [ ] Direct\n- [ ] Independent")
     original_ids = [step["id"] for step in plan["steps"]]
     plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
-    plan = work.save_plan("alice", owned_chat, "Arithmetic", "- [x] Direct\n- [x] Independent",
-                          expected_revision=plan["revision"])
+    plan = work.update_plan_step(
+        "alice", owned_chat, original_ids[0], "done", expected_revision=plan["revision"],
+        summary="Direct calculation was independently verified",
+    )
+    assert [step["status"] for step in plan["steps"]] == ["done", "pending"]
+
+    # A stale full-checklist projection must not reset completed progress.
+    plan = work.save_plan(
+        "alice", owned_chat, "Arithmetic", "- [ ] Direct\n- [ ] Independent",
+        expected_revision=plan["revision"],
+    )
+    assert [step["id"] for step in plan["steps"]] == original_ids
+    assert [step["status"] for step in plan["steps"]] == ["done", "pending"]
+    assert plan["current_step_id"] == original_ids[1]
+
+    # Nor may a legacy checkbox claim work that update_plan_step did not verify.
+    plan = work.save_plan(
+        "alice", owned_chat, "Arithmetic", "- [x] Direct\n- [x] Independent",
+        expected_revision=plan["revision"],
+    )
+    assert plan["status"] == "executing"
+    assert [step["status"] for step in plan["steps"]] == ["done", "pending"]
+    plan = work.update_plan_step(
+        "alice", owned_chat, original_ids[1], "done", expected_revision=plan["revision"],
+        summary="Independent verification passed",
+    )
     assert plan["status"] == "done"
     assert plan["current_step_id"] is None
     assert [step["id"] for step in plan["steps"]] == original_ids
@@ -218,6 +259,34 @@ def test_post_compaction_recovery_plan_starts_from_pending_draft(owned_chat):
     plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
     assert plan["status"] == "executing"
     assert [step["status"] for step in plan["steps"]] == ["in_progress", "pending"]
+
+
+def test_post_compaction_plan_reprojection_preserves_verified_progress(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Large Goal", [
+        {"id": "inspect", "text": "Inspect the current implementation", "status": "pending"},
+        {"id": "tests", "text": "Run focused tests", "status": "pending"},
+    ])
+    plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
+    plan = work.update_plan_step("alice", owned_chat, "inspect", "done",
+                                expected_revision=plan["revision"],
+                                summary="Inspected source",
+                                progress={"verification": ["Source checked"]})
+    plan = work.update_plan_step("alice", owned_chat, "tests", "in_progress",
+                                expected_revision=plan["revision"],
+                                summary="Focused tests running")
+
+    recovered = work.save_plan("alice", owned_chat, "Fresh checkpoint projection", [
+        {"id": "inspect", "text": "Inspect the current implementation", "status": "pending"},
+        {"id": "tests", "text": "Run focused tests", "status": "pending"},
+        {"id": "release", "text": "Verify the release", "status": "pending"},
+    ], replace_terminal=True)
+
+    assert recovered["status"] == "executing"
+    assert [(step["id"], step["status"]) for step in recovered["steps"]] == [
+        ("inspect", "done"), ("tests", "in_progress"), ("release", "pending"),
+    ]
+    assert recovered["steps"][0]["progress"]["verification"] == ["Source checked"]
 
 
 @pytest.mark.parametrize("new_goal", [True, False])
@@ -494,6 +563,20 @@ def test_goal_http_provider_failures_retry_ten_times_then_pause(owned_chat):
     )
     assert goal["failure_count"] == 10
     assert goal["status"] == "paused"
+
+
+def test_goal_dispatch_retry_batch_counts_all_ten_failed_posts(owned_chat):
+    work = ChatWorkStore()
+    goal = work.ensure_goal("alice", owned_chat, "Retry the detached dispatcher")
+    goal = work.record_goal_failure(
+        "alice", owned_chat, "Continuation dispatch failed after ten attempts",
+        {"reason": "continuation_dispatch_failed", "failure_class": "provider_http",
+         "failure_code": "transport", "retry_exhausted": True},
+        failure_attempts=10,
+    )
+    assert goal["failure_count"] == 10
+    assert goal["status"] == "paused"
+    assert "ten attempts" in goal["progress"]
 
 
 def test_ordinary_goal_question_auto_resumes_after_one_minute(owned_chat, monkeypatch):
@@ -774,7 +857,8 @@ def test_goal_controller_http_failure_parks_manual_resume_without_success(monkey
         "alice", owned_chat, reason="goal_resumed",
     )) is False
     state = work.get("alice", owned_chat)["goal"]
-    assert state["status"] == "waiting_user"
+    assert state["status"] == "paused"
+    assert state["failure_count"] == 10
     assert state["checkpoint"]["_wait_reason"] == "dispatch_failure"
 
 

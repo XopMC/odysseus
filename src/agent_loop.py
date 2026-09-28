@@ -809,7 +809,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
     "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; for an active Goal, if no answer arrives within one minute, the server resumes you to choose the safest useful option. This is never approval for a tool effect. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
     "create_plan": "- ```create_plan``` — Persist the structured UI plan. In Plan mode it waits for approval; during an active Goal it starts tracking immediately. Args: {\"title\":\"...\",\"steps\":[{\"id\":\"step-1\",\"text\":\"...\",\"status\":\"pending\",\"required\":true}]}. Saving a PLAN.md file does not update the UI plan.",
-    "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
+    "update_plan": "- ```update_plan``` — Legacy full-checklist adapter for an explicit user-requested plan revision or re-projection. It preserves stable IDs and progress for unchanged steps and cannot advance an executing step. Use `update_plan_step` after performing and verifying a step. Args: {\"plan\": \"complete revised checklist\"}. Does nothing if there's no active plan.",
     "update_plan_step": "- ```update_plan_step``` — Update one stable active-plan step only after doing and checking it. Args: {\"step_id\":\"...\",\"status\":\"pending|in_progress|done|blocked\",\"summary\":\"...\",\"files_changed\":[],\"decisions\":[],\"verification\":[],\"next_work\":[]}.",
     "get_goal": "- ```get_goal``` — Read the durable active goal, attempt number and checkpoint for this chat.",
     "update_goal_progress": "- ```update_goal_progress``` — Save meaningful progress and a restart-safe checkpoint for the active goal. Args: {\"progress\":\"...\",\"checkpoint\":{},\"waiting_user\":false}.",
@@ -4053,7 +4053,9 @@ def build_active_goal_note(goal: Optional[dict]) -> str:
         "the server resumes you to choose the safest useful option; this is never tool approval. "
         "For other blockers, set waiting_user=true and state the exact blocker. The ONLY successful terminal "
         "action is `complete_goal`, and it requires concrete verification evidence. Never "
-        "repeat a command whose side effect has an unknown outcome.\n\n"
+        "repeat a command whose side effect has an unknown outcome. If the same answer repeats, "
+        "do not pause the Goal: change approach, save a recovery checkpoint, and let the server "
+        "continue a fresh attempt.\n\n"
         "For multi-step work, save the current structured UI plan with `create_plan` early, "
         "before delegating implementation. This tool also works in Goal mode. A PLAN.md file "
         "does not update that plan. A completed plan from an older Goal is not the plan for "
@@ -5197,7 +5199,12 @@ async def stream_agent_loop(
             _prepend_agent_directive(route_messages, (
                 "## SUBAGENTS\n"
                 "When a task has genuinely independent parts and the child budget permits, decide yourself "
-                "whether to delegate them; the user need not request subagents explicitly. "
+                "whether to delegate them; the user need not request subagents explicitly. Before creating "
+                "a child, list existing children and compare their objectives with remaining work. Never "
+                "duplicate an active or completed assignment; inspect a failed child's retained result "
+                "before deciding whether a genuinely missing part needs a replacement. Track child IDs and "
+                "assigned scopes in the Goal checkpoint across attempts. If the user requests N new children, "
+                "create exactly N distinct children for that request, not extra exploratory duplicates. "
                 "delegate_subagent starts a child asynchronously and returns its child_id immediately. If the user "
                 "asks for N subagents, call delegate_subagent exactly N times with distinct objectives BEFORE waiting, "
                 "so every child works in parallel. Continue independent parent work while children run; their "
@@ -8052,19 +8059,26 @@ async def stream_agent_loop(
                     else:
                         _goal_stall_signature, _goal_stall_count = _goal_signature, 1
                     if _goal_stall_count >= 6:
+                        _goal_checkpoint = dict((_goal_now or {}).get("checkpoint") or {})
+                        _stalled_runs = min(1000, int(_goal_checkpoint.get("premature_stop_runs") or 0) + 1)
                         try:
                             active_goal = _chat_work_store.update_goal(
                                 owner, session_id,
-                                "No new safe progress after repeated continuation attempts.",
-                                {"round": round_num, "reason": "repeated_premature_stop"},
-                                review_required=True,
+                                "Repeated answer detected; Goal remains active and will continue with a changed approach.",
+                                {"round": round_num, "reason": "repeated_premature_stop",
+                                 "premature_stop_runs": _stalled_runs,
+                                 "response_excerpt": _goal_text[-1000:]},
+                                reset_failures=False,
                                 **_goal_update_fence(),
                             )
                         except (WorkConflict, WorkNotFound):
                             logger.info("Stale Goal loop escalation ignored for session %s", session_id)
                             break
-                        yield f'data: {json.dumps({"type": "loop_breaker_triggered", "reason": "repeated_premature_stop", "round": round_num, "message": "Goal repeated the same response without a tool action; the current attempt stopped for review."})}\n\n'
+                        yield f'data: {json.dumps({"type": "loop_breaker_triggered", "reason": "repeated_premature_stop", "round": round_num, "message": "Repeated response checkpointed; Goal remains active and will automatically retry with a changed approach."})}\n\n'
                         yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
+                        # End this unproductive model attempt so the durable
+                        # Goal controller starts a fresh one from the checkpoint.
+                        # This is not a pause or a model-error budget increment.
                         break
                     try:
                         active_goal = _chat_work_store.update_goal(
@@ -8435,10 +8449,6 @@ async def stream_agent_loop(
                         # The committed intent precedes both the visible start
                         # event and any host/network side effect. A repeated
                         # call after a lost reply is never silently replayed.
-                        _unknown_effects = _effect_inbox.unknown(owner, session_id)
-                        if _unknown_effects:
-                            yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "An earlier tool outcome is unknown; inspect the effect inbox before continuing."}}})}\n\n'
-                            return
                         from src import agent_runs as _effect_runs
                         # Child runs share the parent's chat session, so a
                         # session lookup resolves to the parent run ID. Scope
@@ -8464,8 +8474,30 @@ async def stream_agent_loop(
                                 **_effect_kwargs,
                             )
                             if not _effect_intent["created"]:
-                                yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "This exact effect intent already exists; it will not be dispatched twice."}}})}\n\n'
-                                return
+                                _prior_status = str(_effect_intent.get("status") or "unknown")
+                                _blocked_result = {
+                                    "error": (
+                                        "Not executed: this exact effect already has a durable "
+                                        f"{_prior_status} receipt. Do not replay it; use its earlier "
+                                        "result or continue with independent work."
+                                    ),
+                                    "exit_code": 1,
+                                    "not_executed": True,
+                                    "outcome_unknown": _prior_status == "unknown",
+                                    "effect_intent_id": _effect_intent.get("id"),
+                                    "policy": "effect_replay_fenced",
+                                }
+                                _blocked_text = format_tool_result(block.tool_type, _blocked_result)
+                                tool_results.append(_blocked_text)
+                                tool_result_texts.append(_blocked_text)
+                                tool_result_records.append({
+                                    "tool_name": block.tool_type, "content": block.content,
+                                    "result": _blocked_result, "text": _blocked_text,
+                                })
+                                yield f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num, "tool_call_id": _effect_call_id})}\n\n'
+                                yield f'data: {json.dumps({"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": _blocked_result["error"], "exit_code": 1, "not_executed": True, "outcome_unknown": _prior_status == "unknown", "tool_call_id": _effect_call_id})}\n\n'
+                                yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "effect_replay_fenced", "round": round_num})}\n\n'
+                                continue
                         except Exception as exc:
                             from src.chat_work_store import WorkConflict
                             if (isinstance(exc, WorkConflict) and _goal_effect_cutoff
@@ -8546,6 +8578,7 @@ async def stream_agent_loop(
                         _effect_inbox.mark_unknown(owner, session_id, _effect_intent["id"])
 
                 if _effect_intent:
+                    _effect_receipt = {"status": "unknown"}
                     try:
                         _effect_receipt = _effect_inbox.record_result(
                             owner, session_id, _effect_intent["id"], result,
@@ -8556,11 +8589,25 @@ async def stream_agent_loop(
                             _effect_inbox.mark_unknown(owner, session_id, _effect_intent["id"])
                         except Exception:
                             logger.exception("Unable to mark effect intent unknown")
-                        yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "The tool effect could not be durably settled; inspect before continuing."}}})}\n\n'
-                        return
+                        result = {
+                            "error": "The action may have completed, but its receipt could not be saved. "
+                                     "It was not replayed; continue with independent work and do not infer the outcome.",
+                            "exit_code": 1, "outcome_unknown": True,
+                        }
                     if _effect_receipt["status"] == "unknown":
-                        yield f'data: {json.dumps({"type": "agent_terminal", "data": {"failure": {"kind": "unknown_side_effect", "message": "The tool reply was lost; inspect the effect inbox before continuing."}}})}\n\n'
-                        return
+                        result = {
+                            **result,
+                            "error": result.get("error") or (
+                                "The tool outcome is unknown. It was not replayed; continue with "
+                                "independent work and use read-only verification if useful."
+                            ),
+                            "output": (
+                                "Outcome unknown; action was not replayed. "
+                                + str(result.get("output") or result.get("stdout") or "")
+                            ),
+                            "exit_code": 1,
+                            "outcome_unknown": True,
+                        }
 
             run_security.observe_tool_result(block.tool_type, result, block.content)
             _failed_reads.observe(block.tool_type, block.content, result)
@@ -8794,6 +8841,9 @@ async def stream_agent_loop(
 
             # Emit tool_output (include ui_event data if present)
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}
+            for _receipt_field in ("not_executed", "outcome_unknown", "policy", "effect_intent_id"):
+                if result.get(_receipt_field) is not None:
+                    tool_output_data[_receipt_field] = result[_receipt_field]
             if result.get("child_run_id"):
                 tool_output_data.update({
                     "child_run_id": result["child_run_id"],
@@ -9282,24 +9332,31 @@ async def stream_agent_loop(
                 try:
                     active_goal = _chat_work_store.update_goal(
                         owner, session_id,
-                        "Repeated tool evidence cycle stopped for review; do not auto-retry the same actions.",
-                        {"round": round_num, "reason": "repeated_action_observation"},
-                        review_required=True,
+                        "Repeated tool evidence cycle detected; Goal remains active and will continue with a changed approach.",
+                        {"round": round_num, "reason": "repeated_action_observation",
+                         "recovery_required": True},
+                        reset_failures=False,
                         **_goal_update_fence(),
                     )
                 except (WorkConflict, WorkNotFound):
                     logger.info("Stale Goal loop-breaker result ignored for session %s", session_id)
                     break
-                yield f'data: {json.dumps({"type": "loop_breaker_triggered", "round": round_num, "reason": "repeated_action_observation"})}\n\n'
+                yield f'data: {json.dumps({"type": "loop_breaker_triggered", "round": round_num, "reason": "repeated_action_observation", "message": "Repeated evidence checkpointed; the Goal remains active and will continue with a changed approach."})}\n\n'
                 yield f'data: {json.dumps({"type": "goal_update", "data": active_goal})}\n\n'
-                break
-            _force_answer = True
-            messages.append({"role": "system", "content": (
-                "Repeated tool evidence persisted after a diagnostic warning. "
-                "Stop using tools for this turn and state the verified blocker "
-                "and the next safe step. Do not claim completion."
-            )})
-            yield f'data: {json.dumps({"type": "loop_breaker_triggered", "round": round_num, "reason": "repeated_action_observation"})}\n\n'
+                _force_answer = True
+                messages.append({"role": "system", "content": (
+                    "This attempt repeated the same tool evidence. Do not repeat those actions. "
+                    "Give one concise truthful checkpoint and next safe step; the durable Goal "
+                    "will automatically continue from it. Do not claim completion."
+                )})
+            else:
+                _force_answer = True
+                messages.append({"role": "system", "content": (
+                    "Repeated tool evidence persisted after a diagnostic warning. "
+                    "Stop using tools for this turn and state the verified blocker "
+                    "and the next safe step. Do not claim completion."
+                )})
+                yield f'data: {json.dumps({"type": "loop_breaker_triggered", "round": round_num, "reason": "repeated_action_observation"})}\n\n'
 
         # Emit agent_step event
         yield (

@@ -158,7 +158,6 @@ def test_soft_budget_warning_reaches_clients_without_parking_goal(stream_client,
     ("budget_exceeded", "model_requests"),
     ("budget_exceeded", "wall_seconds"),
     ("budget_exceeded", "children"),
-    ("rounds_exhausted", "model_rounds"),
 ])
 def test_goal_tool_budget_event_parks_goal_before_detached_run_ends(
         stream_client, monkeypatch, event_type, resource):
@@ -202,10 +201,55 @@ def test_goal_tool_budget_event_parks_goal_before_detached_run_ends(
               if line.startswith("data: ") and line != "data: [DONE]"]
     assert any(event.get("type") == "goal_update" and event.get("data", {}).get("status") == "waiting_user"
                for event in events)
+    run = agent_runs._RUNS["session-1"]
     with captured["db_factory"]() as db:
         durable = db.query(ChatRunState).filter_by(run_id=run_id).one()
         assert durable.status == "done"
         assert durable.durable_seq >= 1
+
+
+def test_goal_round_cap_is_a_continuation_slice_not_a_pause(stream_client, monkeypatch):
+    from src import goal_controller
+
+    client, _captured, _events_sent = stream_client
+    dispatched = []
+
+    class GoalWorkStore:
+        goal = {"id": "safe-goal", "status": "active", "revision": 1,
+                "attempt": 3, "objective": "Harmless fixture", "checkpoint": {}}
+
+        def get(self, owner, session):
+            return {"plan": None, "goal": dict(self.goal), "cursor": 0}
+
+        def update_goal(self, owner, session, progress, checkpoint=None, **kwargs):
+            assert kwargs["expected_goal_id"] == "safe-goal"
+            assert kwargs["expected_attempt"] == 3
+            self.goal = {**self.goal, "status": "active", "revision": 2,
+                         "progress": progress, "checkpoint": checkpoint or {}}
+            return dict(self.goal)
+
+    work = GoalWorkStore()
+    monkeypatch.setattr(chat_routes, "chat_work_store", work)
+
+    async def dispatch(owner, session, *, reason, expected_goal_id=None, expected_attempt=None):
+        dispatched.append((owner, session, reason, expected_goal_id, expected_attempt))
+        return True
+
+    async def sliced_stream(*_args, **_kwargs):
+        yield "data: " + json.dumps({"type": "rounds_exhausted", "rounds": 200}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(goal_controller, "dispatch_goal_continuation", dispatch)
+    monkeypatch.setattr(chat_routes, "stream_agent_loop", sliced_stream)
+    response = client.post("/api/chat_stream", data={
+        "session": "session-1", "message": "safe", "mode": "agent",
+    })
+    assert response.status_code == 200
+    assert work.goal["status"] == "active"
+    assert work.goal["checkpoint"]["reason"] == "round_slice_exhausted"
+    run = agent_runs._RUNS["session-1"]
+    asyncio.run(run.on_terminal("done"))
+    assert ("alice", "session-1", "terminal_done", "safe-goal", 3) in dispatched
 
 
 @pytest.mark.parametrize("goal_limit, expected", [(4, 4), (None, 200)])

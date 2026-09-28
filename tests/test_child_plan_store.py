@@ -60,13 +60,18 @@ def test_child_tools_persist_autoexecuting_plan_and_private_audit(case, monkeypa
     assert created["scope"] == "child" and created["child_id"] == "child-a"
     assert created["plan_update"]["status"] == "executing"
     assert all(step["status"] == "pending" for step in created["plan_update"]["steps"])
-    updated = tool(UpdatePlanTool, {"plan": "- [ ] Test\n- [x] Inspect", "expected_revision": 1}, case.ctx)
+    updated = tool(UpdatePlanTool, {"plan": "- [x] Test\n- [x] Inspect", "expected_revision": 1}, case.ctx)
     assert updated["exit_code"] == 0
     assert [step["id"] for step in updated["plan_update"]["steps"]] == ["test", "inspect"]
-    completed = tool(UpdatePlanStepTool, {"step_id": "test", "status": "done", "expected_revision": 2,
+    assert [step["status"] for step in updated["plan_update"]["steps"]] == ["pending", "pending"]
+    assert "0/2" in updated["output"]
+    first_done = tool(UpdatePlanStepTool, {"step_id": "inspect", "status": "done", "expected_revision": 2,
+                                          "verification": ["Source inspection passed"]}, case.ctx)
+    assert first_done["plan_update"]["status"] == "executing"
+    completed = tool(UpdatePlanStepTool, {"step_id": "test", "status": "done", "expected_revision": 3,
                                          "verification": ["Unit tests passed"]}, case.ctx)
     assert completed["plan_update"]["status"] == "done"
-    assert completed["plan_update"]["revision"] == 3
+    assert completed["plan_update"]["revision"] == 4
     lease_token = subagent_runtime._execution_lease.set(None)
     try:
         assert plans.get("alice", "s", "child-b") is None
@@ -77,7 +82,7 @@ def test_child_tools_persist_autoexecuting_plan_and_private_audit(case, monkeypa
         assert child.metrics["tokens"] == 123
         assert child.metrics["_child_plan"] == completed["plan_update"]
         events = db.query(ChatSubagentEvent).all()
-        assert len(events) == 3
+        assert len(events) == 4
         assert all(event.child_id == "child-a" and event.owner == "alice" and event.parent_session_id == "s"
                    and event.payload["plan_update"]["scope"] == "child" for event in events)
 
@@ -107,6 +112,34 @@ def test_stale_revision_terminal_recovery_and_copy_isolation(case):
     restored = plans.get("alice", "s", "child-a")
     restored["steps"][0]["text"] = "Not persisted"
     assert plans.get("alice", "s", "child-a")["steps"][0]["text"] == "Verify"
+
+
+def test_child_post_compaction_plan_reprojection_preserves_verified_progress(case):
+    original = plans.save("alice", "s", "child-a", "Assigned work", [
+        {"id": "inspect", "text": "Inspect assigned files", "status": "pending"},
+        {"id": "test", "text": "Run focused tests", "status": "pending"},
+    ])
+    first = plans.update_step("alice", "s", "child-a", "inspect", "done",
+                              expected_revision=original["revision"],
+                              summary="Inspected files",
+                              progress={"verification": ["Read-only checks passed"]})
+    plans.update_step("alice", "s", "child-a", "test", "in_progress",
+                      expected_revision=first["revision"], summary="Tests in progress")
+
+    recovered = tool(CreatePlanTool, {
+        "title": "Fresh checkpoint projection",
+        "steps": [
+            {"id": "inspect", "text": "Inspect assigned files", "status": "pending"},
+            {"id": "test", "text": "Run focused tests", "status": "pending"},
+            {"id": "report", "text": "Return verified result", "status": "pending"},
+        ],
+    }, {**case.ctx, "plan_recovery": True})
+
+    assert recovered["exit_code"] == 0
+    assert [(step["id"], step["status"]) for step in recovered["plan_update"]["steps"]] == [
+        ("inspect", "done"), ("test", "in_progress"), ("report", "pending"),
+    ]
+    assert recovered["plan_update"]["steps"][0]["progress"]["verification"] == ["Read-only checks passed"]
 
 
 @pytest.mark.parametrize("run_id", [None, "parent-run", "nonexistent"])

@@ -62,6 +62,20 @@ def test_second_device_pages_active_run_before_opening_live_sse():
     assert resume.index("snapshotEvents.push(...events)") < resume.index("/api/chat/resume/")
 
 
+def test_active_run_attaches_before_count_or_history_reconciliation():
+    source = (Path(__file__).resolve().parents[1] / "static/js/sessions.js").read_text(
+        encoding="utf-8"
+    )
+    check = source.split("async function _checkServerStream", 1)[1].split(
+        "export function clearStreamComplete", 1
+    )[0]
+    assert check.index("/api/chat/stream_status/") < check.index("const renderedCount = await refreshSessionMessageCount")
+    active = check.split("if (info.status === 'streaming')", 1)[1].split("// Idle/completed", 1)[0]
+    assert "refreshCountInBackground()" in active
+    assert "window.chatModule.resumeStream(sessionId)" in active
+    assert active.index("window.chatModule.resumeStream(sessionId)") < active.index("refreshSessionHistory(sessionId, { allowBusy: true })")
+
+
 def test_metadata_only_approval_revision_reconciles_without_count_change():
     root = Path(__file__).resolve().parents[1] / "static/js"
     sessions = (root / "sessions.js").read_text(encoding="utf-8")
@@ -73,7 +87,7 @@ def test_metadata_only_approval_revision_reconciles_without_count_change():
     assert "node.dataset.approvalId !== key" in renderer
 
 
-@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "idle_live_count", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_stall_after_output", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k", "replay_lazy_older"])
+@pytest.mark.parametrize("scenario", ["idle_discovery", "idle_completion", "idle_live_count", "idle_streaming_fast_attach", "hidden_focus", "resume_lock", "late_headers", "return_to_same_chat", "late_chunk", "detach_reader", "replay_stall", "replay_stall_after_output", "replay_canonical", "replay_activity", "replay_corpus_1k", "replay_corpus_10k", "replay_corpus_100k", "replay_lazy_older"])
 def test_cross_device_subscription_lifecycle(scenario):
     if not shutil.which("node"):
         pytest.skip("node is not installed")
@@ -100,7 +114,7 @@ def test_cross_device_subscription_lifecycle(scenario):
         querySelector:()=>null,querySelectorAll:()=>[],createElement:()=>new Element(),
         createComment:()=>new Element(),addEventListener:(key,fn)=>{(listeners[key]??=[]).push(fn);}};
       let selected='chat-a',viewToken=1,now=1000,requests=[],cancelled=0,appended=[],reloads=[],canonicalRefreshes=0;
-      const pendingHeaders=deferred(),pendingRead=deferred();
+      const pendingHeaders=deferred(),pendingRead=deferred(),pendingCount=deferred();
       const sm={getCurrentSessionId:()=>selected,getSessionViewToken:()=>viewToken,getSessions:()=>[{id:'chat-a',model:'qwen'}],
         selectSession:async id=>reloads.push(id),loadSessions:noop};
       if(scenario==='replay_canonical'||scenario==='replay_activity'||scenario.startsWith('replay_corpus_'))sm.refreshSessionHistory=async id=>{assert.equal(id,'chat-a');canonicalRefreshes++;};
@@ -113,7 +127,7 @@ def test_cross_device_subscription_lifecycle(scenario):
       const window={location:{origin:'http://odysseus.test',hash:'',pathname:'/'},sessionModule:sm,innerWidth:1280,
         addEventListener:(key,fn)=>{(listeners[key]??=[]).push(fn);}};
       let remoteRunning=false,attached=0,remoteHistory=[];
-      window.chatModule={hasActiveStream:()=>scenario==='idle_live_count'&&attached>0,resumeStream:async id=>{assert.equal(id,'chat-a');attached++;if(scenario==='idle_live_count')return new Promise(()=>{});return true;}};
+      window.chatModule={hasActiveStream:()=>scenario==='idle_live_count'&&attached>0,resumeStream:async id=>{assert.equal(id,'chat-a');attached++;appended.push(['user','Remote question']);appended.push(['assistant','Remote answer']);if(scenario==='idle_live_count')return new Promise(()=>{});return true;}};
       const reader={read:()=>pendingRead.promise,cancel:async()=>{cancelled++;pendingRead.resolve({done:true});}};
       const response={ok:true,headers:{get:()=>scenario==='replay_lazy_older'?'a'.repeat(32):scenario==='replay_corpus_100k'?'e'.repeat(32):'remote-run'},body:{getReader:()=>reader,cancel:reader.cancel}};
       const fixtureEvents=[];
@@ -151,6 +165,7 @@ def test_cross_device_subscription_lifecycle(scenario):
           }
           if(scenario.startsWith('idle_')||scenario==='hidden_focus'){
             if(String(url).includes('/message-count')){
+              if(scenario==='idle_streaming_fast_attach')return pendingCount.promise;
               return {ok:true,status:200,json:async()=>({rendered_total:remoteHistory.length,visible_total:remoteHistory.length,total:remoteHistory.length})};
             }
             if(String(url).includes('/api/history/')){
@@ -173,6 +188,19 @@ def test_cross_device_subscription_lifecycle(scenario):
         mod.namespace.initDependencies();
         mod.namespace.setCurrentSessionId('chat-a');
         assert(timers.length,'already-open idle chat needs periodic discovery');
+        if(scenario==='idle_streaming_fast_attach'){
+          remoteRunning=true;
+          remoteHistory=[{role:'user',content:'Remote question'},{role:'assistant',content:'Remote answer'}];
+          await Promise.all(timers.map(x=>x.fn()));await flush();
+          assert.equal(attached,1,'active detached work attaches while the message-count request is still pending');
+          assert.equal(requests.filter(x=>x.url.includes('/message-count')).length,1);
+          assert.equal(requests.filter(x=>/\/api\/history\//.test(x.url)).length,0,
+            'live replay must not wait for or start canonical history hydration');
+          pendingCount.resolve({ok:true,status:200,json:async()=>({rendered_total:2,visible_total:2,total:2})});
+          await flush();
+          console.log(JSON.stringify({passed:scenario}));
+          return;
+        }
         await Promise.all(timers.map(x=>x.fn()));await flush();
         const previous=requests.length;remoteRunning=scenario!=='idle_completion';
         remoteHistory=[{role:'user',content:'Remote question'},{role:'assistant',content:'Remote answer'}];
@@ -194,7 +222,10 @@ def test_cross_device_subscription_lifecycle(scenario):
         remoteRunning=false;
         await Promise.all(timers.map(x=>x.fn()));await flush();
         if(scenario==='idle_live_count')assert(requests.filter(x=>x.url.includes('/message-count')).length>countProbes,'live replay must not hold the count/discovery lock');
-        assert.equal(requests.filter(x=>/\/api\/history\//.test(x.url)&&!x.url.endsWith('limit=1')).length,historyFetches,'unchanged canonical history must not reload');
+        const afterCompletionHistoryFetches=requests.filter(x=>/\/api\/history\//.test(x.url)&&!x.url.endsWith('limit=1')).length;
+        assert(afterCompletionHistoryFetches<=historyFetches+1,'completion may reconcile canonical history once');
+        await Promise.all(timers.map(x=>x.fn()));await flush();
+        assert.equal(requests.filter(x=>/\/api\/history\//.test(x.url)&&!x.url.endsWith('limit=1')).length,afterCompletionHistoryFetches,'unchanged idle history must not reload again');
         assert.equal(composer.value,'unsent draft','sync must preserve unsent input');
       }else{
         let firstResult='pending';const first=mod.namespace.resumeStream('chat-a');first.then(value=>{firstResult=String(value);},error=>{firstResult=String(error);});await flush();

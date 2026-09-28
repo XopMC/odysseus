@@ -3042,23 +3042,17 @@ async function _checkServerStream(sessionId, { ensureAfterInFlight = false } = {
     // Skip if research is running — it has its own progress UI
     if (_researchingSessions.has(sessionId)) return;
 
-    // Keep the visible badge identical across devices while a detached run is
-    // active; the DOM contains different transient replay nodes on each
-    // client, so a local element count is never authoritative.  This probe is
-    // part of the guarded discovery chain so a slow server cannot create
-    // overlapping count/status/history requests every three seconds.
-    const renderedCount = await refreshSessionMessageCount(sessionId);
-    if (!isCurrent()) return;
-    const previousRenderedCount = _liveSessionRenderedCounts.get(sessionId);
-    const renderedCountChanged = renderedCount === null
-      || previousRenderedCount === undefined
-      || renderedCount !== previousRenderedCount
-      || (_observedHistoryRevisions.has(sessionId)
-        && _observedHistoryRevisions.get(sessionId) !== _syncedHistoryRevisions.get(sessionId));
-    if (renderedCount !== null) _liveSessionRenderedCounts.set(sessionId, renderedCount);
-
-    // Skip if the SSE reader is still actively connected — it handles rendering
-    if (window.chatModule && window.chatModule.hasActiveStream && window.chatModule.hasActiveStream(sessionId)) return;
+    // A slow count/history request must not delay attaching to an active Agent
+    // run: on large chats it made a reloaded Safari/second device sit on an old
+    // tail with an idle composer while the durable model stream kept running.
+    const refreshCountInBackground = () => {
+      void refreshSessionMessageCount(sessionId).catch(() => {});
+    };
+    // A local reader already owns live rendering. Refresh only the shared badge.
+    if (window.chatModule?.hasActiveStream?.(sessionId)) {
+      refreshCountInBackground();
+      return;
+    }
 
     const res = await _readLiveSession(`${API_BASE}/api/chat/stream_status/${encodeURIComponent(sessionId)}`);
     if (!isCurrent()) return;
@@ -3068,6 +3062,35 @@ async function _checkServerStream(sessionId, { ensureAfterInFlight = false } = {
     }
     const info = res.ok ? res.data : { status: 'idle' };
     if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId)) return;
+
+    if (info.status === 'streaming') {
+      refreshCountInBackground();
+      // Replay the durable active-run tail before any full-history reconcile.
+      // The replay finalizes into canonical history when the run ends.
+      if (info.mode !== 'research' && !info.is_research && window.chatModule?.resumeStream) {
+        void window.chatModule.resumeStream(sessionId).then(attached => {
+          // The run can finish between status and attach; reconcile immediately
+          // in that small race rather than waiting for the next poll.
+          if (!attached && isCurrent()) {
+            void refreshSessionHistory(sessionId, { allowBusy: true });
+          }
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // Idle/completed sessions can afford canonical reconciliation. Keep the
+    // count authoritative across devices while avoiding megabyte history reads
+    // unless the count or saved history revision actually changed.
+    const renderedCount = await refreshSessionMessageCount(sessionId);
+    if (!isCurrent()) return;
+    const previousRenderedCount = _liveSessionRenderedCounts.get(sessionId);
+    const renderedCountChanged = renderedCount === null
+      || previousRenderedCount === undefined
+      || renderedCount !== previousRenderedCount
+      || (_observedHistoryRevisions.has(sessionId)
+        && _observedHistoryRevisions.get(sessionId) !== _syncedHistoryRevisions.get(sessionId));
+    if (renderedCount !== null) _liveSessionRenderedCounts.set(sessionId, renderedCount);
 
     // A remote turn can finish between status probes. The cheap authoritative
     // rendered count tells us whether the canonical transcript can possibly
@@ -3093,26 +3116,8 @@ async function _checkServerStream(sessionId, { ensureAfterInFlight = false } = {
         }
       }
     }
-    // A stale local busy bit must not suppress the server-authoritative live
-    // attach after reload.  The exact active-stream registry is the ownership
-    // guard; if it is empty and the server says streaming, reconnect now.
     if (!isCurrent() || window.chatModule?.hasActiveStream?.(sessionId)) return;
-    if (info.status !== 'streaming') {
-      _clearRunningState(sessionId);
-      return;
-    }
-
-    // Skip if this is a research stream — research has its own progress UI
-    if (info.mode === 'research' || info.is_research) return;
-
-    // Attach only after the saved user turn and any completed predecessor are
-    // canonical. The replay then owns all in-flight reasoning/tool/text nodes.
-    // resumeStream resolves only when the entire run ends. Holding this
-    // discovery lock until then suppressed every later message-count probe.
-    // It reserves its own subscription synchronously, preventing duplicates.
-    if (window.chatModule?.resumeStream) {
-      void window.chatModule.resumeStream(sessionId).catch(() => {});
-    }
+    _clearRunningState(sessionId);
   } catch (_) {
     // Network loss is not task completion. Retry on the next visible tick.
   } finally {

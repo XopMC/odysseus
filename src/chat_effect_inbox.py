@@ -91,6 +91,17 @@ class ChatEffectInbox:
             row = self._no_retry_row(db, owner, session_id, tool_name, digest, cutoff)
             return _public(row) if row is not None else None
 
+    def unknown_match(self, owner, session_id, tool_name, content):
+        """Find an exact action whose prior external effect is still uncertain."""
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with SessionLocal() as db:
+            _session(db, owner, session_id)
+            row = db.query(ChatToolIntent).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+                tool_name=tool_name, action_hash=digest, status="unknown",
+            ).order_by(ChatToolIntent.created_at.asc(), ChatToolIntent.id.asc()).first()
+            return _public(row) if row is not None else None
+
     def record_intent(self, owner, session_id, run_id, tool_call_id, tool_name, content,
                       *, goal_created_at=None):
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
@@ -114,6 +125,12 @@ class ChatEffectInbox:
                 if row.tool_name != tool_name or row.action_hash != digest:
                     raise WorkConflict("Tool call ID was reused for a different action")
                 return _public(row)
+            unresolved_match = db.query(ChatToolIntent).filter_by(
+                owner=_storage_owner(owner), session_id=session_id,
+                tool_name=tool_name, action_hash=digest, status="unknown",
+            ).order_by(ChatToolIntent.created_at.asc(), ChatToolIntent.id.asc()).first()
+            if unresolved_match is not None:
+                return _public(unresolved_match, created=False)
             if self._no_retry_row(db, owner, session_id, tool_name, digest, cutoff) is not None:
                 raise WorkConflict("Exact action was marked Do not retry for this Goal")
             verified_not_applied = db.query(ChatToolIntent).filter_by(

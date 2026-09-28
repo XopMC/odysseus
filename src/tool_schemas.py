@@ -915,11 +915,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan",
-            "description": "Write back to the ACTIVE PLAN: mark steps done or revise them. Use this while executing an approved plan — after you finish a step, call update_plan with the full checklist and that step marked `- [x]`; when the user asks to change the plan, call it with the revised checklist. The user's docked plan window updates live. Pass the COMPLETE checklist every time (not a diff). No effect if there is no active plan.",
+            "description": "Legacy full-checklist adapter for an explicit user-requested plan revision or re-projection. It preserves stable IDs and the saved progress of unchanged steps; it cannot advance an executing step. Use update_plan_step after performing and verifying a step. Pass the COMPLETE revised checklist, not a diff. No effect if there is no active plan.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "plan": {"type": "string", "description": "The full updated plan as a GitHub-style markdown checklist — one step per line, `- [ ]` for pending and `- [x]` for done. Always send the whole list."}
+                    "plan": {"type": "string", "description": "The complete checklist only when the user explicitly revises the plan. Existing executing-step statuses are preserved; use update_plan_step to record verified progress."}
                 },
                 "required": ["plan"]
             }

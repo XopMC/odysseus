@@ -129,6 +129,25 @@ def test_unknown_tool_result_is_not_recorded_as_success(inbox):
     assert "reply lost" not in json.dumps(result)
 
 
+def test_unknown_exact_action_is_returned_as_fenced_not_reexecuted(inbox):
+    store, _factory = inbox
+    action = '{"command":"echo fixture"}'
+    first = store.record_intent("alice", "owned-chat", "e" * 32, "call-first", "bash", action)
+    unknown = store.mark_unknown("alice", "owned-chat", first["id"])
+
+    assert store.unknown_match("alice", "owned-chat", "bash", action)["id"] == first["id"]
+    retry = store.record_intent("alice", "owned-chat", "f" * 32, "call-second", "bash", action)
+    assert retry["created"] is False
+    assert retry["id"] == first["id"]
+    assert retry["status"] == "unknown"
+    # The fence is exact-action scoped; unrelated progress is still possible.
+    other = store.record_intent(
+        "alice", "owned-chat", "f" * 32, "call-other", "bash", '{"command":"pwd"}',
+    )
+    assert other["created"] is True
+    assert unknown["status"] == "unknown"
+
+
 def test_no_retry_preserves_prior_unknown_result_digest(inbox):
     store, factory = inbox
     item = store.record_intent("alice", "owned-chat", "e" * 32, "call-preserve", "bash", "effect")

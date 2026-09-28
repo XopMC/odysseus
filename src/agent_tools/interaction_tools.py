@@ -109,11 +109,10 @@ class AskUserTool:
 class UpdatePlanTool:
     async def execute(self, content, ctx):
         """
-        update_plan: the agent writes back to the active plan — tick an item done
-        or revise steps (e.g. when the user asks to change something). Pure UI
-        marker: returns a `plan_update` payload the agent loop turns into a
-        `plan_update` SSE event; the frontend replaces the stored plan and refreshes
-        the docked plan window. Does NOT end the turn.
+        update_plan is a legacy full-checklist adapter for explicit plan revisions.
+        It must not advance progress in an executing plan; update_plan_step is the
+        only per-step progress API. Returns the durable stored plan and does not
+        end the turn.
         """
         raw = (content or "").strip()
         plan = ""
@@ -144,6 +143,16 @@ class UpdatePlanTool:
                 child_data = {**(parsed if isinstance(parsed, dict) else {}), "plan": plan}
                 child_result = _child_plan_action(ctx, "update_plan", child_data)
                 if child_result is not None:
+                    saved_child = child_result.get("plan_update") if isinstance(child_result, dict) else None
+                    child_steps = saved_child.get("steps") if isinstance(saved_child, dict) else None
+                    if isinstance(child_steps, list):
+                        done = sum(step.get("status") == "done" for step in child_steps)
+                        total = len(child_steps)
+                        desc = f"update_plan: {done}/{total} done" if total else "update_plan"
+                        child_result["output"] = (
+                            f"Saved child Plan progress is {done}/{total}; "
+                            "use update_plan_step only after verifying a step."
+                        )
                     return desc, child_result
                 from src.chat_work_store import store
                 current = store.get(owner, session_id).get("plan")
@@ -161,9 +170,18 @@ class UpdatePlanTool:
                 plan_update = saved
             except Exception as exc:
                 return "update_plan: failed", {"error": str(exc), "exit_code": 1}
+        stored_steps = plan_update.get("steps") if isinstance(plan_update, dict) else None
+        if isinstance(stored_steps, list):
+            done = sum(step.get("status") == "done" for step in stored_steps)
+            total = len(stored_steps)
+            desc = f"update_plan: {done}/{total} done" if total else "update_plan"
         result = {
             "plan_update": plan_update,
-            "output": f"Plan updated ({done}/{total} steps complete)." if total else "Plan updated.",
+            "output": (
+                f"Saved Plan progress is {done}/{total}; use update_plan_step only "
+                "after verifying a step."
+                if total else "Plan updated."
+            ),
             "exit_code": 0,
         }
         logger.info("Tool executed: %s", desc)
