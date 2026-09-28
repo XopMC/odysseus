@@ -2130,6 +2130,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       try { window.documentModule.clearSelection(); } catch {}
     }
     currentSessionId = id;
+    window.chatWork?.beginSessionHydration?.(id);
     if (prevSessionId !== id) window.__odysseusClearServerMessageCount?.();
     try { window.__odysseusLastSelectedSessionId = id; } catch (_) {}
     // Identify Assistant / task-output sessions so we don't "trap" the user

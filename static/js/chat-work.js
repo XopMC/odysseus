@@ -5,6 +5,7 @@ import { removeOrdinaryAskUserCards } from './chatRenderer.js?v=20260925thinkemp
 const api = window.location.origin;
 let snapshot = { plan: null, goal: null, cursor: 0 };
 let sessionId = '';
+let workSnapshotReady = true;
 let continuationPending = false;
 let eventTimer = null;
 let eventSource = null;
@@ -42,6 +43,7 @@ function toast(message, error = false) {
 function renderPlan() {
   const node = el('plan-mode-status');
   if (!node) return;
+  if (sessionId && !workSnapshotReady) { node.hidden = true; return; }
   const plan = snapshot.plan;
   let draftEnabled = !!document.getElementById('plan-toggle')?.checked;
   if (draftEnabled && ['done', 'cancelled'].includes(plan?.status)) {
@@ -86,6 +88,7 @@ function renderPlan() {
 function renderGoal() {
   const node = el('goal-mode-status');
   if (!node) return;
+  if (sessionId && !workSnapshotReady) { uiLongTasks.stop(); node.hidden = true; return; }
   const draftEnabled = !!window.__odysseusGoalModeActive?.();
   const goal = snapshot.goal;
   const warning = describeProgressHealth(goal, runHealthSnapshot);
@@ -231,6 +234,7 @@ function renderEffectInbox() {
 function renderWait() {
   const node = el('wait-mode-status');
   if (!node) return;
+  if (sessionId && !workSnapshotReady) { node.hidden = true; return; }
   const state = waitSnapshot || {};
   const activeGoal = state?.goal_status && !['completed', 'cancelled'].includes(state.goal_status);
   const activeRun = state?.run_id && ['running', 'interrupted', 'stopping'].includes(state.run_status);
@@ -283,6 +287,36 @@ function renderWait() {
 }
 
 function render() { renderPlan(); renderGoal(); renderWait(); }
+
+function acceptWorkRecord(current, incoming) {
+  if (!current || !incoming || typeof incoming !== 'object') return true;
+  if (current.id && incoming.id && current.id === incoming.id) {
+    const oldRevision = Number(current.revision);
+    const newRevision = Number(incoming.revision);
+    if (Number.isSafeInteger(oldRevision) && Number.isSafeInteger(newRevision)
+        && newRevision < oldRevision) return false;
+  } else if (current.id && incoming.id) {
+    const oldCreated = Date.parse(current.created_at || '');
+    const newCreated = Date.parse(incoming.created_at || '');
+    if (Number.isFinite(oldCreated) && Number.isFinite(newCreated)
+        && newCreated < oldCreated) return false;
+  }
+  return true;
+}
+
+function beginSessionHydration(id) {
+  const target = id || '';
+  if (target === sessionId && workSnapshotReady) return;
+  ++refreshGeneration;
+  closeEventStream();
+  sessionId = target;
+  snapshot = { plan: null, goal: null, cursor: 0 };
+  runHealthSnapshot = null;
+  waitSnapshot = null;
+  effectInbox = []; effectInboxLoaded = false;
+  workSnapshotReady = !target;
+  render();
+}
 
 async function refreshWait(targetSession = sessionId) {
   if (!targetSession) { waitSnapshot = null; renderWait(); return; }
@@ -343,6 +377,7 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
     runHealthSnapshot = null;
     waitSnapshot = null;
     effectInbox = []; effectInboxLoaded = false;
+    workSnapshotReady = !targetSession;
     render();
   }
   if (!targetSession) return snapshot;
@@ -353,8 +388,10 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   } catch (error) {
     if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
     if (error.message !== 'Chat not found') console.warn('[chat-work]', error);
+    if (!workSnapshotReady) snapshot = { plan: null, goal: null, cursor: 0 };
   }
   if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
+  workSnapshotReady = true;
   render();
   connectEventStream();
   void refreshRunHealth(targetSession);
@@ -368,9 +405,18 @@ function handleEvent(event) {
     void refreshEffects(sessionId); void refreshWait(sessionId); return;
   }
   if (event?.type === 'budget_warning') { void refreshRunHealth(sessionId); return; }
-  if (event?.type === 'plan_update') { snapshot.plan = event.data || null; render(); return; }
-  if (event?.type === 'goal_update') { snapshot.goal = event.data || null; runHealthSnapshot = null; render(); void refreshRunHealth(sessionId); void refreshWait(sessionId); void refreshEffects(sessionId); return; }
+  if (event?.type === 'plan_update') {
+    if (event.data?.session_id && event.data.session_id !== sessionId) return;
+    if (!acceptWorkRecord(snapshot.plan, event.data)) return;
+    snapshot.plan = event.data || null; render(); return;
+  }
+  if (event?.type === 'goal_update') {
+    if (event.data?.session_id && event.data.session_id !== sessionId) return;
+    if (!acceptWorkRecord(snapshot.goal, event.data)) return;
+    snapshot.goal = event.data || null; runHealthSnapshot = null; render(); void refreshRunHealth(sessionId); void refreshWait(sessionId); void refreshEffects(sessionId); return;
+  }
   if (event?.type === 'goal_guidance') {
+    if (event.data?.goal?.session_id && event.data.goal.session_id !== sessionId) return;
     if (event.data?.goal) snapshot.goal = event.data.goal;
     window.chatModule?.appendGoalGuidance?.(event.data?.guidance);
     window.sessionModule?.refreshSessionMessageCount?.(sessionId);
@@ -789,7 +835,7 @@ function bind() {
 }
 
 const chatWork = {
-  bind, refresh, render, handleEvent, beginGoal, prepareNewPlan, prepareNewGoal,
+  bind, refresh, render, handleEvent, beginSessionHydration, beginGoal, prepareNewPlan, prepareNewGoal,
   onRunEnded, pauseActiveGoal, addGuidance, continueGoal, refreshRunHealth,
   refreshWait, refreshEffects, runWaitAction, chooseNoRetry, verifyEffect,
   authorizeEffectRetry, mutate,
