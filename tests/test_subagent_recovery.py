@@ -241,6 +241,13 @@ def test_effect_ledger_exhaustion_keeps_child_recoverable(harness, monkeypatch):
     assert result["metrics"]["failure_class"] == "effect_ledger_recovery_pending"
     assert result["metrics"]["effect_ledger_retries"] == 10
     assert result["metrics"]["provider_retries"] == 0
+    assert harness._recovery_candidates() == []
+    with children.SessionLocal.begin() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        assert row.heartbeat_at > datetime.now(timezone.utc).replace(tzinfo=None)
+        assert row.metrics["effect_ledger_recovery_cycles"] == 1
+        row.heartbeat_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+    assert harness._recovery_candidates()[0][0] == "child"
 
 
 def test_effect_ledger_retry_budget_survives_child_restart(harness):
@@ -255,6 +262,23 @@ def test_effect_ledger_retry_budget_survives_child_restart(harness):
     assert recovered["messages"] == [{"role": "user", "content": "durable child objective"}]
     assert recovered["effect_ledger_retries"] == 4
     assert recovered["provider_retries"] == 0
+
+
+def test_effect_ledger_recovery_backoff_increases_after_another_cycle(harness, monkeypatch):
+    with children.SessionLocal.begin() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        row.metrics = {"effect_ledger_recovery_cycles": 1}
+
+    async def stream(*args, **kwargs):
+        yield event("agent_terminal", data={"failure": {
+            "kind": "effect_ledger", "message": "Tool intent was not saved; action was not started"}})
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    result = run(harness)
+    assert result["status"] == "recovering"
+    assert result["metrics"]["effect_ledger_recovery_cycles"] == 2
+    assert result["metrics"]["recovery_retry_delay_seconds"] == 120
+    assert harness._recovery_candidates() == []
 
 
 def test_effect_ledger_after_uncheckpointed_tool_waits_for_inspection(harness, monkeypatch):

@@ -271,7 +271,15 @@ class SubagentRuntime:
 
     def _recovery_candidates(self):
         with SessionLocal() as db:
-            rows = db.query(ChatSubagentRun).filter_by(status="recovering", removed=False).order_by(
+            rows = db.query(ChatSubagentRun).filter(
+                ChatSubagentRun.status == "recovering",
+                ChatSubagentRun.removed.is_(False),
+                # For a recovering child, heartbeat_at is the earliest safe
+                # retry time. Running/queued children use it as the lease
+                # heartbeat; their recovery is handled separately.
+                or_(ChatSubagentRun.heartbeat_at.is_(None),
+                    ChatSubagentRun.heartbeat_at <= _utcnow()),
+            ).order_by(
                 ChatSubagentRun.heartbeat_at, ChatSubagentRun.created_at).limit(32).all()
             return [(r.id, r.owner, r.parent_session_id, r.revision,
                      copy.deepcopy((r.policy_snapshot or {}).get("recovery_config"))) for r in rows]
@@ -811,6 +819,8 @@ class SubagentRuntime:
             prior_result, existing_guidance = row.result or "", list(row.guidance or [])
             first_started_at = row.started_at
             question_timeout_count = _question_timeout_count(row.metrics)
+            _cycles = (row.metrics or {}).get("effect_ledger_recovery_cycles")
+            ledger_recovery_cycles = _cycles if type(_cycles) is int and 0 <= _cycles < 1_000_000 else 0
         finally:
             db.close()
 
@@ -966,6 +976,7 @@ class SubagentRuntime:
                 nonlocal waiting_payload, tool_since_checkpoint, checkpoint
                 nonlocal consecutive_failures, round_slice_exhausted
                 nonlocal effect_ledger_retries
+                nonlocal ledger_recovery_cycles
                 nonlocal output_retries, output_repair_instruction, child_temperature
                 nonlocal thinking_chars, output_chars, tools_since_checkpoint
                 if output_repair_instruction:
@@ -1041,6 +1052,7 @@ class SubagentRuntime:
                                     if tool_since_checkpoint or checkpoint != event["messages"]:
                                         consecutive_failures = 0
                                         effect_ledger_retries = 0
+                                        ledger_recovery_cycles = 0
                                         output_retries = 0
                                         child_temperature = 0.3
                                     event = {**event, "guidance_ids": sorted(guidance_seen),
@@ -1062,6 +1074,7 @@ class SubagentRuntime:
                                         "checkpoint_messages": len(checkpoint),
                                         "checkpoint_hash": event.get("ledger_hash"),
                                         "context_compactions": history.context_checkpoint_count,
+                                        "effect_ledger_recovery_cycles": ledger_recovery_cycles,
                                     })
                                 if kind == "rounds_exhausted":
                                     round_slice_exhausted = True
@@ -1161,9 +1174,13 @@ class SubagentRuntime:
                         # Keep the mini-goal recoverable after the bounded
                         # retry burst instead of declaring its work failed.
                         await flush(force=True)
+                        ledger_recovery_cycles += 1
+                        retry_delay_seconds = min(900, 60 * (2 ** min(ledger_recovery_cycles - 1, 4)))
                         self._merge_metrics(child_id, owner, {
                             "failure_class": "effect_ledger_recovery_pending",
                             "effect_ledger_retries": effect_ledger_retries,
+                            "effect_ledger_recovery_cycles": ledger_recovery_cycles,
+                            "recovery_retry_delay_seconds": retry_delay_seconds,
                         })
                         self._update_with_event(
                             child_id, owner, session_id, "status",
@@ -1172,6 +1189,7 @@ class SubagentRuntime:
                                 "Tool-intent storage is temporarily unavailable; "
                                 "recovering from the saved child checkpoint."
                             ), finished_at=None, slot=None, worker_id=None,
+                            heartbeat_at=_utcnow() + timedelta(seconds=retry_delay_seconds),
                         )
                         return
                     if not exc.retryable or not safe_to_replay or (
