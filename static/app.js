@@ -4521,10 +4521,11 @@ function startOdysseusApp() {
 
   // Non-critical startup work must not compete with first paint, chat send, or
   // chat switching. Panels load their own data when opened; these are only warmups.
+  // Model inventory is fetched only from explicit model/settings UI opens.
+  // Keep the selected route label current without warming every endpoint on
+  // each page load; the picker performs its own cached inventory refresh.
   runNonCriticalStartup(() => {
-    modelsModule.refreshModels(false).then(() => {
-      try { sessionModule.updateModelPicker(); } catch (_) {}
-    }).catch(() => {});
+    try { sessionModule.updateModelPicker(); } catch (_) {}
   }, 3500);
   runNonCriticalStartup(() => modelsModule.refreshProviders(), 6500);
   runNonCriticalStartup(() => ragModule.loadPersonalDocs(), 9000);
