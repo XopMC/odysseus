@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,29 @@ class CreatePlanTool:
             if child_result is not None:
                 return "create_plan", child_result
             from src.chat_work_store import store
+            snapshot = store.get(owner, session_id)
+            goal = snapshot.get("goal")
+            current_plan = snapshot.get("plan")
+            if (
+                not bool(ctx.get("plan_recovery"))
+                and isinstance(goal, dict) and goal.get("status") == "active"
+                and isinstance(current_plan, dict) and current_plan.get("status") == "executing"
+            ):
+                try:
+                    goal_started = datetime.fromisoformat(str(goal.get("created_at") or ""))
+                    plan_started = datetime.fromisoformat(str(current_plan.get("created_at") or ""))
+                except (TypeError, ValueError):
+                    goal_started = plan_started = None
+                if goal_started is not None and plan_started is not None and plan_started >= goal_started:
+                    return "create_plan", {
+                        "plan_update": current_plan,
+                        "output": (
+                            "This Goal already has an executing durable plan. Keep its stable step IDs, "
+                            "perform the current step, and use update_plan_step after verification; "
+                            "do not replace the plan with another checklist."
+                        ),
+                        "exit_code": 0,
+                    }
             plan = store.save_plan(
                 owner, session_id, str(data.get("title") or "Plan"),
                 data.get("steps") or [], expected_revision=data.get("expected_revision"),

@@ -4045,6 +4045,32 @@ PLAN_MODE_DIRECTIVE = (
 )
 
 
+GOAL_PLAN_BOOTSTRAP_DIRECTIVE = (
+    "## ACTIVE GOAL PLAN — CREATE ONCE, THEN EXECUTE\n"
+    "This is an executing Goal, not plan-only mode. There is no current executing "
+    "plan yet. First call `create_plan` exactly once with stable step IDs; the server "
+    "will start that plan immediately for this Goal. Then begin the first step in this "
+    "same run. Do not stop after presenting a checklist, and do not recreate the plan. "
+    "While independent bounded work is available and selected subagent routes are "
+    "configured, delegate those pieces in parallel, continue useful parent work, and "
+    "poll for first completion instead of waiting idle. After each step is actually "
+    "verified, call `update_plan_step` with that exact step ID and evidence."
+)
+
+
+def resolve_plan_modes(plan_mode: bool, goal_mode: bool) -> tuple[bool, bool]:
+    """Return (plan_only_mode, goal_plan_bootstrap).
+
+    Plan mode by itself intentionally proposes a plan and waits. Combining the
+    one-shot toggle with Goal instead means: require one durable plan, then keep
+    the autonomous Goal executing it. Treating both flags as plan-only strands
+    Goals after repeatedly presenting checklists.
+    """
+    requested = bool(plan_mode)
+    goal = bool(goal_mode)
+    return requested and not goal, requested and goal
+
+
 def build_active_plan_note(approved_plan: str) -> str:
     """System note that pins an approved plan during execution.
 
@@ -4109,7 +4135,11 @@ def build_active_goal_note(goal: Optional[dict]) -> str:
         "For multi-step work, save the current structured UI plan with `create_plan` early, "
         "before delegating implementation. This tool also works in Goal mode. A PLAN.md file "
         "does not update that plan. A completed plan from an older Goal is not the plan for "
-        "this objective. Update each current step through `update_plan_step` after verification.\n\n"
+        "this objective. Once the current Goal has an executing plan, do not call `create_plan` "
+        "again just to repeat the checklist; execute the current step and use `update_plan_step` "
+        "after verification. When independent bounded work exists and selected child models are "
+        "configured, delegate it in parallel while the parent continues useful work; poll for "
+        "first completion rather than waiting idle.\n\n"
         f"Objective: {str(goal.get('objective') or '').strip()}\n"
         f"Attempt: {int(goal.get('attempt') or 1)}\n"
         f"Latest progress: {str(goal.get('progress') or '').strip()}\n"
@@ -4169,6 +4199,7 @@ async def stream_agent_loop(
     fallback_statuses: Optional[Set[int]] = None,
     fallback_on_empty: bool = True,
     plan_mode: bool = False,
+    goal_plan_bootstrap: bool = False,
     approved_plan: Optional[str] = None,
     active_goal: Optional[Dict] = None,
     tool_policy: Optional[ToolPolicy] = None,
@@ -4200,6 +4231,7 @@ async def stream_agent_loop(
       - data: [DONE]                                        (end)
     """
 
+    goal_plan_bootstrap = bool(goal_plan_bootstrap and active_goal)
     wall_started = time.monotonic()
     run_security = ToolRunSecurityContext(
         external_untrusted_context_seen=(
@@ -5232,6 +5264,8 @@ async def stream_agent_loop(
             route_mcp_schemas = []
         if plan_mode and not guide_only:
             _prepend_agent_directive(route_messages, PLAN_MODE_DIRECTIVE)
+        elif goal_plan_bootstrap and not approved_plan and not guide_only:
+            _prepend_agent_directive(route_messages, GOAL_PLAN_BOOTSTRAP_DIRECTIVE)
         elif approved_plan and approved_plan.strip() and not guide_only:
             _set_plan_directive(route_messages, approved_plan)
         if active_goal and not guide_only:
@@ -5331,11 +5365,10 @@ async def stream_agent_loop(
     yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
 
     full_response = ""
-    # Plan mode must leave a durable plan behind, not only prose. Until the
-    # create_plan tool succeeds, tell the provider a tool call is required;
-    # after persistence, disable tools for the final explanation so planning
-    # cannot drift into execution or an unrelated follow-up action.
-    _plan_created = False
+    # Standalone Plan mode is intentionally proposal-only. A Goal+Plan toggle
+    # is different: require one durable plan, then execute it under the Goal's
+    # normal progress/tool loop instead of disabling tools after the checklist.
+    _plan_created = bool(approved_plan)
     _plan_execution_complete = False
     total_start = time.time()
     time_to_first_token = None
@@ -6902,6 +6935,7 @@ async def stream_agent_loop(
             ),
             tool_choice_required=(
                 (plan_mode and not _plan_created)
+                or (goal_plan_bootstrap and not _plan_created)
                 or (bool(approved_plan) and not _plan_execution_complete)
             ) and not _ody_doc_finetune_mode,
             timeout=agent_stream_timeout,
@@ -8825,7 +8859,7 @@ async def stream_agent_loop(
             # Push it to the frontend so the stored plan + docked window update
             # live. Does NOT end the turn — the agent keeps working.
             if "plan_update" in result:
-                if plan_mode and block.tool_type == "create_plan":
+                if (plan_mode or goal_plan_bootstrap) and block.tool_type == "create_plan":
                     _plan_created = True
                 if (approved_plan and str(result["plan_update"].get("status") or "")
                         in {"done", "completed"}):

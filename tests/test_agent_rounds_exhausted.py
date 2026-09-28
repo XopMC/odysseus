@@ -279,6 +279,79 @@ def test_plan_mode_requires_tool_until_durable_plan_then_suppresses_more_tools(m
     assert any(event.get("type") == "plan_update" for event in events)
 
 
+def test_goal_and_plan_toggles_resolve_to_execution_not_plan_only():
+    assert al.resolve_plan_modes(False, False) == (False, False)
+    assert al.resolve_plan_modes(True, False) == (True, False)
+    assert al.resolve_plan_modes(False, True) == (False, False)
+    assert al.resolve_plan_modes(True, True) == (False, True)
+
+
+def test_goal_plan_bootstrap_executes_saved_plan_and_keeps_tools_enabled(monkeypatch):
+    _patch_common(monkeypatch)
+    from src import chat_work_store, context_efficiency_state
+    goal = {"id": "goal", "status": "active", "attempt": 1,
+            "objective": "Build and verify", "checkpoint": {}}
+    state = {"goal": goal, "plan": None}
+    monkeypatch.setattr(chat_work_store.store, "get", lambda *_: state)
+    monkeypatch.setattr(context_efficiency_state, "restore", lambda *_args, **_kwargs: {"cache_write_read_ratio": 12.5})
+    from src import chat_effect_inbox
+    monkeypatch.setattr(chat_effect_inbox.inbox, "unknown", lambda *_args: [])
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_intent", lambda *_args, **_kwargs: {"id": "fixture", "created": True})
+    monkeypatch.setattr(chat_effect_inbox.inbox, "record_result", lambda *_args, **_kwargs: {"status": "done"})
+    requests = []
+    executed = []
+
+    async def stream(_candidates, messages, **kwargs):
+        request = await kwargs["candidate_request_factory"](0, *_candidates[0])
+        requests.append({
+            "messages": list(request["messages"]),
+            "tool_choice_required": kwargs["tool_choice_required"],
+            "tool_choice_none": kwargs["tool_choice_none"],
+        })
+        responses = [
+            '```create_plan\n{"title":"QA plan","steps":[{"id":"step-1","text":"Build and verify","status":"pending"}]}\n```',
+            '```update_plan_step\n{"step_id":"step-1","status":"done","summary":"Implemented and checked","verification":["focused tests passed"]}\n```',
+            "The durable plan was executed and verified.",
+        ]
+        yield "data: " + json.dumps({"delta": responses[len(requests) - 1]}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def execute(block, *_args, **_kwargs):
+        executed.append(block.tool_type)
+        if block.tool_type == "create_plan":
+            state["plan"] = {"status": "executing", "revision": 2,
+                              "steps": [{"id": "step-1", "text": "Build and verify", "status": "in_progress"}]}
+            return "create_plan", {"plan_update": {
+                "status": "executing", "revision": 2,
+                "steps": [{"id": "step-1", "text": "Build and verify", "status": "in_progress"}],
+            }, "output": "Plan started", "exit_code": 0}
+        if block.tool_type == "update_plan_step":
+            state["plan"] = {"status": "done", "revision": 3,
+                              "steps": [{"id": "step-1", "text": "Build and verify", "status": "done"}]}
+            return "update_plan_step", {"plan_update": {
+                "status": "done", "revision": 3,
+                "steps": [{"id": "step-1", "text": "Build and verify", "status": "done"}],
+            }, "output": "Step verified", "exit_code": 0}
+        return block.tool_type, {"output": "verified", "exit_code": 0}
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", stream)
+    monkeypatch.setattr(al, "execute_tool_block", execute)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "qwen-local", [{"role": "user", "content": "Execute this Goal"}],
+        owner="alice", session_id="fixture-chat", active_goal=goal,
+        goal_plan_bootstrap=True, plan_mode=False,
+        relevant_tools={"create_plan", "update_plan_step"}, max_rounds=3,
+    )))
+
+    assert executed == ["create_plan", "update_plan_step"]
+    assert [item["tool_choice_required"] for item in requests] == [True, True, False]
+    assert not any(item["tool_choice_none"] for item in requests)
+    assert "GOAL PLAN" in requests[0]["messages"][0]["content"]
+    assert "PLAN MODE" not in json.dumps(requests[0]["messages"])
+    assert "## ACTIVE PLAN" in json.dumps(requests[1]["messages"])
+    assert any(event.get("type") == "plan_update" for event in events)
+
+
 @pytest.mark.parametrize("runtime", ["plan", "goal", "child"])
 def test_approved_plan_requires_progress_tool_until_plan_is_done(monkeypatch, runtime):
     _patch_common(monkeypatch)

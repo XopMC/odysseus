@@ -314,6 +314,35 @@ def test_create_plan_replaces_only_a_previous_goals_terminal_plan(owned_chat, ne
     assert saved["steps"][0]["id"] == ("new" if new_goal else "old")
 
 
+def test_duplicate_create_plan_is_idempotent_during_active_goal(owned_chat):
+    from src.agent_tools.interaction_tools import CreatePlanTool
+    store = ChatWorkStore()
+    store.ensure_goal("alice", owned_chat, "Execute a verified multi-step task")
+    plan = store.save_plan("alice", owned_chat, "Current Goal plan", [
+        {"id": "step-1", "text": "Implement the current work"},
+        {"id": "step-2", "text": "Verify the result"},
+    ])
+    plan = store.plan_action("alice", owned_chat, "execute", plan["revision"])
+    revision = plan["revision"]
+
+    _, result = asyncio.run(CreatePlanTool().execute(
+        json.dumps({"title": "A repeated checklist", "steps": [
+            {"id": "duplicate-a", "text": "Repeat planning"},
+            {"id": "duplicate-b", "text": "Do not execute yet"},
+        ]}),
+        {"owner": "alice", "session_id": owned_chat, "parent_run_id": "same-goal-run"},
+    ))
+
+    current = store.get("alice", owned_chat)["plan"]
+    assert result["exit_code"] == 0
+    assert "already has an executing durable plan" in result["output"]
+    assert result["plan_update"]["revision"] == revision
+    assert current["revision"] == revision
+    assert [(step["id"], step["status"]) for step in current["steps"]] == [
+        ("step-1", "in_progress"), ("step-2", "pending"),
+    ]
+
+
 def test_goal_stall_wait_reason_is_durable_owner_scoped_and_cleared_on_resume(owned_chat):
     store = ChatWorkStore()
     goal = store.ensure_goal("alice", owned_chat, "Harmless verification")

@@ -28,7 +28,7 @@ from src.llm_core import (
     stream_llm,
     stream_llm_with_fallback,
 )
-from src.agent_loop import stream_agent_loop
+from src.agent_loop import resolve_plan_modes, stream_agent_loop
 from src import agent_runs
 from src.run_wait_state import selected_endpoint_host
 from src.model_context import estimate_tokens
@@ -1149,8 +1149,9 @@ def setup_chat_routes(
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
-        plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
+        requested_plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
         goal_mode = str(form_data.get("goal_mode") or (body or {}).get("goal_mode") or "").lower() == "true"
+        plan_mode, goal_plan_bootstrap = resolve_plan_modes(requested_plan_mode, goal_mode)
         goal_continuation = str(form_data.get("goal_continuation") or (body or {}).get("goal_continuation") or "").lower() == "true"
         goal_lease_token = str(form_data.get("goal_lease_token") or (body or {}).get("goal_lease_token") or "").strip()
         subagent_continuation = str(form_data.get("subagent_continuation") or (body or {}).get("subagent_continuation") or "").lower() == "true"
@@ -2906,6 +2907,7 @@ def setup_chat_routes(
                         fallback_statuses=_foreground_policy.eligible_statuses,
                         fallback_on_empty=_foreground_policy.fallback_on_empty,
                         plan_mode=plan_mode,
+                        goal_plan_bootstrap=goal_plan_bootstrap,
                         approved_plan=approved_plan or None,
                         active_goal=active_goal,
                         workspace=workspace or None,
