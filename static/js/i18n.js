@@ -392,6 +392,7 @@ const RU = Object.freeze({
   'Hard input cap':'Жёсткий лимит входа', 'Reserved (schemas · output · safety)':'Резервы (схемы · вывод · запас)',
   'Last backend request':'Последний запрос backend',
   'Session peak (audit)':'Пик сессии (аудит)',
+  'Latest request (measured)':'Последний запрос (измерено)',
   'Threshold basis':'База порога', 'Usable input budget':'Доступный входной бюджет',
   'Model window':'Окно модели', 'Nothing old enough to compact':'Нет достаточно старых сообщений для сжатия',
   'Thinking saved — open to load':'Размышления сохранены — откройте для загрузки',

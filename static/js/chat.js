@@ -142,6 +142,13 @@ function appendStreamErrorGuidance(container, error) {
     return '';
   }
 
+  function _contextDisplayUsed(data) {
+    const measured = Number(data?.used_tokens || 0);
+    const highWater = Number(data?.high_water_used_tokens);
+    return Number.isSafeInteger(highWater) && highWater > measured
+      ? highWater : measured;
+  }
+
   function _contextRingColor(pct) {
     const n = Number(pct || 0);
     if (n >= 85) return 'var(--red, #e06c75)';
@@ -214,7 +221,8 @@ function appendStreamErrorGuidance(container, error) {
 
     const d = _contextHeaderData;
     const changedWindow = contextWindowChange(d);
-    const pct = Number(d.context_percent || 0);
+    const displayUsed = _contextDisplayUsed(d);
+    const pct = d.context_length ? Math.min(100, Math.round(displayUsed / d.context_length * 1000) / 10) : 0;
     const colorClass = _contextColorClass(pct);
     const modelShort = String(d.model || 'Unknown').split('/').pop();
     const popup = document.createElement('div');
@@ -235,7 +243,7 @@ function appendStreamErrorGuidance(container, error) {
     popup.appendChild(bar);
 
     const rows = [
-      ['Used', `${_fmtContextNumber(d.used_tokens)} / ${_fmtContextNumber(d.context_length)}`],
+      ['Used', `${_fmtContextNumber(displayUsed)} / ${_fmtContextNumber(d.context_length)}`],
       ['Usage', `${pct}%`],
       ['Scope', d.context_status === 'active_request' ? 'Live request'
         : d.context_status === 'last_request' ? 'Last request'
@@ -275,9 +283,8 @@ function appendStreamErrorGuidance(container, error) {
     if (d.context_status !== 'stored_chat' && d.stored_chat_tokens != null) {
       rows.push(['Stored chat (est.)', _fmtContextNumber(d.stored_chat_tokens)]);
     }
-    if (Number.isInteger(d.high_water_used_tokens)
-        && d.high_water_used_tokens > Number(d.used_tokens || 0)) {
-      rows.push(['Session peak (audit)', `${_fmtContextNumber(d.high_water_used_tokens)} · ${Number(d.high_water_context_percent || 0).toFixed(1)}%`]);
+    if (displayUsed > Number(d.used_tokens || 0)) {
+      rows.push(['Latest request (measured)', `${_fmtContextNumber(d.used_tokens)} · ${Number(d.context_percent || 0).toFixed(1)}%`]);
     }
     if (d.context_status === 'working_checkpoint' && d.backend_measurement?.context_percent != null) {
       rows.push(['Last backend request', `${Number(d.backend_measurement.context_percent).toFixed(1)}%`]);
@@ -307,7 +314,7 @@ function appendStreamErrorGuidance(container, error) {
       const b = document.createElement('span');
       b.textContent = value;
       b.title = value;
-      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request', 'Window basis', 'Compaction preview', 'Input budget', 'Hard input cap', 'Reserved (schemas · output · safety)', 'Effective trigger'].includes(label)) {
+      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request', 'Latest request (measured)', 'Window basis', 'Compaction preview', 'Input budget', 'Hard input cap', 'Reserved (schemas · output · safety)', 'Effective trigger'].includes(label)) {
         bindUiText(b, value);
         bindUiText(b, value, 'title');
       }
@@ -451,10 +458,11 @@ function appendStreamErrorGuidance(container, error) {
     if (!pill) return;
     _contextHeaderData = data;
     pill.hidden = false;
-    const pct = Number(data.context_percent || 0);
+    const displayUsed = _contextDisplayUsed(data);
+    const pct = data.context_length ? Math.min(100, Math.round(displayUsed / data.context_length * 1000) / 10) : 0;
     _renderContextHeaderRing(pill, pct);
     _renderCompactMenuContextIcon(pct);
-    pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${_contextSourceLabel(data)} · ${String(data.model || '').split('/').pop()}`;
+    pill.title = `${_fmtContextNumber(displayUsed)} / ${_fmtContextNumber(data.context_length)} tokens · ${_contextSourceLabel(data)}${displayUsed > Number(data.used_tokens || 0) ? ' · session peak' : ''} · ${String(data.model || '').split('/').pop()}`;
     pill.classList.remove('warn', 'danger', 'loading', 'stale');
     const colorClass = _contextColorClass(pct);
     if (colorClass) pill.classList.add(colorClass);
@@ -533,13 +541,21 @@ function appendStreamErrorGuidance(container, error) {
     }
     ++_contextHeaderSeq; // invalidate an older in-flight persisted-history GET
     _bindContextHeaderPill();
+    // A replacement Goal attempt can restart a legacy local counter at zero.
+    // Only an explicit compaction or a *higher* generation can lower the
+    // displayed high-water mark; a lower counter is not a new checkpoint.
+    const sameGeneration = sameRoute
+      && Number(data.compactions || 0) <= Number(previous.compactions || 0)
+      && data.context_reason !== 'compaction';
     _applyContextHeaderData({
       messages: selected && selected.message_count, ...previous, ...data, session_id: sessionId,
+      high_water_used_tokens: sameGeneration
+        ? Math.max(Number(previous.high_water_used_tokens || 0), Number(previous.used_tokens || 0), data.used_tokens)
+        : data.used_tokens,
       ...(orderedObservation ? {
         last_request_run_id: observedRunId,
         last_request_seq: observedSeq,
         last_request_started_at: observedStartedAt,
-        high_water_used_tokens: Math.max(Number(previous.high_water_used_tokens || 0), Number(previous.used_tokens || 0), data.used_tokens),
       } : {}),
       context_percent: Math.min(100, Math.round(data.used_tokens / data.context_length * 1000) / 10),
       context_status: 'active_request', active_run: true, can_compact: false,

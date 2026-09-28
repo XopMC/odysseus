@@ -7705,35 +7705,37 @@ async def stream_agent_loop(
                             from src.chat_work_store import store as _work_store
                             _work_snapshot = _work_store.get(owner, session_id)
                             _old_plan = _work_snapshot.get("plan") or {}
-                            _step_texts = [
-                                "Re-read the active Goal and durable checkpoint",
-                            ]
-                            for _old_step in (_old_plan.get("steps") or []):
-                                _old_text = str(_old_step.get("text") or "").strip()
-                                if (_old_text and _old_step.get("status") != "done"
-                                        and _old_text not in _step_texts):
-                                    _step_texts.append(_old_text)
-                                if len(_step_texts) >= 20:
-                                    break
-                            _step_texts.append("Verify remaining work and update the Goal checkpoint")
-                            _server_plan = _work_store.save_plan(
-                                owner, session_id, "Post-compaction recovery",
-                                [
-                                    {
-                                        "id": f"recovery-{_context_compactions}-{_index}",
-                                        "text": _text,
-                                        # save_plan creates a draft. A draft
-                                        # cannot claim completed progress before
-                                        # Execute; that would make post-
-                                        # compaction recovery fail before the
-                                        # checkpoint can be settled. Execute
-                                        # atomically starts the first step.
-                                        "status": "pending",
-                                        "required": True,
-                                    }
+                            if _old_plan.get("status") == "executing" and _old_plan.get("steps"):
+                                # A fresh projection of the same Goal must not
+                                # silently turn verified steps back to pending.
+                                # save_plan reconciles their stable IDs and
+                                # statuses under the Plan writer lock.
+                                _projected_steps = [
+                                    {"id": step["id"], "text": step["text"],
+                                     "status": "pending", "required": step.get("required", True)}
+                                    for step in _old_plan["steps"]
+                                ]
+                                _recovery_title = _old_plan.get("title") or "Post-compaction recovery"
+                            else:
+                                _step_texts = ["Re-read the active Goal and durable checkpoint"]
+                                for _old_step in (_old_plan.get("steps") or []):
+                                    _old_text = str(_old_step.get("text") or "").strip()
+                                    if (_old_text and _old_step.get("status") != "done"
+                                            and _old_text not in _step_texts):
+                                        _step_texts.append(_old_text)
+                                    if len(_step_texts) >= 20:
+                                        break
+                                _step_texts.append("Verify remaining work and update the Goal checkpoint")
+                                _projected_steps = [
+                                    {"id": f"recovery-{_context_compactions}-{_index}",
+                                     "text": _text, "status": "pending", "required": True}
                                     for _index, _text in enumerate(_step_texts, 1)
-                                ],
-                                replace_terminal=True,
+                                ]
+                                _recovery_title = "Post-compaction recovery"
+                            _server_plan = _work_store.save_plan(
+                                owner, session_id, _recovery_title,
+                                _projected_steps, replace_terminal=True,
+                                preserve_verified=True,
                             )
                             # Reprojection preserves an already-executing Plan;
                             # calling plan_action('execute') again rejects that

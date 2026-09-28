@@ -57,7 +57,7 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
         backend_measurement:{context_length:131840}}),null);
       assert.equal(windowChange({context_length:131840,active_run:false}),null);
       const snapshot = {used_tokens: 82000, prompt_tokens: 81000, context_length: 262144,
-        context_percent: 1.2, source: 'backend', model: 'mac-qwen', round: 12};
+        context_percent: 1.2, source: 'backend', model: 'mac-qwen', round: 12, compactions: 56};
       const pending = mod.namespace.refreshChatContextHeader('initial');
       await Promise.resolve();
       assert.equal(apply(snapshot, 'chat-a'), true);
@@ -78,11 +78,19 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
         endpoint_url:selected.endpoint_url,current_endpoint_key:'a'.repeat(64),used_tokens:82000,
         context_length:262144,context_percent:31.3,source:'backend',context_status:'active_request'})});
       await mod.namespace.refreshChatContextHeader('pin-endpoint');
+      context.fetch=async()=>({ok:true,json:async()=>({session_id:'chat-a',model:'mac-qwen',
+        endpoint_url:selected.endpoint_url,current_endpoint_key:'a'.repeat(64),used_tokens:40000,
+        high_water_used_tokens:82000,context_length:262144,context_percent:15.3,
+        source:'backend',context_status:'last_request'})});
+      await mod.namespace.refreshChatContextHeader('reload-with-smaller-request');
+      assert.match(pill.title,/82,000 \/ 262,144.*session peak/,
+        'reload must restore the durable peak without hiding the lower latest measurement');
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64)},'chat-a'),true);
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:40000},'chat-a',
         {run_id:'new-run',seq:2,started_at:200,stale:true}),true,
-        'an ordered current request must be visible even below the audit peak');
-      assert.match(pill.title,/40,000 \/ 262,144/);
+        'an ordered current request must be retained even below the audit peak');
+      assert.match(pill.title,/82,000 \/ 262,144.*session peak/,
+        'the primary meter must not fall without compaction');
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:82000},'chat-a',
         {run_id:'old-run',seq:99,started_at:100}),false,'older replay cannot restore the peak');
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:39000},'chat-a',
@@ -90,7 +98,11 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:39000},'chat-a',
         {run_id:'new-run',seq:3,started_at:200,stale:true}),true,
         'a later backend correction can refine the same request');
-      assert.match(pill.title,/39,000 \/ 262,144/);
+      assert.match(pill.title,/82,000 \/ 262,144.*session peak/);
+      assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:38000,compactions:0},'chat-a',
+        {run_id:'retry-run',seq:1,started_at:201}),true,
+        'a replacement attempt resetting a legacy counter is not compaction');
+      assert.match(pill.title,/82,000 \/ 262,144.*session peak/);
       const endpointTitle=pill.title;
       assert.equal(apply({...snapshot,endpoint_key:'b'.repeat(64),used_tokens:1},'chat-a'),false);
       assert.equal(apply({...snapshot,endpoint_key:'malformed'},'chat-a'),false);
@@ -99,6 +111,10 @@ def test_stream_context_updates_only_selected_session_and_wins_stale_get():
         used_tokens:40000,context_length:131840},'chat-a'),true,
         'same model reloaded with a new window must accept a new measurement');
       assert.match(pill.title,/40,000 \/ 131,840/);
+      assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),
+        used_tokens:12000,context_length:131840,compactions:57,context_reason:'compaction'},'chat-a'),true,
+        'an explicit new compaction generation may lower the meter');
+      assert.match(pill.title,/12,000 \/ 131,840/);
       await mod.namespace.refreshChatContextHeader('restore-old-window');
       selected.endpoint_url='http://jetson.test/v1';
       assert.equal(apply({...snapshot,endpoint_key:'a'.repeat(64),used_tokens:1},'chat-a'),false,'switch invalidates cached route identity');

@@ -250,7 +250,7 @@ class ChatWorkStore:
 
     def save_plan(self, owner, session_id, title, steps, *, expected_revision=None,
                   replace_terminal=False, replace_previous_goal_plan_run_id=None,
-                  replace_after_run_id=None):
+                  replace_after_run_id=None, preserve_verified=False):
         title = _clean_text(title or "Plan", "plan title", 1000)
         if isinstance(steps, str):
             steps = checklist_steps(steps)
@@ -330,6 +330,21 @@ class ChatWorkStore:
                     # Plan must retain verified progress for matching steps.
                     preserve_progress=row.status == "executing",
                 )
+                if preserve_verified and row.status == "executing":
+                    # The mandatory post-compaction projection is not a new
+                    # objective. A model (or server fallback) may omit already
+                    # verified steps from its fresh checklist; that omission
+                    # must not erase durable Goal progress or stable step IDs.
+                    projected_ids = {step["id"] for step in normalized}
+                    retained = [
+                        dict(step) for step in row.steps or []
+                        if isinstance(step, dict)
+                        and step.get("id") not in projected_ids
+                        and step.get("status") in {"done", "in_progress", "blocked"}
+                    ]
+                    normalized = retained + normalized
+                    if len(normalized) > 100:
+                        raise ValueError("Plan needs 1-100 steps")
             step_ids = [step["id"] for step in normalized]
             if len(step_ids) != len(set(step_ids)):
                 raise ValueError("Plan step IDs must be unique")
@@ -351,7 +366,10 @@ class ChatWorkStore:
             ):
                 status = "done"
             row.title, row.steps, row.status = title, normalized, status
-            row.current_step_id = next((s["id"] for s in normalized if s["status"] in {"pending", "in_progress"}), None)
+            row.current_step_id = (
+                next((s["id"] for s in normalized if s["status"] == "in_progress"), None)
+                or next((s["id"] for s in normalized if s["status"] == "pending"), None)
+            )
             self._event(db, owner, session_id, "plan_saved", row.id, row.revision, _public_plan(row))
             db.flush()
             return _public_plan(row)

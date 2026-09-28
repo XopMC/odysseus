@@ -317,16 +317,56 @@ def test_post_compaction_recovery_resumes_an_existing_executing_plan(owned_chat)
     projected = work.save_plan("alice", owned_chat, "Post-compaction recovery", [
         {"id": "recovery-1", "text": "Re-read the active Goal and durable checkpoint", "status": "pending"},
         {"id": "recovery-2", "text": "Verify remaining work", "status": "pending"},
-    ], replace_terminal=True)
+    ], replace_terminal=True, preserve_verified=True)
     assert projected["status"] == "executing"
+    assert [(step["id"], step["status"]) for step in projected["steps"]] == [
+        ("verified", "done"), ("recovery-1", "pending"), ("recovery-2", "pending"),
+    ]
     with pytest.raises(WorkConflict, match="current state"):
         work.plan_action("alice", owned_chat, "execute", projected["revision"])
 
     resumed = work.ensure_plan_executing("alice", owned_chat)
     assert resumed["status"] == "executing"
-    assert [step["status"] for step in resumed["steps"]] == ["in_progress", "pending"]
+    assert [step["status"] for step in resumed["steps"]] == ["done", "in_progress", "pending"]
     unchanged = work.ensure_plan_executing("alice", owned_chat)
     assert unchanged["revision"] == resumed["revision"]
+
+
+def test_post_compaction_projection_retains_omitted_active_step(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Long Goal", [
+        {"id": "done", "text": "Verified setup"},
+        {"id": "active", "text": "Implement module"},
+        {"id": "later", "text": "Run suite"},
+    ])
+    plan = work.ensure_plan_executing("alice", owned_chat)
+    plan = work.update_plan_step("alice", owned_chat, "done", "done",
+                                 expected_revision=plan["revision"], summary="Checked")
+    plan = work.update_plan_step("alice", owned_chat, "active", "in_progress",
+                                 expected_revision=plan["revision"], summary="Coding")
+    recovered = work.save_plan("alice", owned_chat, "Fresh checkpoint projection", [
+        {"id": "later", "text": "Run suite"},
+        {"id": "report", "text": "Publish report"},
+    ], preserve_verified=True)
+    assert [(step["id"], step["status"]) for step in recovered["steps"]] == [
+        ("done", "done"), ("active", "in_progress"),
+        ("later", "pending"), ("report", "pending"),
+    ]
+    assert recovered["current_step_id"] == "active"
+
+
+def test_reprojection_keeps_active_step_when_new_pending_step_precedes_it(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Goal", [
+        {"id": "active", "text": "Implement"},
+    ])
+    plan = work.ensure_plan_executing("alice", owned_chat)
+    recovered = work.save_plan("alice", owned_chat, "Projected", [
+        {"id": "new", "text": "New pending prerequisite"},
+        {"id": "active", "text": "Implement"},
+    ], preserve_verified=True)
+    assert recovered["steps"][1]["status"] == "in_progress"
+    assert recovered["current_step_id"] == "active"
 
 
 def test_post_compaction_plan_reprojection_preserves_verified_progress(owned_chat):
