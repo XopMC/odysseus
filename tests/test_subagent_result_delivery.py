@@ -7,7 +7,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.database import (
-    Base, ChatGoal, ChatRunState, ChatSubagentDelivery, ChatSubagentRun, Session,
+    Base, ChatGoal, ChatRunState, ChatSubagentDelivery, ChatSubagentEvent,
+    ChatSubagentRun, Session,
 )
 from src import subagent_delivery as delivery
 
@@ -83,6 +84,49 @@ def test_failed_child_delivers_partial_work_and_checkpoint_reference(monkeypatch
     assert payload["recovery"]["provider_retries"] == 10
     assert "manage_subagents" in payload["inspection"]
     assert "private_field" not in summary
+
+
+def test_failed_child_without_final_text_delivers_bounded_tool_progress(monkeypatch):
+    import json
+    factory = _store(monkeypatch)
+    with factory.begin() as db:
+        child = db.get(ChatSubagentRun, "a" * 32)
+        child.status = "failed"
+        child.error = "Provider failed after retries"
+        child.result = ""
+        for tool, exit_code, output in [
+            ("read_file", 0, "secret source one"),
+            ("bash", 0, "private test results"),
+            ("python", 1, "private traceback"),
+            ("bash", 0, "verification passed"),
+            ("read_file", 0, "private final file"),
+        ]:
+            db.add(ChatSubagentEvent(
+                child_id=child.id, parent_session_id="s", owner="alice",
+                kind="tool_output", payload={"tool": tool, "exit_code": exit_code,
+                                             "output": output, "command": "private command"},
+            ))
+        db.add(ChatSubagentEvent(
+            child_id="b" * 32, parent_session_id="s", owner="alice",
+            kind="tool_output", payload={"tool": "sibling_secret", "exit_code": 0},
+        ))
+        db.add(ChatSubagentEvent(
+            child_id=child.id, parent_session_id="s", owner="mallory",
+            kind="tool_output", payload={"tool": "foreign_owner_secret", "exit_code": 0},
+        ))
+    assert delivery.enqueue_terminal("a" * 32, "alice")
+    token = delivery.claim_pending("alice", "s")
+    summary = delivery.claimed_summary("alice", "s", token)
+    payload = json.loads(summary.splitlines()[-1])
+    assert payload["partial_result"] == ""
+    assert [(item["tool"], item["exit_code"]) for item in payload["recent_tool_progress"]] == [
+        ("bash", 0), ("python", 1), ("bash", 0), ("read_file", 0),
+    ]
+    assert all(item["output_chars"] > 0 for item in payload["recent_tool_progress"])
+    assert "sibling_secret" not in summary
+    assert "foreign_owner_secret" not in summary
+    assert "private command" not in summary
+    assert "private test results" not in summary
 
 
 def test_cross_owner_and_unattached_historical_child_cannot_dispatch(monkeypatch):

@@ -14,10 +14,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import func, text
 
 from core.database import (
-    ChatGoal, ChatRunState, ChatSubagentDelivery, ChatSubagentRun,
+    ChatGoal, ChatRunState, ChatSubagentDelivery, ChatSubagentEvent, ChatSubagentRun,
     SessionLocal,
 )
 from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
@@ -208,6 +208,33 @@ def claimed_summary(owner: str | None, session_id: str, token: str) -> str | Non
                        if child.status != "completed" and remaining > 0 else "")
             remaining -= len(partial)
             metrics = child.metrics or {}
+            recent_tool_progress = []
+            if child.status != "completed":
+                # A failed child can have no final prose despite having done
+                # substantial tool work. Give the parent a bounded, owner-
+                # scoped progress trail, never raw commands or tool output;
+                # it can inspect the durable child timeline when needed.
+                recent = db.query(
+                    ChatSubagentEvent.id,
+                    ChatSubagentEvent.payload["tool"].as_string(),
+                    ChatSubagentEvent.payload["exit_code"].as_string(),
+                    func.length(ChatSubagentEvent.payload["output"].as_string()),
+                ).filter(
+                    ChatSubagentEvent.owner == (owner or ""),
+                    ChatSubagentEvent.parent_session_id == session_id,
+                    ChatSubagentEvent.child_id == child.id,
+                    ChatSubagentEvent.kind == "tool_output",
+                ).order_by(ChatSubagentEvent.id.desc()).limit(4).all()
+                for event_id, tool, raw_exit_code, output_chars in reversed(recent):
+                    tool_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(tool or "unknown"))[:96]
+                    exit_text = str(raw_exit_code) if raw_exit_code is not None else ""
+                    exit_code = int(exit_text) if re.fullmatch(r"-?[0-9]{1,9}", exit_text) else None
+                    recent_tool_progress.append({
+                        "event_id": event_id,
+                        "tool": tool_name,
+                        "exit_code": exit_code,
+                        "output_chars": int(output_chars or 0),
+                    })
             lines.append(json.dumps({
                 "child_id": child.id,
                 "parent_run_id": child.parent_run_id,
@@ -215,12 +242,14 @@ def claimed_summary(owner: str | None, session_id: str, token: str) -> str | Non
                 "model": child.model,
                 "result_or_error": detail,
                 "partial_result": partial,
+                "recent_tool_progress": recent_tool_progress,
                 "recovery": {key: metrics[key] for key in (
                     "checkpoint_hash", "checkpoint_messages", "context_compactions", "provider_retries",
                 ) if key in metrics},
                 "inspection": (
                     "This child did not complete. Its partial output is NOT verified completion. "
-                    "Use manage_subagents action=read with child_id for retained output "
+                    "The recent tool progress is metadata only. Use manage_subagents action=read "
+                    "with child_id for exact retained outcomes "
                     "(follow next_result_offset), include_recovery_context=true for a context excerpt, "
                     "and action=list_evidence for published findings before continuing its work."
                     if child.status != "completed" else ""
