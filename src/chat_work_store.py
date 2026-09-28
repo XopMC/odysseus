@@ -878,14 +878,13 @@ class ChatWorkStore:
             ).first()
             if (
                 plan is not None
-                and plan.status not in {"done", "cancelled"}
-                and plan.created_at is not None
-                and row.created_at is not None
-                and plan.created_at >= row.created_at
+                and plan.status in {"approved", "executing"}
                 and any(step.get("required", True) and step.get("status") != "done"
                         for step in (plan.steps or []))
             ):
-                raise WorkConflict("Complete the active plan's required steps before completing the Goal")
+                raise WorkConflict(
+                    "Complete the approved plan's required steps before completing the Goal"
+                )
             row.progress = summary
             row.checkpoint = {**dict(row.checkpoint or {}), "evidence": clean_evidence}
             row.status = "completed"

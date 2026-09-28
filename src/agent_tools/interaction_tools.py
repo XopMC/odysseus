@@ -1,6 +1,5 @@
 import json
 import logging
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -41,23 +40,27 @@ class CreatePlanTool:
             if (
                 not bool(ctx.get("plan_recovery"))
                 and isinstance(goal, dict) and goal.get("status") == "active"
-                and isinstance(current_plan, dict) and current_plan.get("status") == "executing"
+                and isinstance(current_plan, dict)
+                and current_plan.get("status") in {"approved", "executing"}
             ):
-                try:
-                    goal_started = datetime.fromisoformat(str(goal.get("created_at") or ""))
-                    plan_started = datetime.fromisoformat(str(current_plan.get("created_at") or ""))
-                except (TypeError, ValueError):
-                    goal_started = plan_started = None
-                if goal_started is not None and plan_started is not None and plan_started >= goal_started:
+                if current_plan.get("status") == "approved":
+                    current_plan = store.plan_action(
+                        owner, session_id, "execute", current_plan["revision"],
+                    )
                     return "create_plan", {
                         "plan_update": current_plan,
-                        "output": (
-                            "This Goal already has an executing durable plan. Keep its stable step IDs, "
-                            "perform the current step, and use update_plan_step after verification; "
-                            "do not replace the plan with another checklist."
-                        ),
+                        "output": "The already-approved plan is now executing; continue its first unfinished step.",
                         "exit_code": 0,
                     }
+                return "create_plan", {
+                    "plan_update": current_plan,
+                    "output": (
+                        "This chat already has an executing durable plan. Keep its stable step IDs, "
+                        "perform the first unfinished step, and use update_plan_step after verification; "
+                        "do not replace it with another checklist."
+                    ),
+                    "exit_code": 0,
+                }
             plan = store.save_plan(
                 owner, session_id, str(data.get("title") or "Plan"),
                 data.get("steps") or [], expected_revision=data.get("expected_revision"),

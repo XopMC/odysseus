@@ -119,6 +119,30 @@ def test_legacy_update_plan_starts_active_goal_plan_and_completion_waits_for_ste
     assert work.complete_goal("alice", owned_chat, "221", ["13 × 17 = 221"])["status"] == "completed"
 
 
+def test_preexisting_executing_plan_remains_binding_for_new_goal(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Approved work", [
+        {"id": "remaining", "text": "Finish the approved remaining work", "required": True},
+    ])
+    plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
+    goal = work.ensure_goal("alice", owned_chat, "Continue the approved work")
+    assert plan["created_at"] < goal["created_at"]
+
+    with pytest.raises(WorkConflict, match="approved plan's required steps"):
+        work.complete_goal("alice", owned_chat, "Goal result", ["verification passed"])
+    assert work.get("alice", owned_chat)["goal"]["status"] == "active"
+
+    plan = work.update_plan_step(
+        "alice", owned_chat, "remaining", "done", expected_revision=plan["revision"],
+        summary="Finished and verified",
+    )
+    assert plan["status"] == "done"
+    completed = work.complete_goal(
+        "alice", owned_chat, "Goal result", ["verification passed"],
+    )
+    assert completed["status"] == "completed"
+
+
 def test_legacy_update_plan_tool_reports_durable_not_requested_progress(owned_chat):
     work = ChatWorkStore()
     work.ensure_goal("alice", owned_chat, "Verify both Plan steps")
@@ -343,15 +367,24 @@ def test_create_plan_replaces_only_a_previous_goals_terminal_plan(owned_chat, ne
     assert saved["steps"][0]["id"] == ("new" if new_goal else "old")
 
 
-def test_duplicate_create_plan_is_idempotent_during_active_goal(owned_chat):
+@pytest.mark.parametrize("plan_before_goal", [False, True])
+def test_duplicate_create_plan_is_idempotent_during_active_goal(owned_chat, plan_before_goal):
     from src.agent_tools.interaction_tools import CreatePlanTool
     store = ChatWorkStore()
-    store.ensure_goal("alice", owned_chat, "Execute a verified multi-step task")
-    plan = store.save_plan("alice", owned_chat, "Current Goal plan", [
-        {"id": "step-1", "text": "Implement the current work"},
-        {"id": "step-2", "text": "Verify the result"},
-    ])
-    plan = store.plan_action("alice", owned_chat, "execute", plan["revision"])
+    if plan_before_goal:
+        plan = store.save_plan("alice", owned_chat, "Current Goal plan", [
+            {"id": "step-1", "text": "Implement the current work"},
+            {"id": "step-2", "text": "Verify the result"},
+        ])
+        plan = store.plan_action("alice", owned_chat, "execute", plan["revision"])
+        store.ensure_goal("alice", owned_chat, "Execute a verified multi-step task")
+    else:
+        store.ensure_goal("alice", owned_chat, "Execute a verified multi-step task")
+        plan = store.save_plan("alice", owned_chat, "Current Goal plan", [
+            {"id": "step-1", "text": "Implement the current work"},
+            {"id": "step-2", "text": "Verify the result"},
+        ])
+        plan = store.plan_action("alice", owned_chat, "execute", plan["revision"])
     revision = plan["revision"]
 
     _, result = asyncio.run(CreatePlanTool().execute(
