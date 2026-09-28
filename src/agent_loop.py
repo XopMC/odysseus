@@ -1209,16 +1209,13 @@ _SUBAGENT_ALLOW_RE = re.compile(
 _SUBAGENT_STOP_ACTION_RE = re.compile(
     r"(?:\b(?:stop|cancel|terminate|remove|delete|kill)\b.{0,100}"
     r"\b(?:subagents?|children|child|сабагент\w*|дет(?:ей|и|ей))\b"
-    r"|\b(?:subagents?|children|child|сабагент\w*|дет(?:ей|и|ей))\b.{0,60}"
-    r"\b(?:stop|cancel|terminate|remove|delete|kill)\b"
     r"|\b(?:останови|остановить|отмени|отменить|удали|удалить|прерви|прервать)\b"
-    r".{0,100}\b(?:сабагент\w*|дет(?:ей|и|ей)|subagents?|children|child)\b"
-    r"|\b(?:сабагент\w*|дет(?:ей|и|ей)|subagents?|children|child)\b.{0,60}"
-    r"\b(?:останови|остановить|отмени|отменить|удали|удалить|прерви|прервать)\b)",
+    r".{0,100}\b(?:сабагент\w*|дет(?:ей|и|ей)|subagents?|children|child)\b)",
     re.IGNORECASE | re.DOTALL,
 )
 _SUBAGENT_STOP_NEGATION_RE = re.compile(
-    r"(?:\b(?:don't|do not|never|not|without)\b|\bне\b|\bне\s+(?:надо|нужно)\b)",
+    r"(?:\b(?:don't|do not|never|not|without|if|unless|when|while|whether)\b"
+    r"|\bне\b|\bне\s+(?:надо|нужно)\b)",
     re.IGNORECASE,
 )
 

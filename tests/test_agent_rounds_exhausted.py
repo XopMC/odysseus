@@ -80,6 +80,8 @@ def test_explicit_user_subagent_control_is_detected(message, expected):
     "Не останавливай сабагентов, пусть работают.",
     "List the subagents and continue working.",
     "The model should never cancel child agents by itself.",
+    "If a child stops or fails, continue the parent task.",
+    "If you stop a child, keep the parent working.",
 ])
 def test_subagent_stop_permission_requires_positive_user_instruction(message):
     assert al._user_requested_subagent_actions(message) == set()
