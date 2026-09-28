@@ -15,7 +15,7 @@ import zlib
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, or_, update
 
 from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
 from .models import Session, ChatMessage
@@ -612,13 +612,40 @@ class SessionManager:
             db.close()
 
     def _touch_session(self, session_id: str):
-        """Update last_accessed timestamp."""
+        """Coarsely update access time without changing the transcript revision.
+
+        Read-only context/status polls call get_session on legacy chats. A
+        normal ORM update would also trigger TimestampMixin.updated_at, which
+        is the browser's history revision and cache key. That made two idle
+        browsers reload the latest history every three seconds.
+        """
         db = SessionLocal()
         try:
-            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-            if db_session:
-                db_session.last_accessed = datetime.now(timezone.utc)
-                db.commit()
+            last_accessed = db.query(DbSession.last_accessed).filter(
+                DbSession.id == session_id,
+            ).first()
+            if last_accessed is None:
+                return
+            now = utcnow_naive()
+            cutoff = now - timedelta(minutes=1)
+            previous = last_accessed[0]
+            if previous is not None:
+                if previous.tzinfo is not None:
+                    previous = previous.astimezone(timezone.utc).replace(tzinfo=None)
+                if previous >= cutoff:
+                    return
+            db.execute(
+                update(DbSession).where(
+                    DbSession.id == session_id,
+                    or_(DbSession.last_accessed.is_(None), DbSession.last_accessed < cutoff),
+                ).values(
+                    last_accessed=now,
+                    # Explicitly preserve the DB's current value, including
+                    # a concurrent message edit; never invoke onupdate here.
+                    updated_at=DbSession.updated_at,
+                )
+            )
+            db.commit()
         except Exception as e:
             logger.error(f"Error updating last_accessed: {e}")
             db.rollback()
