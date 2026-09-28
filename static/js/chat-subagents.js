@@ -47,6 +47,29 @@ export function formatSubagentDetailChannels(channels, labels) {
     channels.answer && `${labels.answer}\n${channels.answer}`,
   ].filter(Boolean).join('\n\n');
 }
+export function subagentStatusLabel(row, translate = t) {
+  if (row.result_missing) return translate('Subagent missing result');
+  const partial = Number(row.result_chars) > 0;
+  if (row.status === 'failed') {
+    const retries = Number(row.metrics?.provider_retries);
+    if (Number.isSafeInteger(retries) && retries >= 10) {
+      const http = /\bHTTP\s+([45]\d{2})\b/i.exec(String(row.error || ''))?.[1];
+      const cause = `${translate('Subagent model failed after retries')} (${http ? `HTTP ${http} · ` : ''}${retries} ${translate('retries')})`;
+      return partial ? `${cause} · ${translate('Partial work saved')}` : cause;
+    }
+    return partial ? `${translate('Subagent failed')} · ${translate('Partial work saved')}` : translate('Subagent failed');
+  }
+  return translate(`Subagent ${row.status}`);
+}
+
+export function subagentDetailText(detail, channelsText, translate = t) {
+  const content = channelsText || detail.result || '';
+  if (!['failed', 'interrupted'].includes(detail.status)) return content || 'No output yet.';
+  const saved = detail.result && channelsText && !channelsText.includes(detail.result)
+    ? `${translate('Saved partial result')}\n${detail.result}` : '';
+  return [subagentStatusLabel(detail, translate), String(detail.error || '').slice(0, 1000), content, saved]
+    .filter(Boolean).join('\n\n');
+}
 async function json(url, options = {}) {
   const res = await fetch(url, { credentials:'same-origin', cache:'no-store', ...options });
   const data = await res.json().catch(() => ({}));
@@ -105,7 +128,7 @@ function render() {
     item.querySelector('.subagent-model').textContent = row.model || '';
     item.querySelector('.subagent-objective').textContent = row.objective || '';
     const status = item.querySelector('.subagent-status'); status.className = `subagent-status ${row.result_missing ? 'failed' : row.status}`;
-    status.textContent = t(row.result_missing ? 'Subagent missing result' : `Subagent ${row.status}`);
+    status.textContent = subagentStatusLabel(row);
     status.title = Number.isFinite(Number(row.queue_wait_ms)) && row.queue_wait_ms != null
       ? `${t('Queue wait')}: ${Math.max(0, Math.round(Number(row.queue_wait_ms) / 1000))} ${t('seconds')}` : '';
     const view = item.querySelector('button[data-action="view"]'); view.textContent = t('View');
@@ -130,7 +153,7 @@ async function showDetail(childId) {
   const detail = await json(`${api}/api/chat/subagents/${encodeURIComponent(expectedSession)}/${encodeURIComponent(childId)}`);
   if (myGeneration !== detailGeneration || sessionId !== expectedSession || selectedId !== childId) return;
   el('subagent-detail').hidden = false;
-  el('subagent-detail-title').textContent = `${detail.name} · ${t(detail.result_missing ? 'Subagent missing result' : `Subagent ${detail.status}`)}`;
+  el('subagent-detail-title').textContent = `${detail.name} · ${subagentStatusLabel(detail)}`;
   const events = await json(
     `${api}/api/chat/subagents/${encodeURIComponent(expectedSession)}/events?after=${detailCursor}`
     + `&limit=${reset ? 1000 : 200}&tail=${reset ? 'true' : 'false'}&child_id=${encodeURIComponent(childId)}`
@@ -146,9 +169,7 @@ async function showDetail(childId) {
   detailText = formatSubagentDetailChannels(channels, {
     thinking: t('Subagent thinking'), tools: t('Subagent tool activity'), answer: t('Subagent answer'),
   });
-  if (!detailText || detailText === 'No output yet.') {
-    detailText = detail.result || detail.error || 'No output yet.';
-  }
+  detailText = subagentDetailText(detail, detailText);
   if (detailText.length > MAX_DETAIL_CHARS) {
     detailText = `[older output omitted]\n${detailText.slice(-MAX_DETAIL_CHARS)}`;
   }

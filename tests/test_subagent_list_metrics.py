@@ -154,6 +154,21 @@ def test_list_treats_ascii_whitespace_result_as_missing(runtime):
     assert listed["error"] == "Subagent produced no visible final result"
 
 
+def test_failed_child_list_exposes_saved_partial_length_without_loading_content(runtime):
+    runner, factory = runtime
+    with factory.begin() as db:
+        db.add(ChatSubagentRun(
+            id="failed-child", parent_session_id="s", owner="qa", ordinal=1,
+            name="Worker", objective="Verify", assigned_context="", model="worker",
+            status="failed", result="Partial verified work", error="Model request failed (HTTP 503)",
+            metrics={"provider_retries": 10},
+        ))
+    listed = runner.list("qa", "s")[0]
+    assert listed["result_chars"] == len("Partial verified work")
+    assert listed["metrics"]["provider_retries"] == 10
+    assert "result" not in listed
+
+
 @pytest.mark.parametrize("status", ["queued", "running", "waiting_user", "stopping",
                                         "completed", "failed", "cancelled", "interrupted"])
 def test_compact_list_preserves_status_and_missing_result(runtime, status):

@@ -171,7 +171,10 @@ _LIST_CACHE_MAX = 512
 
 
 def _public(row: ChatSubagentRun, *, include_result: bool = False) -> dict:
-    result_missing = row.status == "completed" and not (row.result or "").strip()
+    result_chars = getattr(row, "result_length", None)
+    if result_chars is None:
+        result_chars = len((getattr(row, "result", "") or "").strip())
+    result_missing = row.status == "completed" and not result_chars
     result = {
         "child_id": row.id,
         "parent_run_id": row.parent_run_id,
@@ -183,6 +186,7 @@ def _public(row: ChatSubagentRun, *, include_result: bool = False) -> dict:
         "endpoint_id": row.endpoint_id,
         "status": row.status,
         "result_missing": result_missing,
+        "result_chars": result_chars,
         "error": (row.error or "Subagent produced no visible final result") if result_missing else (row.error or ""),
         "metrics": (row.metrics or {}) if include_result else _list_metrics(row.metrics),
         "revision": row.revision,
@@ -1493,7 +1497,8 @@ class SubagentRuntime:
                         "objective", "model", "endpoint_id", "status", "error", "revision",
                         "started_at", "finished_at", "created_at",
                     )
-                }, result="x" if value["result_length"] else "", metrics=metrics)
+                }, result="x" if value["result_length"] else "",
+                    result_length=value["result_length"], metrics=metrics)
                 output.append(_public(row))
             return output
         finally:
