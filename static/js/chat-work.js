@@ -416,8 +416,13 @@ function handleEvent(event) {
     snapshot.goal = event.data || null; runHealthSnapshot = null; render(); void refreshRunHealth(sessionId); void refreshWait(sessionId); void refreshEffects(sessionId); return;
   }
   if (event?.type === 'goal_guidance') {
-    if (event.data?.goal?.session_id && event.data.goal.session_id !== sessionId) return;
-    if (event.data?.goal) snapshot.goal = event.data.goal;
+    const guidedGoal = event.data?.goal;
+    if (guidedGoal?.session_id && guidedGoal.session_id !== sessionId) return;
+    // Run replay can deliver guidance from a superseded Goal after the durable
+    // work snapshot has loaded. Apply the same revision/identity fence used by
+    // goal_update, otherwise the old active Goal briefly replaces the current one.
+    if (guidedGoal && !acceptWorkRecord(snapshot.goal, guidedGoal)) return;
+    if (guidedGoal) snapshot.goal = guidedGoal;
     window.chatModule?.appendGoalGuidance?.(event.data?.guidance);
     window.sessionModule?.refreshSessionMessageCount?.(sessionId);
     render(); return;
