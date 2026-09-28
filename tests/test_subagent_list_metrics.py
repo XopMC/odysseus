@@ -2,7 +2,7 @@
 import json
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from core.database import Base, ChatSubagentRun, Session
@@ -52,7 +52,24 @@ def test_list_bounds_large_metrics_but_detail_retains_full_history(runtime):
             model="worker", status="completed", result="Verified result",
             metrics=metrics, guidance=[{"text": "Preserve existing work"}],
         ))
-    listed = runner.list("qa", "s", parent_run_id="parent")[0]
+    statements = []
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if "chat_subagent_runs" in statement and statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+    engine = factory.kw["bind"]
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        listed = runner.list("qa", "s", parent_run_id="parent")[0]
+        first_queries = list(statements)
+        statements.clear()
+        assert runner.list("qa", "s", parent_run_id="parent")[0]["metrics"] == listed["metrics"]
+        cached_queries = list(statements)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert any("chat_subagent_runs.metrics AS" in statement for statement in first_queries)
+    assert cached_queries and all("chat_subagent_runs.metrics AS" not in statement for statement in cached_queries)
+    assert all("chat_subagent_runs.result AS" not in statement for statement in cached_queries)
+    assert all("assigned_context" not in statement for statement in cached_queries)
     assert listed["status"] == "completed"
     assert listed["result_missing"] is False
     assert "result" not in listed and "guidance" not in listed
@@ -96,6 +113,45 @@ def test_list_metric_allowlist_rejects_nested_and_unbounded_values():
     }
     assert children._list_metrics(None) == {}
     assert children._list_metrics([source]) == {}
+
+
+def test_cached_list_projection_rejects_boolean_as_numeric_and_refreshes_revision(runtime):
+    runner, factory = runtime
+    with factory.begin() as db:
+        db.add(ChatSubagentRun(
+            id="typed", parent_session_id="s", owner="qa", ordinal=1,
+            name="Worker", objective="Verify", assigned_context="", model="worker",
+            status="running", metrics={
+                "provider_retries": True, "thinking_chars": 12,
+                "working_context": {"used_tokens": False, "auto_compact_enabled": True,
+                                    "source": "backend"},
+            },
+        ))
+    assert runner.list("qa", "s")[0]["metrics"] == {
+        "thinking_chars": 12,
+        "working_context": {"auto_compact_enabled": True, "source": "backend"},
+    }
+    with factory.begin() as db:
+        row = db.get(ChatSubagentRun, "typed")
+        row.metrics = {"thinking_chars": 13}
+        row.revision += 1
+    assert runner.list("qa", "s")[0]["metrics"] == {"thinking_chars": 13}
+    assert len(runner._list_metrics_cache) == 1, (
+        "a frequently updated child must not evict stable historical summaries"
+    )
+
+
+def test_list_treats_ascii_whitespace_result_as_missing(runtime):
+    runner, factory = runtime
+    with factory.begin() as db:
+        db.add(ChatSubagentRun(
+            id="blank", parent_session_id="s", owner="qa", ordinal=1,
+            name="Worker", objective="Verify", assigned_context="", model="worker",
+            status="completed", result=" \n\t\r", metrics={},
+        ))
+    listed = runner.list("qa", "s")[0]
+    assert listed["result_missing"] is True
+    assert listed["error"] == "Subagent produced no visible final result"
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "waiting_user", "stopping",

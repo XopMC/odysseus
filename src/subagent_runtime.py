@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from collections import deque
+from collections import OrderedDict, deque
 import hashlib
 import json
 import logging
@@ -19,13 +19,14 @@ import uuid
 import httpx
 from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
+from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional
 
 from src.database import ChatSubagentEvent, ChatSubagentRun, ChatToolIntent, ChatWorkEvent, Session, SessionLocal
 from src.harness_efficiency import CORE_AGENT_TOOLS
 from src.subagent_limits import MAX_ACTIVE_PER_MODEL
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -165,6 +166,9 @@ def _list_metrics(metrics: Any) -> dict:
     return compact
 
 
+_LIST_CACHE_MAX = 512
+
+
 def _public(row: ChatSubagentRun, *, include_result: bool = False) -> dict:
     result_missing = row.status == "completed" and not (row.result or "").strip()
     result = {
@@ -198,6 +202,8 @@ class SubagentRuntime:
         self._tasks: dict[str, asyncio.Task] = {}
         self._configs: dict[str, dict] = {}
         self._lock = asyncio.Lock()
+        self._list_metrics_cache: OrderedDict[tuple, dict] = OrderedDict()
+        self._list_metrics_cache_lock = Lock()
         self._recovered = False
         self._worker_id = uuid.uuid4().hex
 
@@ -1358,7 +1364,70 @@ class SubagentRuntime:
                 q = q.filter(ChatSubagentRun.parent_run_id == parent_run_id)
             if not include_removed:
                 q = q.filter(ChatSubagentRun.removed.is_(False))
-            return [_public(row) for row in q.order_by(ChatSubagentRun.created_at.asc()).all()]
+            columns = [
+                ChatSubagentRun.id.label("id"),
+                ChatSubagentRun.parent_run_id.label("parent_run_id"),
+                ChatSubagentRun.parent_session_id.label("parent_session_id"),
+                ChatSubagentRun.ordinal.label("ordinal"),
+                ChatSubagentRun.name.label("name"),
+                ChatSubagentRun.objective.label("objective"),
+                ChatSubagentRun.model.label("model"),
+                ChatSubagentRun.endpoint_id.label("endpoint_id"),
+                ChatSubagentRun.status.label("status"),
+                func.length(func.trim(ChatSubagentRun.result, " \t\r\n\v\f")).label("result_length"),
+                ChatSubagentRun.error.label("error"),
+                ChatSubagentRun.revision.label("revision"),
+                ChatSubagentRun.started_at.label("started_at"),
+                ChatSubagentRun.finished_at.label("finished_at"),
+                ChatSubagentRun.created_at.label("created_at"),
+            ]
+            rows = q.with_entities(*columns).order_by(ChatSubagentRun.created_at.asc()).all()
+            scope = (owner or "", session_id)
+            with self._list_metrics_cache_lock:
+                missing = [item.id for item in rows if
+                           (*scope, item.id, item.revision) not in self._list_metrics_cache]
+            fresh = {}
+            if missing:
+                # Only changed children need their full JSON decoded. Completed
+                # historical children are cached by durable revision, so a
+                # large chat no longer reparses megabytes on every UI poll.
+                for child_id, revision, metrics in db.query(
+                    ChatSubagentRun.id, ChatSubagentRun.revision, ChatSubagentRun.metrics,
+                ).filter(
+                    ChatSubagentRun.owner == scope[0],
+                    ChatSubagentRun.parent_session_id == session_id,
+                    ChatSubagentRun.id.in_(missing),
+                ).all():
+                    compact = _list_metrics(metrics)
+                    fresh[child_id] = compact
+                    with self._list_metrics_cache_lock:
+                        key = (*scope, child_id, revision)
+                        for prior in tuple(self._list_metrics_cache):
+                            if prior[:3] == key[:3] and prior != key:
+                                self._list_metrics_cache.pop(prior, None)
+                        self._list_metrics_cache[key] = compact
+                        self._list_metrics_cache.move_to_end(key)
+                        while len(self._list_metrics_cache) > _LIST_CACHE_MAX:
+                            self._list_metrics_cache.popitem(last=False)
+            output = []
+            for item in rows:
+                value = item._mapping
+                key = (*scope, item.id, item.revision)
+                with self._list_metrics_cache_lock:
+                    metrics = self._list_metrics_cache.get(key)
+                    if metrics is not None:
+                        self._list_metrics_cache.move_to_end(key)
+                if metrics is None:
+                    metrics = fresh.get(item.id, {})
+                row = SimpleNamespace(**{
+                    name: value[name] for name in (
+                        "id", "parent_run_id", "parent_session_id", "ordinal", "name",
+                        "objective", "model", "endpoint_id", "status", "error", "revision",
+                        "started_at", "finished_at", "created_at",
+                    )
+                }, result="x" if value["result_length"] else "", metrics=metrics)
+                output.append(_public(row))
+            return output
         finally:
             db.close()
 
