@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import struct
 
 
 def _hash(value):
@@ -144,3 +145,96 @@ def restore_messages(session, owner, run_id, checkpoint):
               and item.get("role") in {"user", "assistant", "tool"}
               and (item.get("metadata") or {}).get("source") != "project memory and skills"]
     return copy.deepcopy(ledger + suffix)
+
+
+def restore_unsealed_terminal_goal(session, owner):
+    """Bridge a fresh, completed Goal ledger into the next ordinary Agent run.
+
+    Old Goal attempts can have a durable model-visible checkpoint but no
+    ordinary transcript coverage seal. Never infer coverage merely from the
+    existence of that checkpoint: require a checkpoint emitted by the exact
+    terminal Goal run, its matching saved assistant anchor, and an unchanged
+    owner-scoped transcript. All messages after that anchor are appended.
+    """
+    from core.database import ChatRunState, SessionLocal
+    if (session.owner or None) != (owner or None):
+        return None
+    with SessionLocal() as db:
+        run = db.query(ChatRunState).filter_by(session_id=session.id).order_by(
+            ChatRunState.started_at.desc(), ChatRunState.run_id.desc(),
+        ).first()
+        if (run is None or run.status != "done"
+                or run.owner != (owner or "__odysseus_single_user__")):
+            return None
+        continuation = run.continuation or {}
+        checkpoint = continuation.get("working_checkpoint") or {}
+        ledger = checkpoint.get("messages")
+        if (continuation.get("goal") is not True
+                or not isinstance(ledger, list) or not ledger
+                or checkpoint.get("coverage")
+                or not checkpoint.get("ledger_hash")
+                or hashlib.sha256(json.dumps(
+                    ledger, ensure_ascii=False, separators=(",", ":"), default=str,
+                ).encode()).hexdigest() != checkpoint["ledger_hash"]):
+            return None
+        origin = checkpoint.get("checkpoint_run_id")
+        if origin != run.run_id:
+            if origin is not None:
+                return None
+            # Pre-marker Goal records can still be proved by their exact
+            # owner/session-bound replay frame. The indexed lookup avoids
+            # reading a multi-hour token stream into memory.
+            try:
+                from src import agent_runs
+                from src.chat_replay_log import ReplayLog
+                if not ReplayLog(agent_runs.replay_root(), run.run_id, session.id).has_context_checkpoint(
+                    checkpoint["ledger_hash"], terminal_fresh=True,
+                ):
+                    return None
+            except (OSError, ValueError, TypeError, struct.error):
+                return None
+        elif continuation.get("checkpoint_terminal_fresh") is not True:
+            return None
+        stored, rows = _read(db, session.id, owner)
+        if (stored is None or not _live_matches(session, rows)
+                or _legacy(stored) != _legacy(session)
+                or (session.context_checkpoint is not None and session.context_checkpoint_count)):
+            return None
+        anchors = []
+        for index, row in enumerate(rows):
+            if row.role != "assistant":
+                continue
+            try:
+                metadata = json.loads(row.meta_data or "{}")
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(metadata, dict):
+                return None
+            timeline = metadata.get("timeline_v2") or {}
+            if timeline.get("run_id") == run.run_id and timeline.get("status") == "done":
+                anchors.append((index, row.id))
+        if len(anchors) != 1:
+            return None
+        anchor_index, anchor_id = anchors[0]
+        tail_ids = []
+        for row in rows[anchor_index:]:
+            try:
+                metadata = json.loads(row.meta_data or "{}")
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(metadata, dict):
+                return None
+            if metadata.get("source") != "slash":
+                tail_ids.append(row.id)
+        tail_set = set(tail_ids)
+        tail = [item for item in session.get_context_messages()
+                if (item.get("metadata") or {}).get("_db_id") in tail_set]
+        if (not tail or (tail[0].get("metadata") or {}).get("_db_id") != anchor_id
+                or [(item.get("metadata") or {}).get("_db_id") for item in tail] != tail_ids):
+            return None
+    ledger = [item for item in ledger if isinstance(item, dict)
+              and item.get("role") in {"user", "assistant", "tool"}
+              and (item.get("metadata") or {}).get("source") != "project memory and skills"]
+    if ledger and ledger[-1].get("role") == "assistant" and ledger[-1].get("content") == tail[0].get("content"):
+        tail = tail[1:]
+    return copy.deepcopy(ledger + tail)

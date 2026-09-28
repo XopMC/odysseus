@@ -17,6 +17,44 @@ def test_long_run_replay_defaults_leave_operational_headroom():
     assert replay.MAX_TOTAL_BYTES >= replay.MAX_RUN_BYTES
 
 
+def test_checkpoint_hash_proof_requires_exact_indexed_event_not_tool_text(tmp_path):
+    digest = 'a' * 64
+    log = ReplayLog(tmp_path, 'b' * 32, 'fixture-chat', create=True)
+    log.append('data: ' + json.dumps({'type': 'tool_output', 'output': digest}) + '\n\n')
+    log.append('data: ' + json.dumps({'type': 'context_checkpoint', 'ledger_hash': digest,
+        '_replay': {'run_id': 'c' * 32}}) + '\n\n')
+    assert not log.has_context_checkpoint(digest)
+    log.append('data: ' + json.dumps({'type': 'context_checkpoint', 'ledger_hash': digest,
+        '_replay': {'run_id': 'b' * 32}}) + '\n\n')
+    assert ReplayLog(tmp_path, 'b' * 32, 'fixture-chat').has_context_checkpoint(digest)
+    assert not log.has_context_checkpoint(digest, terminal_fresh=True)
+    log.checkpoint('done')
+    assert log.has_context_checkpoint(digest, terminal_fresh=True)
+    assert not log.has_context_checkpoint('c' * 64)
+    assert not log.has_context_checkpoint('invalid')
+    with pytest.raises(FileNotFoundError):
+        ReplayLog(tmp_path, 'b' * 32, 'another-chat')
+
+
+@pytest.mark.parametrize('later', [
+    {'type': 'tool_start', 'tool': 'bash'},
+    {'type': 'tool_output', 'tool': 'bash'},
+    {'type': 'compacted'},
+    {'type': 'agent_terminal', 'data': {'failed': True}},
+    {'type': 'context_checkpoint', 'ledger_hash': 'd' * 64},
+    {'error': 'provider failed'},
+])
+def test_legacy_goal_checkpoint_proof_rejects_later_invalidating_event(tmp_path, later):
+    digest = 'a' * 64
+    log = ReplayLog(tmp_path, 'b' * 32, 'fixture-chat', create=True)
+    log.append('data: ' + json.dumps({'type': 'context_checkpoint', 'ledger_hash': digest,
+        '_replay': {'run_id': 'b' * 32}}) + '\n\n')
+    log.append('data: ' + json.dumps(later) + '\n\n')
+    log.checkpoint('done')
+    assert log.has_context_checkpoint(digest)
+    assert not log.has_context_checkpoint(digest, terminal_fresh=True)
+
+
 def test_stream_status_keeps_public_streaming_state_after_run_metadata_merge():
     route = (Path(__file__).resolve().parents[1] / "routes/chat_routes.py").read_text(
         encoding="utf-8"

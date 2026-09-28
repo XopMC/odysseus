@@ -1772,6 +1772,17 @@ def setup_chat_routes(
             ordinary_messages = await asyncio.to_thread(
                 agent_runs.covered_checkpoint_messages, sess, ctx.user,
             )
+            if ordinary_messages is None:
+                # A terminal Goal may predate the strict ordinary coverage
+                # seal. Its own freshly emitted ledger and saved assistant
+                # anchor can still prove a compact bridge into this run.
+                try:
+                    from src.checkpoint_coverage import restore_unsealed_terminal_goal
+                    ordinary_messages = await asyncio.to_thread(
+                        restore_unsealed_terminal_goal, sess, ctx.user,
+                    )
+                except Exception:
+                    logger.warning("Terminal Goal checkpoint bridge unavailable", exc_info=True)
             if ordinary_messages is not None:
                 _restore_ordinary_checkpoint_messages(ctx, ordinary_messages)
 

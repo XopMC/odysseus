@@ -2,6 +2,7 @@
 import asyncio
 import copy
 from datetime import datetime, timedelta
+import hashlib
 import json
 import threading
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from routes.chat_routes import _restore_ordinary_checkpoint_messages
 from routes.chat_routes import _prepare_stream_messages
 from src import agent_runs
 from src.attachment_refs import persistable_message_content
-from src.checkpoint_coverage import capture_source, restore_messages
+from src.checkpoint_coverage import capture_source, restore_messages, restore_unsealed_terminal_goal
 
 
 @pytest.fixture
@@ -289,3 +290,105 @@ def test_child_result_follows_restored_checkpoint_once_as_untrusted_evidence(his
     assert result[-1]["metadata"]["source"] == "child-agent results"
     assert result[0] == ctx.preface[0]
     assert "old bulky transcript" not in str(result)
+
+
+def _unsealed_goal(history, *, after_checkpoint=()):
+    async def stream():
+        ledger = [
+            {"role": "user", "content": "compact Goal working state"},
+            {"role": "tool", "content": "verified tool result"},
+        ]
+        yield _frame({"type": "context_checkpoint", "messages": ledger, "compactions": 4,
+                      "ledger_hash": hashlib.sha256(json.dumps(
+                          ledger, ensure_ascii=False, separators=(",", ":"),
+                      ).encode()).hexdigest()})
+        for event in after_checkpoint:
+            yield _frame(event)
+        yield _frame({"delta": "Goal finished."})
+        saved = history.add("assistant", "Goal finished.")
+        yield _frame({"type": "message_saved", "id": saved})
+        yield "data: [DONE]\n\n"
+
+    async def run():
+        result = agent_runs.start("chat", stream(), owner="alice", continuation={"goal": True})
+        await result.task
+        return result
+
+    return asyncio.run(run())
+
+
+def test_unsealed_completed_goal_checkpoint_bridges_to_next_agent_without_full_history(history):
+    run = _unsealed_goal(history)
+    checkpoint = run.continuation["working_checkpoint"]
+    assert checkpoint["checkpoint_run_id"] == run.run_id
+    assert "coverage" not in checkpoint
+    history.add("user", "intervening instruction")
+    history.add("assistant", "intervening reply")
+    history.add("user", "next Agent task")
+    with history.db() as db:
+        stored_run = db.get(database.ChatRunState, run.run_id)
+        saved = db.get(database.ChatMessage, run.saved_message_id)
+        assert stored_run.status == "done"
+        assert stored_run.continuation["working_checkpoint"]["checkpoint_run_id"] == run.run_id
+        assert json.loads(saved.meta_data)["timeline_v2"]["status"] == "done"
+    restored = restore_unsealed_terminal_goal(history.session, "alice")
+    assert [item["content"] for item in restored] == [
+        "compact Goal working state", "verified tool result", "Goal finished.",
+        "intervening instruction", "intervening reply", "next Agent task",
+    ]
+    assert "old bulky transcript" not in str(restored)
+    assert capture_source(history.session, "alice") is not None
+
+
+def test_legacy_goal_checkpoint_uses_exact_durable_replay_proof(history, monkeypatch, tmp_path):
+    monkeypatch.setenv("ODYSSEUS_DURABLE_CHAT_REPLAY", "1")
+    monkeypatch.setattr(agent_runs, "replay_root", lambda: tmp_path)
+    run = _unsealed_goal(history)
+    with history.db.begin() as db:
+        row = db.get(database.ChatRunState, run.run_id)
+        continuation = dict(row.continuation)
+        checkpoint = dict(continuation["working_checkpoint"])
+        checkpoint.pop("checkpoint_run_id")
+        continuation["working_checkpoint"] = checkpoint
+        row.continuation = continuation
+    agent_runs._RUNS.clear()
+    history.add("user", "next Agent task")
+    restored = restore_unsealed_terminal_goal(history.session, "alice")
+    assert [item["content"] for item in restored][-2:] == ["Goal finished.", "next Agent task"]
+    assert "old bulky transcript" not in str(restored)
+
+
+@pytest.mark.parametrize("event_type", ["tool_start", "tool_output"])
+def test_unsealed_goal_checkpoint_after_unrecorded_tool_event_is_not_reused(history, event_type):
+    run = _unsealed_goal(history, after_checkpoint=[{"type": event_type, "tool": "bash"}])
+    assert run.continuation["checkpoint_terminal_fresh"] is False
+    history.add("user", "next Agent task")
+    assert restore_unsealed_terminal_goal(history.session, "alice") is None
+
+
+@pytest.mark.parametrize("change", ["tamper_ledger", "wrong_origin", "edit_history", "newer_run", "no_anchor", "manual_compaction"])
+def test_unsealed_goal_bridge_refuses_unproven_checkpoint(history, change):
+    run = _unsealed_goal(history)
+    with history.db.begin() as db:
+        row = db.get(database.ChatRunState, run.run_id)
+        if change in {"tamper_ledger", "wrong_origin"}:
+            continuation = dict(row.continuation)
+            checkpoint = dict(continuation["working_checkpoint"])
+            if change == "tamper_ledger":
+                checkpoint["messages"] = [{"role": "user", "content": "unproven"}]
+            else:
+                checkpoint["checkpoint_run_id"] = "another-run"
+            continuation["working_checkpoint"] = checkpoint
+            row.continuation = continuation
+        elif change == "edit_history":
+            db.get(database.ChatMessage, "message-001").content = "changed"
+        elif change == "newer_run":
+            db.add(database.ChatRunState(run_id="newer", session_id="chat", owner="alice",
+                status="done", started_at=datetime.utcfromtimestamp(run.started_at) + timedelta(seconds=1),
+                continuation={"goal": False, "working_checkpoint": row.continuation["working_checkpoint"]}))
+        elif change == "no_anchor":
+            db.get(database.ChatMessage, run.saved_message_id).meta_data = "{}"
+        elif change == "manual_compaction":
+            db.get(database.Session, "chat").context_checkpoint_count = 1
+    agent_runs._RUNS.clear()
+    assert restore_unsealed_terminal_goal(history.session, "alice") is None

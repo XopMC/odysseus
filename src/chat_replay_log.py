@@ -10,6 +10,7 @@ import hashlib
 from functools import lru_cache
 import json
 import logging
+import mmap
 import os
 from pathlib import Path
 import re
@@ -202,6 +203,88 @@ class ReplayLog:
             if len(event) != length:
                 raise ValueError('Incomplete replay frame')
         return event.decode('utf-8')
+
+    def has_context_checkpoint(self, ledger_hash: str, *, terminal_fresh: bool = False) -> bool:
+        """Prove that this run emitted a legacy checkpoint without scanning its token stream.
+
+        The needle locates candidate frames in the memory-mapped event file;
+        the durable offset index resolves each hit to an exact frame. Merely
+        seeing a hash in reasoning or a tool output is not sufficient.
+        """
+        if not isinstance(ledger_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', ledger_hash):
+            return False
+        if terminal_fresh and self.metadata.get('status') != 'done':
+            return False
+        count = len(self)
+        if not count:
+            return False
+        with self.path('.events').open('rb') as source, self.path('.index').open('rb') as index:
+            with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as frames:
+                needle = ledger_hash.encode('ascii')
+                position = frames.rfind(needle)
+                attempts = 0
+                while position >= 0 and attempts < 128:
+                    attempts += 1
+                    low, high = 0, count
+                    while low + 1 < high:
+                        middle = (low + high) // 2
+                        index.seek(middle * _WORD.size)
+                        offset = _WORD.unpack(index.read(_WORD.size))[0]
+                        if offset <= position:
+                            low = middle
+                        else:
+                            high = middle
+                    index.seek(low * _WORD.size)
+                    offset = _WORD.unpack(index.read(_WORD.size))[0]
+                    if offset + _WORD.size <= position:
+                        length = _WORD.unpack(frames[offset:offset + _WORD.size])[0]
+                        end = offset + _WORD.size + length
+                        if length <= MAX_EVENT_BYTES and position < end:
+                            frame = frames[offset + _WORD.size:end].decode('utf-8', 'replace')
+                            raw = '\n'.join(line[5:].lstrip() for line in frame.splitlines()
+                                            if line.startswith('data:'))
+                            try:
+                                event = json.loads(raw)
+                            except (TypeError, ValueError):
+                                event = None
+                            replay = event.get('_replay') if isinstance(event, dict) else None
+                            if (isinstance(event, dict) and event.get('type') == 'context_checkpoint'
+                                    and event.get('ledger_hash') == ledger_hash
+                                    and isinstance(replay, dict) and replay.get('run_id') == self.run_id):
+                                if not terminal_fresh:
+                                    return True
+                                # A later tool start, compaction, or failure
+                                # invalidates this checkpoint until another
+                                # complete ledger is emitted. Only the latest
+                                # matching frame may bridge a legacy Goal.
+                                cursor = end
+                                while cursor < len(frames):
+                                    if cursor + _WORD.size > len(frames):
+                                        return False
+                                    tail_length = _WORD.unpack(frames[cursor:cursor + _WORD.size])[0]
+                                    tail_end = cursor + _WORD.size + tail_length
+                                    if tail_length > MAX_EVENT_BYTES or tail_end > len(frames):
+                                        return False
+                                    tail_frame = frames[cursor + _WORD.size:tail_end]
+                                    if b'"type"' in tail_frame or b'"error"' in tail_frame:
+                                        tail_raw = '\n'.join(
+                                            line[5:].lstrip() for line in tail_frame.decode('utf-8', 'replace').splitlines()
+                                            if line.startswith('data:')
+                                        )
+                                        try:
+                                            tail_event = json.loads(tail_raw)
+                                        except (TypeError, ValueError):
+                                            tail_event = None
+                                        if (isinstance(tail_event, dict)
+                                                and (tail_event.get('type') in {
+                                                    'tool_start', 'tool_output', 'compacted', 'context_checkpoint',
+                                                    'agent_terminal', 'context_compaction_failed',
+                                                } or tail_event.get('error'))):
+                                            return False
+                                    cursor = tail_end
+                                return cursor == len(frames)
+                    position = frames.rfind(needle, 0, position)
+        return False
 
     def append(self, event):
         raw = event.encode('utf-8')

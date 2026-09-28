@@ -450,7 +450,7 @@ def _publish(run: _Run, ev: str) -> None:
                 run.saved_message_id = payload.get("id")
             if (payload.get("error") or kind in {"agent_terminal", "context_compaction_failed"}):
                 run.coverage_failed = True
-            if kind in {"tool_start", "compacted"}:
+            if kind in {"tool_start", "tool_output", "compacted"}:
                 # A tool result must enter a subsequent complete checkpoint.
                 run.checkpoint_fresh = False
             if (run.checkpoint_fresh and payload.get("delta")
@@ -599,6 +599,11 @@ def _publish(run: _Run, ev: str) -> None:
                     "messages": messages,
                     "compactions": checkpoint_compactions,
                     "ledger_hash": str(payload.get("ledger_hash") or "")[:128],
+                    # An inherited checkpoint is not proof that this run
+                    # incorporated its own latest user/tool turns. Only a
+                    # checkpoint emitted by this exact run may bridge a
+                    # terminal Goal into a later ordinary Agent request.
+                    "checkpoint_run_id": run.run_id,
                 }
                 # The ledger belongs in the protected run-state artifact, not
                 # every browser replay page. Keep only audit metadata in SSE.
@@ -1685,6 +1690,11 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
                 run.buffer.checkpoint(terminal_status)
             except OSError:
                 logger.error('[agent-run] replay checkpoint unavailable')
+        run.continuation["checkpoint_terminal_fresh"] = bool(
+            terminal_status == "done" and run.checkpoint_fresh
+            and not run.coverage_failed
+            and (run.continuation.get("working_checkpoint") or {}).get("checkpoint_run_id") == run.run_id
+        )
         _persist_run_state(run, status=terminal_status, durable=True)
         # Wake every subscriber with the end sentinel so their SSE closes.
         _wake_subscribers()
