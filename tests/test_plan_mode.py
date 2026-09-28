@@ -118,3 +118,37 @@ def test_current_plan_checklist_uses_latest_status_and_ids():
     assert "- [x] First check (step_id: step-a)" in checklist
     assert "- [ ] Second check (step_id: step-b)" in checklist
     assert current_plan_checklist({**plan, "status": "cancelled"}) == ""
+
+
+def test_long_plan_projection_keeps_current_step_and_complete_id():
+    from src.agent_loop import current_plan_checklist
+
+    steps = [
+        {
+            "id": f"step-{i}",
+            "text": f"Task {i}: " + "verify evidence " * 60,
+            "status": "done" if i < 90 else ("in_progress" if i == 90 else "pending"),
+        }
+        for i in range(100)
+    ]
+    plan = {
+        "status": "executing", "steps": steps,
+        "current_step_id": "step-90",
+    }
+    projection = current_plan_checklist(plan)
+    assert len(projection) <= 8192
+    assert "step 91/100" in projection
+    assert steps[90]["text"] in projection
+    assert "(step_id: step-90)" in projection
+    assert "(step_id: step-99)" not in projection
+    assert "later steps retained" in projection
+    assert "(step_id: step-89)" not in projection
+
+    # The next model round must show the newly active step in full, even when
+    # it was omitted from the earlier projection.
+    plan["current_step_id"] = "step-99"
+    steps[90]["status"] = "done"
+    steps[99]["status"] = "in_progress"
+    refreshed = current_plan_checklist(plan)
+    assert steps[99]["text"] in refreshed
+    assert "(step_id: step-99)" in refreshed

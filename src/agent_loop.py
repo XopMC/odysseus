@@ -4115,8 +4115,10 @@ def build_active_plan_note(approved_plan: str) -> str:
         return ""
     return (
         "## ACTIVE PLAN (approved — execute this)\n"
-        "You are executing a plan the user already approved. THE FULL PLAN IS "
-        "BELOW — it is always provided here every turn. Do NOT say you lost it, "
+        "You are executing a plan the user already approved. THE CURRENT PLAN "
+        "REVISION IS BELOW — it is provided here every turn. For a very long "
+        "plan, the current step and following steps are shown; after you advance, "
+        "the next step is refreshed from durable storage. Do NOT say you lost it, "
         "and do NOT look for it in tasks, notes, memory, files, or the API; just "
         "read it below. This is the current durable revision: any earlier draft "
         "or checklist in the conversation is obsolete. Do not execute old steps, "
@@ -4140,11 +4142,50 @@ def current_plan_checklist(plan: Optional[dict]) -> str:
     steps = plan.get("steps") or []
     if not isinstance(steps, list):
         return ""
-    return "\n".join(
+    lines = [
         f"- [{'x' if step.get('status') == 'done' else ' '}] "
         f"{str(step.get('text') or '')} (step_id: {str(step.get('id') or '')})"
         for step in steps if isinstance(step, dict)
-    )[:8192]
+    ]
+    full = "\n".join(lines)
+    if len(full) <= 8192:
+        return full
+
+    # Never cut a step or its ID in half. A large durable Plan can contain
+    # 100 steps of 1000 characters each; pin the current step in full and
+    # expose following steps as space permits. When it advances, the next
+    # model round re-renders the new current step from durable storage.
+    valid_steps = [step for step in steps if isinstance(step, dict)]
+    current_id = plan.get("current_step_id")
+    current_index = next(
+        (i for i, step in enumerate(valid_steps) if step.get("id") == current_id),
+        None,
+    )
+    if current_index is None:
+        current_index = next(
+            (i for i, step in enumerate(valid_steps) if step.get("status") == "in_progress"),
+            None,
+        )
+    if current_index is None:
+        current_index = next(
+            (i for i, step in enumerate(valid_steps) if step.get("status") != "done"),
+            max(0, len(valid_steps) - 1),
+        )
+    heading = (
+        f"[Durable Plan excerpt: step {current_index + 1}/{len(valid_steps)}; "
+        f"{current_index} earlier steps retained in storage.]"
+    )
+    visible = []
+    for index in range(current_index, len(lines)):
+        remaining = len(lines) - index - 1
+        tail = f"[{remaining} later steps retained in storage.]" if remaining else ""
+        candidate = "\n".join([heading, *visible, lines[index], tail]).rstrip()
+        if len(candidate) > 8192:
+            break
+        visible.append(lines[index])
+    omitted = len(lines) - current_index - len(visible)
+    tail = f"[{omitted} later steps retained in storage.]" if omitted else ""
+    return "\n".join([heading, *visible, tail]).rstrip()
 
 
 def build_active_goal_note(goal: Optional[dict]) -> str:
