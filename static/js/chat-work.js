@@ -13,6 +13,9 @@ let eventSourceSession = '';
 let eventReconnectTimer = null;
 let collapseTimer = null;
 let refreshGeneration = 0;
+let genericRefreshTimer = null;
+let snapshotRetryTimer = null;
+let snapshotRetryDelayMs = 1200;
 let runHealthSnapshot = null;
 let healthTimer = null;
 let waitSnapshot = null;
@@ -308,6 +311,9 @@ function beginSessionHydration(id) {
   const target = id || '';
   if (target === sessionId && workSnapshotReady) return;
   ++refreshGeneration;
+  clearTimeout(genericRefreshTimer); genericRefreshTimer = null;
+  clearTimeout(snapshotRetryTimer); snapshotRetryTimer = null;
+  snapshotRetryDelayMs = 1200;
   closeEventStream();
   sessionId = target;
   snapshot = { plan: null, goal: null, cursor: 0 };
@@ -372,6 +378,9 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   const switched = targetSession !== sessionId;
   sessionId = targetSession;
   if (switched) {
+    clearTimeout(genericRefreshTimer); genericRefreshTimer = null;
+    clearTimeout(snapshotRetryTimer); snapshotRetryTimer = null;
+    snapshotRetryDelayMs = 1200;
     closeEventStream();
     snapshot = { plan: null, goal: null, cursor: 0 };
     runHealthSnapshot = null;
@@ -384,13 +393,29 @@ async function refresh(id = window.sessionModule?.getCurrentSessionId?.()) {
   try {
     const next = await json(`${api}/api/chat/work/${encodeURIComponent(targetSession)}`);
     if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
-    snapshot = next;
+    snapshot = { ...next, cursor: Math.max(Number(next.cursor || 0), Number(snapshot.cursor || 0)) };
   } catch (error) {
     if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
     if (error.message !== 'Chat not found') console.warn('[chat-work]', error);
-    if (!workSnapshotReady) snapshot = { plan: null, goal: null, cursor: 0 };
+    if (!workSnapshotReady) {
+      // Opening SSE at cursor zero after a transient snapshot failure replays
+      // the entire work log and can issue hundreds of redundant GETs.
+      snapshot = { plan: null, goal: null, cursor: 0 };
+      if (!snapshotRetryTimer) {
+        const delay = snapshotRetryDelayMs;
+        snapshotRetryDelayMs = Math.min(30000, delay * 2);
+        snapshotRetryTimer = setTimeout(() => {
+          snapshotRetryTimer = null;
+          if (sessionId === targetSession && !workSnapshotReady) void refresh(targetSession);
+        }, delay);
+      }
+      render();
+      return snapshot;
+    }
   }
   if (myGeneration !== refreshGeneration || sessionId !== targetSession) return snapshot;
+  clearTimeout(snapshotRetryTimer); snapshotRetryTimer = null;
+  snapshotRetryDelayMs = 1200;
   workSnapshotReady = true;
   render();
   connectEventStream();
@@ -427,7 +452,14 @@ function handleEvent(event) {
     window.sessionModule?.refreshSessionMessageCount?.(sessionId);
     render(); return;
   }
-  if (event?.type?.startsWith('plan_') || event?.type?.startsWith('goal_')) void refresh(sessionId);
+  if (event?.type?.startsWith('plan_') || event?.type?.startsWith('goal_')) {
+    if (genericRefreshTimer) return;
+    const targetSession = sessionId;
+    genericRefreshTimer = setTimeout(() => {
+      genericRefreshTimer = null;
+      if (targetSession === sessionId && workSnapshotReady) void refresh(targetSession);
+    }, 100);
+  }
 }
 
 export function mayPreviewNewGoal(goal) {
@@ -605,11 +637,13 @@ function placeSubagentsBelowPlan(plan, expanded) {
 }
 
 async function pollEvents() {
-  if (!sessionId || document.visibilityState === 'hidden') return;
+  if (!sessionId || !workSnapshotReady || document.visibilityState === 'hidden') return;
+  const targetSession = sessionId;
   try {
-    const data = await json(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/events?after=${Number(snapshot.cursor || 0)}&limit=100`);
+    const data = await json(`${api}/api/chat/work/${encodeURIComponent(targetSession)}/events?after=${Number(snapshot.cursor || 0)}&limit=100`);
+    if (targetSession !== sessionId || !workSnapshotReady) return;
     for (const event of data.events || []) handleEvent(event);
-    snapshot.cursor = Number(data.next_cursor || snapshot.cursor || 0);
+    snapshot.cursor = Math.max(Number(data.next_cursor || 0), Number(snapshot.cursor || 0));
   } catch (_) { /* reconnect on next tick/focus */ }
 }
 
@@ -619,7 +653,7 @@ function closeEventStream() {
 }
 
 function connectEventStream() {
-  if (!sessionId || document.visibilityState === 'hidden' || typeof EventSource === 'undefined') return;
+  if (!sessionId || !workSnapshotReady || document.visibilityState === 'hidden' || typeof EventSource === 'undefined') return;
   if (eventSource && eventSourceSession === sessionId) return;
   closeEventStream();
   const targetSession = sessionId;

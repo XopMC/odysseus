@@ -90,3 +90,95 @@ def test_replay_cannot_flash_or_restore_an_old_goal_after_reload():
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"passed": True}
+
+
+def test_work_replay_waits_for_snapshot_and_coalesces_generic_events():
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    module_path = Path(__file__).resolve().parents[1] / "static/js/chat-work.js"
+    script = r"""
+      const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+      const code=fs.readFileSync(process.argv[1],'utf8');
+      class FakeEl {
+        constructor(id=''){this.id=id;this.hidden=false;this.textContent='';this.value='';
+          this.style={removeProperty(){}};this.classList={remove(){},add(){},contains(){return false}}}
+        replaceChildren(){} appendChild(){} setAttribute(){} querySelector(){return null}
+        addEventListener(){}
+      }
+      const nodes=new Map(),listeners=new Map(),timers=[];
+      const document={visibilityState:'visible',getElementById:id=>{
+        if(!nodes.has(id))nodes.set(id,new FakeEl(id));return nodes.get(id)},
+        createElement:()=>new FakeEl(),querySelectorAll:()=>[],addEventListener(){}};
+      const window={location:{origin:'http://local'},chatModule:{},
+        addEventListener:(type,fn)=>listeners.set(type,fn)};
+      let release; const firstSnapshot=new Promise(resolve=>release=resolve);
+      let snapshotReads=0, failedReads=0; const requests=[],streams=[];
+      const fetch=async url=>{
+        requests.push(String(url));
+        if(String(url).endsWith('/api/chat/work/s')){
+          snapshotReads++;
+          return {ok:true,json:async()=>snapshotReads===1?firstSnapshot:
+            {plan:null,goal:null,cursor:2190}};
+        }
+        if(String(url).endsWith('/api/chat/work/t')){
+          failedReads++;
+          return failedReads===1?{ok:false,status:503,json:async()=>({detail:'unavailable'})}:
+            {ok:true,json:async()=>({plan:null,goal:null,cursor:77})};
+        }
+        return {ok:true,json:async()=>url.includes('/events?')?
+          {events:[],next_cursor:2190}:url.includes('unknown-effects')?{effects:[]}:{phase:'idle'}};
+      };
+      class EventSource {constructor(url){this.url=url;streams.push(url)}close(){}}
+      const monitor={start(){},stop(){},snapshot(){return {}}};
+      const context=vm.createContext({console,document,window,fetch,EventSource,
+        clearTimeout(){},clearInterval(){},setInterval(){},
+        setTimeout:fn=>{timers.push(fn);return timers.length}});
+      const mod=new vm.SourceTextModule(code,{context});
+      await mod.link(async spec=>{
+        const entries=spec.includes('i18n')?{
+          bindUiText(){},unbindUiText(){},t:x=>x,
+        }:spec.includes('runHealth')?{
+          describeProgressHealth:()=>null,describeUiLongTasks:()=>null,
+          describeBudgetWarnings:()=>[],createUiLongTaskMonitor:()=>monitor,
+        }:{removeOrdinaryAskUserCards(){}};
+        return new vm.SyntheticModule(Object.keys(entries),function(){
+          for(const [name,value] of Object.entries(entries))this.setExport(name,value)
+        },{context});
+      });
+      await mod.evaluate();
+      const work=mod.namespace.default;
+      work.bind();work.beginSessionHydration('s');
+      const pending=work.refresh('s');
+      listeners.get('focus')();
+      await Promise.resolve();
+      assert.equal(streams.length,0,'SSE must not start at cursor zero before snapshot');
+      assert.equal(requests.filter(url=>url.includes('/events?')).length,0,
+        'poll must not replay historical events before snapshot');
+      release({plan:null,goal:null,cursor:2190});await pending;
+      assert.equal(streams.length,1);
+      assert.match(streams[0],/after=2190$/);
+      for(let i=0;i<284;i++)work.handleEvent({type:'plan_saved',seq:2191+i});
+      assert.equal(snapshotReads,1,'generic replay events should share one refresh');
+      for(const timer of timers.splice(0))timer();
+      await Promise.resolve();await Promise.resolve();
+      assert.equal(snapshotReads,2,'one coalesced refresh for the burst');
+      work.beginSessionHydration('t');
+      await work.refresh('t');
+      assert.equal(streams.length,1,'a failed first snapshot must not open after=0 SSE');
+      assert.equal(failedReads,1);
+      assert.equal(timers.length,1,'failed hydration should schedule one retry');
+      timers.shift()();
+      await new Promise(resolve=>setImmediate(resolve));
+      assert.equal(failedReads,2);
+      assert.equal(streams.length,2);
+      assert.match(streams[1],/after=77$/);
+      console.log(JSON.stringify({passed:true}));
+    """
+    result = subprocess.run(
+        ["node", "--experimental-vm-modules", "-e",
+         "(async()=>{" + script + "})().catch(e=>{console.error(e);process.exit(1)})",
+         str(module_path)],
+        text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"passed": True}
