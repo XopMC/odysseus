@@ -43,6 +43,7 @@ import {
 } from './chatStreamErrors.js';
 import { loadPanel } from './panels.js';
 import { bindUiText, t } from './i18n.js';
+import { compactionToastText } from './context-compaction-notice.js?v=20260928compaction1';
 
 function appendStreamErrorGuidance(container, error) {
   const presentation = streamErrorPresentation(error, t);
@@ -3991,7 +3992,7 @@ function appendStreamErrorGuidance(container, error) {
                 }
               } else if (json.type === 'compacted') {
                 if (!_isBg) {
-                  uiModule.showToast('Context compacted — older messages summarized');
+                  uiModule.showToast(compactionToastText(json, t));
                 }
               } else if (json.type === 'context_trimmed') {
                 if (!_isBg) {

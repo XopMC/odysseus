@@ -1,6 +1,7 @@
 """Recovery must retain work without replaying an uncertain tool action."""
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.database import Base, ChatSubagentEvent, ChatSubagentRun, Session
+from core.database import Base, ChatSubagentEvent, ChatSubagentRun, ChatToolIntent, Session
 from src import subagent_runtime as children
 
 
@@ -41,6 +42,83 @@ def run(runtime):
                                   endpoint_url="http://model", model="worker", headers={},
                                   timeout_seconds=60, workspace=None, access_mode="full_access"))
     return runtime.get("qa", "s", "child")
+
+
+def test_unanswered_child_question_recovers_after_one_minute(harness, monkeypatch):
+    with children.SessionLocal.begin() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        row.status = "waiting_user"
+        row.error = ""
+        row.metrics = {"waiting_user": {"question_id": "q1", "question": "Choose a safe option"}}
+        row.policy_snapshot = {"recovery_config": {"model": "worker"}}
+        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=61)
+
+    resumed = []
+    async def fake_resume():
+        resumed.append(True)
+        return 1
+
+    monkeypatch.setattr(harness, "resume_recovering", fake_resume)
+    assert asyncio.run(harness.auto_decide_expired_questions()) == 1
+    assert resumed == [True]
+    with children.SessionLocal() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        assert row.status == "recovering"
+        assert row.metrics["question_timeout_count"] == 1
+        assert row.metrics["auto_decide_question_id"] == "q1"
+        assert row.guidance[-1]["source"] == "question_timeout"
+        assert "not approval" in row.guidance[-1]["text"]
+        assert db.query(ChatSubagentEvent).filter_by(
+            child_id="child", kind="question_timeout",
+        ).count() == 1
+    assert asyncio.run(harness.auto_decide_expired_questions()) == 0
+
+
+def test_child_question_timeout_does_not_resume_unknown_effect_or_fresh_question(harness):
+    with children.SessionLocal.begin() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        row.status = "waiting_user"
+        row.metrics = {"waiting_user": {"question_id": "q1"}}
+        row.policy_snapshot = {"recovery_config": {"model": "worker"}}
+        row.error = "Tool outcome is unknown; inspect it"
+        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=61)
+    assert harness.expired_questions() == []
+
+    with children.SessionLocal.begin() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        row.error = ""
+        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=61)
+        db.add(ChatToolIntent(
+            id="intent-1", owner="qa", session_id="s", run_id="child",
+            tool_call_id="call-1", tool_name="bash", action_hash="sha256", status="unknown",
+        ))
+    candidate = harness.expired_questions()[0]
+    assert harness._claim_expired_question(candidate) is False
+    with children.SessionLocal() as db:
+        assert db.query(ChatSubagentRun).filter_by(id="child").one().status == "waiting_user"
+
+    with children.SessionLocal.begin() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        row.error = ""
+        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    assert harness.expired_questions() == []
+
+
+def test_timed_out_child_cannot_repeat_ask_user(harness, monkeypatch):
+    with children.SessionLocal.begin() as db:
+        row = db.query(ChatSubagentRun).filter_by(id="child").one()
+        row.metrics = {"question_timeout_count": 1}
+
+    requests = []
+    async def stream(*args, **kwargs):
+        requests.append(kwargs)
+        yield 'data: {"delta":"Verified final result"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    assert run(harness)["status"] == "completed"
+    assert "ask_user" in requests[0]["disabled_tools"]
+    assert "write_file" in requests[0]["disabled_tools"]
 
 
 @pytest.mark.parametrize("status", [400, 403, 500, 503])

@@ -70,6 +70,7 @@ const PRECACHE = [
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js?v=20260925thinkempty1',
   '/static/js/chat.js?v=20260925thinkempty1',
+  '/static/js/context-compaction-notice.js?v=20260928compaction1',
   '/static/js/replayHistory.js?v=20260923replaycursor2',
   '/static/js/context-settings-dialog.js?v=20260923context1',
   '/static/js/engineering-workspace.js?v=20260923context1',

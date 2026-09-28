@@ -219,6 +219,11 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         events = [json.loads(line[6:]) for line in chunks.splitlines()
                   if line.startswith('data: {')]
         compacted_index = next(i for i, event in enumerate(events) if event.get('type') == 'compacted')
+        notice = events[compacted_index]
+        self.assertEqual(notice['trigger_percent'], 60)
+        self.assertEqual(notice['trigger_basis'], 'model_window')
+        self.assertGreaterEqual(notice['before_percent'], notice['trigger_percent'])
+        self.assertLess(notice['after_percent'], notice['before_percent'])
         checkpoint = events[compacted_index + 1]
         self.assertEqual(checkpoint['type'], 'context_checkpoint')
         self.assertTrue(checkpoint['messages'])

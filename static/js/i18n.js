@@ -351,6 +351,7 @@ const RU = Object.freeze({
   'Window basis':'База окна', 'Current serving window':'Текущее окно загруженной модели',
   'Last request window':'Окно последнего запроса',
   'Messages':'Сообщения', 'Auto compact':'Автосжатие', 'Stored chat (est.)':'Сохранённый чат (оценка)',
+  'threshold':'порог', 'Context compacted — older messages summarized':'Контекст сжат — старые сообщения заменены резюме',
   'Manual compact':'Ручное сжатие', 'Run active':'Задача выполняется',
   'Run status':'Статус запуска', 'Active':'Активен',
   'Compacting':'Сжатие контекста', 'Compact failed':'Не удалось сжать контекст',

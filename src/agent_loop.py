@@ -6654,7 +6654,31 @@ async def stream_agent_loop(
                 except Exception:
                     logger.exception("Failed to persist compaction settlement marker")
                     _pending_compaction_settlement = None
-            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length, "working_context": True, "before_tokens": _before_context, "after_tokens": estimate_tokens(messages), "duration_ms": round(max(0.0, time.monotonic() - _compaction_boundary_started) * 1000, 1), "checkpoint": checkpoint, "economic_decision": (_economic_decision.to_dict() if _economic_decision else None), "settlement": _pending_compaction_settlement})}\n\n'
+            _compact_window = int(_last_route_context_length or context_length or 0)
+            _compact_before_used = (
+                _configured_telemetry.get("before_tokens") if _configured_telemetry
+                else math.ceil(_before_context * _context_calibration) + _schema_tokens
+            )
+            _compact_after_used = (
+                _configured_telemetry.get("after_tokens") if _configured_telemetry
+                else math.ceil(estimate_tokens(messages) * _context_calibration) + _schema_tokens
+            )
+            _compact_notice = {
+                "type": "compacted", "context_length": _last_route_context_length,
+                "working_context": True, "before_tokens": _before_context,
+                "after_tokens": estimate_tokens(messages),
+                "duration_ms": round(max(0.0, time.monotonic() - _compaction_boundary_started) * 1000, 1),
+                "checkpoint": checkpoint,
+                "economic_decision": (_economic_decision.to_dict() if _economic_decision else None),
+                "settlement": _pending_compaction_settlement,
+            }
+            if _compact_window > 0 and _compact_before_used is not None and _compact_after_used is not None:
+                _compact_notice["before_percent"] = round(100 * _compact_before_used / _compact_window, 1)
+                _compact_notice["after_percent"] = round(100 * _compact_after_used / _compact_window, 1)
+            if _configured_telemetry:
+                _compact_notice["trigger_percent"] = _configured_telemetry.get("effective_trigger_percent")
+                _compact_notice["trigger_basis"] = _configured_telemetry.get("trigger_basis")
+            yield f'data: {json.dumps(_compact_notice)}\n\n'
             # Commit the exact new ledger before starting the next model call.
             # Pause during its thinking must not fall back to a summary-only
             # checkpoint and accidentally feed the full transcript on resume.

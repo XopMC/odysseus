@@ -117,6 +117,11 @@ def _safe_child_tool_replay(tool_since_checkpoint: bool, tools_since_checkpoint:
     )
 
 
+def _question_timeout_count(metrics: Any) -> int:
+    value = (metrics or {}).get("question_timeout_count") if isinstance(metrics, dict) else None
+    return value if type(value) is int and 0 <= value < 1_000_000 else 0
+
+
 def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -347,6 +352,85 @@ class SubagentRuntime:
             except Exception:
                 logger.exception("Child checkpoint recovery failed for %s", child_id)
         return resumed
+
+    def expired_questions(self, timeout_seconds: int = 60, limit: int = 100) -> list[dict]:
+        """Find ordinary child questions; unknown tool outcomes require inspection."""
+        cutoff = _utcnow() - timedelta(seconds=max(1, int(timeout_seconds)))
+        with SessionLocal() as db:
+            rows = db.query(ChatSubagentRun).filter(
+                ChatSubagentRun.status == "waiting_user",
+                ChatSubagentRun.updated_at <= cutoff,
+                ChatSubagentRun.removed.is_(False),
+                ChatSubagentRun.cancel_requested.is_(False),
+            ).order_by(ChatSubagentRun.updated_at).limit(max(1, min(int(limit), 100))).all()
+            return [
+                {"child_id": row.id, "owner": row.owner or None,
+                 "session_id": row.parent_session_id, "revision": row.revision}
+                for row in rows
+                if isinstance((row.metrics or {}).get("waiting_user"), dict)
+                and not (row.error or "").strip()
+                and (row.policy_snapshot or {}).get("recovery_config")
+            ]
+
+    def _claim_expired_question(self, candidate: dict, timeout_seconds: int = 60) -> bool:
+        """Atomically replace one unanswered question with safe child guidance."""
+        cutoff = _utcnow() - timedelta(seconds=max(1, int(timeout_seconds)))
+        with SessionLocal.begin() as db:
+            row = _locked_child(db, candidate["child_id"], candidate["owner"])
+            if (row is None or row.parent_session_id != candidate["session_id"]
+                    or row.status != "waiting_user" or row.revision != candidate["revision"]
+                    or row.removed or row.cancel_requested or not row.updated_at
+                    or row.updated_at > cutoff or (row.error or "").strip()
+                    or not (row.policy_snapshot or {}).get("recovery_config")):
+                return False
+            metrics = dict(row.metrics or {})
+            question = metrics.get("waiting_user")
+            if not isinstance(question, dict):
+                return False
+            from src.chat_work_store import _storage_owner
+            if db.query(ChatToolIntent.id).filter(
+                ChatToolIntent.owner == _storage_owner(candidate["owner"]),
+                ChatToolIntent.session_id == row.parent_session_id,
+                ChatToolIntent.run_id == row.id,
+                ChatToolIntent.status.in_({"intent", "unknown"}),
+            ).first():
+                return False
+            question_id = str(question.get("question_id") or question.get("id") or "")[:128]
+            guidance = list(row.guidance or [])
+            guidance.append({
+                "id": uuid.uuid4().hex,
+                "text": (
+                    "No user answer arrived within one minute. Choose the best safe option "
+                    "from the available evidence and continue your assigned mini-goal. "
+                    "This timeout is not approval for a tool effect or new permission. "
+                    "Do not ask the same question again."
+                ),
+                "source": "question_timeout",
+                "created_at": _utcnow().isoformat() + "Z",
+            })
+            metrics["question_timeout_count"] = _question_timeout_count(metrics) + 1
+            metrics["auto_decide_question_id"] = question_id
+            row.guidance = guidance[-100:]
+            row.metrics = metrics
+            row.status, row.slot, row.worker_id = "recovering", None, None
+            row.revision += 1
+            db.add(ChatSubagentEvent(
+                child_id=row.id, parent_session_id=row.parent_session_id,
+                owner=row.owner, kind="question_timeout",
+                payload={"status": "recovering", "question_id": question_id,
+                         "timeout_seconds": timeout_seconds},
+            ))
+            return True
+
+    async def auto_decide_expired_questions(self, timeout_seconds: int = 60) -> int:
+        candidates = await asyncio.to_thread(self.expired_questions, timeout_seconds)
+        claimed = 0
+        for candidate in candidates:
+            if await asyncio.to_thread(self._claim_expired_question, candidate, timeout_seconds):
+                claimed += 1
+        if claimed:
+            await self.resume_recovering()
+        return claimed
 
     def _event(self, child_id: str, owner: Optional[str], session_id: str,
                kind: str, payload: dict) -> int:
@@ -719,6 +803,7 @@ class SubagentRuntime:
             attachment_ids = list((row.policy_snapshot or {}).get("attachment_ids") or [])
             prior_result, existing_guidance = row.result or "", list(row.guidance or [])
             first_started_at = row.started_at
+            question_timeout_count = _question_timeout_count(row.metrics)
         finally:
             db.close()
 
@@ -745,6 +830,12 @@ class SubagentRuntime:
                 "with publish_subagent_evidence so sibling workers and the parent can inspect them. "
                 "Always finish with a concise visible final result and any uncertainty; "
                 "thinking text or a tool call alone is not a deliverable."
+                + (
+                    " An earlier ordinary question timed out. Decide safely from available "
+                    "evidence and continue; do not ask the same question again. The timeout "
+                    "does not authorize any tool effect."
+                    if question_timeout_count else ""
+                )
             )},
             {"role": "user", "content": child_prompt},
         ]
@@ -768,6 +859,8 @@ class SubagentRuntime:
             "send_to_session", "manage_session", "complete_goal",
             "update_goal_progress", "get_goal",
         }
+        if question_timeout_count:
+            disabled.add("ask_user")
         output_parts: list[str] = [prior_result + "\n\n"] if resume_checkpoint and prior_result else []
         unverified_output_parts: list[str] = []
         pending_delta: list[str] = []
