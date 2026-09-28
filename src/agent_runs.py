@@ -584,6 +584,26 @@ def _publish(run: _Run, ev: str) -> None:
                     }
             elif event_type == "context_checkpoint" and isinstance(payload.get("messages"), list):
                 messages = payload["messages"]
+                delivery_token = payload.get("subagent_delivery_token")
+                delivery_sources = {
+                    message["metadata"].get("source")
+                    for message in messages
+                    if isinstance(message, dict)
+                    and isinstance(message.get("metadata"), dict)
+                    and message["metadata"].get("trusted") is False
+                    and isinstance(message["metadata"].get("source"), str)
+                }
+                if (isinstance(delivery_token, str)
+                        and re.fullmatch(r"[0-9a-f]{32}", delivery_token)
+                        and ("completed subagent results" in delivery_sources
+                             or ("child-agent results" in delivery_sources
+                                 and run.continuation.get("subagent_delivery_requires_checkpoint") is True
+                                 and delivery_token == run.continuation.get("subagent_delivery_token")))):
+                    # This marker survives later compaction of the working
+                    # ledger. Each claimed result must also pass the DB-scoped
+                    # mark_checkpointed check before leaving the claim gate.
+                    run.continuation["subagent_delivery_checkpointed_token"] = delivery_token
+                    run.continuation["subagent_delivery_two_phase"] = True
                 run.checkpoint_fresh = True
                 run.checkpoint_tail = []
                 checkpoint_compactions = int(payload.get("compactions") or 0)
@@ -1696,6 +1716,18 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
             and (run.continuation.get("working_checkpoint") or {}).get("checkpoint_run_id") == run.run_id
         )
         _persist_run_state(run, status=terminal_status, durable=True)
+        if (run.continuation.get("subagent_delivery_two_phase")
+                or run.continuation.get("subagent_delivery_requires_checkpoint")):
+            try:
+                from src.subagent_delivery import finalize_run_deliveries
+                await asyncio.to_thread(
+                    finalize_run_deliveries, run.owner, session_id, run.run_id, terminal_status,
+                )
+            except Exception:
+                # The periodic recovery monitor reconciles in_run claims from
+                # durable run status. Never suppress SSE terminalization or
+                # fabricate a successful acknowledgement on a DB failure.
+                logger.exception("[agent-run] child-result delivery finalization failed for %s", session_id)
         # Wake every subscriber with the end sentinel so their SSE closes.
         _wake_subscribers()
         # Run is terminal — arm the grace timer so it (and its buffer) is

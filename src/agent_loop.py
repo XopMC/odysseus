@@ -86,6 +86,10 @@ from src.tool_parsing import strip_tool_blocks_streaming
 
 logger = logging.getLogger(__name__)
 
+
+class _ChildDeliveryCheckpointError(RuntimeError):
+    """The claimed child result is not yet safe to acknowledge or replay."""
+
 # Local reasoning models may spend a substantial portion of their completion
 # budget on thinking before returning a final answer or a structured tool call.
 # Never let an implicit provider default (commonly 2K) truncate an Agent round.
@@ -6161,7 +6165,7 @@ async def stream_agent_loop(
         if session_id and not child_run_id and _subagent_mode in {"same_model", "selected_models"}:
             _child_delivery_token = None
             try:
-                from src.subagent_delivery import claim_pending, claimed_summary, mark_delivered
+                from src.subagent_delivery import claim_pending, claimed_summary, mark_checkpointed
                 from src.prompt_security import untrusted_context_message
                 _child_delivery_token = await asyncio.to_thread(claim_pending, owner, session_id)
                 if _child_delivery_token:
@@ -6174,15 +6178,23 @@ async def stream_agent_loop(
                         _child_encoded = json.dumps(
                             _child_checkpoint, ensure_ascii=False, separators=(",", ":"), default=str,
                         )
-                        yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _child_checkpoint, "ledger_hash": hashlib.sha256(_child_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions}, ensure_ascii=False)}\n\n'
-                        await asyncio.to_thread(
-                            mark_delivered, owner, session_id, _child_delivery_token,
+                        yield f'data: {json.dumps({"type": "context_checkpoint", "messages": _child_checkpoint, "ledger_hash": hashlib.sha256(_child_encoded.encode("utf-8")).hexdigest(), "compactions": _context_compactions, "subagent_delivery_token": _child_delivery_token}, ensure_ascii=False)}\n\n'
+                        checkpointed = await asyncio.to_thread(
+                            mark_checkpointed, owner, session_id, _child_delivery_token,
                             lineage_run_id or run_security.run_id,
                         )
+                        if not checkpointed:
+                            raise _ChildDeliveryCheckpointError(
+                                "Child result checkpoint could not be recorded")
                         _round_had_correction = True
                     else:
                         from src.subagent_delivery import release_claim
                         await asyncio.to_thread(release_claim, owner, session_id, _child_delivery_token)
+            except _ChildDeliveryCheckpointError:
+                # The model must not proceed with a result whose durable claim
+                # could not be tied to this run. Leave the claim fenced for
+                # crash/lease reconciliation rather than silently continuing.
+                raise
             except Exception:
                 logger.exception("Failed to merge completed subagent result into active parent")
                 if _child_delivery_token:

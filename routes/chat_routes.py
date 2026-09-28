@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import hashlib
 import json
 import math
 import os
@@ -416,6 +417,28 @@ def _prepare_stream_messages(messages, current_message, *, tool_approval=False, 
         # Results are new evidence, never new human authority or permissions.
         return list(messages) + [untrusted_context_message("child-agent results", current_message)]
     return _ensure_current_request_is_latest_user(messages, current_message)
+
+
+def _child_delivery_checkpoint_frame(messages, token: str) -> str:
+    """Seal child evidence before its claim can be acknowledged."""
+    from src.agent_loop import _durable_model_checkpoint
+    # A replay frame is limited to 2 MiB; cap this extra pre-model ledger
+    # independently of the ordinary runtime checkpoint, including UTF-8 text.
+    ledger = _durable_model_checkpoint(messages, max_chars=500_000)
+    if not any(
+        isinstance(record, dict)
+        and isinstance(record.get("metadata"), dict)
+        and record["metadata"].get("source") == "child-agent results"
+        and record["metadata"].get("trusted") is False
+        for record in ledger
+    ):
+        raise RuntimeError("Child result missing from the model-visible checkpoint")
+    encoded = json.dumps(ledger, ensure_ascii=False, separators=(",", ":"), default=str)
+    return "data: " + json.dumps({
+        "type": "context_checkpoint", "messages": ledger,
+        "ledger_hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "compactions": 0, "subagent_delivery_token": token,
+    }, ensure_ascii=False) + "\n\n"
 
 
 _WEB_FOLLOWUP_RE = re.compile(
@@ -2228,6 +2251,20 @@ def setup_chat_routes(
                 child_delivery=subagent_continuation,
             )
 
+            if subagent_delivery_token:
+                # A run row alone does not prove the parent saw child results:
+                # the process can die before its generator reaches the model.
+                # Seal the untrusted child evidence into this exact run's
+                # durable ledger before acknowledging the delivery claim.
+                from src.subagent_delivery import mark_checkpointed
+                yield _child_delivery_checkpoint_frame(messages, subagent_delivery_token)
+                checkpointed = await asyncio.to_thread(
+                    mark_checkpointed, _user, session, subagent_delivery_token,
+                    _detached_run.run_id,
+                )
+                if not checkpointed:
+                    raise RuntimeError("Child result checkpoint could not be recorded")
+
             # Auto-compact notification
             if ctx.was_compacted:
                 yield f"data: {json.dumps({'type': 'compacted', 'context_length': ctx.context_length})}\n\n"
@@ -3387,19 +3424,11 @@ def setup_chat_routes(
                 "allow_web_search": bool(_search_enabled),
                 "goal": bool(active_goal),
                 "checkpoint_source": checkpoint_source,
-                **({"subagent_delivery_token": subagent_delivery_token}
+                **({"subagent_delivery_token": subagent_delivery_token,
+                    "subagent_delivery_requires_checkpoint": True}
                    if subagent_delivery_token else {}),
             },
         )
-        if subagent_delivery_token:
-            from src.subagent_delivery import mark_delivered
-            try:
-                await asyncio.to_thread(
-                    mark_delivered, _user, session,
-                    subagent_delivery_token, _detached_run.run_id,
-                )
-            except Exception:
-                logger.exception("Child result delivery checkpoint failed for %s", session)
         return StreamingResponse(
             agent_runs.subscribe(session, _detached_run),
             media_type="text/event-stream",

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -10,7 +11,11 @@ from core.database import (
     Base, ChatGoal, ChatRunState, ChatSubagentDelivery, ChatSubagentEvent,
     ChatSubagentRun, Session,
 )
+from core import database
+from routes.chat_routes import _child_delivery_checkpoint_frame, _prepare_stream_messages
+from src import agent_runs
 from src import subagent_delivery as delivery
+from src.prompt_security import untrusted_context_message
 
 
 def _store(monkeypatch, *, goal_status=None):
@@ -145,6 +150,17 @@ def test_cross_owner_and_unattached_historical_child_cannot_dispatch(monkeypatch
     db.close()
 
 
+def test_single_user_child_and_run_owner_keys_still_match(monkeypatch):
+    factory = _store(monkeypatch)
+    with factory.begin() as db:
+        db.get(ChatRunState, "c" * 32).owner = agent_runs._SINGLE_USER_OWNER_KEY
+        db.get(ChatSubagentRun, "a" * 32).owner = ""
+    assert delivery.enqueue_terminal("a" * 32, None)
+    token = delivery.claim_pending(None, "s")
+    assert token and len(token) == 32
+    assert delivery._dispatch_allowed(None, "s") == (True, False)
+
+
 def test_backfill_skips_delivered_history_but_revisits_pending(monkeypatch):
     factory = _store(monkeypatch)
     assert delivery.backfill_terminal_deliveries() == [("alice", "s")]
@@ -179,6 +195,209 @@ def test_expired_claim_requeues_only_if_no_durable_run_used_token(monkeypatch):
     db = factory()
     assert db.query(ChatSubagentDelivery).one().status == "delivered"
     db.close()
+
+
+def test_new_child_delivery_requires_model_visible_checkpoint_before_ack(monkeypatch):
+    factory = _store(monkeypatch)
+    assert delivery.enqueue_terminal("a" * 32, "alice")
+    token = delivery.claim_pending("alice", "s")
+    run_id = "r" * 32
+    with factory.begin() as db:
+        db.add(ChatRunState(
+            run_id=run_id, session_id="s", owner="alice", status="running",
+            continuation={"subagent_delivery_token": token,
+                          "subagent_delivery_requires_checkpoint": True},
+        ))
+        db.get(ChatSubagentDelivery, "a" * 32).claimed_at = datetime.utcnow() - timedelta(minutes=3)
+    assert delivery.mark_delivered("alice", "s", token, run_id, require_checkpoint=True) == 0
+    assert delivery.claim_pending("alice", "s") is None
+    with factory() as db:
+        assert db.get(ChatSubagentDelivery, "a" * 32).status == "claimed"
+    with factory.begin() as db:
+        row = db.get(ChatRunState, run_id)
+        row.continuation = {**row.continuation,
+                            "working_checkpoint": {"checkpoint_run_id": run_id,
+                                                   "messages": [{"role": "user", "content": "other checkpoint"}]}}
+    assert delivery.mark_delivered("alice", "s", token, run_id, require_checkpoint=True) == 0
+    with factory.begin() as db:
+        row = db.get(ChatRunState, run_id)
+        row.continuation = {**row.continuation,
+                            "working_checkpoint": {"checkpoint_run_id": run_id,
+                                                   "messages": [{"role": "user", "content": "child result",
+                                                                 "metadata": {"source": "child-agent results",
+                                                                              "trusted": False}}]}}
+    assert delivery.mark_delivered("alice", "s", token, run_id, require_checkpoint=True) == 0
+    with factory.begin() as db:
+        row = db.get(ChatRunState, run_id)
+        row.continuation = {**row.continuation,
+                            "subagent_delivery_checkpointed_token": token}
+    assert delivery.mark_checkpointed("alice", "s", token, run_id) == 1
+    with factory() as db:
+        assert db.get(ChatSubagentDelivery, "a" * 32).status == "in_run"
+    assert delivery.mark_delivered("alice", "s", token, run_id, require_checkpoint=True) == 0
+    with factory.begin() as db:
+        db.get(ChatRunState, run_id).status = "done"
+    assert delivery.mark_delivered("alice", "s", token, run_id, require_checkpoint=True) == 1
+    with factory() as db:
+        assert db.get(ChatSubagentDelivery, "a" * 32).status == "delivered"
+
+
+def test_uncheckpointed_child_delivery_requeues_after_interrupted_run(monkeypatch):
+    factory = _store(monkeypatch)
+    assert delivery.enqueue_terminal("a" * 32, "alice")
+    token = delivery.claim_pending("alice", "s")
+    run_id = "r" * 32
+    with factory.begin() as db:
+        db.add(ChatRunState(
+            run_id=run_id, session_id="s", owner="alice", status="interrupted",
+            continuation={"subagent_delivery_token": token,
+                          "subagent_delivery_requires_checkpoint": True,
+                          "subagent_delivery_checkpointed_token": token},
+        ))
+        claim = db.get(ChatSubagentDelivery, "a" * 32)
+        claim.status = "in_run"
+        claim.delivered_run_id = run_id
+        claim.claimed_at = datetime.utcnow() - timedelta(minutes=3)
+    replacement = delivery.claim_pending("alice", "s")
+    assert replacement and replacement != token
+    with factory() as db:
+        row = db.get(ChatSubagentDelivery, "a" * 32)
+        assert row.status == "claimed"
+        assert row.delivered_run_id is None
+
+
+def test_checkpointed_child_does_not_block_another_parallel_result(monkeypatch):
+    factory = _store(monkeypatch)
+    assert delivery.enqueue_terminal("a" * 32, "alice")
+    first = delivery.claim_pending("alice", "s")
+    run_id = "r" * 32
+    with factory.begin() as db:
+        db.add(ChatRunState(
+            run_id=run_id, session_id="s", owner="alice", status="running",
+            continuation={"subagent_delivery_token": first,
+                          "subagent_delivery_requires_checkpoint": True,
+                          "subagent_delivery_checkpointed_token": first},
+        ))
+    assert delivery.mark_checkpointed("alice", "s", first, run_id) == 1
+    assert delivery.enqueue_terminal("b" * 32, "alice")
+    second = delivery.claim_pending("alice", "s")
+    assert second and second != first
+    with factory() as db:
+        assert db.get(ChatSubagentDelivery, "a" * 32).status == "in_run"
+        assert db.get(ChatSubagentDelivery, "b" * 32).status == "claimed"
+    with factory.begin() as db:
+        run = db.get(ChatRunState, run_id)
+        run.continuation = {**run.continuation,
+                            "subagent_delivery_checkpointed_token": second}
+    assert delivery.mark_checkpointed("mallory", "s", second, run_id) == 0
+    assert delivery.mark_checkpointed("alice", "s", second, run_id) == 1
+    with factory.begin() as db:
+        db.get(ChatRunState, run_id).status = "done"
+    assert delivery.finalize_run_deliveries("alice", "s", run_id, "done") == 2
+    with factory() as db:
+        assert {row.status for row in db.query(ChatSubagentDelivery).all()} == {"delivered"}
+
+
+def test_failed_parent_requeues_provisional_child_result(monkeypatch):
+    factory = _store(monkeypatch)
+    assert delivery.enqueue_terminal("a" * 32, "alice")
+    token = delivery.claim_pending("alice", "s")
+    run_id = "r" * 32
+    with factory.begin() as db:
+        db.add(ChatRunState(
+            run_id=run_id, session_id="s", owner="alice", status="running",
+            continuation={"subagent_delivery_checkpointed_token": token,
+                          "subagent_delivery_two_phase": True},
+        ))
+    assert delivery.mark_checkpointed("alice", "s", token, run_id) == 1
+    with factory.begin() as db:
+        db.get(ChatRunState, run_id).status = "error"
+    assert delivery.finalize_run_deliveries("alice", "s", run_id, "error") == 1
+    with factory() as db:
+        row = db.get(ChatSubagentDelivery, "a" * 32)
+        assert row.status == "pending"
+        assert row.claim_token is None
+        assert row.delivered_run_id is None
+
+
+def test_parent_run_checkpoints_child_evidence_before_delivery_ack(monkeypatch):
+    factory = _store(monkeypatch)
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    monkeypatch.setattr(agent_runs, "_RUNS", {})
+    monkeypatch.setattr(agent_runs, "_schedule_evict", lambda *_args: None)
+    monkeypatch.delenv("ODYSSEUS_DURABLE_CHAT_REPLAY", raising=False)
+    assert delivery.enqueue_terminal("a" * 32, "alice")
+    token = delivery.claim_pending("alice", "s")
+    acknowledged = []
+
+    async def stream():
+        messages = _prepare_stream_messages([], "Finished child result: verified 42",
+                                            child_delivery=True)
+        yield _child_delivery_checkpoint_frame(messages, token)
+        acknowledged.append(delivery.mark_checkpointed(
+            "alice", "s", token, agent_runs.get_run_id("s"),
+        ))
+        assert delivery.mark_delivered(
+            "alice", "s", token, agent_runs.get_run_id("s"), require_checkpoint=True,
+        ) == 0
+        yield "data: [DONE]\n\n"
+
+    async def scenario():
+        run = agent_runs.start(
+            "s", stream(), owner="alice",
+            continuation={"subagent_delivery_token": token,
+                          "subagent_delivery_requires_checkpoint": True},
+        )
+        await run.task
+        return run
+
+    run = asyncio.run(scenario())
+    assert run.status == "done"
+    assert acknowledged == [1]
+    assert all(token not in frame for frame in run.buffer)
+    with factory() as db:
+        saved = db.get(ChatRunState, run.run_id)
+        checkpoint = saved.continuation["working_checkpoint"]
+        assert checkpoint["checkpoint_run_id"] == run.run_id
+        assert saved.continuation["subagent_delivery_checkpointed_token"] == token
+        assert checkpoint["messages"][-1]["metadata"] == {
+            "trusted": False, "source": "child-agent results", "tool_gate_untrusted": True,
+        }
+        assert "verified 42" in checkpoint["messages"][-1]["content"]
+        assert db.get(ChatSubagentDelivery, "a" * 32).status == "delivered"
+
+
+def test_round_boundary_child_result_is_recoverable_until_parent_finishes(monkeypatch):
+    factory = _store(monkeypatch)
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    monkeypatch.setattr(agent_runs, "_RUNS", {})
+    monkeypatch.setattr(agent_runs, "_schedule_evict", lambda *_args: None)
+    monkeypatch.delenv("ODYSSEUS_DURABLE_CHAT_REPLAY", raising=False)
+    assert delivery.enqueue_terminal("a" * 32, "alice")
+    token = delivery.claim_pending("alice", "s")
+    accepted = []
+
+    async def stream():
+        messages = [untrusted_context_message("completed subagent results", "verified child work")]
+        yield "data: " + json.dumps({
+            "type": "context_checkpoint", "messages": messages,
+            "subagent_delivery_token": token,
+        }) + "\n\n"
+        accepted.append(delivery.mark_checkpointed(
+            "alice", "s", token, agent_runs.get_run_id("s"),
+        ))
+        yield "data: [DONE]\n\n"
+
+    async def scenario():
+        run = agent_runs.start("s", stream(), owner="alice")
+        await run.task
+        return run
+
+    run = asyncio.run(scenario())
+    assert run.status == "done"
+    assert accepted == [1]
+    with factory() as db:
+        assert db.get(ChatSubagentDelivery, "a" * 32).status == "delivered"
 
 
 def test_completed_goal_child_is_not_auto_dispatched_as_ordinary_agent(monkeypatch):
@@ -234,5 +453,6 @@ def test_chat_route_fences_internal_result_and_does_not_save_fake_user_turn():
     assert "Internal child continuation required" in source
     assert "claimed_summary" in source
     assert "and not subagent_continuation" in source
-    assert "mark_delivered" in source
+    assert "mark_checkpointed" in source
+    assert "finalize_run_deliveries" in (Path(__file__).resolve().parents[1] / "src/agent_runs.py").read_text()
     assert "dispatch_if_idle" in source

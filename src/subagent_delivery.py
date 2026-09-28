@@ -34,6 +34,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _run_owner(owner: str | None) -> str:
+    # Child rows use the legacy empty owner for single-user installs, while
+    # durable run rows use this non-colliding storage sentinel.
+    from src.agent_runs import _SINGLE_USER_OWNER_KEY
+    return owner or _SINGLE_USER_OWNER_KEY
+
+
 def _reserve_writer(db) -> None:
     if db.get_bind().dialect.name == "sqlite":
         db.execute(text("BEGIN IMMEDIATE"))
@@ -55,7 +62,7 @@ def enqueue_terminal(child_id: str, owner: str | None) -> bool:
         parent = db.query(ChatRunState.run_id).filter(
             ChatRunState.run_id == child.parent_run_id,
             ChatRunState.session_id == child.parent_session_id,
-            ChatRunState.owner == child.owner,
+            ChatRunState.owner == _run_owner(child.owner),
         ).one_or_none()
         if parent is None:
             return False
@@ -88,7 +95,7 @@ def backfill_terminal_deliveries() -> list[tuple[str | None, str]]:
         # Reconcile pending claims too, but never load all historical child
         # policy/metrics payloads at every monitor tick.
         pending = db.query(ChatSubagentDelivery.owner, ChatSubagentDelivery.parent_session_id).filter(
-            ChatSubagentDelivery.status.in_({"pending", "claimed"}),
+            ChatSubagentDelivery.status.in_({"pending", "claimed", "in_run"}),
         ).distinct().all()
     finally:
         db.close()
@@ -105,27 +112,65 @@ def _recover_expired_claims(db, owner: str, session_id: str) -> None:
     claims = db.query(ChatSubagentDelivery).filter(
         ChatSubagentDelivery.owner == owner,
         ChatSubagentDelivery.parent_session_id == session_id,
-        ChatSubagentDelivery.status == "claimed",
+        ChatSubagentDelivery.status.in_({"claimed", "in_run"}),
         ChatSubagentDelivery.claimed_at < cutoff,
     ).all()
     if not claims:
         return
-    runs = db.query(ChatRunState.continuation).filter(
+    runs = db.query(ChatRunState.run_id, ChatRunState.status, ChatRunState.continuation).filter(
         ChatRunState.session_id == session_id,
-        ChatRunState.owner == owner,
+        ChatRunState.owner == _run_owner(owner),
     ).all()
-    tokens_in_runs = {
-        str((continuation or {}).get("subagent_delivery_token"))
-        for (continuation,) in runs if isinstance(continuation, dict)
-    }
+    token_runs = {}
+    runs_by_id = {}
+    for run_id, status, continuation in runs:
+        runs_by_id[run_id] = (run_id, status, continuation or {})
+        if isinstance(continuation, dict) and continuation.get("subagent_delivery_token"):
+            token_runs[str(continuation["subagent_delivery_token"])] = (run_id, status, continuation)
+        if isinstance(continuation, dict) and continuation.get("subagent_delivery_checkpointed_token"):
+            token_runs[str(continuation["subagent_delivery_checkpointed_token"])] = (run_id, status, continuation)
     for claim in claims:
-        if claim.claim_token in tokens_in_runs:
+        # in_run is a durable proof that mark_checkpointed validated the
+        # owner-scoped claim against its parent run. The singular run marker
+        # may have advanced to another child at a later round boundary.
+        run = (runs_by_id.get(claim.delivered_run_id) if claim.status == "in_run"
+               else token_runs.get(claim.claim_token))
+        proven = (claim.status == "in_run" and bool(run)) or (
+            bool(run) and (not run[2].get("subagent_delivery_requires_checkpoint")
+                           or _delivery_checkpointed(run[0], run[2], claim.claim_token))
+        )
+        if run and run[1] == "done" and proven:
             claim.status = "delivered"
             claim.delivered_at = claim.delivered_at or _now()
+            claim.delivered_run_id = claim.delivered_run_id or run[0]
+        elif (run and claim.status == "claimed"
+              and not run[2].get("subagent_delivery_requires_checkpoint")
+              and not run[2].get("subagent_delivery_two_phase")):
+            # Preserve the old release's once-a-run semantics for claims
+            # created before this two-phase protocol existed.
+            claim.status = "delivered"
+            claim.delivered_at = claim.delivered_at or _now()
+            claim.delivered_run_id = claim.delivered_run_id or run[0]
+        elif run and run[1] == "running":
+            # This exact run still owns the child result. A sealed in_run
+            # claim does not block other children, but must not be replayed
+            # into another run before its owner reaches a terminal state.
+            continue
         else:
             claim.status = "pending"
             claim.claim_token = None
             claim.claimed_at = None
+            claim.delivered_run_id = None
+            claim.delivered_at = None
+
+
+def _delivery_checkpointed(run_id: str, continuation: dict, token: str) -> bool:
+    # The marker is written only by agent_runs after it has inspected and
+    # durably persisted this run's child-result checkpoint. A later working
+    # checkpoint may compact that message away; the exact token still proves
+    # the result reached the run that eventually completed.
+    return (continuation.get("subagent_delivery_checkpointed_token") == token
+            and bool(run_id))
 
 
 def claim_pending(
@@ -159,7 +204,7 @@ def claim_pending(
                 ).filter(
                     ChatRunState.run_id.in_(parent_ids),
                     ChatRunState.session_id == session_id,
-                    ChatRunState.owner == owner_key,
+                    ChatRunState.owner == _run_owner(owner_key),
                 ).all()
             }
             pending = [row for row in pending if parent_goals.get(row.parent_run_id) is False]
@@ -260,20 +305,115 @@ def claimed_summary(owner: str | None, session_id: str, token: str) -> str | Non
         db.close()
 
 
-def mark_delivered(owner: str | None, session_id: str, token: str, run_id: str) -> int:
+def mark_delivered(owner: str | None, session_id: str, token: str, run_id: str,
+                   *, require_checkpoint: bool = False) -> int:
     db = SessionLocal()
     try:
         _reserve_writer(db)
+        if require_checkpoint:
+            run = db.query(ChatRunState).filter(
+                ChatRunState.run_id == run_id,
+                ChatRunState.owner == _run_owner(owner),
+                ChatRunState.session_id == session_id,
+            ).one_or_none()
+            continuation = dict(run.continuation or {}) if run else {}
+            if (run is None or run.status != "done"):
+                db.commit()
+                return 0
         rows = db.query(ChatSubagentDelivery).filter(
             ChatSubagentDelivery.owner == (owner or ""),
             ChatSubagentDelivery.parent_session_id == session_id,
             ChatSubagentDelivery.claim_token == token,
-            ChatSubagentDelivery.status == "claimed",
+            ChatSubagentDelivery.status.in_(
+                {"claimed", "in_run"} if require_checkpoint else {"claimed"}
+            ),
         ).all()
+        if require_checkpoint:
+            rows = [row for row in rows if
+                    (row.status == "in_run" and row.delivered_run_id == run_id)
+                    or (row.status == "claimed"
+                        and _delivery_checkpointed(run_id, continuation, token))]
         for row in rows:
             row.status = "delivered"
             row.delivered_run_id = run_id
             row.delivered_at = _now()
+        db.commit()
+        if require_checkpoint and not rows:
+            return db.query(ChatSubagentDelivery).filter(
+                ChatSubagentDelivery.owner == (owner or ""),
+                ChatSubagentDelivery.parent_session_id == session_id,
+                ChatSubagentDelivery.claim_token == token,
+                ChatSubagentDelivery.delivered_run_id == run_id,
+                ChatSubagentDelivery.status == "delivered",
+            ).count()
+        return len(rows)
+    finally:
+        db.close()
+
+
+def mark_checkpointed(owner: str | None, session_id: str, token: str, run_id: str) -> int:
+    """Release the claim gate after durable capture, without claiming success.
+
+    A later child may now enter the still-running parent at a round boundary.
+    If this run stops before completion, recovery requeues this first result.
+    """
+    db = SessionLocal()
+    try:
+        _reserve_writer(db)
+        run = db.query(ChatRunState).filter(
+            ChatRunState.run_id == run_id,
+            ChatRunState.owner == _run_owner(owner),
+            ChatRunState.session_id == session_id,
+        ).one_or_none()
+        if (run is None or run.status != "running"
+                or not _delivery_checkpointed(run_id, dict(run.continuation or {}), token)):
+            db.commit()
+            return 0
+        rows = db.query(ChatSubagentDelivery).filter(
+            ChatSubagentDelivery.owner == (owner or ""),
+            ChatSubagentDelivery.parent_session_id == session_id,
+            ChatSubagentDelivery.claim_token == token,
+            ChatSubagentDelivery.status.in_({"claimed", "in_run"}),
+        ).all()
+        for row in rows:
+            row.status = "in_run"
+            row.delivered_run_id = run_id
+        db.commit()
+        return len(rows)
+    finally:
+        db.close()
+
+
+def finalize_run_deliveries(owner: str | None, session_id: str, run_id: str,
+                            status: str) -> int:
+    """Commit or requeue every child result provisionally used by this run."""
+    db = SessionLocal()
+    try:
+        _reserve_writer(db)
+        run = db.query(ChatRunState).filter(
+            ChatRunState.run_id == run_id,
+            ChatRunState.owner == _run_owner(owner),
+            ChatRunState.session_id == session_id,
+        ).one_or_none()
+        if run is None or run.status != status or status not in {"done", "error", "stopped", "interrupted"}:
+            db.commit()
+            return 0
+        rows = db.query(ChatSubagentDelivery).filter(
+            ChatSubagentDelivery.owner == (owner or ""),
+            ChatSubagentDelivery.parent_session_id == session_id,
+            ChatSubagentDelivery.delivered_run_id == run_id,
+            ChatSubagentDelivery.status == "in_run",
+        ).all()
+        for row in rows:
+            if status == "done":
+                row.status = "delivered"
+                row.delivered_at = _now()
+            else:
+                row.status = "pending"
+                row.claim_token = None
+                row.claimed_at = None
+                row.delivered_run_id = None
+                row.delivered_at = None
         db.commit()
         return len(rows)
     finally:
@@ -313,7 +453,7 @@ def _dispatch_allowed(owner: str | None, session_id: str) -> tuple[bool, bool]:
             return False, False
         last = db.query(ChatRunState.status, ChatRunState.continuation).filter(
             ChatRunState.session_id == session_id,
-            ChatRunState.owner == (owner or ""),
+            ChatRunState.owner == _run_owner(owner),
         ).order_by(ChatRunState.started_at.desc()).first()
         if goal and goal[0] in {"completed", "cancelled"} and (
             not last or (last[1] or {}).get("goal") is True
