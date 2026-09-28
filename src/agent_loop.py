@@ -6508,11 +6508,10 @@ async def stream_agent_loop(
         _compacted_messages, _compact_status = messages, "unchanged"
         _compact_failure_detail = None
         _configured_telemetry = None
-        # An explicit ContextPolicy is the single authority for trigger,
-        # retention and target. Running the economics compactor first caused
-        # duplicate summarizer calls and model-slot contention on long Goals.
-        _explicit_context_profile = bool(_context_profile and _context_profile.get("configured", True))
-        if _efficiency_enabled("online_context_compact") and not _explicit_context_profile:
+        # The effective ContextPolicy is authoritative even when it consists
+        # entirely of defaults. An unsaved 75% policy must not silently allow
+        # the economics compactor to summarize at a much lower fill level.
+        if _efficiency_enabled("online_context_compact") and not _context_profile:
             from src.context_compaction_economics import decide as _economic_compaction_decide
             try:
                 _keep_recent = max(1000, int(get_setting("agent_online_compact_keep_recent_tokens", 20_000) or 20_000))

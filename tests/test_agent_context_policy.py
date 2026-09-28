@@ -459,7 +459,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
              patch('src.context_compaction_economics.decide', return_value=decision), \
              patch('src.agent_context.working_context_compactable', return_value=True), \
              patch.object(agent_loop, 'compact_working_context', new=AsyncMock(return_value=(history, 'unchanged'))) as compact:
-            sent, _, chunks = await self.run_agent(history)
+            sent, _, chunks = await self.run_agent(history, policy_enabled=False)
         self.assertEqual(compact.await_count, 1)
         self.assertFalse(sent)
         self.assertIn('context_compaction_failed', chunks)
@@ -478,19 +478,35 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
              patch('src.context_compaction_economics.decide', return_value=decision), \
              patch('src.agent_context.working_context_compactable', return_value=True), \
              patch.object(agent_loop, 'compact_working_context', new=AsyncMock(return_value=(history, 'unchanged'))) as compact:
-            sent, _, chunks = await self.run_agent(history)
+            sent, _, chunks = await self.run_agent(history, policy_enabled=False)
         self.assertEqual(compact.await_count, 1)
         self.assertEqual(len(sent), 1)
         self.assertNotIn('context_compaction_failed', chunks)
         self.assertIn('native_no_reduction', chunks)
 
-    def test_explicit_policy_skips_the_parallel_economic_compactor(self):
-        from pathlib import Path
-        source = (Path(__file__).resolve().parents[1] / 'src/agent_loop.py').read_text()
-        self.assertIn(
-            'if _efficiency_enabled("online_context_compact") and not _explicit_context_profile:',
-            source,
-        )
+    async def test_default_75_percent_policy_skips_proactive_economic_compaction(self):
+        from dataclasses import replace
+        from src.context_compaction_economics import decide
+        from src import agent_loop
+        decision = replace(decide(
+            at_boundary=True, used_tokens=12000, input_budget=65536,
+            completed_boundaries=4, tokens_since_boundary=20000,
+            cache_write_read_ratio=1,
+        ), compact=True, target_tokens=2000)
+        history = [{'role': 'user', 'content': 'evidence ' * 5000}]
+        with patch.object(agent_loop, '_efficiency_enabled',
+                          side_effect=lambda key: key == 'online_context_compact'), \
+             patch('src.context_compaction_economics.decide', return_value=decision) as economic_decide, \
+             patch('src.agent_context.working_context_compactable', return_value=True), \
+             patch.object(agent_loop, 'compact_working_context',
+                          new=AsyncMock(return_value=([{'role': 'system', 'content': 'summary'}], 'compacted'))) as compact:
+            sent, summaries, chunks = await self.run_agent(history)
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(summaries)
+        economic_decide.assert_not_called()
+        compact.assert_not_awaited()
+        self.assertNotIn('"type": "compacted"', chunks)
+        self.assertIn('"effective_trigger_percent": 75.0', chunks)
 
     async def test_oversized_optional_recent_tail_is_folded_after_safe_retry(self):
         from src.context_policy import ContextPolicy
