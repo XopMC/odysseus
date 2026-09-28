@@ -175,7 +175,7 @@ def test_exhausted_provider_retries_keep_partial_work(harness, monkeypatch):
     assert result["metrics"]["provider_retries"] == 10
 
 
-def test_unknown_effect_terminal_without_failed_flag_is_not_completed(harness, monkeypatch):
+def test_unknown_effect_terminal_without_failed_flag_waits_for_reconciliation(harness, monkeypatch):
     calls = 0
 
     async def stream(*args, **kwargs):
@@ -188,8 +188,90 @@ def test_unknown_effect_terminal_without_failed_flag_is_not_completed(harness, m
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
     result = run(harness)
     assert calls == 1
-    assert result["status"] == "failed"
+    assert result["status"] == "waiting_user"
     assert result["result"] == "Some progress"
+    assert result["metrics"]["failure_class"] == "tool_outcome_reconciliation_required"
+    from src.agent_tools.model_interaction_tools import manage_subagents
+    monkeypatch.setattr(children, "runtime", harness)
+    inspected = asyncio.run(manage_subagents(
+        json.dumps({"action": "read", "child_id": "child"}),
+        {"owner": "qa", "session_id": "s"},
+    ))
+    assert inspected["status"] == "waiting_user"
+    assert inspected["content"] == "Some progress"
+    assert inspected["exit_code"] == 0
+
+
+def test_effect_ledger_failure_retries_without_repeating_tool(harness, monkeypatch):
+    calls = 0
+
+    async def stream(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            yield event("agent_terminal", data={"failure": {
+                "kind": "effect_ledger", "message": "Tool intent was not saved; action was not started"}})
+        else:
+            yield 'data: {"delta":"Verified result"}\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    result = run(harness)
+    assert calls == 3
+    assert result["status"] == "completed"
+    assert result["result"] == "Verified result"
+    assert result["metrics"]["effect_ledger_retries"] == 2
+    assert result["metrics"]["provider_retries"] == 0
+    events = harness.events("qa", "s", child_id="child")
+    assert not any(item["kind"] == "tool_start" for item in events)
+
+
+def test_effect_ledger_exhaustion_keeps_child_recoverable(harness, monkeypatch):
+    calls = 0
+
+    async def stream(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield event("agent_terminal", data={"failure": {
+            "kind": "effect_ledger", "message": "Tool intent was not saved; action was not started"}})
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    result = run(harness)
+    assert calls == 11
+    assert result["status"] == "recovering"
+    assert result["metrics"]["failure_class"] == "effect_ledger_recovery_pending"
+    assert result["metrics"]["effect_ledger_retries"] == 10
+    assert result["metrics"]["provider_retries"] == 0
+
+
+def test_effect_ledger_retry_budget_survives_child_restart(harness):
+    harness._event("child", "qa", "s", "context_checkpoint", {
+        "messages": [{"role": "user", "content": "durable child objective"}],
+    })
+    harness._event("child", "qa", "s", "transport_retry", {
+        "kind": "effect_ledger", "effect_ledger_retries": 4,
+        "consecutive_provider_failures": 0, "provider_retries": 0,
+    })
+    recovered = harness._continuation_checkpoint("qa", "s", "child")
+    assert recovered["messages"] == [{"role": "user", "content": "durable child objective"}]
+    assert recovered["effect_ledger_retries"] == 4
+    assert recovered["provider_retries"] == 0
+
+
+def test_effect_ledger_after_uncheckpointed_tool_waits_for_inspection(harness, monkeypatch):
+    calls = 0
+
+    async def stream(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield event("tool_start", tool="bash")
+        yield event("agent_terminal", data={"failure": {
+            "kind": "effect_ledger", "message": "Tool intent was not saved"}})
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+    result = run(harness)
+    assert calls == 1
+    assert result["status"] == "waiting_user"
+    assert result["metrics"]["failure_class"] == "tool_outcome_reconciliation_required"
 
 
 def test_uncheckpointed_tool_is_not_replayed(harness, monkeypatch):

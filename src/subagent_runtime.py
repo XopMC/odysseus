@@ -93,7 +93,8 @@ class ChildStreamFailure(RuntimeError):
         except (ValueError, TypeError):
             self.status = None
         self.retryable = (
-            (self.kind == "context_compaction"
+            self.kind == "effect_ledger"
+            or (self.kind == "context_compaction"
              and "fresh plan" in str(self).lower()
              and "could not be rebuilt" in str(self).lower())
             or (self.kind not in {"unknown_side_effect", "context_compaction", "permission_denied",
@@ -955,6 +956,7 @@ class SubagentRuntime:
                 checkpoint = copy.deepcopy(messages[1:])
             consecutive_failures = int((resume_checkpoint or {}).get("consecutive_provider_failures") or 0)
             provider_retries = int((resume_checkpoint or {}).get("provider_retries") or 0)
+            effect_ledger_retries = int((resume_checkpoint or {}).get("effect_ledger_retries") or 0)
             output_retries = int((resume_checkpoint or {}).get("output_retries") or 0)
             output_repair_instruction = str((resume_checkpoint or {}).get("output_repair_instruction") or "")
             child_temperature = 0.3
@@ -963,6 +965,7 @@ class SubagentRuntime:
             async def consume():
                 nonlocal waiting_payload, tool_since_checkpoint, checkpoint
                 nonlocal consecutive_failures, round_slice_exhausted
+                nonlocal effect_ledger_retries
                 nonlocal output_retries, output_repair_instruction, child_temperature
                 nonlocal thinking_chars, output_chars, tools_since_checkpoint
                 if output_repair_instruction:
@@ -1037,11 +1040,13 @@ class SubagentRuntime:
                                 if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
                                     if tool_since_checkpoint or checkpoint != event["messages"]:
                                         consecutive_failures = 0
+                                        effect_ledger_retries = 0
                                         output_retries = 0
                                         child_temperature = 0.3
                                     event = {**event, "guidance_ids": sorted(guidance_seen),
                                              "consecutive_provider_failures": consecutive_failures,
                                              "provider_retries": provider_retries,
+                                             "effect_ledger_retries": effect_ledger_retries,
                                              "output_retries": output_retries}
                                 self._event(child_id, owner, session_id, kind, event)
                                 if kind == "context_checkpoint" and isinstance(event.get("messages"), list) and event["messages"]:
@@ -1150,10 +1155,37 @@ class SubagentRuntime:
                     safe_to_replay = _safe_child_tool_replay(
                         tool_since_checkpoint, tools_since_checkpoint,
                     )
-                    if not exc.retryable or not safe_to_replay or consecutive_failures >= 10:
+                    if (exc.kind == "effect_ledger" and safe_to_replay
+                            and effect_ledger_retries >= 10):
+                        # No action was dispatched for the failed intent.
+                        # Keep the mini-goal recoverable after the bounded
+                        # retry burst instead of declaring its work failed.
+                        await flush(force=True)
+                        self._merge_metrics(child_id, owner, {
+                            "failure_class": "effect_ledger_recovery_pending",
+                            "effect_ledger_retries": effect_ledger_retries,
+                        })
+                        self._update_with_event(
+                            child_id, owner, session_id, "status",
+                            {"status": "recovering", "reason": "effect_ledger_retry_exhausted"},
+                            status="recovering", error=(
+                                "Tool-intent storage is temporarily unavailable; "
+                                "recovering from the saved child checkpoint."
+                            ), finished_at=None, slot=None, worker_id=None,
+                        )
+                        return
+                    if not exc.retryable or not safe_to_replay or (
+                            exc.kind != "effect_ledger" and consecutive_failures >= 10):
                         raise exc
-                    consecutive_failures += 1
-                    provider_retries += 1
+                    if exc.kind == "effect_ledger":
+                        consecutive_failures = 0
+                        effect_ledger_retries += 1
+                        retry_number = effect_ledger_retries
+                    else:
+                        effect_ledger_retries = 0
+                        consecutive_failures += 1
+                        provider_retries += 1
+                        retry_number = consecutive_failures
                     if exc.kind == "context_compaction":
                         output_repair_instruction = (
                             "The previous attempt saved a durable compacted checkpoint but did not rebuild its fresh plan. "
@@ -1164,16 +1196,21 @@ class SubagentRuntime:
                     waiting_payload = None
                     messages = ([copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
                                 if checkpoint is not None else copy.deepcopy(initial_messages))
-                    self._merge_metrics(child_id, owner, {"provider_retries": provider_retries})
+                    self._merge_metrics(child_id, owner, {
+                        "provider_retries": provider_retries,
+                        "effect_ledger_retries": effect_ledger_retries,
+                    })
                     self._event(child_id, owner, session_id, "transport_retry", {
-                        "attempt": consecutive_failures + 1, "retry_limit": 10,
+                        "attempt": retry_number + 1, "retry_limit": 10,
+                        "kind": exc.kind,
                         "status": exc.status, "reason": str(exc)[:160],
                         "instruction": output_repair_instruction,
                         "checkpoint_messages": len(checkpoint or []),
                         "consecutive_provider_failures": consecutive_failures,
                         "provider_retries": provider_retries,
+                        "effect_ledger_retries": effect_ledger_retries,
                     })
-                    await asyncio.sleep(_retry_delay(consecutive_failures))
+                    await asyncio.sleep(_retry_delay(retry_number))
             await flush(force=True)
             final = "".join(output_parts).strip()
             if waiting_payload:
@@ -1196,15 +1233,28 @@ class SubagentRuntime:
         except ChildLeaseLost:
             raise
         except Exception as exc:
-            if (isinstance(exc, ChildStreamFailure) and exc.retryable
-                    and tool_since_checkpoint
-                    and not _safe_child_tool_replay(tool_since_checkpoint, tools_since_checkpoint)):
-                # This is not a provider retry exhaustion. A non-read-only
-                # tool began after the last durable ledger, so replaying the
-                # old checkpoint could repeat a write/command. Keep the child
-                # inspectable and release its model slot instead of publishing
-                # a generic failure or silently retrying an unknown effect.
+            unknown_effect = (isinstance(exc, ChildStreamFailure)
+                              and exc.kind in {"unknown_side_effect", "effect_ledger"}
+                              and (exc.kind == "unknown_side_effect"
+                                   or not _safe_child_tool_replay(
+                                       tool_since_checkpoint, tools_since_checkpoint)))
+            unsafe_transport_replay = (
+                isinstance(exc, ChildStreamFailure) and exc.retryable
+                and tool_since_checkpoint
+                and not _safe_child_tool_replay(tool_since_checkpoint, tools_since_checkpoint)
+            )
+            if unknown_effect or unsafe_transport_replay:
+                # An unknown effect is a reconciliation state, not a failed
+                # mini-goal or a provider retry. Replaying the old checkpoint
+                # could repeat a write/command, even when the terminal frame
+                # arrived without a preceding tool_start in this stream.
                 safe_error = (
+                    "A tool outcome is unknown. Inspect the durable tool intent and receipt "
+                    "before continuing; independent parent work can continue."
+                    if unknown_effect and exc.kind == "unknown_side_effect" else
+                    "An earlier tool has no settled checkpoint. Inspect its durable outcome "
+                    "before continuing; independent parent work can continue."
+                    if unknown_effect else
                     "Provider transport failed after a side-effecting tool started. "
                     "The child is waiting for durable tool-outcome inspection; "
                     "independent parent work can continue."
@@ -1276,7 +1326,7 @@ class SubagentRuntime:
                     self._configs.pop(child_id, None)
                     return
         row = self._get_any(owner, child_id)
-        if row and row["status"] == "waiting_user":
+        if row and row["status"] in {"waiting_user", "recovering"}:
             return
         self._configs.pop(child_id, None)
         if row and row["status"] not in TERMINAL_STATUSES:
@@ -1567,7 +1617,7 @@ class SubagentRuntime:
             if checkpoint and (not isinstance(ledger, list) or not ledger):
                 raise ValueError("Child execution checkpoint is unavailable")
             if retry and (checkpoint is None or retry.id > checkpoint.id):
-                for key in ("consecutive_provider_failures", "provider_retries"):
+                for key in ("consecutive_provider_failures", "provider_retries", "effect_ledger_retries"):
                     payload[key] = int((retry.payload or {}).get(key) or 0)
                 if (retry.payload or {}).get("instruction"):
                     payload["output_repair_instruction"] = str(
