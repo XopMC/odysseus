@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 
 from core.database import (
     ChatGoal, ChatRunState, ChatSubagentDelivery, ChatSubagentEvent, ChatSubagentRun,
@@ -113,14 +113,26 @@ def _recover_expired_claims(db, owner: str, session_id: str) -> None:
         ChatSubagentDelivery.owner == owner,
         ChatSubagentDelivery.parent_session_id == session_id,
         ChatSubagentDelivery.status.in_({"claimed", "in_run"}),
-        ChatSubagentDelivery.claimed_at < cutoff,
+        # A checkpointed in_run delivery is tied to a durable parent run.
+        # Once recovery marks that run terminal, reclaim it immediately;
+        # only ambiguous pre-checkpoint claims need the two-minute lease.
+        or_(ChatSubagentDelivery.claimed_at < cutoff,
+            ChatSubagentDelivery.status == "in_run"),
     ).all()
     if not claims:
         return
-    runs = db.query(ChatRunState.run_id, ChatRunState.status, ChatRunState.continuation).filter(
+    run_query = db.query(ChatRunState.run_id, ChatRunState.status, ChatRunState.continuation).filter(
         ChatRunState.session_id == session_id,
         ChatRunState.owner == _run_owner(owner),
-    ).all()
+    )
+    if not any(claim.status == "claimed" for claim in claims):
+        # An in_run row already stores its exact run ID. Keep the common
+        # long-running-parent poll bounded instead of scanning every old run
+        # in a large chat merely to inspect that one provisional delivery.
+        run_query = run_query.filter(ChatRunState.run_id.in_(
+            {claim.delivered_run_id for claim in claims if claim.delivered_run_id},
+        ))
+    runs = run_query.all()
     token_runs = {}
     runs_by_id = {}
     for run_id, status, continuation in runs:
@@ -182,6 +194,9 @@ def claim_pending(
     try:
         _reserve_writer(db)
         _recover_expired_claims(db, owner_key, session_id)
+        # Production SessionLocal disables autoflush. Make recovered pending
+        # rows visible to the claim query in this same monitor pass.
+        db.flush()
         in_flight = db.query(ChatSubagentDelivery.child_id).filter(
             ChatSubagentDelivery.owner == owner_key,
             ChatSubagentDelivery.parent_session_id == session_id,

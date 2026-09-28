@@ -244,6 +244,9 @@ def test_new_child_delivery_requires_model_visible_checkpoint_before_ack(monkeyp
 
 def test_uncheckpointed_child_delivery_requeues_after_interrupted_run(monkeypatch):
     factory = _store(monkeypatch)
+    # Match production SessionLocal: without an explicit flush, the recovered
+    # pending row is invisible until the next monitor pass.
+    factory.configure(autoflush=False)
     assert delivery.enqueue_terminal("a" * 32, "alice")
     token = delivery.claim_pending("alice", "s")
     run_id = "r" * 32
@@ -257,7 +260,9 @@ def test_uncheckpointed_child_delivery_requeues_after_interrupted_run(monkeypatc
         claim = db.get(ChatSubagentDelivery, "a" * 32)
         claim.status = "in_run"
         claim.delivered_run_id = run_id
-        claim.claimed_at = datetime.utcnow() - timedelta(minutes=3)
+        # A restarted process has already marked this run interrupted; a
+        # checkpointed result should not wait for the two-minute claim lease.
+        claim.claimed_at = datetime.utcnow()
     replacement = delivery.claim_pending("alice", "s")
     assert replacement and replacement != token
     with factory() as db:
