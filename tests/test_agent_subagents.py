@@ -987,6 +987,63 @@ def test_child_retries_transient_transport_failure_only_before_first_tool(monkey
         db.commit(); db.close()
 
 
+def test_child_retries_transport_failure_after_durable_tool_checkpoint(monkeypatch):
+    owner = "checkpoint-retry-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="checkpoint retry test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    calls = 0
+
+    async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield 'data: {"type":"tool_start","tool":"read_file","round":1}\n\n'
+            yield 'data: {"type":"tool_output","tool":"read_file","round":1}\n\n'
+            yield "data: " + json.dumps({
+                "type": "context_checkpoint",
+                "messages": [{"role": "user", "content": "committed read result"}],
+                "compactions": 0,
+            }) + "\n\n"
+            yield 'event: error\ndata: {"error":"upstream unavailable","status":502}\n\n'
+            return
+        assert args[2][-1]["content"] == "committed read result"
+        yield 'data: {"delta":"Recovered from the durable read checkpoint."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+    monkeypatch.setattr("src.subagent_runtime._retry_delay", lambda _attempt: 0)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe checkpoint retry", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        row = runtime.get(owner, session_id, child["child_id"])
+        assert row["status"] == "completed"
+        assert "Recovered from the durable read checkpoint" in row["result"]
+        assert calls == 2
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        retry = next(event for event in events if event["kind"] == "transport_retry")
+        assert retry["payload"]["status"] == 502
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
 def test_child_timeout_persists_actionable_error_instead_of_blank(monkeypatch, caplog):
     owner = "timeout-" + uuid.uuid4().hex
     session_id = uuid.uuid4().hex
@@ -1225,7 +1282,7 @@ def test_child_never_retries_after_tool_start(monkeypatch):
     async def fake_loop(*args, **kwargs):
         nonlocal calls
         calls += 1
-        yield 'data: {"type":"tool_start","tool":"read_file","round":1}\n\n'
+        yield 'data: {"type":"tool_start","tool":"write_file","round":1}\n\n'
         yield 'event: error\ndata: {"error":"Read timeout","status":504}\n\n'
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
@@ -1239,10 +1296,15 @@ def test_child_never_retries_after_tool_start(monkeypatch):
         )
         await runtime._tasks[child["child_id"]]
         row = runtime.get(owner, session_id, child["child_id"])
-        assert row["status"] == "failed"
+        assert row["status"] == "waiting_user"
+        assert row["metrics"]["failure_class"] == "tool_outcome_reconciliation_required"
+        assert "independent parent work can continue" in row["error"]
         assert calls == 1
         events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
         assert not any(event["kind"] == "transport_retry" for event in events)
+        assert any(event["kind"] == "status"
+                   and event["payload"].get("reason") == "tool_outcome_reconciliation_required"
+                   for event in events)
 
     try:
         asyncio.run(scenario())
@@ -1313,11 +1375,16 @@ def test_thinking_only_child_cannot_claim_completed_without_result(monkeypatch):
                    model="parent", owner=owner))
     db.commit(); db.close()
 
+    calls = 0
+
     async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
         yield 'data: {"delta":"2 + 2 = 4", "thinking":true,"round":1}\n\n'
         yield 'data: [DONE]\n\n'
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+    monkeypatch.setattr("src.subagent_runtime._retry_delay", lambda _attempt: 0)
 
     async def scenario():
         child = await runtime.spawn(
@@ -1330,10 +1397,66 @@ def test_thinking_only_child_cannot_claim_completed_without_result(monkeypatch):
         row = runtime.get(owner, session_id, child["child_id"])
         assert row["status"] == "failed"
         assert row["result"] == ""
-        assert "no visible final result" in row["error"]
+        assert "no usable visible result" in row["error"]
+        assert calls == 11  # Initial thinking-only turn plus ten bounded retries.
         events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
         assert not any(e["kind"] == "status" and e["payload"].get("status") == "completed"
                        for e in events)
+        assert sum(e["kind"] == "output_retry" for e in events) == 10
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
+def test_child_stream_flush_batches_reasoning_and_counts_without_rescanning(monkeypatch):
+    owner = "flush-batch-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="flush batch test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    flush_calls = 0
+    original_flush = runtime._flush_progress
+
+    def count_flush(*args, **kwargs):
+        nonlocal flush_calls
+        flush_calls += 1
+        return original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, "_flush_progress", count_flush)
+
+    async def fake_loop(*args, **kwargs):
+        for index in range(200):
+            yield 'data: ' + json.dumps({"delta": f"r{index};", "thinking": True}) + "\n\n"
+        yield 'data: {"delta":"done"}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe long stream", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        row = runtime.get(owner, session_id, child["child_id"])
+        assert row["status"] == "completed"
+        assert row["metrics"]["thinking_chars"] == sum(len(f"r{index};") for index in range(200))
+        assert row["metrics"]["output_chars"] == len("done")
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        assert sum(event["kind"] == "thinking" for event in events) == 1
+        assert sum(event["kind"] == "delta" for event in events) == 1
+        assert flush_calls <= 3
 
     try:
         asyncio.run(scenario())

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from collections import deque
 import hashlib
 import json
 import logging
@@ -35,9 +36,18 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 CHILD_CORE_TOOLS = CORE_AGENT_TOOLS | {"publish_subagent_evidence"}
 MAX_CHILD_OUTPUT_RETRIES = 10
 MAX_CHILD_UNVERIFIED_OUTPUT_CHARS = 12000
+MAX_CHILD_LIVE_RESULT_CHARS = 120000
 CHILD_LEASE_SECONDS = 90
 CHILD_HEARTBEAT_SECONDS = 15
 _execution_lease = ContextVar("subagent_execution_lease", default=None)
+
+# Only replay operations whose contract is read-only. Unknown/custom tools and
+# all host execution are conservatively treated as effectful until a durable
+# post-tool checkpoint has been written.
+_REPLAY_SAFE_TOOLS = frozenset({
+    "ls", "glob", "grep", "search_files", "read_file", "read_tool_artifact",
+    "web_search", "web_fetch", "list_models", "list_sessions", "get_goal",
+})
 
 
 class ChildLeaseLost(RuntimeError):
@@ -97,6 +107,14 @@ class ChildStreamFailure(RuntimeError):
 
 def _retry_delay(attempt: int) -> float:
     return min(30.0, 0.25 * (2 ** min(attempt - 1, 7)))
+
+
+def _safe_child_tool_replay(tool_since_checkpoint: bool, tools_since_checkpoint: list[str]) -> bool:
+    if not tool_since_checkpoint:
+        return True
+    return bool(tools_since_checkpoint) and all(
+        name in _REPLAY_SAFE_TOOLS for name in tools_since_checkpoint
+    )
 
 
 def _utcnow():
@@ -405,6 +423,34 @@ class SubagentRuntime:
             db.commit()
             db.refresh(row)
             return _public(row, include_result=True)
+        finally:
+            db.close()
+
+    def _flush_progress(self, child_id: str, owner: Optional[str], session_id: str,
+                        events: list[tuple[str, dict]], result_tail: str,
+                        metrics: dict) -> None:
+        """Persist one bounded stream batch with one SQLite transaction."""
+        db = SessionLocal()
+        try:
+            row = _locked_child(db, child_id, owner)
+            if row is None or row.parent_session_id != session_id:
+                return None
+            _check_cancelled_transition(row, {})
+            row.result = result_tail[-MAX_CHILD_LIVE_RESULT_CHARS:]
+            row.heartbeat_at = _utcnow()
+            merged = dict(row.metrics or {})
+            merged.update(metrics or {})
+            row.metrics = merged
+            row.revision = int(row.revision or 0) + 1
+            for kind, payload in events:
+                db.add(ChatSubagentEvent(
+                    child_id=child_id, parent_session_id=session_id,
+                    owner=owner or "", kind=kind, payload=payload or {},
+                ))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 
@@ -724,10 +770,40 @@ class SubagentRuntime:
         }
         output_parts: list[str] = [prior_result + "\n\n"] if resume_checkpoint and prior_result else []
         unverified_output_parts: list[str] = []
-        reasoning_parts: list[str] = []
         pending_delta: list[str] = []
         pending_thinking: list[str] = []
+        thinking_chars = 0
+        output_chars = sum(map(len, output_parts))
+        result_tail_parts = deque(output_parts)
+        result_tail_chars = output_chars
         last_flush = time.monotonic()
+
+        def append_result_tail(text: str):
+            nonlocal result_tail_chars
+            if not text:
+                return
+            result_tail_parts.append(text)
+            result_tail_chars += len(text)
+            overflow = result_tail_chars - MAX_CHILD_LIVE_RESULT_CHARS
+            while overflow > 0 and result_tail_parts:
+                first = result_tail_parts[0]
+                if len(first) <= overflow:
+                    result_tail_parts.popleft()
+                    result_tail_chars -= len(first)
+                    overflow -= len(first)
+                else:
+                    result_tail_parts[0] = first[overflow:]
+                    result_tail_chars -= overflow
+                    overflow = 0
+
+        def reset_result_tail():
+            nonlocal result_tail_chars
+            result_tail_parts.clear()
+            result_tail_chars = 0
+            output_text_tail = "".join(output_parts)[-MAX_CHILD_LIVE_RESULT_CHARS:]
+            if output_text_tail:
+                result_tail_parts.append(output_text_tail)
+                result_tail_chars = len(output_text_tail)
 
         async def guidance_provider():
             db = SessionLocal()
@@ -751,20 +827,20 @@ class SubagentRuntime:
             # monopolising SQLite/the web event loop while retaining live UI.
             if not force and time.monotonic() - last_flush < 1.0:
                 return
+            events = []
             if pending_thinking:
                 text = "".join(pending_thinking)
                 pending_thinking.clear()
-                self._event(child_id, owner, session_id, "thinking", {"text": text})
+                events.append(("thinking", {"text": text}))
             if pending_delta:
                 text = "".join(pending_delta)
                 pending_delta.clear()
-                self._event(child_id, owner, session_id, "delta", {"text": text})
-            if output_parts or reasoning_parts:
-                self._update(child_id, owner, result="".join(output_parts)[-120000:], heartbeat_at=_utcnow())
-                self._merge_metrics(child_id, owner, {
-                    "thinking_chars": sum(map(len, reasoning_parts)),
-                    "output_chars": sum(map(len, output_parts)),
-                })
+                events.append(("delta", {"text": text}))
+            self._flush_progress(
+                child_id, owner, session_id, events,
+                "".join(result_tail_parts),
+                {"thinking_chars": thinking_chars, "output_chars": output_chars},
+            )
             last_flush = time.monotonic()
 
         try:
@@ -772,6 +848,7 @@ class SubagentRuntime:
             # Only a persisted post-tool ledger makes a retry safe. Never
             # rebuild from the original objective after effects have started.
             tool_since_checkpoint = False
+            tools_since_checkpoint: list[str] = []
             checkpoint = copy.deepcopy((resume_checkpoint or {}).get("messages"))
             if checkpoint:
                 # Include newly queued guidance in retries, without duplicating
@@ -788,6 +865,7 @@ class SubagentRuntime:
                 nonlocal waiting_payload, tool_since_checkpoint, checkpoint
                 nonlocal consecutive_failures, round_slice_exhausted
                 nonlocal output_retries, output_repair_instruction, child_temperature
+                nonlocal thinking_chars, output_chars, tools_since_checkpoint
                 if output_repair_instruction:
                     messages.append({"role": "system", "content": output_repair_instruction})
                     output_repair_instruction = ""
@@ -837,15 +915,22 @@ class SubagentRuntime:
                             if "delta" in event and not event.get("type"):
                                 text = str(event.get("delta") or "")
                                 if event.get("thinking"):
-                                    reasoning_parts.append(text); pending_thinking.append(text)
+                                    thinking_chars += len(text)
+                                    pending_thinking.append(text)
                                 else:
-                                    output_parts.append(text); pending_delta.append(text)
+                                    output_chars += len(text)
+                                    output_parts.append(text)
+                                    append_result_tail(text)
+                                    pending_delta.append(text)
                                 await flush()
                             else:
                                 await flush(force=True)
                                 kind = str(event.get("type") or "event")
                                 if kind == "tool_start":
                                     tool_since_checkpoint = True
+                                    tool_name = str(event.get("tool") or "").strip()
+                                    if tool_name:
+                                        tools_since_checkpoint.append(tool_name)
                                 if kind == "ask_user":
                                     waiting_payload = event.get("data") or event
                                 if kind == "metrics":
@@ -868,6 +953,7 @@ class SubagentRuntime:
                                     history.context_checkpoint = copy.deepcopy(checkpoint)
                                     history.context_checkpoint_count = int(event.get("compactions") or 0)
                                     tool_since_checkpoint = False
+                                    tools_since_checkpoint = []
                                     self._merge_metrics(child_id, owner, {
                                         "checkpoint_messages": len(checkpoint),
                                         "checkpoint_hash": event.get("ledger_hash"),
@@ -911,6 +997,12 @@ class SubagentRuntime:
                             "reason": "round_slice_exhausted", "checkpoint_messages": len(checkpoint),
                         })
                         continue
+                    if (not waiting_payload
+                            and not "".join(output_parts[attempt_output_start:]).strip()):
+                        raise ChildStreamFailure({
+                            "kind": "empty_output",
+                            "message": "The model returned no usable visible result after completing its turn.",
+                        })
                     break
                 except (ChildStreamFailure, asyncio.TimeoutError, httpx.TimeoutException, httpx.NetworkError) as raw_exc:
                     exc = raw_exc if isinstance(raw_exc, ChildStreamFailure) else ChildStreamFailure({
@@ -920,7 +1012,7 @@ class SubagentRuntime:
                                     if isinstance(raw_exc, (asyncio.TimeoutError, httpx.TimeoutException))
                                     else "Model network error. No result was verified."),
                     })
-                    if exc.kind == "degenerate_output":
+                    if exc.kind in {"degenerate_output", "empty_output"}:
                         # Keep rejected prose out of the eventual successful
                         # answer. Its streamed events remain in the child
                         # timeline; if recovery ultimately fails, the parent
@@ -933,28 +1025,33 @@ class SubagentRuntime:
                             while sum(map(len, unverified_output_parts)) > MAX_CHILD_UNVERIFIED_OUTPUT_CHARS:
                                 unverified_output_parts.pop(0)
                         del output_parts[attempt_output_start:]
-                        if (not tool_since_checkpoint
+                        reset_result_tail()
+                        if (_safe_child_tool_replay(tool_since_checkpoint, tools_since_checkpoint)
                                 and output_retries < MAX_CHILD_OUTPUT_RETRIES):
                             output_retries += 1
                             child_temperature = max(0.05, 0.3 / (1 + output_retries))
                             output_repair_instruction = (
-                                "Your previous generation repeated itself and was discarded. Continue the assigned "
-                                "mini-goal from the latest committed checkpoint. Do not repeat prior prose or "
-                                "reasoning. Take one concrete, concise next action with the available tools, then "
-                                "verify it; if the objective is complete, return a short evidence-based result."
+                                "Your previous generation produced no usable visible result or repeated itself. "
+                                "Continue the assigned mini-goal from the latest committed checkpoint. Do not "
+                                "repeat prior prose or reasoning. Take one concrete, concise next action with the "
+                                "available tools, then verify it; if the objective is complete, return a short "
+                                "evidence-based result."
                             )
                             messages = ([copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
                                         if checkpoint is not None else copy.deepcopy(initial_messages))
                             await flush(force=True)
                             self._event(child_id, owner, session_id, "output_retry", {
                                 "attempt": output_retries, "retry_limit": MAX_CHILD_OUTPUT_RETRIES,
-                                "reason": "degenerate_output", "temperature": child_temperature,
+                                "reason": exc.kind, "temperature": child_temperature,
                                 "discarded_output_chars": len(failed_attempt_output),
                                 "messages": copy.deepcopy(messages), "instruction": output_repair_instruction,
                             })
                             await asyncio.sleep(_retry_delay(output_retries))
                             continue
-                    if not exc.retryable or tool_since_checkpoint or consecutive_failures >= 10:
+                    safe_to_replay = _safe_child_tool_replay(
+                        tool_since_checkpoint, tools_since_checkpoint,
+                    )
+                    if not exc.retryable or not safe_to_replay or consecutive_failures >= 10:
                         raise exc
                     consecutive_failures += 1
                     provider_retries += 1
@@ -986,11 +1083,6 @@ class SubagentRuntime:
                     "status": "waiting_user", "ask_user": waiting_payload,
                 }, status="waiting_user", result=final, error="")
                 return
-            if not "".join(output_parts[attempt_output_start:]).strip():
-                # Thinking and successful transport completion are not a
-                # deliverable.  Never let a parent treat an empty child result
-                # as independent verification of the assigned objective.
-                raise RuntimeError("Subagent produced no visible final result")
             self._update_with_event(child_id, owner, session_id, "status", {
                 "status": "completed", "result": final[-12000:],
             }, status="completed", result=final, finished_at=_utcnow(), error="", slot=None)
@@ -1005,12 +1097,38 @@ class SubagentRuntime:
         except ChildLeaseLost:
             raise
         except Exception as exc:
+            if (isinstance(exc, ChildStreamFailure) and exc.retryable
+                    and tool_since_checkpoint
+                    and not _safe_child_tool_replay(tool_since_checkpoint, tools_since_checkpoint)):
+                # This is not a provider retry exhaustion. A non-read-only
+                # tool began after the last durable ledger, so replaying the
+                # old checkpoint could repeat a write/command. Keep the child
+                # inspectable and release its model slot instead of publishing
+                # a generic failure or silently retrying an unknown effect.
+                safe_error = (
+                    "Provider transport failed after a side-effecting tool started. "
+                    "The child is waiting for durable tool-outcome inspection; "
+                    "independent parent work can continue."
+                )
+                partial_result = "".join(output_parts)[-MAX_CHILD_LIVE_RESULT_CHARS:]
+                self._merge_metrics(child_id, owner, {
+                    "failure_class": "tool_outcome_reconciliation_required",
+                    "provider_error_status": exc.status,
+                })
+                self._update_with_event(
+                    child_id, owner, session_id, "status",
+                    {"status": "waiting_user", "reason": "tool_outcome_reconciliation_required"},
+                    status="waiting_user", result=partial_result, error=safe_error,
+                    finished_at=None, slot=None,
+                )
+                return
             if unverified_output_parts:
                 excerpt = "\n\n".join(unverified_output_parts)[-MAX_CHILD_UNVERIFIED_OUTPUT_CHARS:]
                 output_parts.append(
                     "\n\n[Unverified partial output from rejected repeated generations; "
                     "do not treat this as a completed result.]\n" + excerpt
                 )
+                reset_result_tail()
             await flush(force=True)
             if isinstance(exc, ChildStreamFailure):
                 logger.warning("Subagent %s stopped after recovery: kind=%s status=%s", child_id, exc.kind, exc.status)

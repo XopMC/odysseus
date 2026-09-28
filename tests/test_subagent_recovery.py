@@ -124,8 +124,15 @@ def test_uncheckpointed_tool_is_not_replayed(harness, monkeypatch):
         yield 'event: error\ndata: {"error":"Read timeout","status":504}\n\n'
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
-    assert run(harness)["status"] == "failed"
+    result = run(harness)
+    assert result["status"] == "waiting_user"
+    assert result["metrics"]["failure_class"] == "tool_outcome_reconciliation_required"
     assert calls == 1
+    events = harness.events("qa", "s", child_id="child")
+    assert not any(item["kind"] == "transport_retry" for item in events)
+    assert any(item["kind"] == "status"
+               and item["payload"].get("reason") == "tool_outcome_reconciliation_required"
+               for item in events)
 
 
 def test_round_slice_continues_from_checkpoint_not_partial_prose(harness, monkeypatch):
