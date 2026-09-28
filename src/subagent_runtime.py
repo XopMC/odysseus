@@ -34,6 +34,7 @@ ACTIVE_STATUSES = {"queued", "running", "waiting_user", "stopping", "recovering"
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 CHILD_CORE_TOOLS = CORE_AGENT_TOOLS | {"publish_subagent_evidence"}
 MAX_CHILD_OUTPUT_RETRIES = 10
+MAX_CHILD_UNVERIFIED_OUTPUT_CHARS = 12000
 CHILD_LEASE_SECONDS = 90
 CHILD_HEARTBEAT_SECONDS = 15
 _execution_lease = ContextVar("subagent_execution_lease", default=None)
@@ -722,6 +723,7 @@ class SubagentRuntime:
             "update_goal_progress", "get_goal",
         }
         output_parts: list[str] = [prior_result + "\n\n"] if resume_checkpoint and prior_result else []
+        unverified_output_parts: list[str] = []
         reasoning_parts: list[str] = []
         pending_delta: list[str] = []
         pending_thinking: list[str] = []
@@ -918,26 +920,40 @@ class SubagentRuntime:
                                     if isinstance(raw_exc, (asyncio.TimeoutError, httpx.TimeoutException))
                                     else "Model network error. No result was verified."),
                     })
-                    if (exc.kind == "degenerate_output" and not tool_since_checkpoint
-                            and output_retries < MAX_CHILD_OUTPUT_RETRIES):
-                        output_retries += 1
-                        child_temperature = max(0.05, 0.3 / (1 + output_retries))
-                        output_repair_instruction = (
-                            "Your previous generation repeated itself and was discarded. Continue the assigned "
-                            "mini-goal from the latest committed checkpoint. Do not repeat prior prose or "
-                            "reasoning. Take one concrete, concise next action with the available tools, then "
-                            "verify it; if the objective is complete, return a short evidence-based result."
-                        )
-                        messages = ([copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
-                                    if checkpoint is not None else copy.deepcopy(initial_messages))
-                        await flush(force=True)
-                        self._event(child_id, owner, session_id, "output_retry", {
-                            "attempt": output_retries, "retry_limit": MAX_CHILD_OUTPUT_RETRIES,
-                            "reason": "degenerate_output", "temperature": child_temperature,
-                            "messages": copy.deepcopy(messages), "instruction": output_repair_instruction,
-                        })
-                        await asyncio.sleep(_retry_delay(output_retries))
-                        continue
+                    if exc.kind == "degenerate_output":
+                        # Keep rejected prose out of the eventual successful
+                        # answer. Its streamed events remain in the child
+                        # timeline; if recovery ultimately fails, the parent
+                        # gets a bounded, explicitly unverified excerpt below.
+                        failed_attempt_output = "".join(output_parts[attempt_output_start:]).strip()
+                        if failed_attempt_output:
+                            unverified_output_parts.append(
+                                failed_attempt_output[-MAX_CHILD_UNVERIFIED_OUTPUT_CHARS:]
+                            )
+                            while sum(map(len, unverified_output_parts)) > MAX_CHILD_UNVERIFIED_OUTPUT_CHARS:
+                                unverified_output_parts.pop(0)
+                        del output_parts[attempt_output_start:]
+                        if (not tool_since_checkpoint
+                                and output_retries < MAX_CHILD_OUTPUT_RETRIES):
+                            output_retries += 1
+                            child_temperature = max(0.05, 0.3 / (1 + output_retries))
+                            output_repair_instruction = (
+                                "Your previous generation repeated itself and was discarded. Continue the assigned "
+                                "mini-goal from the latest committed checkpoint. Do not repeat prior prose or "
+                                "reasoning. Take one concrete, concise next action with the available tools, then "
+                                "verify it; if the objective is complete, return a short evidence-based result."
+                            )
+                            messages = ([copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
+                                        if checkpoint is not None else copy.deepcopy(initial_messages))
+                            await flush(force=True)
+                            self._event(child_id, owner, session_id, "output_retry", {
+                                "attempt": output_retries, "retry_limit": MAX_CHILD_OUTPUT_RETRIES,
+                                "reason": "degenerate_output", "temperature": child_temperature,
+                                "discarded_output_chars": len(failed_attempt_output),
+                                "messages": copy.deepcopy(messages), "instruction": output_repair_instruction,
+                            })
+                            await asyncio.sleep(_retry_delay(output_retries))
+                            continue
                     if not exc.retryable or tool_since_checkpoint or consecutive_failures >= 10:
                         raise exc
                     consecutive_failures += 1
@@ -989,6 +1005,12 @@ class SubagentRuntime:
         except ChildLeaseLost:
             raise
         except Exception as exc:
+            if unverified_output_parts:
+                excerpt = "\n\n".join(unverified_output_parts)[-MAX_CHILD_UNVERIFIED_OUTPUT_CHARS:]
+                output_parts.append(
+                    "\n\n[Unverified partial output from rejected repeated generations; "
+                    "do not treat this as a completed result.]\n" + excerpt
+                )
             await flush(force=True)
             if isinstance(exc, ChildStreamFailure):
                 logger.warning("Subagent %s stopped after recovery: kind=%s status=%s", child_id, exc.kind, exc.status)

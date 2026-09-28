@@ -137,7 +137,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('"configured_generation_budget_tokens": 131072', chunks)
                 events = [json.loads(line[6:]) for line in chunks.splitlines() if line.startswith('data: {')]
                 usage = next(e['data'] for e in events if e.get('type') == 'context_usage')
-                self.assertEqual(usage['context_policy']['output_reserve'], 32768)
+                self.assertEqual(usage['context_policy']['output_reserve'], 25344)
 
     async def test_backend_usage_preserves_request_budget_annotations(self):
         _, _, chunks = await self.run_agent(window=131840, agent_output_setting=131072, backend_usage=True)
@@ -146,7 +146,7 @@ class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshots[-1]['source'], 'backend')
         self.assertEqual(snapshots[-1]['configured_generation_budget_tokens'], 131072)
         self.assertEqual(snapshots[-1]['generation_budget_tokens'], snapshots[0]['generation_budget_tokens'])
-        self.assertEqual(snapshots[-1]['context_policy']['output_reserve'], 32768)
+        self.assertEqual(snapshots[-1]['context_policy']['output_reserve'], 25344)
 
     async def test_chat_policy_shapes_agent_without_changing_other_chats(self):
         from contextlib import contextmanager

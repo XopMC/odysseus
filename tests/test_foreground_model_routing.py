@@ -4040,7 +4040,7 @@ def test_approved_exact_action_cannot_execute_twice_when_model_repeats(monkeypat
     ("primary_context", "backup_context", "expected_fallback_message_count"),
     [
         (65536, 16384, 3),
-        (16384, 65536, 3),
+        (16384, 65536, 22),
         (16384, 131072, 22),
     ],
 )
@@ -4174,14 +4174,21 @@ def test_agent_fallback_request_uses_candidate_context_budget(
     # Compaction keeps a checkpoint plus the goal, not just the latest user.
     backup_schema = requests_by_round[0][1]["kwargs"]["tools"]
     backup_output_tokens = requests_by_round[0][1]["kwargs"]["max_tokens"]
-    backup_reserve = 4096 if backup_context == 16384 else 32768
+    backup_reserve = max(
+        agent_loop.MIN_AGENT_OUTPUT_TOKENS,
+        agent_loop._default_agent_output_reserve(
+            backup_context, agent_loop.schema_token_estimate(backup_schema),
+            desired_tokens=131072, trigger_percent=75,
+        ),
+    )
     assert backup_output_tokens == min(131072, backup_context - 1024 - math.ceil(backup_context * .05)
                                       - len(fallback_messages) * 1000
                                       - agent_loop.schema_token_estimate(backup_schema))
     assert backup_output_tokens > backup_reserve
     from src.context_policy import ContextPolicy
     expected_limit = ContextPolicy(output_reserve=backup_reserve).budget(
-        backup_context, schema_tokens=agent_loop.schema_token_estimate(backup_schema)).trigger_messages
+        backup_context, schema_tokens=agent_loop.schema_token_estimate(backup_schema),
+        hard_input_max=200000).trigger_messages
     assert ("route prompt for backup-model", expected_limit) in checkpoint_limits
     assert len(fallback_messages) == expected_fallback_message_count
     assert any(message.get("_agent_working_summary") for message in fallback_messages) == (expected_fallback_message_count == 3)
@@ -4286,10 +4293,9 @@ def test_agent_fallback_checkpoint_preserves_goal_without_rewriting_history(monk
     assert metrics["working_context"]["context_length"] == 65536
     assert metrics["working_context"]["compactions"] == 1
     from src.context_policy import ContextPolicy
-    expected_limit = ContextPolicy(output_reserve=32768).budget(65536).trigger_messages
     assert metrics["working_context"]["generation_budget_tokens"] == requests[2]["kwargs"]["max_tokens"]
     assert metrics["working_context"]["configured_generation_budget_tokens"] == 131072
-    assert metrics["working_context"]["auto_compact_threshold"] == round(100 * expected_limit / 65536, 1)
+    assert metrics["working_context"]["auto_compact_threshold"] == 75.0
     snapshots = [json.loads(chunk[6:])["data"] for chunk in chunks if '"type": "context_usage"' in chunk]
     assert not any(s["model"] == "failed-backup-model" for s in snapshots)
     assert snapshots[-1]["model"] == "backup-model"

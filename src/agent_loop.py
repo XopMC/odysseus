@@ -3587,7 +3587,8 @@ def _default_agent_output_reserve(window: int, schema_tokens: int,
                                   requested_window: int = 0, *,
                                   desired_tokens: int = DEFAULT_AGENT_OUTPUT_TOKENS,
                                   safety_tokens: int = 1024,
-                                  safety_percent: int = 5) -> int:
+                                  safety_percent: int = 5,
+                                  trigger_percent: int = 75) -> int:
     """Reserve stable generation headroom independently of the output ceiling.
 
     The actual backend/model window remains authoritative. On smaller models,
@@ -3603,7 +3604,15 @@ def _default_agent_output_reserve(window: int, schema_tokens: int,
     available_output = usable_window - safety - schema_tokens - 8192
     if available_output < MIN_AGENT_OUTPUT_TOKENS:
         return 0
-    return min(desired_tokens, DEFAULT_AGENT_OUTPUT_RESERVE, available_output)
+    # Reserve only completion room that fits after the configured full-window
+    # trigger. Treating the entire 32K default as mandatory input headroom made
+    # a 75% trigger impossible on a 128K model once safety/schema reserves were
+    # included, silently moving compaction far earlier than the UI promised.
+    trigger_headroom = usable_window * (100 - trigger_percent) // 100 - safety
+    if trigger_headroom < MIN_AGENT_OUTPUT_TOKENS:
+        return 0
+    return min(desired_tokens, DEFAULT_AGENT_OUTPUT_RESERVE,
+               available_output, trigger_headroom)
 
 
 def _agent_completion_budget(window: int, prompt_tokens: int, ceiling: int, *,
@@ -6216,6 +6225,7 @@ async def stream_agent_loop(
             desired_tokens=_agent_output_setting,
             safety_tokens=_configured_policy.safety_tokens if _configured_policy else 1024,
             safety_percent=_configured_policy.safety_percent if _configured_policy else 5,
+            trigger_percent=_configured_policy.trigger_percent if _configured_policy else 75,
         )
         if _configured_policy:
             # Existing chat/owner profiles may reserve less than the minimum
@@ -6653,7 +6663,8 @@ async def stream_agent_loop(
                 candidate_schema_tokens = schema_token_estimate(_tool_schemas_for_route(state))
                 candidate_max_tokens = max(MIN_AGENT_OUTPUT_TOKENS,
                     _default_agent_output_reserve(route_context, candidate_schema_tokens,
-                                                  desired_tokens=_agent_output_setting))
+                                                  desired_tokens=_agent_output_setting,
+                                                  trigger_percent=75))
                 candidate_limit = input_limit(route_context, candidate_max_tokens,
                                               candidate_schema_tokens,
                                               max(1, _hard_cap))
@@ -6700,6 +6711,7 @@ async def stream_agent_loop(
                         desired_tokens=_agent_output_setting,
                         safety_tokens=_configured_policy.safety_tokens,
                         safety_percent=_configured_policy.safety_percent,
+                        trigger_percent=_configured_policy.trigger_percent,
                     ))
                 candidate_profile = {
                     **_context_profile_for_generation,

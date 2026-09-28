@@ -64,6 +64,25 @@ def test_actual_compaction_threshold_may_be_fractional(monkeypatch, threshold):
     assert agent_runs.get_context_usage("a")["auto_compact_threshold"] == threshold
 
 
+def test_context_policy_budget_telemetry_is_preserved_without_unlisted_fields():
+    data = _snapshot(context_length=131840, context_policy={
+        'status': 'unchanged', 'window': 131840, 'input_budget': 98880,
+        'trigger_messages': 87297, 'schema_tokens': 11583,
+        'requested_trigger_tokens': 98880, 'effective_trigger_tokens': 98880,
+        'effective_trigger_percent': 75.0, 'trigger_basis': 'model_window',
+        'hard_input_max': 200000, 'target_messages': 54337,
+        'output_reserve': 25344, 'safety_tokens': 7616,
+        'revisions': {'owner': 0}, 'private_setting': 'must not escape',
+    })
+    normalized = agent_runs.normalize_context_usage(data)
+    policy = normalized['context_policy']
+    assert policy['effective_trigger_tokens'] == 98880
+    assert policy['effective_trigger_percent'] == 75.0
+    assert policy['trigger_basis'] == 'model_window'
+    assert policy['hard_input_max'] == 200000
+    assert 'private_setting' not in policy
+
+
 def test_disabled_compaction_state_survives_context_snapshot(monkeypatch):
     run = agent_runs._Run()
     monkeypatch.setattr(agent_runs, '_RUNS', {'a': run})
@@ -541,17 +560,35 @@ def test_idle_context_uses_current_loaded_window_after_model_reload(monkeypatch)
     assert data["context_percent"] == round(82000 / 131840 * 100, 1)
 
 
-def test_effective_trigger_uses_usable_budget_not_full_window(monkeypatch):
+def test_effective_trigger_uses_model_window_and_respects_hard_input_cap(monkeypatch):
     from src import context_policy_runtime
     from src.context_policy import ContextPolicy
     policy = ContextPolicy(trigger_percent=75)
     monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: {
         'effective': policy.to_dict(), 'revisions': {'owner': 1}})
     data = _client(monkeypatch, _history(snapshot=False)).get('/api/session/chat/context').json()
-    expected = policy.budget(262144).trigger_messages
+    expected = policy.budget(262144).effective_trigger_tokens
     assert data['effective_auto_compact_trigger_tokens'] == expected
     assert data['effective_auto_compact_threshold'] == round(100 * expected / 262144, 1)
+    assert data['threshold_basis'] == 'model_window'
     assert data['should_compact'] is False
+
+
+def test_context_endpoint_exposes_a_hard_input_cap_that_clamps_the_trigger(monkeypatch):
+    from src import context_policy_runtime, settings
+    from src.context_policy import ContextPolicy
+    policy = ContextPolicy(trigger_percent=75, target_percent=50)
+    monkeypatch.setattr(context_policy_runtime, 'owner_policy', lambda owner, **scope: {
+        'effective': policy.to_dict(), 'revisions': {'owner': 1}})
+    monkeypatch.setattr(settings, 'get_setting', lambda key, default=None:
+                        65536 if key == 'agent_input_token_hard_max' else default)
+    data = _client(monkeypatch, _history(snapshot=False)).get('/api/session/chat/context').json()
+    assert data['input_hard_max'] == 65536
+    assert data['input_budget'] == 65536
+    assert data['threshold_basis'] == 'model_window'
+    assert data['effective_auto_compact_trigger_tokens'] == 65536
+    assert data['effective_auto_compact_threshold'] == 25.0
+    assert data['output_reserve'] == 32768
 
 
 def test_legacy_short_compaction_timeout_is_raised_to_ten_minutes():
@@ -626,7 +663,7 @@ def test_saved_policy_does_not_rewrite_observed_request(monkeypatch):
     assert data['used_tokens'] == 82000
     assert data['saved_context_policy']['auto_compact'] is False
     assert data['saved_context_policy']['trigger_percent'] == 60
-    assert data['saved_context_policy']['threshold_basis'] == 'input_budget'
+    assert data['saved_context_policy']['threshold_basis'] == 'model_window'
     assert data['context_policy_error'] is False
 
 

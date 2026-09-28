@@ -27,9 +27,10 @@ def test_budget_includes_entire_output_and_tool_schema_reserve():
 
 
 def test_input_cap_does_not_subtract_output_reserve_twice():
-    # 65,536 is an INPUT cap, not a combined input/output window. At 75%
-    # the full input trigger is 49,152, less its separately counted schemas.
-    assert ac.input_limit(131840, 32768, 7000, 65536) == 49152 - 7000
+    # 65,536 is an INPUT cap, not a combined input/output window. The desired
+    # 75% full-window trigger is safely clamped to that cap, then schemas are
+    # excluded from the message-only split threshold exactly once.
+    assert ac.input_limit(131840, 32768, 7000, 65536) == 65536 - 7000
 
 
 def test_compacts_mid_tool_run_without_losing_goal_or_pairs():

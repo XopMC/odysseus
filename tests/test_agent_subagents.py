@@ -812,6 +812,53 @@ def test_parallel_children_receive_independent_model_contexts(monkeypatch):
         db.commit(); db.close()
 
 
+def test_full_access_subagent_inherits_shell_file_edit_and_python_tools(monkeypatch):
+    owner = "full-tools-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="full access child tools", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    captured = []
+
+    async def fake_loop(*args, **kwargs):
+        captured.append({
+            "access_mode": kwargs.get("access_mode"),
+            "disabled_tools": set(kwargs.get("disabled_tools") or ()),
+            "forced_tools": set(kwargs.get("forced_tools") or ()),
+        })
+        yield 'data: {"delta":"Verified the assigned work."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe full-tool inheritance", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=30,
+            workspace=None, access_mode="full_access",
+        )
+        await runtime._tasks[child["child_id"]]
+        assert runtime.get(owner, session_id, child["child_id"])["status"] == "completed"
+        assert len(captured) == 1
+        tools = captured[0]["forced_tools"]
+        assert {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch"} <= tools
+        assert not (tools & captured[0]["disabled_tools"])
+        assert captured[0]["access_mode"] == "full_access"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
 def test_child_retries_transient_transport_failure_only_before_first_tool(monkeypatch):
     owner = "retry-" + uuid.uuid4().hex
     session_id = uuid.uuid4().hex
@@ -952,6 +999,126 @@ def test_child_recovers_fresh_plan_failure_from_durable_compaction_checkpoint(mo
         events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
         retry = next(event for event in events if event["kind"] == "transport_retry")
         assert "did not rebuild its fresh plan" in retry["payload"]["instruction"]
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
+def test_child_retries_repetition_after_tool_checkpoint_without_merging_rejected_output(monkeypatch):
+    owner = "repetition-retry-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="repetition retry test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    calls = 0
+    resumed_messages = []
+
+    async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield 'data: {"type":"tool_start","tool":"read_file","round":1}\n\n'
+            yield 'data: {"type":"tool_output","tool":"read_file","round":1}\n\n'
+            yield "data: " + json.dumps({
+                "type": "context_checkpoint",
+                "messages": [{"role": "user", "content": "committed read result"}],
+                "compactions": 0,
+            }) + "\n\n"
+            yield 'data: {"delta":"Rejected repeated draft."}\n\n'
+            yield "data: " + json.dumps({
+                "type": "agent_terminal",
+                "data": {"failed": True, "failure": {
+                    "category": "degenerate_output", "status": 422,
+                    "message": "Output repetition guard stopped generation.",
+                }},
+            }) + "\n\n"
+            return
+        resumed_messages.extend(json.loads(json.dumps(args[2])))
+        yield 'data: {"delta":"Verified child result."}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+    monkeypatch.setattr("src.subagent_runtime._retry_delay", lambda _attempt: 0)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe repeated-output recovery", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=60,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        result = runtime.get(owner, session_id, child["child_id"])
+        assert result["status"] == "completed"
+        assert result["result"] == "Verified child result."
+        assert calls == 2
+        assert any(message.get("content") == "committed read result" for message in resumed_messages)
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        retry = next(event for event in events if event["kind"] == "output_retry")
+        assert retry["payload"]["discarded_output_chars"] == len("Rejected repeated draft.")
+        assert any(event["kind"] == "delta" and
+                   event["payload"].get("text") == "Rejected repeated draft." for event in events)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
+def test_child_preserves_rejected_output_when_all_retries_are_exhausted(monkeypatch):
+    owner = "repetition-exhausted-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="repetition exhausted test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    calls = 0
+
+    async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield f'data: {{"delta":"attempt {calls} draft"}}\n\n'
+        yield "data: " + json.dumps({
+            "type": "agent_terminal",
+            "data": {"failed": True, "failure": {
+                "category": "degenerate_output", "status": 422,
+                "message": "Output repetition guard stopped generation.",
+            }},
+        }) + "\n\n"
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+    monkeypatch.setattr("src.subagent_runtime._retry_delay", lambda _attempt: 0)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe repeated-output exhaustion", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=60,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        result = runtime.get(owner, session_id, child["child_id"])
+        assert result["status"] == "failed"
+        assert calls == 11  # Initial call plus ten bounded recovery attempts.
+        assert "Unverified partial output" in result["result"]
+        assert "attempt 11 draft" in result["result"]
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=200)
+        assert sum(event["kind"] == "output_retry" for event in events) == 10
 
     try:
         asyncio.run(scenario())

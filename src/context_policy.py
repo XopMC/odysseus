@@ -1,6 +1,9 @@
 """Validated context settings and one full-request budget calculation.
 
 Backend capacity is evidence supplied by the caller, never granted by a profile.
+Trigger/target percentages are relative to the serving model window. Output,
+safety, schema and explicit input caps may reduce the effective budget; callers
+must expose that effective threshold instead of silently relabeling the basis.
 This module does not resolve owners, grant provider access or start inference.
 """
 from dataclasses import asdict, dataclass
@@ -64,8 +67,14 @@ class ContextPolicy:
         available = window - self.output_reserve - safety
         if hard_input_max is not None:
             available = min(available, hard_input_max)
-        trigger = available * self.trigger_percent // 100
-        target = available * self.target_percent // 100
+        requested_trigger = window * self.trigger_percent // 100
+        trigger = min(available, requested_trigger)
+        requested_target = window * self.target_percent // 100
+        target = min(available, requested_target, max(0, trigger - 1))
+        if trigger < requested_trigger:
+            # Preserve hysteresis when a hard input cap or large output reserve
+            # clamps the trigger below its configured full-window percentage.
+            target = min(target, trigger * self.target_percent // self.trigger_percent)
         # The configured target is a desired post-compaction size, not a
         # prerequisite for starting a request.  A low target may be smaller
         # than a large native tool schema while both the trigger and hard
@@ -77,7 +86,8 @@ class ContextPolicy:
             raise ValueError('Context policy leaves no usable input budget after reserves and tool schemas')
         return ContextBudget(window, available, self.output_reserve, safety, schema_tokens,
                              trigger - schema_tokens, max(1, target - schema_tokens),
-                             available - schema_tokens)
+                             available - schema_tokens, requested_trigger, trigger,
+                             'model_window')
 
 
 @dataclass(frozen=True)
@@ -90,6 +100,9 @@ class ContextBudget:
     trigger_messages: int
     target_messages: int
     hard_messages: int
+    requested_trigger_tokens: int
+    effective_trigger_tokens: int
+    trigger_basis: str
 
     def action(self, message_tokens, *, auto_compact=True):
         if type(message_tokens) is not int or message_tokens < 0:

@@ -1364,7 +1364,9 @@ def normalize_context_usage(data) -> Optional[dict]:
             key: policy[key]
             for key in (
                 'status', 'window', 'input_budget', 'trigger_messages',
-                'target_messages', 'output_reserve', 'safety_tokens', 'revisions',
+                'schema_tokens', 'requested_trigger_tokens', 'effective_trigger_tokens',
+                'effective_trigger_percent', 'trigger_basis', 'hard_input_max', 'target_messages',
+                'output_reserve', 'configured_output_reserve', 'safety_tokens', 'revisions',
             )
             if key in policy
         }

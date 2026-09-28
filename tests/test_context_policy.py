@@ -5,16 +5,19 @@ from src.context_policy import ContextPolicy
 
 
 class ContextPolicyTests(unittest.TestCase):
-    def test_full_request_budget_and_hysteresis(self):
+    def test_trigger_and_target_are_percentages_of_the_full_model_window(self):
         policy = ContextPolicy(output_reserve=2000, safety_tokens=1000,
                                safety_percent=10, trigger_percent=75, target_percent=50)
         budget = policy.budget(20000, schema_tokens=500)
         self.assertEqual(budget.input_tokens, 15000)
-        self.assertEqual(budget.trigger_messages, 10750)
-        self.assertEqual(budget.target_messages, 7000)
+        self.assertEqual(budget.requested_trigger_tokens, 15000)
+        self.assertEqual(budget.effective_trigger_tokens, 15000)
+        self.assertEqual(budget.trigger_basis, 'model_window')
+        self.assertEqual(budget.trigger_messages, 14500)
+        self.assertEqual(budget.target_messages, 9500)
         self.assertEqual(budget.hard_messages, 14500)
-        self.assertEqual(budget.action(10749), 'continue')
-        self.assertEqual(budget.action(10750), 'compact')
+        self.assertEqual(budget.action(14499), 'continue')
+        self.assertEqual(budget.action(14500), 'compact')
         self.assertEqual(budget.action(14501, auto_compact=False), 'blocked')
         self.assertEqual(budget.action(14500, auto_compact=False), 'continue')
 
@@ -24,13 +27,23 @@ class ContextPolicyTests(unittest.TestCase):
         self.assertEqual(ContextPolicy(requested_window=8192).budget(131072).window, 8192)
         self.assertEqual(policy.budget(131072, hard_input_max=10000).input_tokens, 10000)
 
+    def test_effective_trigger_reports_hard_cap_instead_of_claiming_configured_percent(self):
+        policy = ContextPolicy(output_reserve=4096, safety_tokens=0,
+                               safety_percent=0, trigger_percent=75, target_percent=50)
+        budget = policy.budget(131840, schema_tokens=12000, hard_input_max=65536)
+        self.assertEqual(budget.requested_trigger_tokens, 98880)
+        self.assertEqual(budget.effective_trigger_tokens, 65536)
+        self.assertEqual(budget.trigger_messages, 53536)
+        self.assertEqual(budget.target_messages, 31690)
+        self.assertEqual(round(100 * budget.effective_trigger_tokens / budget.window, 1), 49.7)
+
     def test_target_below_tool_schemas_does_not_block_a_request_with_headroom(self):
         policy = ContextPolicy(output_reserve=4096, safety_tokens=0,
                                safety_percent=0, trigger_percent=75,
                                target_percent=15)
         budget = policy.budget(100000, schema_tokens=20000)
         self.assertEqual(budget.input_tokens, 95904)
-        self.assertEqual(budget.trigger_messages, 51928)
+        self.assertEqual(budget.trigger_messages, 55000)
         self.assertEqual(budget.target_messages, 1)
         self.assertEqual(budget.hard_messages, 75904)
         self.assertEqual(budget.action(8000), 'continue')

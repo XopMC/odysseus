@@ -1330,7 +1330,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                         'auto_compact': record['effective']['auto_compact'],
                         'trigger_percent': record['effective']['trigger_percent'],
                         'target_percent': record['effective']['target_percent'],
-                        'revisions': record['revisions'], 'threshold_basis': 'input_budget',
+                        'revisions': record['revisions'], 'threshold_basis': 'model_window',
                     }
                 elif context_policy_enabled():
                     effective_policy = ContextPolicy().to_dict()
@@ -1378,10 +1378,42 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 display_enabled = True
             effective_trigger_tokens = None
             effective_trigger_percent = None
-            if effective_policy and ctx_len:
+            effective_budget = None
+            from src.settings import get_setting
+            try:
+                hard_input_max = int(get_setting('agent_input_token_hard_max', 200000) or 200000)
+            except (TypeError, ValueError, OverflowError):
+                hard_input_max = 200000
+            if ctx_len:
                 try:
-                    budget = ContextPolicy.from_dict(effective_policy).budget(ctx_len)
-                    effective_trigger_tokens = budget.trigger_messages
+                    from dataclasses import replace
+                    from src.agent_loop import (
+                        DEFAULT_AGENT_OUTPUT_TOKENS, MIN_AGENT_OUTPUT_TOKENS,
+                        _default_agent_output_reserve,
+                    )
+                    base_policy = ContextPolicy.from_dict(effective_policy) if effective_policy else ContextPolicy()
+                    try:
+                        desired_output = int(get_setting(
+                            'agent_output_token_budget', DEFAULT_AGENT_OUTPUT_TOKENS,
+                        ))
+                    except (TypeError, ValueError, OverflowError):
+                        desired_output = DEFAULT_AGENT_OUTPUT_TOKENS
+                    desired_output = max(MIN_AGENT_OUTPUT_TOKENS, min(131072, desired_output))
+                    automatic_reserve = _default_agent_output_reserve(
+                        ctx_len, 0, base_policy.requested_window,
+                        desired_tokens=desired_output,
+                        safety_tokens=base_policy.safety_tokens,
+                        safety_percent=base_policy.safety_percent,
+                        trigger_percent=base_policy.trigger_percent,
+                    )
+                    runtime_reserve = max(
+                        MIN_AGENT_OUTPUT_TOKENS, base_policy.output_reserve, automatic_reserve,
+                    )
+                    budget_policy = replace(base_policy, output_reserve=runtime_reserve)
+                    effective_budget = budget_policy.budget(
+                        ctx_len, hard_input_max=max(1, hard_input_max),
+                    )
+                    effective_trigger_tokens = effective_budget.effective_trigger_tokens
                     effective_trigger_percent = round(100 * effective_trigger_tokens / ctx_len, 1)
                 except ValueError:
                     policy_error = True
@@ -1442,6 +1474,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     "context_revision": backend_snapshot.get("context_revision"),
                     "reason": backend_snapshot.get("context_reason"),
                     "recorded_at": backend_snapshot.get("_recorded_at"),
+                    "context_policy": observation.get("context_policy") if observation else None,
                 } if backend_snapshot else None,
                 "messages": visible_messages,
                 "context_messages": len(messages),
@@ -1461,7 +1494,13 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     effective_trigger_percent if effective_trigger_percent is not None else display_threshold
                 ),
                 "effective_auto_compact_trigger_tokens": effective_trigger_tokens,
-                "threshold_basis": "usable_input" if effective_policy else "model_window",
+                "threshold_basis": "model_window",
+                "input_budget": effective_budget.input_tokens if effective_budget else None,
+                "input_hard_max": hard_input_max,
+                "schema_tokens": effective_budget.schema_tokens if effective_budget else 0,
+                "output_reserve": effective_budget.output_reserve if effective_budget else None,
+                "configured_output_reserve": effective_policy.get('output_reserve') if effective_policy else None,
+                "safety_tokens": effective_budget.safety_tokens if effective_budget else None,
                 "auto_compact_enabled": display_enabled,
                 "observed_auto_compact_threshold": observed_threshold,
                 "observed_auto_compact_enabled": observed_enabled,

@@ -174,7 +174,17 @@ def test_all_agent_models_default_to_128k_and_setting_can_lower_it(monkeypatch):
 
 
 def test_generation_ceiling_borrows_free_window_without_reserving_it_all():
-    assert al._default_agent_output_reserve(131840, 4000, desired_tokens=131072) == 32768
+    assert al._default_agent_output_reserve(131840, 4000, desired_tokens=131072) == 25344
+    assert al._default_agent_output_reserve(
+        131840, 4000, desired_tokens=131072, trigger_percent=60,
+    ) == 32768
+    from src.context_policy import ContextPolicy
+    reserve = al._default_agent_output_reserve(131840, 4000, desired_tokens=131072)
+    budget = ContextPolicy(output_reserve=reserve).budget(
+        131840, schema_tokens=4000, hard_input_max=200000,
+    )
+    assert budget.effective_trigger_tokens == 98880
+    assert round(100 * budget.effective_trigger_tokens / budget.window, 1) == 75.0
     assert al._agent_completion_budget(131840, 20000, 131072) == 104224
     assert al._agent_completion_budget(262144, 20000, 131072) == 131072
     assert al._agent_completion_budget(131840, 20000, 8192) == 8192

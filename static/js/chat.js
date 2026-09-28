@@ -246,13 +246,30 @@ function appendStreamErrorGuidance(container, error) {
       ['Auto compact', d.auto_compact_enabled === false ? 'Disabled'
         : `${Number(d.configured_auto_compact_threshold || d.auto_compact_threshold || 75)}%`],
     ];
+    const runtimePolicy = d.backend_measurement?.context_policy || {};
+    const budget = runtimePolicy.input_budget ?? d.input_budget;
+    const hardInputMax = runtimePolicy.hard_input_max ?? d.input_hard_max;
+    if (budget != null) rows.push(['Input budget', `${_fmtContextNumber(budget)} / ${_fmtContextNumber(d.context_length)}`]);
+    if (hardInputMax != null) rows.push(['Hard input cap', _fmtContextNumber(hardInputMax)]);
+    const schemaTokens = runtimePolicy.schema_tokens ?? d.schema_tokens;
+    const outputReserve = runtimePolicy.output_reserve ?? d.output_reserve;
+    const configuredOutputReserve = runtimePolicy.configured_output_reserve ?? d.configured_output_reserve;
+    const safetyTokens = runtimePolicy.safety_tokens ?? d.safety_tokens;
+    if (schemaTokens != null || outputReserve != null || safetyTokens != null) {
+      const outputText = outputReserve == null ? '—' : _fmtContextNumber(outputReserve)
+        + (configuredOutputReserve != null && Number(configuredOutputReserve) !== Number(outputReserve)
+          ? ` (setting ${_fmtContextNumber(configuredOutputReserve)})` : '');
+      rows.push(['Reserved (schemas · output · safety)', [schemaTokens, outputText, safetyTokens]
+        .map(value => value == null ? '—' : typeof value === 'string' ? value : _fmtContextNumber(value)).join(' · ')]);
+    }
     if (changedWindow) {
       rows.push(['Last request window', _fmtContextNumber(changedWindow.previous)]);
     }
     if (d.auto_compact_enabled !== false
-        && d.effective_auto_compact_threshold != null
-        && Number(d.effective_auto_compact_threshold) !== Number(d.configured_auto_compact_threshold)) {
-      rows.push(['Effective trigger', `${Number(d.effective_auto_compact_threshold)}% of model window`]);
+        && d.effective_auto_compact_threshold != null) {
+      rows.push(['Effective trigger', `${Number(d.effective_auto_compact_threshold)}% of model window`
+        + (d.effective_auto_compact_trigger_tokens != null
+          ? ` · ${_fmtContextNumber(d.effective_auto_compact_trigger_tokens)} tokens` : '')]);
     }
     if (d.context_status !== 'stored_chat' && d.stored_chat_tokens != null) {
       rows.push(['Stored chat (est.)', _fmtContextNumber(d.stored_chat_tokens)]);
@@ -289,7 +306,7 @@ function appendStreamErrorGuidance(container, error) {
       const b = document.createElement('span');
       b.textContent = value;
       b.title = value;
-      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request', 'Window basis', 'Compaction preview'].includes(label)) {
+      if (['Scope', 'Count source', 'Run status', 'Threshold basis', 'Settings apply', 'Saved context policy', 'Last backend request', 'Window basis', 'Compaction preview', 'Input budget', 'Hard input cap', 'Reserved (schemas · output · safety)', 'Effective trigger'].includes(label)) {
         bindUiText(b, value);
         bindUiText(b, value, 'title');
       }

@@ -861,7 +861,9 @@ export function mountEngineeringWorkspace(root, { request, onProjectSelected = (
     }
     const controlsByKey = new Map();
     const panel = el('section', undefined, 'context-policy', 'team-card team-panel'); panel.hidden = true;
-    panel.append(uiEl('h4', 'Context policy'), uiEl('p', 'Only explicitly checked overrides are saved. Saving policy does not invoke a model or compact a conversation. Sources show the last saved policy.'));
+    panel.append(uiEl('h4', 'Context policy'),
+      uiEl('p', 'Only explicitly checked overrides are saved. Saving policy does not invoke a model or compact a conversation. Sources show the last saved policy.'),
+      uiEl('p', 'Trigger and target percentages use the current model window. Output, safety and tool-schema reserves, or an explicit input cap can lower the effective trigger; the chat context panel shows the actual budget for this run.'));
     const retentionRules = el('details');
     retentionRules.append(uiEl('summary', 'History retention rules'), uiEl('p', 'The minimum recent groups takes priority over the recent token budget. Set both to zero to summarize all optional history. Goals and pinned tool exchanges remain protected; an impossible target is rejected without a summary request.'));
     panel.append(retentionRules);
