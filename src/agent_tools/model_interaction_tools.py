@@ -139,6 +139,16 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
         return {"error": "Subagent arguments must be a JSON object", "exit_code": 1}
     if not isinstance(payload, dict):
         return {"error": "Subagent arguments must be a JSON object", "exit_code": 1}
+    state = ctx.get("subagent_state") if isinstance(ctx.get("subagent_state"), dict) else {}
+    if state.get("delegation_forbidden_by_user") is True:
+        return {
+            "error": (
+                "The user's latest subagent guidance forbids creating more children. "
+                "Continue parent work or use manage_subagents for existing children."
+            ),
+            "exit_code": 1,
+            "policy": "disabled_by_user_guidance",
+        }
     objective = str(payload.get("objective") or "").strip()
     assigned_context = str(payload.get("context") or "").strip()
     requested_attachments = payload.get("attachment_ids")
@@ -226,7 +236,6 @@ async def delegate_subagent(content: str, ctx: dict) -> Dict:
                 return {"error": "Requested subagent model is outside the configured allowlist", "exit_code": 1,
                         "policy": "disabled_by_policy"}
 
-        state = ctx.get("subagent_state") if isinstance(ctx.get("subagent_state"), dict) else {}
         cache_key = (
             ctx.get("owner") or "", tuple(allowed),
             tuple(sorted(model_limits.items())),

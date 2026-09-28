@@ -43,6 +43,42 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
 
+@pytest.mark.parametrize("guidance", [
+    "Не создавай больше сабагентов. Их уже достаточно.",
+    "Don't create any more subagents; continue the parent task.",
+    "No more subagents for this Goal.",
+])
+def test_explicit_user_guidance_disables_new_subagent_delegation(guidance):
+    assert al._user_forbids_more_subagents([
+        {"role": "user", "content": "Create three subagents for independent work."},
+        {"role": "assistant", "content": "I will delegate."},
+        {"role": "user", "content": guidance},
+    ]) is True
+
+
+def test_later_explicit_subagent_request_reenables_delegation():
+    assert al._user_forbids_more_subagents([
+        {"role": "user", "content": "Не создавай больше сабагентов."},
+        {"role": "assistant", "content": "Understood."},
+        {"role": "user", "content": "Создай двух сабагентов для независимых файлов."},
+    ]) is False
+
+
+def test_delegate_subagent_honors_user_denial_before_resolution(monkeypatch):
+    from src.agent_tools.model_interaction_tools import delegate_subagent
+
+    async def must_not_resolve(*_args, **_kwargs):
+        pytest.fail("a user-denied child must be blocked before model resolution")
+
+    monkeypatch.setattr("src.ai_interaction._resolve_model", must_not_resolve)
+    result = asyncio.run(delegate_subagent(
+        json.dumps({"objective": "Independent safe work", "model": "auto"}),
+        {"subagent_state": {"delegation_forbidden_by_user": True}},
+    ))
+    assert result["policy"] == "disabled_by_user_guidance"
+    assert result["exit_code"] == 1
+
+
 def _run_loop(monkeypatch, round_text, max_rounds=2, *, active_goal=None, session_id=None):
     async def _fake_stream(_candidates, messages, **kwargs):
         yield f'data: {json.dumps({"delta": round_text})}\n\n'

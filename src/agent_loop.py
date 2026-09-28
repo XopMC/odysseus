@@ -1193,6 +1193,47 @@ def _extract_last_user_message(messages: List[Dict]) -> str:
     return ""
 
 
+_SUBAGENT_MENTION_RE = re.compile(r"(?:subagents?|сабагент\w*)", re.IGNORECASE)
+_SUBAGENT_DENIAL_RE = re.compile(
+    r"не\s+(?:создавай|создавать|запускай|запускать|порождай|делегируй)"
+    r"(?:\s+\w+){0,2}\s+(?:subagents?|сабагент\w*)"
+    r"|no\s+more\s+(?:new\s+)?subagents?"
+    r"|don't\s+(?:create|spawn|delegate)\s+(?:(?:any|more|new)\s+){0,2}subagents?",
+    re.IGNORECASE,
+)
+_SUBAGENT_ALLOW_RE = re.compile(
+    r"(?:создай|создайте|запусти|запустите|делегируй|поручи|create|spawn|delegate)"
+    r".{0,120}(?:subagents?|сабагент\w*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _user_forbids_more_subagents(messages: List[Dict]) -> bool:
+    """Honor the newest explicit user guidance about creating more children.
+
+    Old Goal retries can retain earlier delegation requests in their checkpoint.
+    Resolve the most recent user message that actually mentions subagents, so a
+    later explicit prohibition fences creation while still allowing
+    ``manage_subagents`` to inspect, message, or stop existing children.
+    """
+    for message in reversed(list(messages or [])[-200:]):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                str(item.get("text") or "") for item in content if isinstance(item, dict)
+            )
+        text = str(content or "")[-12000:]
+        if not _SUBAGENT_MENTION_RE.search(text):
+            continue
+        if _SUBAGENT_DENIAL_RE.search(text):
+            return True
+        if _SUBAGENT_ALLOW_RE.search(text):
+            return False
+    return False
+
+
 def _user_turn_count(messages: List[Dict]) -> int:
     """Count real user turns in the message list."""
     count = 0
@@ -4574,6 +4615,7 @@ async def stream_agent_loop(
     _subagent_state = {
         "started": 0,
         "max_children_per_model": MAX_ACTIVE_PER_MODEL,
+        "delegation_forbidden_by_user": _user_forbids_more_subagents(messages),
         **({"child_run_id": child_run_id} if child_run_id else {}),
     }
     _t1 = time.time()
