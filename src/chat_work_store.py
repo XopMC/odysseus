@@ -358,6 +358,29 @@ class ChatWorkStore:
             db.flush()
             return _public_plan(row)
 
+    def ensure_plan_executing(self, owner, session_id):
+        """Start a draft Plan or resume its current step after checkpoint recovery."""
+        plan = self.get(owner, session_id).get("plan")
+        if not isinstance(plan, dict):
+            raise WorkNotFound("Plan not found")
+        status = plan.get("status")
+        if status in {"draft", "approved"}:
+            return self.plan_action(owner, session_id, "execute", plan["revision"])
+        if status != "executing":
+            raise WorkConflict("Plan cannot resume in its current state")
+        steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
+        unfinished = [step for step in steps
+                      if step.get("required", True) and step.get("status") != "done"]
+        if not unfinished:
+            return plan
+        current = next((step for step in unfinished if step.get("status") == "in_progress"), None)
+        if current:
+            return plan
+        return self.update_plan_step(
+            owner, session_id, str(unfinished[0].get("id") or ""), "in_progress",
+            expected_revision=plan["revision"],
+        )
+
     def revise_goal(self, owner, session_id, objective, expected_revision):
         objective = _clean_text(objective, "goal", 12000)
         with SessionLocal.begin() as db:

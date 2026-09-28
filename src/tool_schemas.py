@@ -674,7 +674,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_subagents",
-            "description": "List, inspect, message, stop, remove, or briefly wait for independently running child agents. Spawn all independent children first. Omit child_ids to wait for children of the current parent run. Wait is capped at 30 seconds; on timeout continue independent parent work. Finished results are also delivered at model-round boundaries. Pass wait_for='all' only at the final join.",
+            "description": "List, inspect, message, stop, remove, or briefly wait for independently running child agents. During an active Goal, the model MUST NOT stop/remove children unless the latest user message explicitly requests it; the user may also manage them in the Subagents UI. Spawn all independent children first. Omit child_ids to wait for children of the current parent run. Wait is capped at 30 seconds; on timeout continue independent parent work. Finished results are also delivered at model-round boundaries. Pass wait_for='all' only at the final join.",
             "parameters": {
                 "type": "object",
                 "properties": {

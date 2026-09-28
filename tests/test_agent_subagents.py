@@ -72,6 +72,87 @@ def test_child_runtime_has_stable_file_and_verification_tool_core():
     }
 
 
+@pytest.mark.parametrize("action,method", [("stop", "stop"), ("remove", "remove")])
+def test_active_goal_cannot_autonomously_stop_or_remove_children(monkeypatch, action, method):
+    calls = []
+
+    async def mutate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"exit_code": 0, "status": "cancelled"}
+
+    monkeypatch.setattr(runtime, method, mutate)
+    result = asyncio.run(tools.manage_subagents(json.dumps({
+        "action": action, "child_id": "child-1",
+    }), {
+        "owner": "alice", "session_id": "s1",
+        "subagent_state": {
+            "active_goal": True,
+            "user_authorized_subagent_actions": set(),
+        },
+    }))
+
+    assert result["policy"] == "active_goal_child_stop_requires_user"
+    assert result["exit_code"] == 1
+    assert calls == []
+
+
+def test_active_goal_child_stop_is_allowed_after_explicit_user_request(monkeypatch):
+    calls = []
+
+    async def stop(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"exit_code": 0, "status": "cancelled"}
+
+    monkeypatch.setattr(runtime, "stop", stop)
+    result = asyncio.run(tools.manage_subagents(json.dumps({
+        "action": "stop", "child_id": "child-1",
+    }), {
+        "owner": "alice", "session_id": "s1",
+        "subagent_state": {
+            "active_goal": True,
+            "user_authorized_subagent_actions": {"stop"},
+        },
+    }))
+
+    assert result["status"] == "cancelled"
+    assert len(calls) == 1
+
+
+def test_explicit_stop_does_not_authorize_removing_child(monkeypatch):
+    async def remove(*_args, **_kwargs):
+        pytest.fail("stop permission must not authorize destructive removal")
+
+    monkeypatch.setattr(runtime, "remove", remove)
+    result = asyncio.run(tools.manage_subagents(json.dumps({
+        "action": "remove", "child_id": "child-1",
+    }), {
+        "owner": "alice", "session_id": "s1",
+        "subagent_state": {
+            "active_goal": True,
+            "user_authorized_subagent_actions": {"stop"},
+        },
+    }))
+
+    assert result["policy"] == "active_goal_child_stop_requires_user"
+    assert result["exit_code"] == 1
+
+
+def test_non_goal_subagent_management_keeps_existing_stop_behavior(monkeypatch):
+    calls = []
+
+    async def stop(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"exit_code": 0, "status": "cancelled"}
+
+    monkeypatch.setattr(runtime, "stop", stop)
+    result = asyncio.run(tools.manage_subagents(json.dumps({
+        "action": "stop", "child_id": "child-1",
+    }), {"owner": "alice", "session_id": "s1", "subagent_state": {}}))
+
+    assert result["status"] == "cancelled"
+    assert len(calls) == 1
+
+
 def test_restart_fences_expired_children_owned_by_the_previous_worker(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

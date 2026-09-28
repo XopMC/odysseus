@@ -256,9 +256,38 @@ def test_post_compaction_recovery_plan_starts_from_pending_draft(owned_chat):
         {"id": "recovery-1-2", "text": "Verify remaining work", "status": "pending", "required": True},
     ], replace_terminal=True)
     assert plan["status"] == "draft"
-    plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
+    plan = work.ensure_plan_executing("alice", owned_chat)
     assert plan["status"] == "executing"
     assert [step["status"] for step in plan["steps"]] == ["in_progress", "pending"]
+
+
+def test_post_compaction_recovery_resumes_an_existing_executing_plan(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Existing Goal Plan", [
+        {"id": "verified", "text": "Verified first work", "status": "pending"},
+        {"id": "remaining", "text": "Continue remaining work", "status": "pending"},
+    ])
+    plan = work.ensure_plan_executing("alice", owned_chat)
+    plan = work.update_plan_step("alice", owned_chat, "verified", "done",
+                                expected_revision=plan["revision"], summary="Verified")
+    assert plan["steps"][1]["status"] == "pending"
+
+    # This is the exact compaction projection used by Goal recovery. save_plan
+    # preserves the already-executing Plan status, so executing it a second time
+    # is invalid; recovery must resume its first unfinished step instead.
+    projected = work.save_plan("alice", owned_chat, "Post-compaction recovery", [
+        {"id": "recovery-1", "text": "Re-read the active Goal and durable checkpoint", "status": "pending"},
+        {"id": "recovery-2", "text": "Verify remaining work", "status": "pending"},
+    ], replace_terminal=True)
+    assert projected["status"] == "executing"
+    with pytest.raises(WorkConflict, match="current state"):
+        work.plan_action("alice", owned_chat, "execute", projected["revision"])
+
+    resumed = work.ensure_plan_executing("alice", owned_chat)
+    assert resumed["status"] == "executing"
+    assert [step["status"] for step in resumed["steps"]] == ["in_progress", "pending"]
+    unchanged = work.ensure_plan_executing("alice", owned_chat)
+    assert unchanged["revision"] == resumed["revision"]
 
 
 def test_post_compaction_plan_reprojection_preserves_verified_progress(owned_chat):

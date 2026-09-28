@@ -385,6 +385,20 @@ async def manage_subagents(content: str, ctx: dict) -> Dict:
         return result
     if action == "message":
         return await runtime.message(owner, session_id, child_id, payload.get("message") or "")
+    subagent_state = ctx.get("subagent_state") if isinstance(ctx.get("subagent_state"), dict) else {}
+    if action in {"stop", "remove", "delete"} and subagent_state.get("active_goal"):
+        authorized_actions = set(subagent_state.get("user_authorized_subagent_actions") or ())
+        normalized_action = "remove" if action in {"remove", "delete"} else "stop"
+        if normalized_action not in authorized_actions:
+            return {
+                "error": (
+                    "An active Goal may not stop or remove its child agents autonomously. "
+                    "Keep running children, continue independent parent work, and collect results asynchronously. "
+                    "Only an explicit user instruction for this exact action authorizes it; the user can also use the Subagents UI."
+                ),
+                "exit_code": 1,
+                "policy": "active_goal_child_stop_requires_user",
+            }
     if action == "stop":
         return await runtime.stop(owner, session_id, child_id)
     if action in {"remove", "delete"}:

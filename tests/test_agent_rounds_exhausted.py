@@ -64,6 +64,27 @@ def test_later_explicit_subagent_request_reenables_delegation():
     ]) is False
 
 
+@pytest.mark.parametrize("message,expected", [
+    ("Stop all subagents now.", {"stop"}),
+    ("Please remove child 123 from this Goal.", {"remove"}),
+    ("Останови всех сабагентов.", {"stop"}),
+    ("Удали сабагента 123.", {"remove"}),
+    ("Stop and remove all subagents.", {"stop", "remove"}),
+])
+def test_explicit_user_subagent_control_is_detected(message, expected):
+    assert al._user_requested_subagent_actions(message) == expected
+
+
+@pytest.mark.parametrize("message", [
+    "Don't stop the subagents; let them continue.",
+    "Не останавливай сабагентов, пусть работают.",
+    "List the subagents and continue working.",
+    "The model should never cancel child agents by itself.",
+])
+def test_subagent_stop_permission_requires_positive_user_instruction(message):
+    assert al._user_requested_subagent_actions(message) == set()
+
+
 def test_delegate_subagent_honors_user_denial_before_resolution(monkeypatch):
     from src.agent_tools.model_interaction_tools import delegate_subagent
 

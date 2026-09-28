@@ -72,7 +72,7 @@ def test_agent_server_recovery_plan_settles_before_continuing():
         '"type": "context_compaction_failed"', 1,
     )[0]
     assert 'replace_terminal=True' in branch
-    assert '_work_store.plan_action(' in branch
+    assert '_work_store.ensure_plan_executing(' in branch
     assert 'if not _settle_compaction(' in branch
     assert branch.index('if not _settle_compaction(') < branch.index(
         '"reason": "server_recovery_plan"'

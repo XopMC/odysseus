@@ -738,7 +738,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "delegate_subagent": f"- ```delegate_subagent``` — Start one independent child agent and return immediately. Start every requested child first so they run in parallel. Args JSON: {{\"objective\":\"...\",\"context\":\"only needed excerpt\",\"attachment_ids\":[\"explicit parent-chat upload ID\"],\"model\":\"auto|exact configured model\"}}. Files are never inherited implicitly; attachment IDs are checked against the parent chat and owner. Selected models are filled breadth-first. Maximum {MAX_ACTIVE_PER_MODEL} children per exact model, or 3 on the active chat model.",
-    "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or briefly wait for several child_ids after all have started. Read returns retained output in content; follow next_result_offset as result_offset for further pages. include_recovery_context=true adds a checkpoint inspection excerpt. Never use send_to_session to contact a child. Wait is bounded to 30 seconds; continue independent parent work on timeout. Finished results also arrive at model-round boundaries. A terminal status alone is not a verdict: require a non-empty result or inspect explicit evidence; an empty result never verifies a claim.",
+    "manage_subagents": "- ```manage_subagents``` — List/read/message/stop/remove child agents, or briefly wait for several child_ids after all have started. During an active Goal you cannot stop/remove a child unless the latest user message explicitly asks; continue parent work while children run. Read returns retained output in content; follow next_result_offset as result_offset for further pages. include_recovery_context=true adds a checkpoint inspection excerpt. Never use send_to_session to contact a child. Wait is bounded to 30 seconds; continue independent parent work on timeout. Finished results also arrive at model-round boundaries. A terminal status alone is not a verdict: require a non-empty result or inspect explicit evidence; an empty result never verifies a claim.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show the cached model inventory without network probes. Use only when the user asks what models are available; refresh live inventory by opening the model picker or endpoint settings.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
@@ -1206,6 +1206,21 @@ _SUBAGENT_ALLOW_RE = re.compile(
     r".{0,120}(?:subagents?|сабагент\w*)",
     re.IGNORECASE | re.DOTALL,
 )
+_SUBAGENT_STOP_ACTION_RE = re.compile(
+    r"(?:\b(?:stop|cancel|terminate|remove|delete|kill)\b.{0,100}"
+    r"\b(?:subagents?|children|child|сабагент\w*|дет(?:ей|и|ей))\b"
+    r"|\b(?:subagents?|children|child|сабагент\w*|дет(?:ей|и|ей))\b.{0,60}"
+    r"\b(?:stop|cancel|terminate|remove|delete|kill)\b"
+    r"|\b(?:останови|остановить|отмени|отменить|удали|удалить|прерви|прервать)\b"
+    r".{0,100}\b(?:сабагент\w*|дет(?:ей|и|ей)|subagents?|children|child)\b"
+    r"|\b(?:сабагент\w*|дет(?:ей|и|ей)|subagents?|children|child)\b.{0,60}"
+    r"\b(?:останови|остановить|отмени|отменить|удали|удалить|прерви|прервать)\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+_SUBAGENT_STOP_NEGATION_RE = re.compile(
+    r"(?:\b(?:don't|do not|never|not|without)\b|\bне\b|\bне\s+(?:надо|нужно)\b)",
+    re.IGNORECASE,
+)
 
 
 def _user_forbids_more_subagents(messages: List[Dict]) -> bool:
@@ -1232,6 +1247,27 @@ def _user_forbids_more_subagents(messages: List[Dict]) -> bool:
         if _SUBAGENT_ALLOW_RE.search(text):
             return False
     return False
+
+
+def _user_requested_subagent_actions(message: str) -> set[str]:
+    """Return explicitly requested child controls from the latest user message."""
+    text = str(message or "")[-12000:]
+    actions: set[str] = set()
+    for match in _SUBAGENT_STOP_ACTION_RE.finditer(text):
+        # A recent negation such as "don't stop the children" is not consent.
+        prefix = text[max(0, match.start() - 48):match.start()]
+        if _SUBAGENT_STOP_NEGATION_RE.search(prefix):
+            continue
+        action_phrase = match.group(0)
+        if re.search(r"\bне\s+(?:останавливай|останавливать|отменяй|удаляй|прерывай)\b",
+                     action_phrase, re.IGNORECASE):
+            continue
+        if re.search(r"\b(?:stop|cancel|terminate|kill|останови|остановить|отмени|отменить|прерви|прервать)\b",
+                     action_phrase, re.IGNORECASE):
+            actions.add("stop")
+        if re.search(r"\b(?:remove|delete|удали|удалить)\b", action_phrase, re.IGNORECASE):
+            actions.add("remove")
+    return actions
 
 
 def _user_turn_count(messages: List[Dict]) -> int:
@@ -4657,6 +4693,13 @@ async def stream_agent_loop(
         "started": 0,
         "max_children_per_model": MAX_ACTIVE_PER_MODEL,
         "delegation_forbidden_by_user": _user_forbids_more_subagents(messages),
+        "active_goal": bool(
+            isinstance(active_goal, dict)
+            and active_goal.get("status") in {"active", "waiting_user"}
+        ),
+        "user_authorized_subagent_actions": _user_requested_subagent_actions(
+            _extract_last_user_message(messages)
+        ),
         **({"child_run_id": child_run_id} if child_run_id else {}),
     }
     _t1 = time.time()
@@ -5297,6 +5340,9 @@ async def stream_agent_loop(
                 "depends on those results. Then call manage_subagents "
                 "action='wait' with all child_ids; it wakes on the first completion by default, so collect remaining "
                 "children later and use wait_for='all' only for the final join. "
+                "During an active Goal, never stop or remove a child yourself unless the latest user message explicitly asks you to. "
+                "A child that is running is not an obsolete duplicate; keep it working and continue your own independent work. "
+                "The user can always stop/remove children from the Subagents UI. "
                 "Never use create_session for subagents; create_session only creates a separate user-visible chat. "
                 "Give each child only the context excerpt it needs, never secrets or the full transcript. "
                 "Children receive ordinary Agent tools within the current user policy; verify their claims before acting. "
@@ -7621,8 +7667,11 @@ async def stream_agent_loop(
                                 ],
                                 replace_terminal=True,
                             )
-                            _server_plan = _work_store.plan_action(
-                                owner, session_id, "execute", _server_plan["revision"],
+                            # Reprojection preserves an already-executing Plan;
+                            # calling plan_action('execute') again rejects that
+                            # valid state and used to strand long Goals here.
+                            _server_plan = _work_store.ensure_plan_executing(
+                                owner, session_id,
                             )
                             if not _pending_compaction_settlement:
                                 raise RuntimeError("Compaction settlement marker is unavailable")
