@@ -81,13 +81,16 @@ class ChildStreamFailure(RuntimeError):
         except (ValueError, TypeError):
             self.status = None
         self.retryable = (
-            self.kind not in {"unknown_side_effect", "context_compaction", "permission_denied",
+            (self.kind == "context_compaction"
+             and "fresh plan" in str(self).lower()
+             and "could not be rebuilt" in str(self).lower())
+            or (self.kind not in {"unknown_side_effect", "context_compaction", "permission_denied",
                               "degenerate_output", "empty_output"}
             and ((self.status is not None and 400 <= self.status <= 599)
                  or any(marker in str(self).lower() for marker in (
                      "read timeout", "connection pool timeout", "upstream timeout",
                      "network error", "cannot reach", "unreachable", "connection reset",
-                 )))
+                 ))))
         )
 
 
@@ -939,6 +942,12 @@ class SubagentRuntime:
                         raise exc
                     consecutive_failures += 1
                     provider_retries += 1
+                    if exc.kind == "context_compaction":
+                        output_repair_instruction = (
+                            "The previous attempt saved a durable compacted checkpoint but did not rebuild its fresh plan. "
+                            "Continue from this checkpoint; inspect the retained private plan and verified progress, "
+                            "then rebuild/update it only if needed. Do not repeat completed steps or stop the mini-goal."
+                        )
                     await flush(force=True)
                     waiting_payload = None
                     messages = ([copy.deepcopy(system_message), *copy.deepcopy(checkpoint)]
@@ -947,6 +956,7 @@ class SubagentRuntime:
                     self._event(child_id, owner, session_id, "transport_retry", {
                         "attempt": consecutive_failures + 1, "retry_limit": 10,
                         "status": exc.status, "reason": str(exc)[:160],
+                        "instruction": output_repair_instruction,
                         "checkpoint_messages": len(checkpoint or []),
                         "consecutive_provider_failures": consecutive_failures,
                         "provider_retries": provider_retries,
@@ -1257,6 +1267,10 @@ class SubagentRuntime:
             if retry and (checkpoint is None or retry.id > checkpoint.id):
                 for key in ("consecutive_provider_failures", "provider_retries"):
                     payload[key] = int((retry.payload or {}).get(key) or 0)
+                if (retry.payload or {}).get("instruction"):
+                    payload["output_repair_instruction"] = str(
+                        (retry.payload or {}).get("instruction") or ""
+                    )[:4000]
             if output_retry and (checkpoint is None or output_retry.id > checkpoint.id):
                 retry_payload = output_retry.payload or {}
                 payload["output_retries"] = int(retry_payload.get("attempt") or 0)

@@ -905,6 +905,66 @@ def test_child_timeout_persists_actionable_error_instead_of_blank(monkeypatch, c
         db.commit(); db.close()
 
 
+def test_child_recovers_fresh_plan_failure_from_durable_compaction_checkpoint(monkeypatch):
+    owner = "compact-retry-" + uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    db = SessionLocal()
+    db.add(Session(id=session_id, name="compaction retry test", endpoint_url="http://local",
+                   model="parent", owner=owner))
+    db.commit(); db.close()
+    calls = 0
+
+    async def fake_loop(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "data: " + json.dumps({
+                "type": "context_checkpoint",
+                "messages": [{"role": "user", "content": "safe retained checkpoint"}],
+                "compactions": 1,
+            }) + "\n\n"
+            yield "data: " + json.dumps({
+                "type": "agent_terminal",
+                "data": {"failed": True, "failure": {
+                    "kind": "context_compaction",
+                    "message": "Compaction succeeded, but the required fresh plan could not be rebuilt.",
+                }},
+            }) + "\n\n"
+        else:
+            yield 'data: {"delta":"Recovered from the checkpoint and verified the remaining work."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
+    monkeypatch.setattr("src.subagent_runtime._retry_delay", lambda _attempt: 0)
+
+    async def scenario():
+        child = await runtime.spawn(
+            owner=owner, session_id=session_id, parent_run_id="parent",
+            objective="safe plan recovery", assigned_context="", endpoint_url="http://local",
+            model="worker", headers={}, endpoint_id="ep", timeout_seconds=60,
+            workspace=None, access_mode="ask_important",
+        )
+        await runtime._tasks[child["child_id"]]
+        result = runtime.get(owner, session_id, child["child_id"])
+        assert result["status"] == "completed"
+        assert "Recovered from the checkpoint" in result["result"]
+        assert result["metrics"]["provider_retries"] == 1
+        events = runtime.events(owner, session_id, child_id=child["child_id"], limit=100)
+        retry = next(event for event in events if event["kind"] == "transport_retry")
+        assert "did not rebuild its fresh plan" in retry["payload"]["instruction"]
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        db = SessionLocal()
+        ids = [row.id for row in db.query(ChatSubagentRun).filter(ChatSubagentRun.owner == owner).all()]
+        if ids:
+            db.query(ChatSubagentEvent).filter(ChatSubagentEvent.child_id.in_(ids)).delete(synchronize_session=False)
+            db.query(ChatSubagentRun).filter(ChatSubagentRun.id.in_(ids)).delete(synchronize_session=False)
+        db.query(Session).filter(Session.id == session_id).delete(synchronize_session=False)
+        db.commit(); db.close()
+
+
 def test_child_never_retries_after_tool_start(monkeypatch):
     owner = "no-retry-" + uuid.uuid4().hex
     session_id = uuid.uuid4().hex
