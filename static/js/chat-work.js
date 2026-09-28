@@ -42,8 +42,15 @@ function toast(message, error = false) {
 function renderPlan() {
   const node = el('plan-mode-status');
   if (!node) return;
-  const draftEnabled = !!document.getElementById('plan-toggle')?.checked;
   const plan = snapshot.plan;
+  let draftEnabled = !!document.getElementById('plan-toggle')?.checked;
+  if (draftEnabled && ['done', 'cancelled'].includes(plan?.status)) {
+    // Plan mode is a one-shot proposal mode. Leaving it selected after the
+    // previous plan finishes silently makes the next Agent request read-only,
+    // even though the visible composer still says Agent and Shell is on.
+    window.__odysseusSetPlanMode?.(false);
+    draftEnabled = false;
+  }
   node.hidden = plan?.status === 'cancelled' || (!draftEnabled && !plan);
   if (node.hidden) el('subagents-status')?.style.removeProperty('top');
   if (plan?.status === 'cancelled') {

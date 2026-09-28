@@ -249,7 +249,8 @@ class ChatWorkStore:
             } for row in rows]
 
     def save_plan(self, owner, session_id, title, steps, *, expected_revision=None,
-                  replace_terminal=False, replace_previous_goal_plan_run_id=None):
+                  replace_terminal=False, replace_previous_goal_plan_run_id=None,
+                  replace_after_run_id=None):
         title = _clean_text(title or "Plan", "plan title", 1000)
         if isinstance(steps, str):
             steps = checklist_steps(steps)
@@ -279,6 +280,23 @@ class ChatWorkStore:
                 db.add(row)
                 db.flush()
             else:
+                if replace_after_run_id and row.status in {"cancelled", "done"}:
+                    origin_run = db.query(ChatRunState).filter_by(
+                        owner=stored_owner, session_id=session_id,
+                        run_id=replace_after_run_id, status="running",
+                    ).first()
+                    active_goal = db.query(ChatGoal).filter_by(
+                        owner=stored_owner, session_id=session_id,
+                    ).first()
+                    # A terminal Plan belongs to its earlier run. A later
+                    # owner-scoped run may start a fresh one, but a stale call
+                    # from the finishing run or the same unfinished Goal must
+                    # never reopen it. A newly created Goal has its own
+                    # replacement path below.
+                    if (origin_run is not None and origin_run.started_at
+                            and row.updated_at and origin_run.started_at > row.updated_at
+                            and (active_goal is None or active_goal.status in {"completed", "cancelled"})):
+                        replace_terminal = True
                 if replace_previous_goal_plan_run_id and row.status in {"cancelled", "done"}:
                     goal = db.query(ChatGoal).filter_by(owner=stored_owner, session_id=session_id).first()
                     origin_run = db.query(ChatRunState).filter_by(
@@ -301,7 +319,10 @@ class ChatWorkStore:
             # Legacy update_plan is an adapter. Once execution has started it
             # must not silently reset or advance durable step progress. Reconcile
             # IDs by explicit ID first, then matching text for old clients.
-            if row is not None and row.steps:
+            replaces_finished_plan = bool(
+                replace_terminal and row is not None and row.status in {"cancelled", "done"}
+            )
+            if row is not None and row.steps and not replaces_finished_plan:
                 _reconcile_plan_steps(
                     normalized, row.steps,
                     # Recovery may replace an old terminal Plan, but a fresh
@@ -312,9 +333,12 @@ class ChatWorkStore:
             step_ids = [step["id"] for step in normalized]
             if len(step_ids) != len(set(step_ids)):
                 raise ValueError("Plan step IDs must be unique")
-            replaces_finished_plan = bool(
-                replace_terminal and row is not None and row.status in {"cancelled", "done"}
-            )
+            if replaces_finished_plan:
+                # Preserve the old generation in ChatWorkEvent and give this
+                # Plan its own identity. Keep revision monotonic so stale UI
+                # actions still fail their CAS check.
+                row.id = uuid.uuid4().hex
+                row.created_at = utcnow_naive()
             prior_status = "draft" if replaces_finished_plan else (row.status if row is not None else "draft")
             if prior_status in {"draft", "approved"} and any(
                 step["status"] != "pending" for step in normalized

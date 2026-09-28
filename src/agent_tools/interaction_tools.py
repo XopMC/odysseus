@@ -69,6 +69,7 @@ class CreatePlanTool:
                 # clients still fail closed unless they explicitly opt in.
                 replace_terminal=bool(ctx.get("plan_recovery")) if isinstance(ctx, dict) else False,
                 replace_previous_goal_plan_run_id=ctx.get("parent_run_id") if isinstance(ctx, dict) else None,
+                replace_after_run_id=ctx.get("parent_run_id") if isinstance(ctx, dict) else None,
             )
             snapshot = store.get(owner, session_id)
             goal = snapshot.get("goal")
@@ -187,6 +188,7 @@ class UpdatePlanTool:
                     owner, session_id, (current or {}).get("title") or "Plan", plan,
                     expected_revision=(current or {}).get("revision", 0),
                     replace_terminal=bool(ctx.get("plan_recovery")) if isinstance(ctx, dict) else False,
+                    replace_after_run_id=ctx.get("parent_run_id") if isinstance(ctx, dict) else None,
                 )
                 goal = store.get(owner, session_id).get("goal")
                 if goal and goal.get("status") == "active" and saved.get("status") == "draft":

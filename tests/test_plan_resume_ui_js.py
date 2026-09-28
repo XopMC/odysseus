@@ -17,6 +17,16 @@ def test_executing_plan_keeps_continue_button_visible():
     assert "plan.status === 'executing' ? t('Continue')" in source
 
 
+def test_completed_plan_releases_one_shot_plan_mode_before_next_agent_send():
+    source = SRC.read_text(encoding="utf-8")
+    start = source.index("function renderPlan() {")
+    end = source.index("function renderGoal() {", start)
+    render = source[start:end]
+    assert "['done', 'cancelled'].includes(plan?.status)" in render
+    assert "window.__odysseusSetPlanMode?.(false)" in render
+    assert "draftEnabled = false" in render
+
+
 @pytest.mark.skipif(not shutil.which("node"), reason="Node.js unavailable")
 def test_plan_continue_checks_remote_run_before_submitting():
     source = SRC.read_text(encoding="utf-8")

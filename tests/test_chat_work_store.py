@@ -382,6 +382,68 @@ def test_create_plan_replaces_only_a_previous_goals_terminal_plan(owned_chat, ne
     assert saved["steps"][0]["id"] == ("new" if new_goal else "old")
 
 
+def test_new_agent_run_can_replace_completed_plan_but_stale_run_cannot(owned_chat):
+    from core.database import ChatRunState
+    from src.agent_tools.interaction_tools import CreatePlanTool
+
+    store = ChatWorkStore()
+    old_run = uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(run_id=old_run, session_id=owned_chat, owner="alice",
+                            status="running"))
+    old = store.save_plan("alice", owned_chat, "Old plan", [
+        {"id": "old", "text": "Old verified step"},
+    ])
+    old = store.plan_action("alice", owned_chat, "execute", old["revision"])
+    old = store.update_plan_step("alice", owned_chat, "old", "done")
+
+    with pytest.raises(WorkConflict, match="no longer mutable"):
+        store.save_plan("alice", owned_chat, "Stale plan", [
+            {"id": "stale", "text": "Stale step"},
+        ], replace_after_run_id=old_run)
+
+    new_run = uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(run_id=new_run, session_id=owned_chat, owner="alice",
+                            status="running"))
+    _, result = asyncio.run(CreatePlanTool().execute(json.dumps({
+        "title": "New plan", "steps": [{"id": "new", "text": "New step"}],
+        "expected_revision": old["revision"],
+    }), {"owner": "alice", "session_id": owned_chat, "parent_run_id": new_run}))
+    assert result["exit_code"] == 0
+    fresh = result["plan_update"]
+    assert fresh["id"] != old["id"]
+    assert fresh["revision"] > old["revision"]
+    assert fresh["status"] == "draft"
+    assert [step["id"] for step in fresh["steps"]] == ["new"]
+    with pytest.raises(WorkConflict, match="Plan changed"):
+        store.plan_action("alice", owned_chat, "execute", old["revision"])
+    assert any(event["type"] == "plan_saved" and event["entity_id"] == old["id"]
+               for event in store.events("alice", owned_chat))
+
+
+def test_legacy_update_plan_starts_fresh_generation_in_later_run(owned_chat):
+    from core.database import ChatRunState
+
+    store = ChatWorkStore()
+    old = store.save_plan("alice", owned_chat, "Old", [{"id": "old", "text": "Old step"}])
+    old = store.plan_action("alice", owned_chat, "execute", old["revision"])
+    old = store.update_plan_step("alice", owned_chat, "old", "done")
+    run_id = uuid.uuid4().hex
+    with SessionLocal.begin() as db:
+        db.add(ChatRunState(run_id=run_id, session_id=owned_chat, owner="alice",
+                            status="running"))
+    _, result = asyncio.run(UpdatePlanTool().execute(
+        json.dumps({"plan": "- [ ] New check\n- [ ] Verify new check"}),
+        {"owner": "alice", "session_id": owned_chat, "parent_run_id": run_id},
+    ))
+    assert result["exit_code"] == 0
+    fresh = result["plan_update"]
+    assert fresh["id"] != old["id"]
+    assert fresh["status"] == "draft"
+    assert len(fresh["steps"]) == 2
+
+
 @pytest.mark.parametrize("plan_before_goal", [False, True])
 def test_duplicate_create_plan_is_idempotent_during_active_goal(owned_chat, plan_before_goal):
     from src.agent_tools.interaction_tools import CreatePlanTool
