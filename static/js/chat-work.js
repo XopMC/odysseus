@@ -161,6 +161,9 @@ function renderGoal() {
     resumeButton.hidden = false;
     quickResume.hidden = false;
     el('goal-mode-status-toggle').hidden = true;
+    // setGoalMode(false) syncs the composer toggle by hiding this whole card;
+    // leave the durable restore affordance visible after that sync finishes.
+    node.hidden = false;
     return;
   }
   if (el('goal-work-save')) el('goal-work-save').hidden = false;

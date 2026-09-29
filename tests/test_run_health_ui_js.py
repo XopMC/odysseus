@@ -112,7 +112,7 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
         'goal-mode-status','goal-work-state','goal-work-objective','goal-work-objective-preview','goal-work-ui-lag',
         'goal-work-budget-warning',
         'goal-work-budget-warning-indicator',
-        'goal-work-progress','goal-work-pause','goal-work-resume','goal-work-cancel',
+        'goal-work-progress','goal-work-save','goal-work-pause','goal-work-resume','goal-work-cancel',
         'goal-work-quick-pause','goal-work-quick-resume','goal-work-quick-cancel',
         'goal-mode-status-toggle','goal-work-health-indicator','goal-work-health-detail',
         'wait-mode-status','wait-phase','wait-duration','wait-run-id','wait-child-id',
@@ -165,6 +165,9 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
             goal={...goal,status:'active',revision:goal.revision+1};
             if(staleResume){staleResume=false;return{ok:false,status:409,json:async()=>({detail:'Goal changed; reload'})};}
             return{ok:true,json:async()=>goal};}
+          if(url.endsWith('/goal/restore')){
+            goal={...goal,status:'active',revision:goal.revision+1};
+            return{ok:true,json:async()=>goal};}
           if(url.endsWith('/why-waiting'))return{ok:true,json:async()=>url.includes('/chat-2/')?{phase:'idle',run_id:null,goal_status:null}:wait};
           if(url.includes('/api/chat/work/'))return{ok:true,json:async()=>({goal:url.endsWith('chat-2')?null:goal,plan:null,cursor:0})};
           if(delayOld && url.endsWith('/chat-1'))return new Promise(resolve=>{releaseOld=()=>resolve({ok:true,json:async()=>run})});
@@ -180,6 +183,7 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       },{context});
       await work.link(spec=>spec.includes('runHealth')?health:spec.includes('chatRenderer')?renderer:i18n);await work.evaluate();
       const api=work.namespace.default;
+      window.__odysseusSetGoalMode=()=>{ids['goal-mode-status'].hidden=true};
       assert.equal(typeof api.refreshRunHealth,'function');
       assert.equal(typeof api.refreshWait,'function');
       assert.equal(typeof api.runWaitAction,'function');
@@ -304,6 +308,14 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       await api.refresh('chat-2');releaseOld();await stale;
       assert.equal(ids['goal-work-health-indicator'].hidden,true,'late result from prior chat must not leak into new chat');
       assert.equal(ids['wait-mode-status'].hidden,true);
+      goal={...goal,status:'cancelled',revision:goal.revision+1};
+      await api.refresh('chat-1');
+      assert.equal(ids['goal-mode-status'].hidden,false,'cancelled Goal must remain recoverable after toggle sync');
+      assert.equal(ids['goal-work-resume'].hidden,false);
+      assert.equal(ids['goal-work-quick-resume']['aria-label'],'Restore goal');
+      assert.equal(ids['goal-work-save'].hidden,true);
+      await api.mutate('goal','restore');
+      assert.equal(api.getSnapshot().goal.status,'active');
       goal=null;wait={...wait,run_status:'done',goal_status:null,current_child:null};
       await api.refresh('chat-1');await api.refreshWait('chat-1');
       assert.equal(ids['wait-mode-status'].hidden,true,'finished idle chat must not keep a floating wait button');
