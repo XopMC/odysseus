@@ -2,6 +2,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -12,7 +13,10 @@ from core.database import (
     ChatSubagentRun, Session,
 )
 from core import database
-from routes.chat_routes import _child_delivery_checkpoint_frame, _prepare_stream_messages
+from routes.chat_routes import (
+    _child_delivery_checkpoint_frame, _prepare_stream_messages,
+    _restore_goal_checkpoint_messages,
+)
 from src import agent_runs
 from src import subagent_delivery as delivery
 from src.prompt_security import untrusted_context_message
@@ -370,6 +374,34 @@ def test_parent_run_checkpoints_child_evidence_before_delivery_ack(monkeypatch):
         }
         assert "verified 42" in checkpoint["messages"][-1]["content"]
         assert db.get(ChatSubagentDelivery, "a" * 32).status == "delivered"
+
+
+def test_restored_goal_seals_child_result_separately_from_control_message():
+    control = "Continue the current Goal from its durable checkpoint"
+    child_result = "Finished child result: partial verified work"
+    preface = [{"role": "system", "content": "current policy"}]
+    ctx = SimpleNamespace(
+        preface=preface,
+        messages=preface + [{"role": "user", "content": control}],
+        route_messages=preface + [{"role": "user", "content": control}],
+    )
+    ledger = [{"role": "user", "content": "original objective"}] + [
+        {"role": "assistant", "content": "prior verified progress " * 180}
+        for _ in range(62)
+    ]
+    _restore_goal_checkpoint_messages(ctx, ledger)
+    messages = _prepare_stream_messages(
+        ctx.route_messages, control, child_delivery_content=child_result,
+    )
+    assert messages[-2]["content"] == control
+    assert messages[-2].get("metadata") is None
+    assert messages[-1]["metadata"]["source"] == "child-agent results"
+    assert messages[-1]["metadata"]["trusted"] is False
+    assert sum(child_result in str(item.get("content") or "") for item in messages) == 1
+    frame = _child_delivery_checkpoint_frame(messages, "a" * 32)
+    payload = json.loads(frame.removeprefix("data: "))
+    assert payload["subagent_delivery_token"] == "a" * 32
+    assert payload["messages"][-1]["metadata"]["source"] == "child-agent results"
 
 
 def test_round_boundary_child_result_is_recoverable_until_parent_finishes(monkeypatch):

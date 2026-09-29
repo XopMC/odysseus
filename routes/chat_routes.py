@@ -409,9 +409,17 @@ def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], curre
     return repaired
 
 
-def _prepare_stream_messages(messages, current_message, *, tool_approval=False, child_delivery=False):
+def _prepare_stream_messages(messages, current_message, *, tool_approval=False,
+                             child_delivery=False, child_delivery_content=None):
     if tool_approval:
         return list(messages)
+    if child_delivery_content:
+        # Goal continuation has its own trusted server control message. Keep
+        # the claimed child result separate and explicitly untrusted, so the
+        # sealed ledger can prove exactly what reached the model.
+        return _ensure_current_request_is_latest_user(messages, current_message) + [
+            untrusted_context_message("child-agent results", child_delivery_content)
+        ]
     if child_delivery:
         # The internal delivery token was validated before context building.
         # Results are new evidence, never new human authority or permissions.
@@ -1353,6 +1361,7 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            child_delivery_summary = None
             if subagent_continuation or subagent_delivery_token:
                 # This is an internal model-visible result, not a browser
                 # message.  Do not let a guessed token create a new run or
@@ -1368,7 +1377,7 @@ def setup_chat_routes(
                 )
                 if not child_results:
                     raise HTTPException(409, "Child result delivery is unavailable or already consumed")
-                message = str(message or "") + "\n\n" + child_results
+                child_delivery_summary = child_results
                 chat_mode = "agent"
             try:
                 from routes.prefs_routes import get_access_mode_for_user
@@ -1739,7 +1748,7 @@ def setup_chat_routes(
                 else None
             ),
             persist_user_message=(not tool_approval_continuation and not goal_continuation
-                                  and not subagent_continuation),
+                                  and not subagent_continuation and not subagent_delivery_token),
         )
 
         if str(getattr(sess, "project_id", None) or "").strip():
@@ -2249,6 +2258,7 @@ def setup_chat_routes(
                 context_source, message,
                 tool_approval=tool_approval_continuation,
                 child_delivery=subagent_continuation,
+                child_delivery_content=child_delivery_summary,
             )
 
             if subagent_delivery_token:
