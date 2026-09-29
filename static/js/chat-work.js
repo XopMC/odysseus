@@ -139,13 +139,31 @@ function renderGoal() {
   }
   if (detail) { detail.hidden = !warning; detail.textContent = message; }
   const live = goal && !['completed', 'cancelled'].includes(goal.status);
-  // A cancelled goal remains in the durable audit log, but it is no longer
-  // active UI state and must disappear after cancel, reload, or reconnect.
-  node.hidden = goal?.status === 'cancelled' || (!draftEnabled && !goal);
+  // Keep a cancelled Goal recoverable from its durable checkpoint. It is not
+  // active work until the owner explicitly restores this exact revision.
+  node.hidden = !draftEnabled && !goal;
+  const restore = goal?.status === 'cancelled';
+  const resumeButton = el('goal-work-resume');
+  const quickResume = el('goal-work-quick-resume');
+  if (resumeButton) resumeButton.textContent = t(restore ? 'Restore goal' : 'Resume');
+  if (quickResume) {
+    quickResume.setAttribute('aria-label', t(restore ? 'Restore goal' : 'Resume goal'));
+    quickResume.title = t(restore ? 'Restore goal' : 'Resume goal');
+  }
   if (goal?.status === 'cancelled') {
     window.__odysseusSetGoalMode?.(false);
+    el('goal-work-objective-preview').textContent = t('Cancelled goal');
+    el('goal-work-state').textContent = t('Cancelled goal');
+    el('goal-work-objective').value = goal.objective || '';
+    el('goal-work-progress').textContent = goal.progress || '';
+    ['goal-work-pause', 'goal-work-cancel', 'goal-work-quick-pause', 'goal-work-quick-cancel',
+      'goal-work-save'].forEach(id => { if (el(id)) el(id).hidden = true; });
+    resumeButton.hidden = false;
+    quickResume.hidden = false;
+    el('goal-mode-status-toggle').hidden = true;
     return;
   }
+  if (el('goal-work-save')) el('goal-work-save').hidden = false;
   if (!goal) {
     const state = el('goal-work-state');
     const objective = el('goal-work-objective');
@@ -184,10 +202,10 @@ function renderGoal() {
     && (!effectInboxLoaded || effectInbox.some(effect =>
       ['unknown', 'verified_not_applied'].includes(effect.status)));
   el('goal-work-pause').hidden = goal.status !== 'active';
-  el('goal-work-resume').hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
+  resumeButton.hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
   el('goal-work-cancel').hidden = !live;
   el('goal-work-quick-pause').hidden = goal.status !== 'active';
-  el('goal-work-quick-resume').hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
+  quickResume.hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
   el('goal-work-quick-cancel').hidden = !live;
   el('goal-mode-status-toggle').hidden = true;
   if (goal.status === 'completed') window.__odysseusSetGoalMode?.(false);
@@ -519,7 +537,7 @@ async function mutate(kind, action) {
     snapshot[kind] = await post(`${api}/api/chat/work/${encodeURIComponent(sessionId)}/${kind}/${action}`, { expected_revision: record.revision });
     if (kind === 'goal') { runHealthSnapshot = null; void refreshWait(sessionId); }
     if (kind === 'plan' && action === 'cancel') { snapshot.plan = null; window.__odysseusSetPlanMode?.(false); }
-    if (kind === 'goal' && action === 'cancel') { snapshot.goal = null; window.__odysseusSetGoalMode?.(false); }
+    if (kind === 'goal' && action === 'cancel') window.__odysseusSetGoalMode?.(false);
     render();
     if (kind === 'goal' && action === 'pause') window.refreshChatContextHeader?.('goal-paused');
     if (kind === 'plan' && action === 'execute') {
@@ -529,11 +547,11 @@ async function mutate(kind, action) {
     }
   } catch (error) {
     await refresh(sessionId);
-    const desiredStatus = { pause: 'paused', resume: 'active', cancel: 'cancelled' }[action];
+    const desiredStatus = { pause: 'paused', resume: 'active', restore: 'active', cancel: 'cancelled' }[action];
     const current = snapshot[kind];
     if (kind === 'goal' && error.status === 409 && desiredStatus
         && current?.id === record.id && current.status === desiredStatus) return;
-    if (kind === 'goal' && action === 'resume' && error.status === 409) {
+    if (kind === 'goal' && ['resume', 'restore'].includes(action) && error.status === 409) {
       await refreshEffects(sessionId);
       if (effectInboxLoaded && effectInbox.some(effect =>
         ['unknown', 'verified_not_applied'].includes(effect.status))) {
@@ -808,10 +826,10 @@ function bind() {
     catch (error) { toast(error.message, true); await refresh(); }
   });
   el('goal-work-pause')?.addEventListener('click', () => mutate('goal', 'pause'));
-  el('goal-work-resume')?.addEventListener('click', () => mutate('goal', 'resume'));
+  el('goal-work-resume')?.addEventListener('click', () => mutate('goal', snapshot.goal?.status === 'cancelled' ? 'restore' : 'resume'));
   el('goal-work-cancel')?.addEventListener('click', () => mutate('goal', 'cancel'));
   el('goal-work-quick-pause')?.addEventListener('click', () => mutate('goal', 'pause'));
-  el('goal-work-quick-resume')?.addEventListener('click', () => mutate('goal', 'resume'));
+  el('goal-work-quick-resume')?.addEventListener('click', () => mutate('goal', snapshot.goal?.status === 'cancelled' ? 'restore' : 'resume'));
   el('goal-work-quick-cancel')?.addEventListener('click', () => mutate('goal', 'cancel'));
   el('goal-work-save')?.addEventListener('click', reviseGoal);
   el('wait-refresh')?.addEventListener('click', () => refreshWait());

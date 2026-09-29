@@ -508,7 +508,7 @@ class ChatWorkStore:
             return _public_goal(row)
 
     def goal_action(self, owner, session_id, action, expected_revision):
-        statuses = {"pause": "paused", "resume": "active", "cancel": "cancelled"}
+        statuses = {"pause": "paused", "resume": "active", "cancel": "cancelled", "restore": "active"}
         if action not in statuses:
             raise ValueError("Invalid goal action")
         with SessionLocal.begin() as db:
@@ -518,16 +518,25 @@ class ChatWorkStore:
                 raise WorkNotFound("Goal not found")
             if row.revision != expected_revision:
                 raise WorkConflict("Goal changed; reload")
-            if row.status in {"completed", "cancelled"}:
+            if action == "restore" and row.status != "cancelled":
+                raise WorkConflict("Only a cancelled Goal can be restored")
+            if action != "restore" and row.status in {"completed", "cancelled"}:
                 raise WorkConflict("Goal is already terminal")
             row.status = statuses[action]
-            if action == "resume":
+            if action in {"resume", "restore"}:
                 row.checkpoint = {
                     key: value for key, value in dict(row.checkpoint or {}).items()
                     if key not in {"_wait_reason", "auto_decide_question_id"}
                 }
+            if action == "restore":
+                row.failure_count = 0
+                row.failure_key = None
+                row.last_error = None
+                row.lease_token = None
+                row.lease_expires_at = None
             row.revision += 1
-            event_kind = {"pause": "goal_paused", "resume": "goal_resumed", "cancel": "goal_cancelled"}[action]
+            event_kind = {"pause": "goal_paused", "resume": "goal_resumed",
+                          "cancel": "goal_cancelled", "restore": "goal_restored"}[action]
             self._event(db, owner, session_id, event_kind, row.id, row.revision, _public_goal(row))
             db.flush()
             return _public_goal(row)

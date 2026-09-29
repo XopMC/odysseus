@@ -28,8 +28,10 @@ def test_goal_and_plan_are_in_composer_overflow_and_model_picker_stays_visible()
 
     assert "['completed', 'cancelled'].includes(snapshot.goal?.status)" in work
     assert "function prepareNewPlan()" in work
-    assert "action === 'cancel') { snapshot.goal = null; window.__odysseusSetGoalMode?.(false); }" in work
+    assert "action === 'cancel') window.__odysseusSetGoalMode?.(false);" in work
     assert "goal?.status === 'cancelled'" in work
+    assert "mutate('goal', snapshot.goal?.status === 'cancelled' ? 'restore' : 'resume')" in work
+    assert "'Restore goal':'Восстановить цель'" in (root / 'static/js/i18n.js').read_text()
     assert "plan?.status === 'cancelled'" in work
     assert "bindUiText(state, 'Waiting for a goal')" in work
     assert "bindUiText(objective, 'Your next message becomes the active goal.')" in work

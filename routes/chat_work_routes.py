@@ -249,7 +249,7 @@ def setup_chat_work_routes():
         body = await _json(request)
         if set(body) != {"expected_revision"}:
             raise HTTPException(400, "Exact goal revision required")
-        if action == "resume":
+        if action in {"resume", "restore"}:
             from src.chat_effect_inbox import inbox
             if inbox.blocking(owner, session_id):
                 raise HTTPException(409, "Tool effect must be reconciled or explicitly authorized before Goal resumes")
@@ -270,9 +270,11 @@ def setup_chat_work_routes():
             goal = store.goal_action(owner, session_id, action, body["expected_revision"])
         except WorkConflict as exc:
             raise HTTPException(409, str(exc)) from None
-        if action == "resume":
+        if action in {"resume", "restore"}:
             from src.goal_controller import dispatch_goal_continuation
-            started = await dispatch_goal_continuation(owner, session_id, reason="goal_resumed")
+            started = await dispatch_goal_continuation(
+                owner, session_id, reason="goal_restored" if action == "restore" else "goal_resumed",
+            )
             if not started:
                 raise HTTPException(503, "Goal continuation did not start; inspect status before retrying")
         return goal

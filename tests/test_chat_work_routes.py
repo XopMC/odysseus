@@ -342,6 +342,50 @@ def test_goal_resume_dispatches_server_controller_before_return(monkeypatch):
     assert calls == [("alice", "chat-1", "goal_resumed")]
 
 
+def test_goal_restore_dispatches_server_controller_and_checks_effect_inbox(monkeypatch):
+    from src.chat_effect_inbox import inbox
+    import src.goal_controller as controller
+    from src import agent_runs
+
+    calls = []
+    class RestoreStore(WorkStoreStub):
+        def goal_action(self, owner, session_id, action, expected_revision):
+            calls.append(("store", owner, session_id, action, expected_revision))
+            return {"id": "goal-1", "session_id": session_id, "status": "active",
+                    "revision": expected_revision + 1}
+    async def dispatch(owner, session_id, *, reason):
+        calls.append(("dispatch", owner, session_id, reason))
+        return True
+    monkeypatch.setattr(inbox, "blocking", lambda owner, session: [])
+    monkeypatch.setattr(agent_runs, "describe_run", lambda session: None)
+    monkeypatch.setattr(controller, "dispatch_goal_continuation", dispatch)
+    monkeypatch.setattr(chat_work_routes, "store", RestoreStore())
+    monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: "alice")
+    app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
+    with TestClient(app) as client:
+        response = client.post("/api/chat/work/chat-1/goal/restore", json={"expected_revision": 7})
+    assert response.status_code == 200
+    assert calls == [
+        ("store", "alice", "chat-1", "restore", 7),
+        ("dispatch", "alice", "chat-1", "goal_restored"),
+    ]
+
+
+def test_goal_restore_does_not_replay_unreconciled_tool_effect(monkeypatch):
+    from src.chat_effect_inbox import inbox
+    monkeypatch.setattr(inbox, "blocking", lambda owner, session: [{"id": "unknown-effect"}])
+    store = WorkStoreStub()
+    monkeypatch.setattr(chat_work_routes, "store", store)
+    monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: "alice")
+    app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
+    with TestClient(app) as client:
+        response = client.post("/api/chat/work/chat-1/goal/restore", json={"expected_revision": 7})
+    assert response.status_code == 409
+    assert store.calls == []
+
+
 def test_goal_resume_does_not_report_success_when_controller_did_not_start(monkeypatch):
     from src.chat_effect_inbox import inbox
     import src.goal_controller as controller

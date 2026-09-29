@@ -112,6 +112,33 @@ def test_paused_goal_cannot_be_completed_by_an_ordinary_agent_run(owned_chat):
     assert completed["status"] == "completed"
 
 
+def test_accidentally_cancelled_goal_restores_same_checkpoint_and_plan(owned_chat):
+    work = ChatWorkStore()
+    plan = work.save_plan("alice", owned_chat, "Approved work", [
+        {"id": "verify", "text": "Verify the output", "required": True},
+    ])
+    plan = work.plan_action("alice", owned_chat, "execute", plan["revision"])
+    goal = work.ensure_goal("alice", owned_chat, "Finish approved work")
+    goal = work.update_goal("alice", owned_chat, "Progress saved", {
+        "model_ledger": [{"role": "tool", "content": "verified evidence"}],
+        "context_revision": 7,
+    })
+    cancelled = work.goal_action("alice", owned_chat, "cancel", goal["revision"])
+    with pytest.raises(WorkConflict, match="reload"):
+        work.goal_action("alice", owned_chat, "restore", goal["revision"])
+    restored = work.goal_action("alice", owned_chat, "restore", cancelled["revision"])
+    assert restored["status"] == "active"
+    assert restored["id"] == goal["id"]
+    assert restored["checkpoint"]["model_ledger"] == [{"role": "tool", "content": "verified evidence"}]
+    assert restored["checkpoint"]["context_revision"] == 7
+    assert work.get("alice", owned_chat)["plan"]["revision"] == plan["revision"]
+    assert [event["type"] for event in work.events("alice", owned_chat)][-2:] == [
+        "goal_cancelled", "goal_restored",
+    ]
+    with pytest.raises(WorkConflict):
+        work.goal_action("alice", owned_chat, "restore", restored["revision"])
+
+
 def test_legacy_update_plan_starts_active_goal_plan_and_completion_waits_for_steps(owned_chat):
     work = ChatWorkStore()
     work.ensure_goal("alice", owned_chat, "Calculate and verify 13 × 17 using two plan steps")
