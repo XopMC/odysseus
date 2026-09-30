@@ -2533,6 +2533,7 @@ async def llm_call_async(
     availability_only_transport: bool = False,
     return_model_metadata: bool = False,
     require_answer_content: bool = False,
+    bypass_cache: bool = False,
 ) -> str | tuple[str, str]:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
@@ -2556,7 +2557,7 @@ async def llm_call_async(
     )
     if require_answer_content:
         cache_key += ":answer-content-only"
-    cached_response = _get_cached_response(cache_key)
+    cached_response = None if bypass_cache else _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         if return_model_metadata:
@@ -2591,11 +2592,10 @@ async def llm_call_async(
                     continue
                 if raw == "[DONE]":
                     response = "".join(parts)
-                    _set_cached_response(
-                        cache_key,
-                        response,
-                        actual_model=actual_model,
-                    )
+                    if not bypass_cache:
+                        _set_cached_response(
+                            cache_key, response, actual_model=actual_model,
+                        )
                     return (
                         (response, actual_model)
                         if return_model_metadata
@@ -2622,7 +2622,8 @@ async def llm_call_async(
                 if isinstance(delta, str) and not (require_answer_content and data.get("thinking")):
                     parts.append(delta)
         response = "".join(parts)
-        _set_cached_response(cache_key, response, actual_model=actual_model)
+        if not bypass_cache:
+            _set_cached_response(cache_key, response, actual_model=actual_model)
         return (response, actual_model) if return_model_metadata else response
 
     if provider == "anthropic":
@@ -2758,11 +2759,10 @@ async def llm_call_async(
                         response = (content or "") if require_answer_content else (content or msg.get("reasoning_content") or "")
                 if require_answer_content and not response.strip():
                     raise HTTPException(502, "Model returned reasoning but no answer content")
-                _set_cached_response(
-                    cache_key,
-                    response,
-                    actual_model=actual_model,
-                )
+                if not bypass_cache:
+                    _set_cached_response(
+                        cache_key, response, actual_model=actual_model,
+                    )
                 return (
                     (response, actual_model)
                     if return_model_metadata

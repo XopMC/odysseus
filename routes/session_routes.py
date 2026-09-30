@@ -1103,7 +1103,7 @@ def setup_session_routes(
         preview = manual_compaction_plan(
             working_history, recent_keep, measured_tokens=int(estimate_tokens(working_history)),
         )
-        older, recent = preview["older"], preview["recent"]
+        older, recent, pinned = preview["older"], preview["recent"], preview["pinned"]
         if not preview["feasible"]:
             return {
                 "ok": False, "status": "unchanged", "reason": "native_not_compactable",
@@ -1135,6 +1135,7 @@ def setup_session_routes(
         from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary, is_compaction_prompt_echo
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
+        from src.context_compaction_retry import summarize_with_retries, bound_checkpoint_summary
         from src.model_context import get_context_length
         import hashlib
 
@@ -1160,32 +1161,66 @@ def setup_session_routes(
             "{count}", str(len(older))
         ).replace(
             "{n}", str(prior_compactions + 1)
-        )
-        convo_text = "\n".join(
-            f"{_message_role(m).upper()}: {_message_text(m)[:2000]}"
-            for m in older
-        )
+        ) + "\nReturn a final factual answer only. /no_think"
+        from src.agent_context import manual_compaction_evidence_chunks, native_tool_groups
+        evidence_groups = []
+        for group in native_tool_groups(older):
+            group_lines = []
+            for message in group:
+                content = _message_text(message)
+                line = f"{_message_role(message).upper()}: {content[:2000]}"
+                if len(content) > 2000:
+                    line += "\n[Message excerpt; remainder retained in the durable transcript]"
+                if isinstance(message, dict):
+                    tool_fields = {key: message[key] for key in ("tool_calls", "tool_call_id")
+                                   if key in message}
+                    if tool_fields:
+                        line += "\n" + json.dumps(tool_fields, ensure_ascii=False, default=str)[:2000]
+                group_lines.append(line)
+            evidence_groups.append("\n".join(group_lines))
         summary_window = int(get_context_length(url, model) or 0)
-        if summary_window and estimate_tokens([{"role": "user", "content": convo_text}]) > int(summary_window * 0.7):
-            raise HTTPException(413, "Working context exceeds the summarizer input budget")
+        # A large Agent run can be much longer than the utility model's
+        # window. Summarize bounded sequential segments, carrying forward the
+        # previous segment summary instead of rejecting the whole checkpoint.
+        chunk_budget = max(512, min(24000, int((summary_window or 8192) * .45) - 2048))
+        evidence_chunks = manual_compaction_evidence_chunks(evidence_groups, chunk_budget)
         context_length = int(get_context_length(session.endpoint_url, session.model) or 0)
         before_tokens = int(estimate_tokens(session.get_context_messages()))
         try:
-            summary = await llm_call_async(
-                url,
-                model,
-                [{"role": "system", "content": prompt}, {"role": "user", "content": convo_text}],
-                temperature=0.2,
-                max_tokens=1024,
-                headers=headers,
-                timeout=600,
-            )
+            summary = ""
+            for chunk in evidence_chunks:
+                segment = (f"Prior checkpoint:\n{summary}\n\nNext evidence segment:\n{chunk}"
+                           if summary else chunk)
+                generation_attempt = 0
+
+                async def summarize_segment(segment=segment):
+                    nonlocal generation_attempt
+                    generation_attempt += 1
+                    window = summary_window or 8192
+                    first_budget = max(512, min(8192, int(window * .3)))
+                    retry_budget = max(first_budget, min(16384, int(window * .4)))
+                    return await llm_call_async(
+                        url, model,
+                        [{"role": "system", "content": prompt}, {"role": "user", "content": segment}],
+                        temperature=0.2,
+                        max_tokens=first_budget if generation_attempt == 1 else retry_budget,
+                        headers=headers, timeout=600, max_retries=1,
+                        bypass_cache=True, require_answer_content=True,
+                    )
+
+                summary = await summarize_with_retries(
+                    summarize_segment,
+                    normalize=lambda value: normalize_compaction_summary(
+                        re.sub(r"<think>.*?</think>", "", value or "", flags=re.S),
+                    ),
+                    valid=lambda value: bool(value) and not value.startswith("<think>")
+                    and not is_compaction_prompt_echo(value),
+                    timeout_seconds=600,
+                )
+                summary = bound_checkpoint_summary(summary)
         except Exception as e:
-            logger.error("Manual compaction failed: %s", e)
-            raise HTTPException(500, "Compaction failed")
-        summary = normalize_compaction_summary(summary)
-        if not summary or is_compaction_prompt_echo(summary):
-            raise HTTPException(502, "Compaction returned no usable summary; checkpoint unchanged")
+            logger.error("Manual compaction failed after five retries: %s", type(e).__name__)
+            raise HTTPException(502, "Compaction failed after five retries; checkpoint unchanged")
 
         previous = getattr(session, "context_checkpoint", None)
         previous_count = getattr(session, "context_checkpoint_count", 0)
@@ -1216,6 +1251,7 @@ def setup_session_routes(
                 "context_revision": context_revision,
                 "context_generation": context_generation,
                 "context_reason": "manual_compaction",
+                "pinned_messages": pinned,
                 "model": session.model,
                 "endpoint_url": session.endpoint_url,
             },
@@ -1248,6 +1284,13 @@ def setup_session_routes(
             session.context_checkpoint = previous
             session.context_checkpoint_count = int(previous_count or 0)
             raise HTTPException(503, "Context checkpoint could not be persisted")
+        if persist_checkpoint:
+            from src.agent_runs import invalidate_working_checkpoint_after_manual_compaction
+            if not invalidate_working_checkpoint_after_manual_compaction(session.id):
+                session.context_checkpoint = previous
+                session.context_checkpoint_count = int(previous_count or 0)
+                persist_checkpoint(session.id)
+                raise HTTPException(503, "Superseded run checkpoint could not be retired")
         session_manager.save_sessions()
 
         before_percent = round(before_tokens / context_length * 100, 1) if context_length else 0.0

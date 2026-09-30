@@ -170,7 +170,13 @@ class Session:
         checkpoint = self.context_checkpoint
         checkpoint_count = int(self.context_checkpoint_count or 0)
         if checkpoint is not None and 0 < checkpoint_count <= len(self.history):
-            history_for_context = [checkpoint, *self.history[checkpoint_count:]]
+            # Manual compaction may cover a long run whose original user goal
+            # precedes the cut. Keep that exact user message outside the
+            # summary while replacing only the archived transcript prefix.
+            pinned = (checkpoint.metadata or {}).get("pinned_messages") or []
+            pinned = [ChatMessage(item["role"], item.get("content"), item.get("metadata"))
+                      for item in pinned if isinstance(item, dict) and item.get("role") == "user"]
+            history_for_context = [checkpoint, *pinned, *self.history[checkpoint_count:]]
 
         messages = [
             msg.to_dict()

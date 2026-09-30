@@ -178,18 +178,21 @@ async def test_summary_timeout_fails_closed_without_main_dispatch(ctx, monkeypat
     # Keep this timeout-path unit test short without changing the production
     # minimum of ten minutes for slow local model summarization.
     monkeypatch.setattr(ContextPolicy, 'effective_summary_timeout_seconds',
-                        property(lambda policy: policy.summary_timeout_seconds))
+                        property(lambda _policy: .01))
+    async def instant_pause(_index):
+        return None
+    monkeypatch.setattr('src.context_compaction_retry._retry_pause', instant_pause)
     save(ctx, {'summary_timeout_seconds': 5}, task_id=ctx[2], worker_id=ctx[3]['id'])
     async def slow_summary():
         await asyncio.sleep(20)
         return {'role': 'assistant', 'content': 'late'}
-    ctx[6].append(slow_summary)
+    ctx[6].extend([slow_summary] * 6)
     messages = [{'role': 'user', 'content': 'Goal'}] + [
         {'role': 'assistant', 'content': 'x' * 610} for _ in range(16)]
     before = copy.deepcopy(messages)
     with pytest.raises(PermissionError, match='compaction'):
         await request(ctx, messages)
-    assert len(ctx[5]) == 1 and ctx[5][0]['max_tokens'] == 128
+    assert len(ctx[5]) == 6 and all(call['max_tokens'] == 128 for call in ctx[5])
     assert messages == before
 
 

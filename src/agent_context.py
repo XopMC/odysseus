@@ -8,6 +8,7 @@ import re
 from src.model_context import estimate_tokens
 from src.prompt_security import untrusted_context_message
 from src.context_compactor import is_compaction_prompt_echo
+from src.context_compaction_retry import summarize_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,11 @@ def _groups(messages):
     return groups
 
 
+def native_tool_groups(messages):
+    """Public read-only grouping for checkpoint evidence and split planning."""
+    return _groups(messages)
+
+
 def _excerpt(message):
     # Serialize arguments and tool IDs as well as content. Treat everything as
     # data: summarization is not permission to act on retrieved instructions.
@@ -98,7 +104,7 @@ def manual_compaction_plan(messages, recent_message_limit: int, *, measured_toke
     durable checkpoint can still be represented by one transcript index.
     """
     if type(recent_message_limit) is not int or recent_message_limit < 1:
-        return {'feasible': False, 'reason': 'invalid_target', 'older': [], 'recent': [],
+        return {'feasible': False, 'reason': 'invalid_target', 'older': [], 'recent': [], 'pinned': [],
                 'archive_groups': 0, 'protected_groups': 0}
     groups = _groups(messages)
     start = len(groups)
@@ -113,12 +119,18 @@ def manual_compaction_plan(messages, recent_message_limit: int, *, measured_toke
                and (message.get('metadata') or {}).get('trusted') is not False
                for message in groups[index])
     ), None)
-    if latest_user_group is not None:
-        start = min(start, latest_user_group)
-    older_groups = groups[:start]
+    # The newest user request may be the very first message of a long agent
+    # run. Preserve it verbatim outside the summarized prefix instead of
+    # forcing the contiguous tail to begin there (which made such runs
+    # permanently impossible to compact).
+    pinned_groups = ([groups[latest_user_group]]
+                     if latest_user_group is not None and latest_user_group < start else [])
+    older_groups = [group for index, group in enumerate(groups[:start])
+                    if index != latest_user_group]
     recent_groups = groups[start:]
     older = [message for group in older_groups for message in group]
     recent = [message for group in recent_groups for message in group]
+    pinned = [message for group in pinned_groups for message in group]
     archive_groups = sum(
         1 for group in older_groups
         if any(message.get('role') != 'system' for message in group)
@@ -131,9 +143,10 @@ def manual_compaction_plan(messages, recent_message_limit: int, *, measured_toke
         'reason': None if feasible else 'native_not_compactable',
         'older': older,
         'recent': recent,
+        'pinned': pinned,
         'archive_groups': archive_groups,
-        'protected_groups': len(recent_groups),
-        'retained_messages': len(recent),
+        'protected_groups': len(recent_groups) + len(pinned_groups),
+        'retained_messages': len(recent) + len(pinned),
     }
 
 
@@ -145,6 +158,47 @@ def manual_compaction_preview(messages, recent_message_limit: int, *, measured_t
     return {key: plan[key] for key in (
         'feasible', 'reason', 'archive_groups', 'protected_groups', 'retained_messages',
     )}
+
+
+def manual_compaction_evidence_chunks(lines, max_tokens: int) -> list[str]:
+    """Bound manual summarizer prefill without discarding the archived ledger.
+
+    Each chunk is summarized in order, carrying the prior checkpoint forward.
+    A single oversized line is explicitly excerpted; the original transcript
+    remains durable and available for later verification.
+    """
+    if type(max_tokens) is not int or max_tokens < 128:
+        raise ValueError("Invalid summarizer input budget")
+    chunks, current = [], []
+
+    def weight(text):
+        return estimate_tokens([{"role": "user", "content": text}])
+
+    for raw_line in lines:
+        line = str(raw_line)
+        if weight(line) > max_tokens:
+            marker = "\n[Source excerpt omitted; consult the durable transcript]\n"
+            low, high, fitted = 0, len(line), marker
+            while low <= high:
+                keep = (low + high) // 2
+                left = keep // 2
+                right = keep - left
+                candidate = line[:left] + marker + (line[-right:] if right else "")
+                if weight(candidate) <= max_tokens:
+                    fitted = candidate
+                    low = keep + 1
+                else:
+                    high = keep - 1
+            line = fitted
+        candidate = "\n".join([*current, line])
+        if current and weight(candidate) > max_tokens:
+            chunks.append("\n".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 async def compact_working_context(messages, limit, summarize, *, policy=None, target_limit=None, manual=False):
@@ -238,12 +292,15 @@ async def compact_working_context(messages, limit, summarize, *, policy=None, ta
         {"role": "user", "content": evidence},
     ]
     try:
-        summary = await asyncio.wait_for(summarize(prompt), timeout=policy.effective_summary_timeout_seconds if policy else 600)
-        summary = re.sub(r"<think>.*?</think>", "", summary or "", flags=re.S).strip()
-        if not summary or summary.startswith("<think>"):
-            raise ValueError("Summarizer returned no usable answer")
-        if is_compaction_prompt_echo(summary):
-            raise ValueError("Summarizer echoed internal context envelope")
+        summary = await summarize_with_retries(
+            lambda: summarize(prompt),
+            normalize=lambda value: re.sub(
+                r"<think>.*?</think>", "", value or "", flags=re.S,
+            ).strip(),
+            valid=lambda value: bool(value) and not value.startswith("<think>")
+            and not is_compaction_prompt_echo(value),
+            timeout_seconds=policy.effective_summary_timeout_seconds if policy else 600,
+        )
         if policy is not None and estimate_tokens([{'role': 'assistant', 'content': summary}]) > policy.summary_tokens:
             marker = (
                 "\n[Checkpoint summary exceeded its configured budget; middle omitted. "

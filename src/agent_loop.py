@@ -6479,6 +6479,7 @@ async def stream_agent_loop(
                                 headers=summary_headers, timeout=attempt_timeout,
                                 max_retries=1, session_id=session_id,
                                 require_answer_content=True,
+                                bypass_cache=True,
                             ),
                             timeout=attempt_timeout,
                         )

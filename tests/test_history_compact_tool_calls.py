@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
-from core.models import ChatMessage
+from core.models import ChatMessage, Session
 import routes.history_routes as history_routes
 import routes.session_routes as session_routes
 
@@ -84,8 +84,12 @@ class _FakeSession:
     def __init__(self, history):
         self.history = history
         self.message_count = len(history)
+        self.context_checkpoint = None
+        self.context_checkpoint_count = 0
 
     def get_context_messages(self):
+        if all(isinstance(msg, ChatMessage) for msg in self.history):
+            return Session.get_context_messages(self)
         return [
             msg.to_dict() if isinstance(msg, ChatMessage) else msg
             for msg in self.history
@@ -143,7 +147,9 @@ def _registered_compact_response(monkeypatch, history, active_run=False, working
     async def fake_llm_call_async(endpoint_url, model, messages, **kwargs):
         captured["messages"] = messages
         captured["timeout"] = kwargs.get("timeout")
-        return summary_text
+        captured.setdefault("calls", []).append(messages)
+        captured.setdefault("call_kwargs", []).append(kwargs)
+        return summary_text.pop(0) if isinstance(summary_text, list) else summary_text
 
     monkeypatch.setattr(
         session_routes,
@@ -318,8 +324,71 @@ def test_manual_compaction_native_feasibility_gate_avoids_summarizer(monkeypatch
     assert manager.saved is False
 
 
+def test_manual_compaction_preserves_initial_goal_outside_long_archived_run(monkeypatch):
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "get_context_length", lambda _url, _model: 131072)
+    goal = "Original user request must stay exact after checkpoint and reload."
+    history = [ChatMessage(role="user", content=goal)] + [
+        ChatMessage(role="assistant", content=f"verified round {i}: " + "evidence " * 500)
+        for i in range(12)
+    ]
+    response, captured, manager = _registered_compact_response(monkeypatch, history)
+    assert response.status_code == 200
+    assert response.json()["status"] == "compacted"
+    assert manager.session.context_checkpoint_count > 1
+    assert goal not in captured["messages"][1]["content"]
+    messages = manager.session.get_context_messages()
+    assert messages[0]["role"] == "system"
+    assert [item["content"] for item in messages if item["role"] == "user"] == [goal]
+    reloaded = Session(
+        id="session-1", name="Long run", endpoint_url="http://example.test/v1",
+        model="test-model", history=list(history),
+        context_checkpoint=manager.session.context_checkpoint,
+        context_checkpoint_count=manager.session.context_checkpoint_count,
+    )
+    assert reloaded.get_context_messages() == messages
+    assert len(reloaded.history) == len(history)
+
+
+def test_manual_compaction_processes_long_evidence_in_bounded_segments(monkeypatch):
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "get_context_length", lambda _url, _model: 4096)
+    history = [ChatMessage(role="user", content="Original request")]
+    history += [ChatMessage(role="assistant", content=f"round {i}: " + "x" * 1900)
+                for i in range(24)]
+    response, captured, manager = _registered_compact_response(monkeypatch, history)
+    assert response.status_code == 200
+    assert response.json()["status"] == "compacted"
+    assert len(captured["calls"]) > 1
+    assert all(model_context.estimate_tokens(call) < 4096 * .7
+               for call in captured["calls"])
+    assert manager.session.get_context_messages()[1]["content"] == "Original request"
+
+
+def test_manual_compaction_retries_reasoning_only_with_larger_answer_budget(monkeypatch):
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "get_context_length", lambda _url, _model: 131072)
+    async def instant_pause(_index):
+        return None
+    monkeypatch.setattr("src.context_compaction_retry._retry_pause", instant_pause)
+    history = [ChatMessage(role="user", content=f"request {i}") for i in range(6)]
+    response, captured, manager = _registered_compact_response(
+        monkeypatch, history, summary_text=["", "Verified summary"],
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "compacted"
+    assert [call["max_tokens"] for call in captured["call_kwargs"]] == [8192, 16384]
+    assert all(call["timeout"] == 600 and call["bypass_cache"] is True
+               for call in captured["call_kwargs"])
+    assert manager.session.context_checkpoint is not None
+
+
 def test_manual_compaction_does_not_claim_success_without_reduction(monkeypatch):
     from src import model_context
+    # This test deliberately makes every estimate the same number; bypass the
+    # independent summary-fit guard so it isolates the no-reduction rollback.
+    monkeypatch.setattr("src.context_compaction_retry.bound_checkpoint_summary",
+                        lambda summary: summary)
     monkeypatch.setattr(model_context, "estimate_tokens", lambda messages: 2000)
     history = [ChatMessage(role="user", content=f"entry {i}") for i in range(6)]
     response, _captured, manager = _registered_compact_response(monkeypatch, history)

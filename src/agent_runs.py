@@ -1558,6 +1558,35 @@ def context_checkpoint_for_session(session_id: str) -> Optional[dict]:
     return dict(value)
 
 
+def invalidate_working_checkpoint_after_manual_compaction(session_id: str) -> bool:
+    """Prevent a stale run ledger from superseding a newer manual checkpoint.
+
+    The manual checkpoint is already persisted before this is called. Only the
+    replacement-run ledger is removed; the durable run, events, and transcript
+    remain available for audit and replay.
+    """
+    from core.database import ChatRunState, SessionLocal
+    run = _RUNS.get(session_id)
+    if run is not None and run.status == "running":
+        return False
+    try:
+        with SessionLocal() as db:
+            row = db.query(ChatRunState).filter(
+                ChatRunState.session_id == session_id,
+            ).order_by(ChatRunState.updated_at.desc(), ChatRunState.started_at.desc()).first()
+            if row is not None:
+                continuation = dict(row.continuation or {})
+                continuation.pop("working_checkpoint", None)
+                row.continuation = continuation
+                db.commit()
+            if run is not None:
+                run.continuation.pop("working_checkpoint", None)
+        return True
+    except Exception:
+        logger.exception("[agent-run] unable to retire superseded working checkpoint")
+        return False
+
+
 def covered_checkpoint_messages(session, owner) -> Optional[list]:
     """Ordinary Agent follow-ups require exact owner/run/transcript coverage."""
     from src.checkpoint_coverage import restore_messages
