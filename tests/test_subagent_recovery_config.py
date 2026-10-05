@@ -197,6 +197,63 @@ def test_revised_goal_and_tampered_snapshot_are_rejected(case):
         prepare(case, altered)
 
 
+def test_paused_goal_children_recover_only_after_same_goal_resumes(case):
+    with case.factory.begin() as db:
+        db.get(ChatRunState, case.parent).continuation = {"goal": True}
+        db.add(ChatGoal(id="goal", owner="alice", session_id="s",
+                        objective="Original QA", status="active"))
+    snapshot = capture_child(case)
+    with case.factory.begin() as db:
+        parent = db.get(ChatRunState, case.parent)
+        parent.status = "stopped"
+        parent.continuation = {"goal": True, "terminal_reason": "goal_paused"}
+        db.get(ChatGoal, "goal").status = "paused"
+    with pytest.raises(recovery.RecoveryUnavailable) as caught:
+        prepare(case, snapshot)
+    assert caught.value.code == "goal_not_active"
+    assert caught.value.retryable is True
+    assert case.state.resolutions == 0
+    with case.factory.begin() as db:
+        db.get(ChatGoal, "goal").status = "active"
+    restored = prepare(case, snapshot)
+    assert restored["model"] == "worker"
+    assert restored["workspace"] == case.capture_args["workspace"]
+    with case.factory() as db:
+        assert recovery.validate_recovery_seal(
+            db, owner="alice", session_id="s", child_id="child",
+            seal=restored["recovery_seal"],
+        )
+
+
+@pytest.mark.parametrize("reason", ["user_stop", "goal_cancelled", "cancelled", "superseded_by_new_run"])
+def test_active_goal_does_not_override_explicit_parent_stop(case, reason):
+    with case.factory.begin() as db:
+        db.get(ChatRunState, case.parent).continuation = {"goal": True}
+        db.add(ChatGoal(id="goal", owner="alice", session_id="s",
+                        objective="Original QA", status="active"))
+    snapshot = capture_child(case)
+    with case.factory.begin() as db:
+        parent = db.get(ChatRunState, case.parent)
+        parent.status = "stopped"
+        parent.continuation = {"goal": True, "terminal_reason": reason}
+    with pytest.raises(recovery.RecoveryUnavailable) as caught:
+        prepare(case, snapshot)
+    assert caught.value.code == "parent_stopped"
+    assert caught.value.retryable is False
+    assert case.state.resolutions == 0
+
+
+def test_goal_pause_exception_does_not_apply_to_ordinary_parent(case):
+    snapshot = capture_child(case)
+    with case.factory.begin() as db:
+        parent = db.get(ChatRunState, case.parent)
+        parent.status = "stopped"
+        parent.continuation = {"terminal_reason": "goal_paused"}
+    with pytest.raises(recovery.RecoveryUnavailable) as caught:
+        prepare(case, snapshot)
+    assert caught.value.code == "parent_stopped"
+
+
 def test_process_restarted_parent_is_eligible_but_not_arbitrary_error(case):
     snapshot = capture_child(case)
     with case.factory.begin() as db:

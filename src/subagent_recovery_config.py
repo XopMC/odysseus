@@ -367,7 +367,10 @@ def prepare_config(*, owner, session_id, child_id, snapshot, db_factory) -> dict
             if continuation.get("goal") is not True:
                 _deny("goal_changed")
             _goal_identity(db, owner, session_id, snapshot["goal"])
-            if reason and reason != "process_restarted":
+            # Pausing ends this parent attempt, not the bound Goal. The exact
+            # same Goal must already be active again (_goal_identity above).
+            # Explicit Stop/Cancel and ordinary parent runs stay fenced.
+            if reason and reason not in {"process_restarted", "goal_paused"}:
                 _deny("parent_stopped")
         else:
             if reason and reason != "process_restarted":
