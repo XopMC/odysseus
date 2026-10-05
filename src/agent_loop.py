@@ -5220,7 +5220,7 @@ async def stream_agent_loop(
     _t2 = time.time()
     _route_context_lengths = {}
 
-    def _trim_route_request_messages(candidate_url, candidate_model, route_messages):
+    async def _trim_route_request_messages(candidate_url, candidate_model, route_messages):
         """Apply the candidate route's own context budget to its request."""
 
         def _without_protection(items):
@@ -5238,7 +5238,8 @@ async def stream_agent_loop(
             )
             from src.model_context import budget_context_for_model
 
-            candidate_context = budget_context_for_model(
+            candidate_context = await asyncio.to_thread(
+                budget_context_for_model,
                 candidate_url,
                 candidate_model,
                 fallback=context_length,
@@ -5458,7 +5459,7 @@ async def stream_agent_loop(
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
-    _initial_route_request_messages = _trim_route_request_messages(
+    _initial_route_request_messages = await _trim_route_request_messages(
         endpoint_url,
         model,
         messages,
@@ -6268,7 +6269,8 @@ async def stream_agent_loop(
                 _pinned_fallback_candidate = None
                 _pinned_fallback_route = None
                 from src.model_context import budget_context_for_model
-                _last_route_context_length = budget_context_for_model(
+                _last_route_context_length = await asyncio.to_thread(
+                    budget_context_for_model,
                     endpoint_url, model, fallback=context_length,
                 ) or context_length or 8192
                 _route_context_lengths[(endpoint_url, model)] = _last_route_context_length
@@ -6839,7 +6841,10 @@ async def stream_agent_loop(
                 from src.model_context import budget_context_for_model
                 from fastapi import HTTPException
                 from src.llm_core import llm_call_async
-                route_context = budget_context_for_model(candidate_url, candidate_model, fallback=context_length) or context_length or 8192
+                route_context = await asyncio.to_thread(
+                    budget_context_for_model, candidate_url, candidate_model,
+                    fallback=context_length,
+                ) or context_length or 8192
                 _route_context_lengths[(candidate_url, candidate_model)] = route_context
                 candidate_schema_tokens = schema_token_estimate(_tool_schemas_for_route(state))
                 candidate_max_tokens = max(MIN_AGENT_OUTPUT_TOKENS,

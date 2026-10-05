@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -36,6 +37,25 @@ def test_checkpoint_summarizer_error_codes_are_stable_and_redacted():
 
 
 class AgentContextPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_discovery_never_runs_on_agent_event_loop(self):
+        event_loop_thread = threading.get_ident()
+        discovery_threads = []
+
+        def discover(*args, **kwargs):
+            discovery_threads.append(threading.get_ident())
+            return 16384
+
+        for fallback, policy_enabled in ((False, True), (True, True), (True, False)):
+            with self.subTest(fallback=fallback, policy_enabled=policy_enabled):
+                discovery_threads.clear()
+                sent, _, _ = await self.run_agent(
+                    window=16384, window_error=discover,
+                    fallback=fallback, policy_enabled=policy_enabled,
+                )
+                self.assertTrue(sent)
+                self.assertTrue(discovery_threads)
+                self.assertNotIn(event_loop_thread, discovery_threads)
+
     async def asyncSetUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
