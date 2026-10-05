@@ -210,8 +210,12 @@ _TOOL_CODE_OPEN_RE = re.compile(r"<tool_code>\s*\{", re.IGNORECASE)
 _TOOL_CODE_CLOSE_RE = re.compile(r"\}\s*</tool_code>", re.IGNORECASE)
 
 # Pattern 4b: Gemma-style <|tool_call|> call:tool_name{args} <tool_call|>
-_GEMMA_TOOL_CALL_RE = re.compile(
-    r"<\|?tool_call\|?>\s*call:([\w\d_-]+)\s*(\{[\s\S]*?\})\s*<\|?tool_call\|?>",
+_GEMMA_TOOL_OPEN_RE = re.compile(
+    r"<\|?tool_call\|?>\s*call:([\w\d_-]+)\s*(?=\{)",
+    re.IGNORECASE,
+)
+_GEMMA_TOOL_CLOSE_RE = re.compile(
+    r"\}\s*<\|?tool_call\|?>",
     re.IGNORECASE,
 )
 
@@ -1189,12 +1193,16 @@ def _parse_gemma_tool_call(tool_name: str, body: str) -> Optional[ToolBlock]:
             if not isinstance(params, dict):
                 params = {}
         except Exception:
-            # Simple regex key-value extraction fallback
+            # Forward-only field boundaries. An unanchored \w+ key / lazy
+            # value regex rescans long malformed arguments quadratically.
             params = {}
-            for m in re.finditer(r'(\w+)\s*:\s*["\']?(.*?)["\']?(?=\s*,\s*\w+\s*:|\s*\})', body):
-                k = m.group(1)
-                v = m.group(2).strip()
-                params[k] = v
+            fields = list(re.finditer(r'(?:\{|,)\s*(\w+)\s*:\s*', body))
+            for index, field in enumerate(fields):
+                end = fields[index + 1].start() if index + 1 < len(fields) else body.rfind('}')
+                if end >= field.end():
+                    params[field.group(1)] = body[field.end():end].strip().strip('"\'')
+            if not params:
+                return None
 
     from src.tool_schemas import function_call_to_tool_block
     return function_call_to_tool_block(tool_name, json.dumps(params))
@@ -1483,10 +1491,8 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
 
     # Pattern 4b: Gemma-style <|tool_call|> blocks
     if not blocks:
-        for m in _GEMMA_TOOL_CALL_RE.finditer(text):
-            tool_name = m.group(1)
-            body = m.group(2)
-            block = _parse_gemma_tool_call(tool_name, body)
+        for tool_name, body in _iter_named_blocks(text, _GEMMA_TOOL_OPEN_RE, _GEMMA_TOOL_CLOSE_RE):
+            block = _parse_gemma_tool_call(tool_name, body + "}")
             if block:
                 blocks.append(block)
 
@@ -1556,7 +1562,7 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     cleaned = _strip_delimited(cleaned, _XML_TOOL_CALL_OPEN_RE, _XML_TOOL_CALL_CLOSE_RE)
     cleaned = _XML_OPEN_TOOL_CALL_RE.sub('', cleaned)
     cleaned = _strip_delimited(cleaned, _TOOL_CODE_OPEN_RE, _TOOL_CODE_CLOSE_RE)
-    cleaned = _GEMMA_TOOL_CALL_RE.sub('', cleaned)
+    cleaned = _strip_delimited(cleaned, _GEMMA_TOOL_OPEN_RE, _GEMMA_TOOL_CLOSE_RE)
     cleaned = _strip_delimited(cleaned, _FUNCTION_MODEL_OPEN_RE, _FUNCTION_MODEL_CLOSE_RE)
     cleaned = _strip_raw_openai_tool_call_json(cleaned)
     cleaned = _QWEN_ROLE_MARKER_RE.sub('', cleaned)
@@ -1580,17 +1586,20 @@ _STREAM_TOOL_OPENERS = (
     re.compile(r"\[TOOL_CALL\]", re.IGNORECASE),
     re.compile(r"<tool_code\b", re.IGNORECASE),
     re.compile(r"<invoke\b", re.IGNORECASE),
+    re.compile(r"<(?:\|tool_call\|?|tool_call\|)>", re.IGNORECASE),
 )
 _STREAM_TOOL_CLOSERS = (
     re.compile(r"</(?:[\w.-]+:)?(?:tool_call|function_call)\s*>", re.IGNORECASE),
     re.compile(r"\[/TOOL_CALL\]", re.IGNORECASE),
     re.compile(r"</tool_code\s*>", re.IGNORECASE),
     re.compile(r"</invoke\s*>", re.IGNORECASE),
+    re.compile(r"<(?:\|tool_call\|?|tool_call\|)>", re.IGNORECASE),
 )
 _STREAM_TOOL_MARKERS = (
     "<tool_call>", "</tool_call>", "<function_call>", "</function_call>",
     "[tool_call]", "[/tool_call]", "<tool_code", "</tool_code>",
     "<invoke", "</invoke>", "<|tool_call_begin|>", "<|tool▁call▁begin｜>",
+    "<|tool_call|>", "<|tool_call>", "<tool_call|>",
 )
 
 
