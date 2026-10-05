@@ -2361,6 +2361,8 @@ def _model_error_category(
     if status == 429:
         return "rate_limit"
     marker = str(detail or "")[:1000].lower()
+    if status is not None and status >= 500 and 'engine protocol predict request failed' in marker:
+        return 'provider_engine'
     if any(token in marker for token in (
         "context length", "context window", "maximum context", "prompt is too long",
     )):
@@ -2416,6 +2418,8 @@ def _stream_http_rejection_chunk(
         message = "Model rejected the request schema; check model capabilities."
     elif category == "provider_unload":
         message = "Selected model is not loaded on the endpoint."
+    elif category == 'provider_engine':
+        message = 'Selected model inference engine failed; check this loaded instance.'
     elif status == 429:
         message = "Model endpoint rate limit reached."
     elif status in (401, 403):
@@ -3870,6 +3874,12 @@ def _provider_stream_error_status(error, *, default: int = 400) -> int:
         return 429
     if any(token in marker for token in ("overloaded", "over capacity")):
         return 529
+    # LM Studio can accept the HTTP stream and fail its internal engine RPC
+    # later (observed: "Engine protocol predict request failed: fetch failed"
+    # after 300s). With no numeric code this is a provider server failure,
+    # not an invalid caller request. Explicit numeric statuses above still win.
+    if 'engine protocol predict request failed' in marker:
+        return 500
     if any(token in marker for token in ("timeout", "timed out")):
         return 504
     if any(token in marker for token in ("api_error", "server_error", "server error", "internal error", "temporarily unavailable")):

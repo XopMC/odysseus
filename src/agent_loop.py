@@ -7172,7 +7172,7 @@ async def stream_agent_loop(
                     ),
                     "status": terminal_status,
                 }
-                if error_data.get("error_category") in {"degenerate_output", "empty_output", "provider_unload"}:
+                if error_data.get("error_category") in {"degenerate_output", "empty_output", "provider_unload", "provider_engine"}:
                     terminal_error["category"] = error_data["error_category"]
                 if full_response.strip() or round_reasoning.strip() or tool_events or round_texts:
                     _finalize_round_usage(include_empty=False)

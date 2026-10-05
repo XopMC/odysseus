@@ -2168,6 +2168,27 @@ def test_anthropic_stream_preserves_error_semantics(monkeypatch, error, expected
     assert json.loads(chunks[0].split("data: ", 1)[1])["status"] == expected_status
 
 
+def test_lmstudio_engine_protocol_failure_is_server_failure_not_invalid_request(monkeypatch):
+    chunks = _run_provider_stream(
+        monkeypatch, "https://selected.example/v1/chat/completions",
+        ['data: ' + json.dumps({'error': {
+            'message': 'Engine protocol predict request failed: fetch failed',
+        }})],
+    )
+    event = json.loads(chunks[0].split('data: ', 1)[1])
+    assert event['status'] == 500
+    assert event['error_category'] == 'provider_engine'
+    assert event['fallback_eligible'] is False  # no ambiguous request replay
+    assert 'fetch failed' not in event.get('text', '')
+
+
+@pytest.mark.parametrize('status', [400, 401, 403])
+def test_explicit_provider_status_wins_over_engine_error_text(status):
+    assert llm_core._provider_stream_error_status({
+        'status': status, 'message': 'Engine protocol predict request failed: fetch failed',
+    }) == status
+
+
 def test_dedupe_candidates_keeps_first_of_each_route():
     """Exact route repeats are dropped while credential-distinct routes remain."""
     cands = [

@@ -149,7 +149,8 @@ def _list_metrics(metrics: Any) -> dict:
         "request_context_tokens", "context_length", "context_percent", "prefill_tps",
         "provider_error_status", "consecutive_provider_failures",
     ))
-    for key, limit in (("checkpoint_hash", 128), ("usage_source", 32), ("tps_source", 32)):
+    for key, limit in (("checkpoint_hash", 128), ("usage_source", 32), ("tps_source", 32),
+                       ("provider_error_category", 32)):
         value = metrics.get(key)
         if isinstance(value, str):
             compact[key] = value[:limit]
@@ -1223,6 +1224,7 @@ class SubagentRuntime:
                         "provider_retries": provider_retries,
                         "effect_ledger_retries": effect_ledger_retries,
                         "provider_error_status": exc.status if exc.kind != 'effect_ledger' else 0,
+                        "provider_error_category": exc.kind if exc.kind != 'effect_ledger' else '',
                         "consecutive_provider_failures": consecutive_failures,
                     })
                     self._event(child_id, owner, session_id, "transport_retry", {

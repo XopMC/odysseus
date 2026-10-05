@@ -176,6 +176,20 @@ def test_exhausted_provider_retries_keep_partial_work(harness, monkeypatch):
     assert result["metrics"]["provider_error_status"] == 500
 
 
+def test_provider_engine_failure_keeps_server_category_in_child_metrics(harness, monkeypatch):
+    async def stream(*args, **kwargs):
+        yield event('agent_terminal', data={'failed': True, 'failure': {
+            'status': 500, 'category': 'provider_engine',
+            'message': 'Selected model inference engine failed',
+        }})
+    monkeypatch.setattr('src.agent_loop.stream_agent_loop', stream)
+    result = run(harness)
+    assert result['status'] == 'failed'
+    assert result['metrics']['provider_retries'] == 10
+    assert result['metrics']['provider_error_category'] == 'provider_engine'
+    assert children._list_metrics(result['metrics'])['provider_error_category'] == 'provider_engine'
+
+
 def test_unknown_effect_terminal_without_failed_flag_waits_for_reconciliation(harness, monkeypatch):
     calls = 0
 
