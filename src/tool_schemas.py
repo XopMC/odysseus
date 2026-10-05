@@ -868,11 +868,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ask_user",
-            "description": "Ask the user a multiple-choice question when the task is genuinely ambiguous. The user sees clickable choices. During an active Goal, no answer within one minute resumes the agent to choose a safe default; this timeout never grants tool approval. Prefer sensible defaults over asking. Do NOT use this for irreversible/destructive actions with a dedicated confirmation flow.",
+            "description": "Ask the user a multiple-choice question only for genuinely missing task information. Never ask permission for already requested work, plan updates or tests under Full Access. During an active Goal, no answer within one minute resumes the agent to choose a safe default; this timeout never grants tool approval. Do NOT replace dedicated irreversible/destructive confirmation flows.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "description": "The question to ask. Be specific and self-contained."},
+                    "purpose": {"type": "string", "enum": ["clarification", "confirmation"], "description": "Clarification means missing task information; confirmation means permission to act. Full Access redirects redundant confirmation questions without granting new authority."},
                     "options": {
                         "type": "array",
                         "description": "2-6 choices. Each is an object with a short `label` and an optional `description` explaining the trade-off.",

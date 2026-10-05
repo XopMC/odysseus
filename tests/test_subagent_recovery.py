@@ -173,6 +173,7 @@ def test_exhausted_provider_retries_keep_partial_work(harness, monkeypatch):
     assert result["status"] == "failed"
     assert "Partial result remains available" in result["result"]
     assert result["metrics"]["provider_retries"] == 10
+    assert result["metrics"]["provider_error_status"] == 500
 
 
 def test_unknown_effect_terminal_without_failed_flag_waits_for_reconciliation(harness, monkeypatch):

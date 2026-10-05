@@ -10,6 +10,7 @@ import logging
 import sys
 import time
 import threading
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
@@ -243,6 +244,51 @@ _local_context_cache_lock = threading.RLock()
 _LOCAL_CONTEXT_CACHE_TTL = 300.0
 
 
+@dataclass(frozen=True)
+class ServingCapacity:
+    """Loaded instance limits, not an architecture's advertised maximum.
+
+    LM Studio's context pool is conservatively divided by its configured
+    parallelism when it does not expose an authoritative per-sequence window.
+    llama.cpp /slots already reports that window and must NOT be divided twice.
+    Independent loaded instance IDs have independent pools.
+    """
+    instance_id: str
+    context_length: int
+    loaded_context_length: int
+    parallel: int
+    source: str
+
+
+_serving_capacity: Dict[Tuple[str, str], ServingCapacity] = {}
+_local_catalog_cache: Dict[str, Tuple[float, float, object]] = {}
+_local_catalog_locks: Dict[str, threading.Lock] = {}
+
+
+def _local_base(endpoint_url: str) -> str:
+    base = _normalize_base_for_compare(endpoint_url)
+    if '/v1' in base:
+        return base.split('/v1')[0].rstrip('/')
+    for suffix in ('/api/chat', '/api/generate'):
+        if base.endswith(suffix):
+            return base[:-len(suffix)]
+    return base
+
+
+def _positive_int(value) -> Optional[int]:
+    return value if type(value) is int and value > 0 else None
+
+
+def get_serving_capacity(endpoint_url: str, model: str) -> ServingCapacity:
+    # Use the same discovery/cache as context budgeting. No per-round inventory
+    # poll and no model loading side effect. Missing concurrency is one slot,
+    # never the old optimistic four.
+    context = get_context_length(endpoint_url, model)
+    with _local_context_cache_lock:
+        discovered = _serving_capacity.get((_local_base(endpoint_url), model))
+    return discovered or ServingCapacity(model, context, context, 1, 'unknown')
+
+
 def clear_model_context_cache(endpoint_url: Optional[str] = None) -> None:
     """Invalidate discovered context windows after an explicit model refresh.
 
@@ -257,12 +303,19 @@ def clear_model_context_cache(endpoint_url: Optional[str] = None) -> None:
             _local_context_cache.clear()
             _context_cache.clear()
             _catalog_ctx_cache.clear()
+            _serving_capacity.clear()
+            _local_catalog_cache.clear()
             return
         for cache in (_local_context_cache, _context_cache):
             for key in list(cache):
                 if _normalize_base_for_compare(key[0]) == target:
                     cache.pop(key, None)
         _catalog_ctx_cache.pop(target, None)
+        base = _local_base(endpoint_url)
+        _local_catalog_cache.pop(base, None)
+        for key in list(_serving_capacity):
+            if key[0] == base:
+                _serving_capacity.pop(key, None)
 
 
 def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool]:
@@ -441,10 +494,25 @@ def _lmstudio_loaded_context(base: str, model: str) -> Optional[int]:
     Probe only at an already selected local model endpoint; never load a model.
     """
     try:
-        response = httpx.get(f"{base}/api/v1/models", timeout=REQUEST_TIMEOUT)
-        if not response.is_success:
-            return None
-        payload = response.json()
+        # All selected instances share one inventory. A per-endpoint lock
+        # coalesces concurrent starts; never hold the global cache lock during
+        # network I/O (an offline host must not stall other cached endpoints).
+        with _local_context_cache_lock:
+            discovery_lock = _local_catalog_locks.setdefault(base, threading.Lock())
+        with discovery_lock:
+            with _local_context_cache_lock:
+                cached = _local_catalog_cache.get(base)
+            if cached and time.monotonic() - cached[0] < cached[1]:
+                payload = cached[2]
+            else:
+                try:
+                    response = httpx.get(f"{base}/api/v1/models", timeout=REQUEST_TIMEOUT)
+                    payload = response.json() if response.is_success else None
+                except Exception:
+                    payload = None
+                with _local_context_cache_lock:
+                    _local_catalog_cache[base] = (time.monotonic(),
+                                                _LOCAL_CONTEXT_CACHE_TTL if payload else 15.0, payload)
         entries = payload.get("models") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             return None
@@ -459,17 +527,29 @@ def _lmstudio_loaded_context(base: str, model: str) -> Optional[int]:
                 if not isinstance(instance, dict):
                     continue
                 config = instance.get("config")
-                size = config.get("context_length") if isinstance(config, dict) else None
-                if type(size) is not int or size <= 0:
+                size = _positive_int(config.get("context_length")) if isinstance(config, dict) else None
+                if not size:
                     continue
+                parallel = _positive_int(config.get("parallel")) or 1
+                # Explicit per-sequence metadata wins; absent metadata must not
+                # make each of two 128K-pool requests reserve the entire pool.
+                per_request = _positive_int(config.get("context_length_per_slot"))
+                window = min(size, per_request) if per_request else max(1, size // parallel)
+                capacity = ServingCapacity(str(instance.get("id") or model), window,
+                                           size, parallel, 'lmstudio_loaded')
                 if instance.get("id") == model:
-                    exact.append(size)
+                    exact.append(capacity)
                 if entry.get("key") == model:
-                    by_key.append(size)
+                    by_key.append(capacity)
         # A key can route to several instances. Their common safe window is
         # the minimum unless the request names one exact loaded instance.
-        sizes = exact or by_key
-        return min(sizes) if sizes else None
+        capacities = exact or by_key
+        if not capacities:
+            return None
+        capacity = min(capacities, key=lambda value: value.context_length)
+        with _local_context_cache_lock:
+            _serving_capacity[(base, model)] = capacity
+        return capacity.context_length
     except Exception as exc:
         logger.debug("LM Studio loaded-context probe unavailable: %s", exc)
         return None
@@ -501,7 +581,9 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
 
     # Try llama.cpp /slots endpoint first — reports actual serving context
     if is_local_endpoint(endpoint_url):
-        base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rsplit("/", 1)[0]
+        base = _local_base(endpoint_url)
+        with _local_context_cache_lock:
+            _serving_capacity.pop((base, model), None)
         loaded_context = _lmstudio_loaded_context(base, model)
         if loaded_context:
             logger.info("LM Studio loaded instance reports context=%s for %s", loaded_context, model)
@@ -511,8 +593,12 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
             if r.is_success:
                 slots = r.json()
                 if isinstance(slots, list) and slots:
-                    n_ctx = slots[0].get("n_ctx")
-                    if n_ctx and isinstance(n_ctx, int) and n_ctx > 0:
+                    windows = [_positive_int(slot.get('n_ctx')) for slot in slots if isinstance(slot, dict)]
+                    if len(windows) == len(slots) and all(windows):
+                        n_ctx = min(windows)
+                        with _local_context_cache_lock:
+                            _serving_capacity[(base, model)] = ServingCapacity(
+                                '@llama_slots', n_ctx, sum(windows), len(slots), 'llama_slots')
                         logger.info(f"llama.cpp /slots reports n_ctx={n_ctx} for {model}")
                         return n_ctx, True
         except Exception:

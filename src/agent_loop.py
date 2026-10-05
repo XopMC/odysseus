@@ -30,7 +30,7 @@ from src.llm_core import (
     _normalize_usage_counts,
     _stream_failure_user_message,
 )
-from src.model_context import estimate_tokens
+from src.model_context import estimate_tokens, is_local_endpoint
 from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 from src.agent_context import (
     FailedReadGuard, call_signature, compact_working_context,
@@ -3652,6 +3652,17 @@ def _default_agent_output_reserve(window: int, schema_tokens: int,
                available_output, trigger_headroom)
 
 
+def _agent_provider_idle_timeout(endpoint_url: str) -> int:
+    """Local long-context prefill may be silent for minutes, not a dead run.
+
+    Preserve longer operator settings and cloud settings; legacy materialized
+    300-second defaults must not keep killing local child requests at five
+    minutes. This is an inactivity timeout, not a whole-task deadline.
+    """
+    timeout = int(get_setting('agent_stream_timeout_seconds', 600) or 600)
+    return max(600 if is_local_endpoint(endpoint_url) else 1, timeout)
+
+
 def _agent_completion_budget(window: int, prompt_tokens: int, ceiling: int, *,
                              requested_window: int = 0, safety_tokens: int = 1024,
                              safety_percent: int = 5) -> int:
@@ -4561,7 +4572,7 @@ async def stream_agent_loop(
                 max_tokens=min(max_tokens or 128, 128),
                 prompt_type=None,
                 tools=None,
-                timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
+                timeout=_agent_provider_idle_timeout(endpoint_url),
                 session_id=session_id,
                 workload=workload,
                 fallback_statuses=fallback_statuses,
@@ -5357,6 +5368,17 @@ async def stream_agent_loop(
             _set_plan_directive(route_messages, approved_plan)
         if active_goal and not guide_only:
             _prepend_agent_directive(route_messages, build_active_goal_note(active_goal))
+        from src.access_policy import ACCESS_MODE_FULL, normalize_access_mode
+        if normalize_access_mode(access_mode, default=None) == ACCESS_MODE_FULL and not guide_only:
+            _prepend_agent_directive(route_messages, (
+                "## EXISTING FULL ACCESS POLICY\n"
+                "The owner already selected Full Access for otherwise permitted tools. Do not ask "
+                "for permission to perform requested work, start/check tests or update the durable Plan. "
+                "Do the work through the normal tool dispatcher. This does not lift explicit owner "
+                "denies, workspace limits or dedicated effect confirmations. Ask only for genuinely "
+                "missing task information (ask_user purpose='clarification'), never invent an approval "
+                "question merely because work has reached a new Plan step."
+            ))
         if _subagent_mode in {"same_model", "selected_models"} and not guide_only:
             _subagent_scope = (
                 "Use only the current model (model='same')."
@@ -6760,7 +6782,7 @@ async def stream_agent_loop(
         if _economic_decision:
             _working_context['economic_compaction'] = _economic_decision.to_dict()
         yield f'data: {json.dumps({"type": "context_usage", "data": _working_context})}\n\n'
-        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
+        agent_stream_timeout = _agent_provider_idle_timeout(endpoint_url)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")

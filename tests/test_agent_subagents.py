@@ -1470,12 +1470,14 @@ def test_child_stream_flush_batches_reasoning_and_counts_without_rescanning(monk
         db.commit(); db.close()
 
 
-def test_local_transport_allows_four_subagent_prompts_in_flight(monkeypatch):
+def test_local_transport_allows_reported_subagent_prompts_in_flight(monkeypatch):
     import src.llm_core as llm_core
+    from src.model_context import ServingCapacity
 
     monkeypatch.setenv("ODYSSEUS_LOCAL_MODEL_GATE", "true")
     monkeypatch.setattr(llm_core, "is_local_endpoint", lambda _url: True)
-    monkeypatch.setattr(llm_core, "_SUBAGENT_MODEL_SLOTS", {})
+    monkeypatch.setattr('src.model_request_gate.get_serving_capacity',
+                        lambda *_: ServingCapacity('worker-model', 32768, 131072, 4, 'test'))
 
     async def scenario():
         active = 0

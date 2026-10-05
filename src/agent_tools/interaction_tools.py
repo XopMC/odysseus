@@ -1,7 +1,36 @@
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def _redundant_action_confirmation(parsed, question, options, ctx):
+    """Redirect redundant permission questions, never supply an approval.
+
+    Full Access is already an owner-selected gate policy. This does not answer
+    substantive questions, lift disabled tools, or replace effect confirmation
+    flows. A caller with a delegated credential cannot inherit this behavior.
+    """
+    from src.access_policy import ACCESS_MODE_FULL, normalize_access_mode
+    if (not isinstance(ctx, dict) or ctx.get('delegated_credential')
+            or normalize_access_mode(ctx.get('access_mode'), default=None) != ACCESS_MODE_FULL):
+        return False
+    if parsed.get('purpose') == 'clarification':
+        return False
+    if parsed.get('purpose') == 'confirmation':
+        return True
+    if len(options) != 2 or parsed.get('multi') or parsed.get('multiSelect'):
+        return False
+    yes = r'^(yes|approve|confirm|allow|continue|да|разрешить|подтвердить|продолжить)(\b|[,!])'
+    no = r'^(no|deny|cancel|wait|нет|отмена|отклонить|подождать)(\b|[,!])'
+    labels = [option['label'].casefold() for option in options]
+    return (any(re.search(yes, label) for label in labels)
+            and any(re.search(no, label) for label in labels)
+            and bool(re.search(r'\b(permission|approve|confirm|may i|shall i|разреш\w*|подтверд\w*|можно ли)\b',
+                               question.casefold()))
+            and bool(re.search(r'\b(plan|test\w*|run|execute|start|tool\w*|changes|план\w*|тест\w*|запуск\w*|выполн\w*|инструмент\w*|правк\w*)\b',
+                               question.casefold())))
 
 
 def _scope(ctx):
@@ -125,6 +154,18 @@ class AskUserTool:
             }
 
         options = options[:6]  # keep the choice list sane
+        if _redundant_action_confirmation(parsed, question, options, ctx):
+            return 'ask_user: EXISTING ACCESS POLICY', {
+                'output': (
+                    'Full Access is already selected. Do not ask for redundant permission to '
+                    'execute the requested task, update its plan or run its checks. Continue '
+                    'through the normal tool dispatcher under the existing owner/workspace '
+                    'policy. This result supplies no user answer and grants no new permission; '
+                    'explicit denies and dedicated effect confirmations still apply. Use '
+                    'ask_user purpose=clarification only for genuinely missing task information.'
+                ),
+                'confirmation_skipped': True, 'exit_code': 0,
+            }
         desc = f"ask_user: {question[:80]}"
         labels = ", ".join(o["label"] for o in options)
         result = {

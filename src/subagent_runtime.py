@@ -147,6 +147,7 @@ def _list_metrics(metrics: Any) -> dict:
         "context_compactions", "input_tokens", "output_tokens", "total_tokens",
         "response_time", "time_to_first_token", "tokens_per_second", "generation_time",
         "request_context_tokens", "context_length", "context_percent", "prefill_tps",
+        "provider_error_status", "consecutive_provider_failures",
     ))
     for key, limit in (("checkpoint_hash", 128), ("usage_source", 32), ("tps_source", 32)):
         value = metrics.get(key)
@@ -1221,6 +1222,8 @@ class SubagentRuntime:
                     self._merge_metrics(child_id, owner, {
                         "provider_retries": provider_retries,
                         "effect_ledger_retries": effect_ledger_retries,
+                        "provider_error_status": exc.status if exc.kind != 'effect_ledger' else 0,
+                        "consecutive_provider_failures": consecutive_failures,
                     })
                     self._event(child_id, owner, session_id, "transport_retry", {
                         "attempt": retry_number + 1, "retry_limit": 10,

@@ -18,7 +18,6 @@ from email.utils import parsedate_to_datetime
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
-from src.subagent_limits import MAX_ACTIVE_PER_MODEL
 from core.log_safety import redact_url
 from urllib.parse import urlparse
 
@@ -27,7 +26,6 @@ logger = logging.getLogger(__name__)
 _LOCAL_MODEL_LOCK = asyncio.Lock()
 _LOCAL_MODEL_WAITING_FOREGROUND = 0
 _LOCAL_MODEL_CURRENT: Dict[str, object] = {}
-_SUBAGENT_MODEL_SLOTS: Dict[tuple, asyncio.Semaphore] = {}
 
 
 def _normalize_usage_counts(input_value=0, output_value=0):
@@ -90,6 +88,14 @@ def _gate_workload(workload: Optional[str]) -> str:
 
 @asynccontextmanager
 async def _local_model_slot(target_url: str, model: str, workload: Optional[str] = None):
+    from src.model_request_gate import model_request_slot
+    async with _local_model_workload_slot(target_url, model, workload):
+        async with model_request_slot(target_url, model):
+            yield
+
+
+@asynccontextmanager
+async def _local_model_workload_slot(target_url: str, model: str, workload: Optional[str] = None):
     """Serialize local model traffic, with foreground chat taking priority.
 
     Most local servers expose one GPU/CPU generation pipe even when their HTTP
@@ -107,17 +113,9 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
     from src.team_config import enabled as teams_enabled, resource_group
     kind = _gate_workload(workload)
     if kind == "subagent":
-        # LM Studio and compatible local servers can batch concurrent streams.
-        # Ordinary background work remains serialized below, but child Agents
-        # get a bounded per-route/model semaphore so their prompts are truly in
-        # flight together instead of merely appearing as parallel DB rows.
-        loop = asyncio.get_running_loop()
-        key = (loop, resource_group(target_url), str(model))
-        semaphore = _SUBAGENT_MODEL_SLOTS.setdefault(
-            key, asyncio.Semaphore(MAX_ACTIVE_PER_MODEL)
-        )
-        async with semaphore:
-            yield
+        # Shared loaded-instance permits are held by the outer gate, including
+        # foreground parents. Children on independent instances stay parallel.
+        yield
         return
     if teams_enabled():
         from src.team_model import resource_slot

@@ -166,7 +166,8 @@ async def _complete_once(route, messages, tools, *, max_tokens=4096, on_delta=No
     visible_text = ''
     # Shared process lock is also used for normal model traffic once wired into
     # llm_core; independent host groups do not serialize each other.
-    async with resource_slot(route['resource_group'] if route['local'] else None):
+    from src.model_request_gate import model_request_slot
+    async with resource_slot(route['resource_group'] if route['local'] else None), model_request_slot(route['url'], route['model']):
         async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10), follow_redirects=False) as client:
             async with client.stream('POST', route['url'], headers=route['headers'], json=payload) as response:
                 if response.status_code != 200:

@@ -129,6 +129,9 @@ async def test_scheduled_local_summary_is_preempted_by_foreground_call(monkeypat
     import routes.email_helpers as email_helpers
     import src.llm_core as llm_core
     import src.task_endpoint as task_endpoint
+    from src.model_context import ServingCapacity
+    monkeypatch.setattr('src.model_request_gate.get_serving_capacity',
+                        lambda *_: ServingCapacity('test', 8192, 8192, 1, 'test'))
 
     local_url = "http://127.0.0.1:11434/v1/chat/completions"
     background_started = asyncio.Event()
