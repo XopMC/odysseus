@@ -411,6 +411,10 @@ function _installHistoryPager(id, pageInfo, modelName) {
     if (!_historyPager || event.isTrusted === false) return;
     if (event.type === 'wheel' && event.deltaY >= 0) return;
     _historyPager.userRequestedOlder = true;
+    // A short newest page may not overflow the viewport, so an upward
+    // gesture produces no scroll event. Load at the current top boundary
+    // as well; loadOlder retains the session, top and in-flight guards.
+    void loadOlder();
   };
   box.addEventListener('wheel', markUserScroll, { passive: true });
   box.addEventListener('touchmove', markUserScroll, { passive: true });
