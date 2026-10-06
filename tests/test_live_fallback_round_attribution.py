@@ -53,6 +53,79 @@ def _run_node(source):
     return json.loads(proc.stdout.strip())
 
 
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+@pytest.mark.parametrize("first_event", ["thinking", "agent_step"])
+def test_replay_does_not_leave_waiting_spinner_on_finished_reasoning_round(first_event):
+    """Execute resumeStream while the provider remains live in its next round."""
+    script = r"""
+import assert from 'node:assert/strict';
+const noop = () => {};
+class Element {
+  constructor() {
+    this.children=[]; this.parentNode=null; this.dataset={}; this.style={};
+    this.fields={}; this.textContent=''; this.classList={add:noop,remove:noop,contains:()=>false};
+  }
+  appendChild(child) { child.parentNode=this; this.children.push(child); return child; }
+  insertBefore(child) { return this.appendChild(child); }
+  remove() { if(this.parentNode)this.parentNode.children=this.parentNode.children.filter(x=>x!==this);this.parentNode=null; }
+  set innerHTML(value) { this.html=value; }
+  get innerHTML() { return this.html||''; }
+  get isConnected() { return Boolean(this.parentNode); }
+  querySelector(key) { return this.fields[key] ||= new Element(); }
+  querySelectorAll() { return []; }
+  addEventListener() {} removeEventListener() {}
+}
+const box=new Element(),spinners=[];
+const document={getElementById:id=>id==='chat-history'?box:null,querySelector:()=>null,createElement:()=>new Element()};
+const window={};
+const sessionModule={getCurrentSessionId:()=> 's1',getSessionViewToken:()=>1,getSessions:()=>[{id:'s1',model:'model'}],refreshSessionHistory:async()=>{}};
+const uiModule={esc:String,scrollHistory:noop};
+const markdownModule={mdToHtml:String,normalizeThinkingMarkup:String,squashOutsideCode:String};
+const spinnerModule={create:()=> {
+  const spinner={element:new Element(),createElement(){return this.element;},start:noop,destroy(){this.element.remove();}};
+  spinners.push(spinner); return spinner;
+}};
+const chatRenderer={recordSessionMetricsCost:noop};
+const documentModule=null,API_BASE='',_resumingStreams=new Map(),_streamRunIds=new Map(),_streamGenerations=new Map([['s1',1]]);
+const updateSubmitButton=noop,_shortModel=String,_applyModelColor=noop,_setRoleModelLabel=noop,bindUiText=noop;
+const inheritModelRouteState=noop;
+const refreshChatContextHeader=noop,hasActiveStream=()=>false;
+let supply; const waiting=()=>new Promise(resolve=>{supply=resolve;});
+let next=waiting();
+const reader={read:()=>next,cancel:async()=>{supply({done:true});}};
+const fetch=async url=>String(url).includes('/api/chat/run/')?{ok:false}:{ok:true,headers:{get:()=> 'run-1'},body:{getReader:()=>reader}};
+const flush=async()=>{for(let i=0;i<30;i++)await Promise.resolve();};
+const push=async data=> {
+  const resolve=supply; next=waiting();
+  resolve({done:false,value:new TextEncoder().encode('data: '+JSON.stringify(data)+'\n\n')});
+  await flush();
+};
+""" + _resume_function_source() + "\n" + r"""
+const live=resumeStream('s1'); await flush();
+assert.equal(spinners.length,1);
+assert.equal(spinners[0].element.isConnected,true,'waiting indicator starts attached');
+await push(FIRST_EVENT==='thinking'?{delta:'first reasoning',thinking:true,round:1}:{type:'agent_step',round:2});
+assert.equal(spinners[0].element.isConnected,false,
+  'replay waiting indicator must end at reasoning or a completed round, not wait for prose/tools');
+if(FIRST_EVENT==='thinking')await push({type:'agent_step',round:2});
+await push({delta:'second reasoning',thinking:true,round:2});
+assert.equal(spinners[0].element.isConnected,false,'old round must not keep claiming generation');
+assert.equal(_resumingStreams.size,1,'the actual detached run stays attached');
+assert.ok(box.children.length>=1,'reasoning view is preserved');
+if(FIRST_EVENT==='thinking') {
+  assert.equal(box.children.length,2,'distinct reasoning rounds remain visible');
+  assert.equal(box.children[0].fields['.thinking-section'].fields['.thinking-content-inner'].innerHTML,'first reasoning');
+}
+assert.equal(box.children.at(-1).fields['.thinking-section'].fields['.thinking-content-inner'].textContent,'second reasoning');
+await push({type:'agent_terminal'});
+supply({done:true}); await live;
+assert.equal(_resumingStreams.size,0);
+console.log(JSON.stringify({passed:true}));
+"""
+    script = script.replace("FIRST_EVENT", json.dumps(first_event))
+    assert _run_node(script) == {"passed": True}
+
+
 def test_live_fallback_targets_the_active_round_and_replaces_actual_model():
     fallback_block = CHAT_JS.split("json.type === 'fallback'", 1)[1].split(
         "json.type === 'doc_stream_open'", 1

@@ -6240,6 +6240,9 @@ function appendStreamErrorGuidance(container, error) {
           if (eventIsError) {
             replayError = createTerminalStreamError(json);
           } else if (json.delta) {
+            // Thinking is already visible progress. Do not leave the initial
+            // waiting spinner attached to an older reasoning-only round.
+            try { spinner.destroy(); } catch (_) {}
             // Keep thinking private during replay exactly as it is during a
             // foreground stream. It remains in the canonical record for the
             // dedicated thinking UI, rather than being emitted as prose.
@@ -6379,6 +6382,7 @@ function appendStreamErrorGuidance(container, error) {
             // Previously replay ignored tool/round events until the whole run
             // finished, making a second device appear frozen for long tasks.
             rich = true;
+            try { spinner.destroy(); } catch (_) {}
             // Avoid an empty leading duplicate, but preserve every real
             // persisted round boundary in a long-running agent timeline.
             _flushIncrementalStreamRender(contentDiv);
