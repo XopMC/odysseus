@@ -1224,7 +1224,7 @@ _SUBAGENT_STOP_NEGATION_RE = re.compile(
 )
 
 
-def _user_forbids_more_subagents(messages: List[Dict]) -> bool:
+def _user_subagent_delegation_policy(messages: List[Dict]) -> Optional[bool]:
     """Honor the newest explicit user guidance about creating more children.
 
     Old Goal retries can retain earlier delegation requests in their checkpoint.
@@ -1233,7 +1233,8 @@ def _user_forbids_more_subagents(messages: List[Dict]) -> bool:
     ``manage_subagents`` to inspect, message, or stop existing children.
     """
     for message in reversed(list(messages or [])[-200:]):
-        if not isinstance(message, dict) or message.get("role") != "user":
+        if (not isinstance(message, dict) or message.get("role") != "user"
+                or (message.get("metadata") or {}).get("trusted") is False):
             continue
         content = message.get("content")
         if isinstance(content, list):
@@ -1247,7 +1248,11 @@ def _user_forbids_more_subagents(messages: List[Dict]) -> bool:
             return True
         if _SUBAGENT_ALLOW_RE.search(text):
             return False
-    return False
+    return None
+
+
+def _user_forbids_more_subagents(messages: List[Dict]) -> bool:
+    return _user_subagent_delegation_policy(messages) is True
 
 
 def _user_requested_subagent_actions(message: str) -> set[str]:
@@ -6172,10 +6177,22 @@ async def stream_agent_loop(
                             "metadata": dict(context_message.get("metadata") or {}),
                         })
                     else:
+                        _owner_guidance = str(item.get("text") or "")
                         messages.append({
                             "role": "user",
-                            "content": "Additional user guidance for the active Goal:\n" + str(item.get("text") or ""),
+                            "content": "Additional user guidance for the active Goal:\n" + _owner_guidance,
                         })
+                        # Apply fresh owner control to the dispatcher as well
+                        # as the prompt. Keep a denial across compaction and
+                        # unrelated guidance; child/tool data cannot change it.
+                        _delegation_policy = _user_subagent_delegation_policy([
+                            {"role": "user", "content": _owner_guidance},
+                        ])
+                        if _delegation_policy is not None:
+                            _subagent_state["delegation_forbidden_by_user"] = _delegation_policy
+                        _subagent_state["user_authorized_subagent_actions"] = _user_requested_subagent_actions(
+                            _owner_guidance,
+                        )
                     _round_had_correction = True
             except Exception:
                 logger.exception("Failed to refresh active Goal guidance")

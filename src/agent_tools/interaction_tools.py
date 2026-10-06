@@ -309,11 +309,19 @@ class UpdateGoalProgressTool:
             if not session_id:
                 raise ValueError("update_goal_progress requires an active owned chat")
             from src.chat_work_store import store
+            checkpoint = dict(data.get("checkpoint") or {})
+            ignored_guidance = "guidance" in checkpoint
+            # Only the authenticated owner's guidance endpoint may write this
+            # control stream. A model's progress payload cannot impersonate it.
+            checkpoint.pop("guidance", None)
             goal = store.update_goal(
                 owner, session_id, data.get("progress") or "",
-                data.get("checkpoint") or {}, waiting_user=bool(data.get("waiting_user")),
+                checkpoint, waiting_user=bool(data.get("waiting_user")),
             )
-            return "update_goal_progress", {"goal_update": goal, "output": "Goal checkpoint saved.", "exit_code": 0}
+            output = "Goal checkpoint saved."
+            if ignored_guidance:
+                output += " Owner guidance is read-only and was not changed."
+            return "update_goal_progress", {"goal_update": goal, "output": output, "exit_code": 0}
         except Exception as exc:
             return "update_goal_progress: failed", {"error": str(exc), "exit_code": 1}
 

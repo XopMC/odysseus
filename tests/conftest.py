@@ -26,6 +26,18 @@ try:
     import sqlalchemy  # noqa: F401
     import sqlalchemy.orm  # noqa: F401
     import core.database  # noqa: F401
+    # The default in-memory test database must represent one application DB
+    # across asyncio.to_thread calls. SingletonThreadPool creates/evicts
+    # separate databases per executor thread; file-backed CI URLs stay intact.
+    if core.database.engine.url.get_backend_name() == "sqlite" and core.database.engine.url.database in (None, "", ":memory:"):
+        from sqlalchemy.pool import StaticPool
+        _collection_engine = core.database.engine
+        core.database.engine = sqlalchemy.create_engine(
+            _collection_engine.url, connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        core.database.SessionLocal.configure(bind=core.database.engine)
+        core.database.Base.metadata.create_all(bind=core.database.engine)
+        _collection_engine.dispose()
     import src.database
 except ImportError:
     pass  # not installed - the stubs below will handle it
