@@ -397,10 +397,12 @@ _RAW_WEB_JSON_ALLOWED_KEYS = {"query", "queries", "time_filter", "freshness", "m
 # frontend event, while broad plain-text parsing of shell/doc/email tools would
 # be unsafe.
 _PLAIN_UI_OPEN_PANEL_RE = re.compile(
-    r"(?im)^\s*(?:`{1,3})?\s*ui_control\s+open_panel\s+"
+    # Line-local indentation and disjoint optional backtick groups avoid
+    # quadratic backtracking on long whitespace in accumulated model output.
+    r"(?im)^[^\S\r\n]*(?:`{1,3}[^\S\r\n]*)?ui_control\s+open_panel\s+"
     r"(documents?|library|gallery|images?|email|inbox|mail|sessions?|chats?|history|"
     r"notes?|brain|memor(?:y|ies)|skills?|settings|preferences|cookbook|models?)"
-    r"\s*(?:`{1,3})?\s*$"
+    r"[^\S\r\n]*(?:`{1,3}[^\S\r\n]*)?$"
 )
 
 
