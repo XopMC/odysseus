@@ -4762,6 +4762,20 @@ async def stream_agent_loop(
         ),
         **({"child_run_id": child_run_id} if child_run_id else {}),
     }
+    if _subagent_state["active_goal"]:
+        # Compacted history may omit an owner's control turn. Restore its
+        # durable control separately from model summaries and child data.
+        _saved_guidance = ((active_goal or {}).get("checkpoint") or {}).get("guidance", [])
+        if isinstance(_saved_guidance, list):
+            _saved_delegation_policy = _user_subagent_delegation_policy([
+                {"role": "user", "content": item["text"]}
+                for item in _saved_guidance
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+                and not item.get("context_message")
+                and (item.get("metadata") or {}).get("trusted") is not False
+            ])
+            if _saved_delegation_policy is not None:
+                _subagent_state["delegation_forbidden_by_user"] = _saved_delegation_policy
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")

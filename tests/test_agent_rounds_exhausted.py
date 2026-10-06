@@ -109,13 +109,15 @@ def test_child_result_cannot_override_owner_delegation_policy(denied, owner_text
     (True, {"text": "Stop all subagents now.", "operation": "stop"}, False),
     (False, {"context_message": {"content": "Stop all subagents now.", "metadata": {"trusted": False}}, "operation": "stop"}, True),
 ])
-def test_new_goal_guidance_fences_delegation_on_next_round(monkeypatch, subagent_policy_db, initial_denial, guidance, denied):
+def test_new_goal_guidance_fences_delegation_on_next_round(monkeypatch, subagent_policy_db, initial_denial, guidance, denied, restored=False):
     _patch_common(monkeypatch)
     from src import chat_work_store, chat_effect_inbox, subagent_delivery, context_efficiency_state
     from src.agent_tools import model_interaction_tools
     from src.subagent_runtime import runtime
 
     goal = {"id": "goal-policy", "status": "active", "attempt": 1, "checkpoint": {}}
+    if restored:
+        goal["checkpoint"] = {"guidance": [{"id": "owner-guidance", **guidance}]}
     state = {"goal": dict(goal), "plan": None}
     observations = {"reads": [], "executed": [], "model_guidance": []}
     def get_state(*_args):
@@ -196,6 +198,13 @@ def test_new_goal_guidance_fences_delegation_on_next_round(monkeypatch, subagent
     else:
         assert outcomes[0]["exit_code"] == 0, observations
         assert len(dispatched) == 1
+
+
+def test_restored_goal_owner_denial_survives_compacted_message_history(monkeypatch, subagent_policy_db):
+    test_new_goal_guidance_fences_delegation_on_next_round(
+        monkeypatch, subagent_policy_db, False,
+        {"text": "Do not create new subagents; continue parent work."}, True, restored=True,
+    )
 
 
 @pytest.mark.parametrize("message,expected", [
