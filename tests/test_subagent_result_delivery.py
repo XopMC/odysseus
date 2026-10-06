@@ -450,6 +450,7 @@ def test_idle_parent_dispatch_uses_internal_unprivileged_continuation(monkeypatc
     monkeypatch.setattr("src.agent_runs.is_active", lambda _sid: False)
     monkeypatch.setattr("src.agent_runs.continuation_for_session", lambda _sid: {
         "allow_bash": False, "allow_web_search": False,
+        "workspace": "/tmp/owned-qa",
     })
     sent = []
 
@@ -482,6 +483,7 @@ def test_idle_parent_dispatch_uses_internal_unprivileged_continuation(monkeypatc
     assert sent[0][3]["subagent_continuation"] == "true"
     assert sent[0][3]["allow_bash"] == "false"
     assert sent[0][3]["allow_web_search"] == "false"
+    assert sent[0][3]["workspace"] == "/tmp/owned-qa"
     assert len(sent[0][3]["subagent_delivery_token"]) == 32
 
 

@@ -75,6 +75,8 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
             "complete_goal only after verified evidence."
         ),
         "mode": "agent",
+        # chat_stream revalidates this owner-scoped path on every continuation.
+        "workspace": prior.get("workspace") or "",
         "goal_continuation": "true",
         "goal_lease_token": lease,
         "allow_bash": "true" if prior.get("allow_bash") is True else "false",

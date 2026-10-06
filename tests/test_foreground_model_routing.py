@@ -268,6 +268,28 @@ async def test_chat_stream_route_keeps_selected_model_strict_with_legacy_data(mo
 
 
 @pytest.mark.asyncio
+async def test_detached_run_captures_validated_workspace_for_server_continuations(monkeypatch):
+    from src import agent_runs
+    captured, continuation = {}, {}
+    endpoint = _chat_stream_endpoint(monkeypatch, "agent", captured)
+    monkeypatch.setattr(chat_routes, "_resolve_request_workspace", lambda *_args: ("/tmp/owned-qa", ""))
+    monkeypatch.setattr(agent_runs, "is_active", lambda *_args: False)
+
+    def start(_session, stream, **kwargs):
+        continuation.update(kwargs["continuation"])
+        return SimpleNamespace(run_id="qa-run", started_at=1, stream=stream)
+
+    monkeypatch.setattr(agent_runs, "start", start)
+    monkeypatch.setattr(agent_runs, "subscribe", lambda _session, run: run.stream)
+    request = _RouteRequest("agent")
+    request._form.update(compare_mode="false", workspace="/tmp/owned-qa")
+    response = await endpoint(request)
+    async for _ in response.body_iterator:
+        pass
+    assert continuation["workspace"] == "/tmp/owned-qa"
+
+
+@pytest.mark.asyncio
 async def test_streaming_chat_tps_uses_output_delta_span_not_usage_or_done_tail(monkeypatch):
     captured = {}
     endpoint = _chat_stream_endpoint(

@@ -98,3 +98,25 @@ def test_ambiguous_dispatch_response_does_not_start_a_duplicate(monkeypatch):
     assert len(attempts) == 1
     assert failures == []
     assert agent_runs.active is True
+
+
+def test_dispatch_retains_last_validated_workspace(monkeypatch):
+    _install_dispatch_fakes(monkeypatch, status=200)
+    from src import agent_runs
+    monkeypatch.setattr(agent_runs, "continuation_for_session", lambda _sid: {
+        "workspace": "/tmp/owned-qa", "allow_bash": False,
+    })
+    sent = []
+
+    class CapturingClient(_Client):
+        def __init__(self, **_kwargs):
+            super().__init__([], status=200)
+
+        def stream(self, *_args, **kwargs):
+            sent.append(kwargs["data"])
+            return super().stream(*_args, **kwargs)
+
+    monkeypatch.setattr(goal_controller.httpx, "AsyncClient", CapturingClient)
+    assert asyncio.run(goal_controller.dispatch_goal_continuation("alice", "chat", reason="goal_resumed"))
+    assert sent[0]["workspace"] == "/tmp/owned-qa"
+    assert sent[0]["allow_bash"] == "false"

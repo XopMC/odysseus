@@ -522,6 +522,7 @@ async def dispatch_if_idle(owner: str | None, session_id: str) -> bool:
             "session": session_id,
             "message": "Continue after the finished child-agent result; verify it before acting.",
             "mode": "agent",
+            "workspace": previous.get("workspace") or "",
             "subagent_continuation": "true",
             "subagent_delivery_token": token,
             "allow_bash": "true" if previous.get("allow_bash") is True else "false",

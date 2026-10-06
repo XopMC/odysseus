@@ -3430,6 +3430,9 @@ def setup_chat_routes(
             initial_model=sess.model,
             initial_endpoint_label=selected_endpoint_host(sess.endpoint_url),
             continuation={
+                # Preserve the already owner-validated file scope for detached
+                # Goal and background-child continuations, not just UI state.
+                "workspace": workspace or None,
                 "allow_bash": str(allow_bash).lower() == "true",
                 "allow_web_search": bool(_search_enabled),
                 "goal": bool(active_goal),
