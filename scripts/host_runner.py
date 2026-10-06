@@ -5,9 +5,11 @@ ownership leases, NOT sandboxes. No commands or terminal input are persisted.
 Use systemd KillMode=control-group: restart interrupts work, never replays it.
 """
 import base64
+from contextlib import closing
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pty
@@ -16,6 +18,7 @@ import selectors
 import shutil
 import signal
 import socketserver
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -46,9 +49,10 @@ ISOLATED_IMAGE = 'alpine@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e688
 
 
 class RunnerError(ValueError):
-    def __init__(self, message, code):
+    def __init__(self, message, code, *, not_executed=False):
         super().__init__(message)
         self.code = code
+        self.not_executed = not_executed
 
 
 def atomic_json(path, value):
@@ -99,9 +103,106 @@ class Runner:
 
     def record(self, category, identity, owner, scope):
         record = self.data[category].get(identity)
+        if not record and category == 'file_checkpoints' and isinstance(identity, str) and self._file_history_path.exists():
+            with closing(self._file_history()) as db:
+                row = db.execute('SELECT record FROM checkpoints WHERE id=? AND owner=? AND scope=?',
+                                 (identity, owner, scope)).fetchone()
+            if row:
+                record = json.loads(row[0])
         if not record or record['owner'] != owner or record['scope'] != scope:
             raise ValueError('not found in this owner/scope')
         return record
+
+    @property
+    def _file_history_path(self):
+        return self.state / 'file-checkpoint-history.sqlite3'
+
+    def _file_history(self):
+        # Cold metadata only: before-image blobs remain at their original paths.
+        fd = os.open(self._file_history_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.close(fd)
+        db = sqlite3.connect(str(self._file_history_path), timeout=30)
+        db.execute('PRAGMA synchronous=FULL')
+        db.execute('CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, owner TEXT NOT NULL, '
+                   'scope TEXT NOT NULL, created_at REAL NOT NULL, bytes INTEGER NOT NULL, record TEXT NOT NULL)')
+        db.execute('CREATE INDEX IF NOT EXISTS checkpoints_scope ON checkpoints(owner,scope,created_at,id)')
+        db.commit()
+        return db
+
+    def _history_hot_table(self, db):
+        # Also deduplicates a crash after the archive commit but before metadata.json.
+        db.execute('CREATE TEMP TABLE hot (id TEXT PRIMARY KEY, owner TEXT, scope TEXT, created_at REAL, record TEXT)')
+        db.executemany('INSERT INTO hot VALUES (?,?,?,?,?)', [
+            (r['id'], r['owner'], r['scope'], r['created_at'], json.dumps(r))
+            for r in self.data['file_checkpoints'].values()])
+
+    def _file_checkpoint_page(self, args, owner, scope):
+        before, limit = args.get('before'), args.get('limit', 200)
+        if type(limit) is not int or not 1 <= limit <= 2000:
+            raise ValueError('checkpoint page requires limit 1..2000')
+        if before is not None and (not isinstance(before,dict) or set(before)!={'created_at','id'}
+                or type(before['created_at']) not in (int,float) or not math.isfinite(before['created_at'])
+                or not isinstance(before['id'],str) or not 1 <= len(before['id']) <= 200):
+            raise ValueError('invalid checkpoint page cursor')
+        bound = (before['created_at'],before['id']) if before else None
+        if self._file_history_path.exists():
+            with closing(self._file_history()) as db:
+                self._history_hot_table(db)
+                query = ('SELECT record FROM ('
+                    'SELECT id,owner,scope,created_at,record FROM checkpoints WHERE id NOT IN (SELECT id FROM hot) '
+                    'UNION ALL SELECT id,owner,scope,created_at,record FROM hot) '
+                    'WHERE owner=? AND scope=?')
+                params = [owner,scope]
+                if bound:
+                    query += ' AND (created_at < ? OR (created_at=? AND id<?))'
+                    params += [bound[0],bound[0],bound[1]]
+                rows = db.execute(query+' ORDER BY created_at DESC,id DESC LIMIT ?',params+[limit+1]).fetchall()
+            records = [json.loads(r[0]) for r in rows]
+        else:
+            records = sorted((r for r in self.data['file_checkpoints'].values()
+                if (r['owner'],r['scope'])==(owner,scope) and (not bound or (r['created_at'],r['id'])<bound)),
+                key=lambda r:(r['created_at'],r['id']), reverse=True)[:limit+1]
+        cursor = {'created_at':records[limit-1]['created_at'],'id':records[limit-1]['id']} if len(records)>limit else None
+        return {'checkpoints':[self._public_file_checkpoint(r) for r in records[:limit]],
+                'next_cursor':cursor}
+
+    def _archive_file_checkpoints(self, owner, scope):
+        terminal = {'applied','partial','no_change','rolled_back','rollback_partial'}
+        candidates = sorted((r for r in self.data['file_checkpoints'].values() if r['status'] in terminal),
+            key=lambda r:((r['owner'],r['scope'])!=(owner,scope),r['created_at'],r['id']))
+        candidates = candidates[:max(1,min(32,MAX_FILE_CHECKPOINTS//4))]
+        if not candidates:
+            raise RunnerError('file checkpoint metadata is occupied by unresolved receipts',
+                              'file_checkpoint_capacity',not_executed=True)
+        with closing(self._file_history()) as db, db:
+            db.executemany('INSERT OR REPLACE INTO checkpoints VALUES (?,?,?,?,?,?)', [
+                (r['id'],r['owner'],r['scope'],r['created_at'],r.get('bytes',0),json.dumps(r)) for r in candidates])
+        previous = dict(self.data['file_checkpoints'])
+        for record in candidates:
+            self.data['file_checkpoints'].pop(record['id'])
+        try:
+            self.save()  # archive is durable BEFORE removing the hot copies
+        except (OSError,ValueError):
+            self.data['file_checkpoints'] = previous
+            raise
+
+    def _retained_file_checkpoint_bytes(self):
+        total = sum(r.get('bytes',0) for r in self.data['file_checkpoints'].values())
+        if self._file_history_path.exists():
+            with closing(self._file_history()) as db:
+                self._history_hot_table(db)
+                total += db.execute('SELECT COALESCE(SUM(bytes),0) FROM checkpoints '
+                                    'WHERE id NOT IN (SELECT id FROM hot)').fetchone()[0]
+        return total
+
+    def _persist_file_checkpoint(self, record):
+        if record['id'] not in self.data['file_checkpoints']:
+            with closing(self._file_history()) as db, db:
+                changed = db.execute('UPDATE checkpoints SET record=? WHERE id=? AND owner=? AND scope=?',
+                    (json.dumps(record),record['id'],record['owner'],record['scope'])).rowcount
+                if changed != 1:
+                    raise ValueError('archived checkpoint disappeared')
+        self.save()
 
     def safe_cwd(self, raw):
         path = Path(raw or str(Path.home())).expanduser().resolve()
@@ -826,7 +927,11 @@ class Runner:
         if not 1 <= len(paths) <= 32:
             raise ValueError('file checkpoint requires 1..32 exact paths')
         if len(self.data['file_checkpoints']) >= MAX_FILE_CHECKPOINTS:
-            raise ValueError('file checkpoint metadata limit reached; operator archival required')
+            try:
+                self._archive_file_checkpoints(owner,scope)
+            except (OSError,ValueError,sqlite3.Error) as exc:
+                raise RunnerError('file checkpoint metadata archive unavailable',
+                                  'file_checkpoint_capacity',not_executed=True) from exc
         prepared, size = [], 0
         for path in paths:
             state, contents = self._file_state(path, with_data=True)
@@ -834,9 +939,14 @@ class Runner:
             if size > 8 * 1024 * 1024:
                 raise ValueError('file checkpoint exceeds 8 MiB')
             prepared.append((path, state, contents))
-        retained = sum(record.get('bytes', 0) for record in self.data['file_checkpoints'].values())
+        try:
+            retained = self._retained_file_checkpoint_bytes()
+        except (OSError,ValueError,sqlite3.Error) as exc:
+            raise RunnerError('file checkpoint metadata archive unavailable',
+                              'file_checkpoint_capacity',not_executed=True) from exc
         if retained + size > MAX_FILE_CHECKPOINT_BYTES:
-            raise ValueError('file checkpoint storage limit reached; operator archival required')
+            raise RunnerError('file checkpoint storage limit reached; operator archival required',
+                              'file_checkpoint_capacity',not_executed=True)
         identity = uuid.uuid4().hex
         directory = self.state / 'file-checkpoints' / identity
         directory.mkdir(parents=True, mode=0o700)
@@ -950,17 +1060,16 @@ class Runner:
                 completed.append(path)
         except (OSError, ValueError) as exc:
             record.update(status='rollback_partial', rollback_completed=completed)
-            self.save()
+            self._persist_file_checkpoint(record)
             raise ValueError(f'partial rollback; completed paths={completed!r}; {exc}') from exc
         record.update(status='rolled_back', rolled_back_at=time.time())
-        self.save()
+        self._persist_file_checkpoint(record)
         return {'checkpoint_id': record['id'], 'status': 'rolled_back', 'files': completed}
 
     def _file(self, op, args, owner, scope):
         from host_files import handle, _path, _read, _check, _write, _model_args, _model_path_allowed
         if op == 'file.checkpoint.list':
-            return {'checkpoints': [self._public_file_checkpoint(record) for record in self.data['file_checkpoints'].values()
-                                    if (record['owner'], record['scope']) == (owner, scope)]}
+            return self._file_checkpoint_page(args,owner,scope)
         if op == 'file.rollback':
             return self._file_rollback(args, owner, scope)
         cwd = self.safe_cwd(args.get('cwd'))
@@ -1324,10 +1433,12 @@ class Runner:
                 else:
                     raise ValueError('unknown runner operation')
             return {'ok': True, 'result': result}
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError, sqlite3.Error) as exc:
             response = {'ok': False, 'error': str(exc)[:2000]}
             if isinstance(exc, RunnerError):
                 response['code'] = exc.code
+                if exc.not_executed:
+                    response['not_executed'] = True
             return response
 
     def close(self):

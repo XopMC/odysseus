@@ -73,6 +73,20 @@ class HostExecutionTests(unittest.TestCase):
         self.assertFalse(result['retryable'])
         self.assertNotIn('private detail', result['error'])
 
+    def test_runner_preexecution_capacity_rejection_is_not_unknown(self):
+        async def rejected(op, args, owner, scope):
+            return {'ok':False,'code':'file_checkpoint_capacity','not_executed':True,
+                    'error':'private host state details'}
+        with patch.dict(os.environ,{'ODYSSEUS_HOST_ENABLED':'1','ODYSSEUS_HOST_OWNER':'alice'}), \
+             patch('src.team_host.call',side_effect=rejected):
+            result=asyncio.run(self.host.execute('write_file','{"path":"a","content":"b"}',
+                owner='alice',session_id='scope'))
+        self.assertEqual(result['exit_code'],1)
+        self.assertEqual(result.get('code'),'file_checkpoint_capacity')
+        self.assertTrue(result.get('not_executed'),result)
+        self.assertFalse(result.get('outcome_unknown',False),result)
+        self.assertNotIn('private host',result['error'])
+
     def test_agent_file_mutations_use_durable_owner_session_checkpoint_route(self):
         calls = []
 

@@ -239,6 +239,10 @@ async def execute(tool, content, *, owner=None, session_id=None, run_id=None, wo
             from src.team_host import call as runner_call
             response = await runner_call(op, runner_args, owner, session_id)
             if not response.get('ok'):
+                if response.get('not_executed') is True:
+                    return {'error':'Host rejected the action before execution; no file mutation was started',
+                            'code':response.get('code') or 'host_action_rejected',
+                            'not_executed':True,'outcome_unknown':False,'retryable':False,'exit_code':1}
                 if tool in FILE_MUTATION_TOOLS or tool == 'rollback_file_checkpoint':
                     # The runner may have committed a write or rollback before
                     # the SSH response was lost. Never invite an automatic replay.

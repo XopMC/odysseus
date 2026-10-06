@@ -706,11 +706,12 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
     ui.diffFiles.append(uiElement('p', files.length ? 'All changed files are selected initially. Renames appear as deletion and addition; select both to move a file.' : 'No changed files in this worktree.'));
     for (const path of files) { const choice = checkbox('', true); choice.wrap.append(uiElement('span', 'Include'), document.createTextNode(' ' + path)); ui.diffChoices.set(path, choice); ui.diffFiles.append(choice.wrap); }
   }
-  async function loadFileCheckpoints() {
+  async function loadFileCheckpoints(before = null, append = false) {
     const token = generation, scope = ui.hostScope.value, container = ui.fileCheckpointList;
-    const data = await host('file.checkpoint.list');
+    const data = await host('file.checkpoint.list', { before, limit: 200 });
     if (!current(token) || ui.hostScope.value !== scope || ui.fileCheckpointList !== container) return;
-    container.replaceChildren();
+    if (!append) container.replaceChildren();
+    else container.querySelector('[data-file-checkpoint-more]')?.remove();
     if (!data.checkpoints?.length) container.append(uiElement('p', 'No file checkpoints in this host scope.'));
     for (const checkpoint of data.checkpoints || []) {
       const card = element('article', '', 'team-card'); card.setAttribute('aria-label', `File checkpoint ${checkpoint.id}`);
@@ -729,6 +730,14 @@ export function createTeamWorkspace({ getSessionId, fetchImpl = null,
         await loadFileCheckpoints();
       }, event.currentTarget)));
       container.append(card);
+    }
+    if (data.next_cursor) {
+      const more = button('Load older file checkpoints', event => act(async () => {
+        if (!current(token) || ui.hostScope.value !== scope || ui.fileCheckpointList !== container) return;
+        await loadFileCheckpoints(data.next_cursor, true);
+      }, event.currentTarget));
+      more.dataset.fileCheckpointMore = 'true';
+      container.append(more);
     }
   }
   function renderWorkers() {

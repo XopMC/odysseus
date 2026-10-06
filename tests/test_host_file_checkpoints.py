@@ -34,6 +34,99 @@ class FileCheckpointTests(unittest.TestCase):
         record = next(record for record in records if record['id'] == identity)
         return {'checkpoint_id': identity, 'expected_sha256': {item['path']: item['after_sha256'] for item in record['files']}}
 
+    def test_full_live_metadata_archives_without_losing_rollback_or_owner_scope(self):
+        (self.root / 'first').write_text('original')
+        with patch.object(self.module, 'MAX_FILE_CHECKPOINTS', 3):
+            first = self.write('first', 'changed')['result']['checkpoint_id']
+            for name in ('second', 'third', 'fourth', 'fifth'):
+                response = self.write(name, 'new')
+                self.assertTrue(response['ok'], response)
+            self.assertLessEqual(len(self.runner.data['file_checkpoints']), 3)
+            records = self.call('file.checkpoint.list')['result']['checkpoints']
+            self.assertEqual(len(records), 5)
+            self.assertEqual(len({r['id'] for r in records}), 5)
+            self.assertEqual(self.call('file.checkpoint.list', owner='bob')['result']['checkpoints'], [])
+            self.assertFalse(self.call('file.rollback', self.rollback_args(first), scope='other')['ok'])
+            restarted = self.module.Runner(self.root / 'state')
+            self.addCleanup(restarted.close)
+            response = restarted.handle({'owner':'alice', 'scope':'scope', 'op':'file.rollback',
+                'args':self.rollback_args(first)})
+            self.assertTrue(response['ok'], response)
+            self.assertEqual((self.root / 'first').read_text(), 'original')
+            records = restarted.handle({'owner':'alice', 'scope':'scope', 'op':'file.checkpoint.list'})['result']['checkpoints']
+            self.assertEqual(next(r for r in records if r['id']==first)['status'], 'rolled_back')
+
+    def test_prepared_and_uncertain_receipts_are_not_archived_or_reported_unknown(self):
+        with patch.object(self.module, 'MAX_FILE_CHECKPOINTS', 2):
+            for index, status in enumerate(('prepared', 'uncertain')):
+                self.runner.data['file_checkpoints'][str(index)] = {
+                    'id':str(index), 'owner':'alice', 'scope':'scope', 'status':status,
+                    'created_at':index, 'bytes':0, 'files':[],
+                }
+            result = self.write('not-created', 'new')
+            self.assertFalse(result['ok'])
+            self.assertTrue(result.get('not_executed'), result)
+            self.assertEqual(result.get('code'), 'file_checkpoint_capacity')
+            self.assertFalse((self.root / 'not-created').exists())
+            self.assertEqual(len(self.runner.data['file_checkpoints']), 2)
+
+    def test_archived_before_images_still_count_toward_storage_limit(self):
+        (self.root / 'a').write_text('1234')
+        (self.root / 'b').write_text('5678')
+        with patch.object(self.module, 'MAX_FILE_CHECKPOINTS', 1):
+            self.assertTrue(self.write('a', 'after')['ok'])
+            with patch.object(self.module, 'MAX_FILE_CHECKPOINT_BYTES', 7):
+                result=self.write('b', 'must not happen')
+            self.assertFalse(result['ok'])
+            self.assertTrue(result.get('not_executed'), result)
+            self.assertEqual((self.root / 'b').read_text(), '5678')
+            records=self.call('file.checkpoint.list')['result']['checkpoints']
+            self.assertEqual(len(records),1)
+
+    def test_checkpoint_archive_pages_are_bounded_and_do_not_drop_old_records(self):
+        with patch.object(self.module, 'MAX_FILE_CHECKPOINTS', 2):
+            for index in range(6):
+                self.assertTrue(self.write(str(index), 'body')['ok'])
+            records=[]
+            cursor=None
+            while True:
+                page=self.call('file.checkpoint.list', {'before':cursor, 'limit':2})['result']
+                self.assertLessEqual(len(page['checkpoints']),2)
+                records.extend(page['checkpoints'])
+                if page['next_cursor'] is None:
+                    break
+                cursor=page['next_cursor']
+            self.assertEqual(len(records),6)
+            self.assertEqual(len({r['id'] for r in records}),6)
+
+    def test_checkpoint_cursor_survives_new_writes_between_pages(self):
+        with patch.object(self.module,'MAX_FILE_CHECKPOINTS',2):
+            for name in ('a','b','c','d'):
+                self.assertTrue(self.write(name,'body')['ok'])
+            first=self.call('file.checkpoint.list',{'limit':2})['result']
+            self.assertTrue(self.write('new-after-first-page','body')['ok'])
+            older=self.call('file.checkpoint.list',{'limit':2,'before':first['next_cursor']})['result']
+            ids=[r['id'] for r in first['checkpoints']+older['checkpoints']]
+            self.assertEqual(len(ids),4)
+            self.assertEqual(len(set(ids)),4)
+
+    def test_failed_archive_metadata_commit_preserves_hot_and_cold_receipts(self):
+        with patch.object(self.module, 'MAX_FILE_CHECKPOINTS', 2):
+            for name in ('a','b'):
+                self.assertTrue(self.write(name,'value')['ok'])
+            before=set(self.runner.data['file_checkpoints'])
+            with patch.object(self.module,'atomic_json',side_effect=OSError('simulated fsync failure')):
+                result=self.write('not-created','body')
+            self.assertFalse(result['ok'])
+            self.assertTrue(result.get('not_executed'), result)
+            self.assertFalse((self.root / 'not-created').exists())
+            self.assertEqual(set(self.runner.data['file_checkpoints']),before)
+            restarted=self.module.Runner(self.root / 'state')
+            self.addCleanup(restarted.close)
+            records=restarted.handle({'op':'file.checkpoint.list','owner':'alice','scope':'scope'})['result']['checkpoints']
+            self.assertEqual({r['id'] for r in records},before)
+            self.assertEqual(len(records),2)
+
     def test_restore_original_text_mode_and_keep_contents_out_of_metadata(self):
         target = self.root / 'a'
         target.write_text('original private content')
