@@ -201,8 +201,7 @@ def compose_wait_panel(
     }
     recovery = (
         "resume_goal" if goal_status == "review_required"
-        else "resume_goal" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect" and blocking_effects == 0
-        else "inspect_effect" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect"
+        else "resume_goal" if goal_status == "waiting_user" and wait_reason == "unknown_side_effect"
         else "inspect_context" if goal_status == "waiting_user" and wait_reason == "context_compaction"
         else "resume_goal" if goal_status == "waiting_user" and wait_reason in {"repeated_premature_stop", "provider_failure", "dispatch_failure", "resource_budget"}
         else "answer" if phase in {"approval", "user"}

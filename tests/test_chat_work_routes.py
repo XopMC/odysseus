@@ -173,13 +173,21 @@ def test_unknown_effect_inbox_is_identical_across_clients_and_owner_scoped(monke
     assert foreign.status_code == 404
 
 
-def test_goal_resume_is_rejected_while_unknown_effect_is_unresolved(monkeypatch):
+def test_goal_resume_dispatches_independent_work_while_unknown_effect_is_unresolved(monkeypatch):
     from src.chat_effect_inbox import inbox
+    import src.goal_controller as controller
+    calls = []
 
     class GoalStore:
         def goal_action(self, *args):
-            raise AssertionError("Goal must not resume before effect reconciliation")
+            calls.append(args)
+            return {"status": "active", "revision": 6}
 
+    async def dispatch(owner, session_id, *, reason):
+        calls.append((owner, session_id, reason))
+        return True
+
+    monkeypatch.setattr(controller, "dispatch_goal_continuation", dispatch)
     monkeypatch.setattr(chat_work_routes, "store", GoalStore())
     monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
     monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: "alice")
@@ -187,8 +195,8 @@ def test_goal_resume_is_rejected_while_unknown_effect_is_unresolved(monkeypatch)
     app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
     with TestClient(app) as client:
         response = client.post("/api/chat/work/chat-1/goal/resume", json={"expected_revision": 5})
-    assert response.status_code == 409
-    assert "effect" in str(response.json()).lower()
+    assert response.status_code == 200
+    assert calls == [("alice", "chat-1", "resume", 5), ("alice", "chat-1", "goal_resumed")]
 
 
 def test_owner_can_choose_no_retry_with_cas_but_foreign_owner_cannot(monkeypatch):
@@ -374,6 +382,12 @@ def test_goal_restore_dispatches_server_controller_and_checks_effect_inbox(monke
 
 def test_goal_restore_does_not_replay_unreconciled_tool_effect(monkeypatch):
     from src.chat_effect_inbox import inbox
+    import src.goal_controller as controller
+    calls = []
+    async def dispatch(owner, session_id, *, reason):
+        calls.append((owner, session_id, reason))
+        return True
+    monkeypatch.setattr(controller, "dispatch_goal_continuation", dispatch)
     monkeypatch.setattr(inbox, "blocking", lambda owner, session: [{"id": "unknown-effect"}])
     store = WorkStoreStub()
     monkeypatch.setattr(chat_work_routes, "store", store)
@@ -382,8 +396,9 @@ def test_goal_restore_does_not_replay_unreconciled_tool_effect(monkeypatch):
     app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
     with TestClient(app) as client:
         response = client.post("/api/chat/work/chat-1/goal/restore", json={"expected_revision": 7})
-    assert response.status_code == 409
-    assert store.calls == []
+    assert response.status_code == 200
+    assert store.calls == [("alice", "chat-1", "restore", 7)]
+    assert calls == [("alice", "chat-1", "goal_restored")]
 
 
 def test_goal_resume_does_not_report_success_when_controller_did_not_start(monkeypatch):

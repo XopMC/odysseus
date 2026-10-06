@@ -57,6 +57,7 @@ def _install_dispatch_fakes(monkeypatch, *, status=503, active_after=None):
     })
     monkeypatch.setattr(store, "record_goal_failure", lambda *a, **k: failures.append((a, k)))
     monkeypatch.setattr(inbox, "unknown", lambda *_a: [])
+    monkeypatch.setattr(inbox, "blocking", lambda *_a: [])
     monkeypatch.setattr(subagent_delivery, "claim_pending", lambda *_a, **_k: None)
 
     def client_factory(*_args, **_kwargs):
@@ -120,3 +121,27 @@ def test_dispatch_retains_last_validated_workspace(monkeypatch):
     assert asyncio.run(goal_controller.dispatch_goal_continuation("alice", "chat", reason="goal_resumed"))
     assert sent[0]["workspace"] == "/tmp/owned-qa"
     assert sent[0]["allow_bash"] == "false"
+
+
+@pytest.mark.parametrize("status", ["unknown", "verified_not_applied"])
+def test_dispatch_warns_about_exact_effect_fence_without_waiting_for_approval(monkeypatch, status):
+    attempts, failures, _ = _install_dispatch_fakes(monkeypatch, status=200)
+    from src.chat_effect_inbox import inbox
+    effect = {"id": "receipt-1", "status": status, "revision": 2}
+    monkeypatch.setattr(inbox, "blocking", lambda owner, session: [effect])
+    sent = []
+
+    class CapturingClient(_Client):
+        def __init__(self, **_kwargs):
+            super().__init__(attempts, status=200)
+
+        def stream(self, *_args, **kwargs):
+            sent.append(kwargs["data"])
+            return super().stream(*_args, **kwargs)
+
+    monkeypatch.setattr(goal_controller.httpx, "AsyncClient", CapturingClient)
+    assert asyncio.run(goal_controller.dispatch_goal_continuation("alice", "chat", reason="goal_resumed"))
+    assert len(attempts) == 1 and failures == []
+    assert "Continue independent safe work" in sent[0]["message"]
+    assert "Do not repeat either action" in sent[0]["message"]
+    assert effect == {"id": "receipt-1", "status": status, "revision": 2}

@@ -249,10 +249,9 @@ def setup_chat_work_routes():
         body = await _json(request)
         if set(body) != {"expected_revision"}:
             raise HTTPException(400, "Exact goal revision required")
-        if action in {"resume", "restore"}:
-            from src.chat_effect_inbox import inbox
-            if inbox.blocking(owner, session_id):
-                raise HTTPException(409, "Tool effect must be reconciled or explicitly authorized before Goal resumes")
+        # Resume independent work without resolving or authorizing any effect.
+        # The controller warns the model; record_intent still fences the exact
+        # unknown/not-applied action across attempts, including Full Access.
         # Stop the exact detached attempt before changing durable Goal state.
         # Otherwise a slow run can publish progress after Cancel/Pause and
         # resurrect the goal on another browser.
@@ -321,9 +320,8 @@ def setup_chat_work_routes():
         owner = _owner(request, session_id, mutation=True)
         if await _json(request) != {}:
             raise HTTPException(400, "Empty goal lease body required")
-        from src.chat_effect_inbox import inbox
-        if inbox.unknown(owner, session_id):
-            raise HTTPException(409, "Unknown tool effect must be reconciled before Goal resumes")
+        # A lease does not authorize replay of an uncertain tool action.
+        # Its durable exact-action fence survives the next attempt.
         from src import agent_runs
         if agent_runs.is_active(session_id):
             raise HTTPException(409, "The current goal attempt is still running")

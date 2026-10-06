@@ -61,6 +61,7 @@ const RU = Object.freeze({
   'idle':'нет работы', 'unavailable':'статус недоступен',
   'Recovery: answer':'Ответьте на вопрос в чате',
   'Recovery: resume_goal':'Цель на паузе; можно продолжить',
+  'Tool receipt pending verification; independent work can continue without approval.':'Результат инструмента требует проверки; независимая работа может продолжаться без подтверждения.',
   'Recovery: reconnect':'Восстановите соединение с запуском',
   'Recovery: inspect':'Проверьте последнее событие; не повторяйте действие автоматически',
   'Recovery: wait':'Подождите текущую фазу', 'Recovery: none':'Действие не требуется',

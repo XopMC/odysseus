@@ -161,7 +161,7 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
           if(url.includes('/unknown-effects/')&&url.endsWith('/no-retry')){noRetryCalls++;effects=[];return{ok:true,json:async()=>({status:'no_retry'})};}
           if(url.endsWith('/unknown-effects'))return{ok:true,json:async()=>({effects})};
           if(url.endsWith('/goal/resume')){goalResumeCalls++;
-            if(blockedResume)return{ok:false,status:409,json:async()=>({detail:'Tool effect must be reconciled or explicitly authorized before Goal resumes'})};
+            if(blockedResume)return{ok:false,status:409,json:async()=>({detail:'Goal changed; reload'})};
             goal={...goal,status:'active',revision:goal.revision+1};
             if(staleResume){staleResume=false;return{ok:false,status:409,json:async()=>({detail:'Goal changed; reload'})};}
             return{ok:true,json:async()=>goal};}
@@ -271,13 +271,13 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       goal={...goal,status:'waiting_user',checkpoint:{_wait_reason:'unknown_side_effect'}};
       wait={...wait,wait_reason:'unknown_side_effect',recovery_action:'inspect_effect'};
       await api.refresh('chat-1');await api.refreshWait('chat-1');await api.refreshEffects('chat-1');
-      assert.equal(ids['goal-work-resume'].hidden,true);
+      assert.equal(ids['goal-work-resume'].hidden,false,'an uncertain action does not block independent Goal work');
       assert.equal(ids['wait-unknown-effects'].hidden,false);
       assert.equal(ids['wait-unknown-effects'].children.length,2);
       await api.verifyEffect(effects[0]);
       assert.equal(verifyCalls,1);
       assert.equal(effects[0].status,'verified_not_applied');
-      assert.equal(ids['goal-work-resume'].hidden,true,'verified-not-applied must still require a decision');
+      assert.equal(ids['goal-work-resume'].hidden,false,'retry decisions fence the exact action, not the Goal');
       await api.authorizeEffectRetry(effects[0]);
       assert.equal(retryAuthorizeCalls,1);
       assert.equal(effects[0].status,'retry_authorized');
@@ -290,10 +290,9 @@ def test_goal_warning_renders_from_real_work_module_and_clears_on_pause():
       goal={...goal,status:'paused',checkpoint:{}};
       wait={...wait,phase:'paused',wait_reason:'goal_paused',recovery_action:'resume_goal'};
       blockedResume=true;await api.refresh('chat-1');await api.mutate('goal','resume');
-      assert.equal(api.getSnapshot().goal.status,'paused','unknown effect must not silently resume');
-      assert.equal(ids['wait-unknown-effects'].hidden,false,'blocked resume exposes the effect inbox');
-      assert.equal(waitClasses.has('expanded'),true,'blocked resume opens the recovery panel');
-      assert.equal(errorToasts.at(-1),'Review the tool effect before resuming.');
+      assert.equal(api.getSnapshot().goal.status,'paused','a revision conflict must not silently resume');
+      assert.equal(waitClasses.has('expanded'),false,'a revision conflict must not open tool approval');
+      assert.equal(errorToasts.at(-1),'Goal changed; reload');
       effects=[];blockedResume=false;errorToasts=[];
       goal={...goal,status:'paused',checkpoint:{}};await api.refresh('chat-1');
       staleResume=true;await api.mutate('goal','resume');

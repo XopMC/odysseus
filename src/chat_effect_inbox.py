@@ -353,7 +353,7 @@ class ChatEffectInbox:
             return [_public(row) for row in rows]
 
     def unknown(self, owner, session_id):
-        """Only uncertain effects fence dispatch, even behind a long intent tail."""
+        """Uncertain effects fence their exact action, not independent Goal work."""
         with SessionLocal() as db:
             _session(db, owner, session_id)
             rows = db.query(ChatToolIntent).filter_by(
@@ -363,7 +363,7 @@ class ChatEffectInbox:
             return [_public(row) for row in rows]
 
     def blocking(self, owner, session_id):
-        """Effects that still require a human decision before a Goal resumes."""
+        """Effects requiring an explicit decision before their exact action retries."""
         with SessionLocal() as db:
             _session(db, owner, session_id)
             rows = db.query(ChatToolIntent).filter(

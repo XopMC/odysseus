@@ -52,6 +52,61 @@ def test_unknown_effect_is_durable_redacted_and_owner_scoped(inbox):
         assert "private-marker" not in json.dumps({"action_hash": row.action_hash, "receipt": row.receipt})
 
 
+@pytest.mark.parametrize("action", ["resume", "restore", "lease"])
+@pytest.mark.parametrize("effect_status", ["unknown", "verified_not_applied"])
+def test_goal_continuation_retains_real_effect_receipt_and_exact_action_fence(inbox, monkeypatch, action, effect_status):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes import chat_work_routes
+    from src import agent_runs, chat_effect_inbox, goal_controller
+
+    effects, _factory = inbox
+    payload = '{"command":"printf owned-test"}'
+    intent = effects.record_intent("alice", "owned-chat", "a" * 32, "call-1", "bash", payload)
+    receipt = effects.mark_unknown("alice", "owned-chat", intent["id"])
+    if effect_status == "verified_not_applied":
+        receipt = effects.verify("alice", "owned-chat", intent["id"],
+            expected_revision=receipt["revision"], outcome="not_applied", evidence="checked without replay")
+    before = effects.pending_actions("alice", "owned-chat")
+    dispatched = []
+
+    class GoalStore:
+        def goal_action(self, owner, session_id, requested, revision):
+            assert (owner, session_id, requested, revision) == ("alice", "owned-chat", action, 5)
+            return {"status": "active", "revision": 6}
+
+        def acquire_goal_lease(self, owner, session_id):
+            assert (owner, session_id) == ("alice", "owned-chat")
+            return "lease-token"
+
+    async def dispatch(owner, session_id, *, reason):
+        dispatched.append((owner, session_id, reason))
+        return True
+
+    monkeypatch.setattr(chat_effect_inbox, "inbox", effects)
+    monkeypatch.setattr(chat_work_routes, "store", GoalStore())
+    monkeypatch.setattr(chat_work_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(chat_work_routes, "effective_user", lambda request: "alice")
+    monkeypatch.setattr(agent_runs, "is_active", lambda session_id: False)
+    monkeypatch.setattr(goal_controller, "dispatch_goal_continuation", dispatch)
+    app = FastAPI(); app.include_router(chat_work_routes.setup_chat_work_routes())
+    path = "goal-lease" if action == "lease" else f"goal/{action}"
+    with TestClient(app) as client:
+        response = client.post(f"/api/chat/work/owned-chat/{path}",
+            json={} if action == "lease" else {"expected_revision": 5})
+    assert response.status_code == 200, response.text
+    assert effects.pending_actions("alice", "owned-chat") == before
+    assert dispatched == ([] if action == "lease" else [("alice", "owned-chat", f"goal_{'resumed' if action == 'resume' else 'restored'}")])
+    if effect_status == "unknown":
+        repeated = effects.record_intent("alice", "owned-chat", "b" * 32, "call-2", "bash", payload)
+        assert repeated["id"] == intent["id"] and repeated["created"] is False
+    else:
+        with pytest.raises(WorkConflict, match="explicit retry authorization required"):
+            effects.record_intent("alice", "owned-chat", "b" * 32, "call-2", "bash", payload)
+    independent = effects.record_intent("alice", "owned-chat", "b" * 32, "call-3", "bash", '{"command":"printf independent"}')
+    assert independent["created"] is True
+
+
 def test_parallel_children_can_record_same_round_tool_ordinal(inbox):
     store, _factory = inbox
     first = store.record_intent(

@@ -49,7 +49,7 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
     # An uncertain side effect fences that exact action, not the whole Goal.
     # The continuation receives a warning and can make independent progress;
     # it must not infer the result or repeat an equivalent action.
-    unresolved_effects = await asyncio.to_thread(inbox.unknown, owner, session_id)
+    unresolved_effects = await asyncio.to_thread(inbox.blocking, owner, session_id)
     lease = await asyncio.to_thread(
         store.acquire_goal_lease, owner, session_id,
         expected_goal_id=expected_goal_id, expected_attempt=expected_attempt,
@@ -90,8 +90,9 @@ async def dispatch_goal_continuation(owner: str | None, session_id: str, *, reas
         )
     if unresolved_effects:
         form["message"] += (
-            f"\nThere are {len(unresolved_effects)} unresolved tool outcome(s). "
-            "Do not repeat or infer the result of any such action. Continue independent "
+            f"\nThere are {len(unresolved_effects)} fenced tool effect(s). "
+            "Unknown outcomes must not be inferred; verified-not-applied actions still "
+            "require explicit retry authorization. Do not repeat either action. Continue independent "
             "safe work; use read-only verification where useful, and ask the user only "
             "if the remaining objective truly depends on the uncertain effect."
         )

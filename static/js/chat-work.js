@@ -200,15 +200,11 @@ function renderGoal() {
   el('goal-work-state').textContent = `${t(needsReview ? 'Review required' : goal.status)} · ${t('attempt')} ${goal.attempt || 1}`;
   el('goal-work-objective').value = goal.objective || '';
   el('goal-work-progress').textContent = goal.progress || '';
-  const effectFence = goal.status === 'waiting_user'
-    && goal.checkpoint?._wait_reason === 'unknown_side_effect'
-    && (!effectInboxLoaded || effectInbox.some(effect =>
-      ['unknown', 'verified_not_applied'].includes(effect.status)));
   el('goal-work-pause').hidden = goal.status !== 'active';
-  resumeButton.hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
+  resumeButton.hidden = !['paused', 'waiting_user', 'review_required'].includes(goal.status);
   el('goal-work-cancel').hidden = !live;
   el('goal-work-quick-pause').hidden = goal.status !== 'active';
-  quickResume.hidden = effectFence || !['paused', 'waiting_user', 'review_required'].includes(goal.status);
+  quickResume.hidden = !['paused', 'waiting_user', 'review_required'].includes(goal.status);
   el('goal-work-quick-cancel').hidden = !live;
   el('goal-mode-status-toggle').hidden = true;
   if (goal.status === 'completed') window.__odysseusSetGoalMode?.(false);
@@ -217,7 +213,10 @@ function renderGoal() {
 function renderEffectInbox() {
   const node = el('wait-unknown-effects');
   if (!node) return;
-  node.hidden = waitSnapshot?.wait_reason !== 'unknown_side_effect' && !effectInbox.length;
+  // Full Access does not require an owner decision to continue independent
+  // work. Keep uncertain receipts in the ledger, not as an approval panel.
+  node.hidden = window.accessModeModule?.getMode?.() === 'full_access'
+    || (waitSnapshot?.wait_reason !== 'unknown_side_effect' && !effectInbox.length);
   node.replaceChildren();
   if (node.hidden) return;
   const heading = document.createElement('strong');
@@ -294,13 +293,7 @@ function renderWait() {
       : state.wait_reason === 'resource_budget'
         ? `${t(state.budget?.resource === 'model_rounds' ? 'Model-round budget reached:' : state.budget?.resource === 'model_tokens' ? 'Model-token budget reached:' : state.budget?.resource === 'model_requests' ? 'Model-request budget reached:' : state.budget?.resource === 'wall_seconds' ? 'Wall-time budget reached:' : state.budget?.resource === 'children' ? 'Child-agent budget reached:' : 'Tool-call budget reached:')} ${Number(state.budget?.used) || 0}/${Number(state.budget?.limit) || 0}. ${state.budget?.resource === 'model_tokens' && state.budget?.usage_source && state.budget.usage_source !== 'real' ? `${t('Estimated usage')}. ` : ''}${t('Review the limit before resuming.')}`
       : state.wait_reason === 'unknown_side_effect'
-        ? t(Number(state.unknown_effect_count) > 0
-          ? 'A tool outcome is unknown. Verify its outcome or forbid a repeat.'
-          : Number(state.blocking_effect_count) > 0
-            ? 'The effect was verified as not applied. Authorize one exact retry or forbid a repeat before resuming.'
-            : Number(state.pending_effect_count) > 0
-              ? 'One exact retry is authorized. Resume explicitly; only the matching action can consume it.'
-              : 'No unresolved effects. You may resume the goal explicitly.')
+        ? t('Tool receipt pending verification; independent work can continue without approval.')
       : t(`Recovery: ${state.recovery_action || 'none'}`));
   renderEffectInbox();
   const action = el('wait-action');
@@ -554,16 +547,8 @@ async function mutate(kind, action) {
     const current = snapshot[kind];
     if (kind === 'goal' && error.status === 409 && desiredStatus
         && current?.id === record.id && current.status === desiredStatus) return;
-    if (kind === 'goal' && ['resume', 'restore'].includes(action) && error.status === 409) {
-      await refreshEffects(sessionId);
-      if (effectInboxLoaded && effectInbox.some(effect =>
-        ['unknown', 'verified_not_applied'].includes(effect.status))) {
-        await refreshWait(sessionId);
-        openEffectRecovery();
-        toast(t('Review the tool effect before resuming.'), true);
-        return;
-      }
-    }
+    // A Resume conflict is about Goal revision/state, not implicit permission
+    // to replay a tool. Keep effect recovery separate from independent work.
     toast(error.message, true);
   }
 }

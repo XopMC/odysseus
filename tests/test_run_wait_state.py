@@ -251,7 +251,7 @@ def test_repeated_compaction_failure_offers_explicit_recovery_not_question_card(
     assert "private provider response" not in json.dumps(leaked)
 
 
-def test_unknown_effect_wait_requires_inbox_inspection_not_goal_resume():
+def test_unknown_effect_wait_offers_independent_goal_resume():
     from src.run_wait_state import compose_wait_panel
 
     panel = compose_wait_panel(
@@ -261,7 +261,7 @@ def test_unknown_effect_wait_requires_inbox_inspection_not_goal_resume():
               "status_since": 180, "lease_held": False},
         now=200,
     )
-    assert panel["recovery_action"] == "inspect_effect"
+    assert panel["recovery_action"] == "resume_goal"
     assert panel["wait_reason"] == "unknown_side_effect"
 
 
@@ -278,7 +278,7 @@ def test_reconciled_effect_wait_offers_explicit_goal_resume():
     assert panel["unknown_effect_count"] == 0
 
 
-def test_verified_missing_effect_blocks_goal_until_retry_is_authorized():
+def test_verified_missing_effect_does_not_block_independent_goal_resume():
     from src.run_wait_state import compose_wait_panel
 
     waiting = compose_wait_panel(
@@ -287,7 +287,7 @@ def test_verified_missing_effect_blocks_goal_until_retry_is_authorized():
               "status_since": 180, "lease_held": False},
         unknown_effects=0, blocking_effects=1, pending_effects=1, now=200,
     )
-    assert waiting["recovery_action"] == "inspect_effect"
+    assert waiting["recovery_action"] == "resume_goal"
     assert waiting["unknown_effect_count"] == 0
     assert waiting["blocking_effect_count"] == 1
 
