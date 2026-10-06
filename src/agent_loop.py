@@ -1202,7 +1202,7 @@ _SUBAGENT_DENIAL_RE = re.compile(
     r"не\s+(?:создавай|создавать|запускай|запускать|порождай|делегируй)"
     r"(?:\s+\w+){0,2}\s+(?:subagents?|сабагент\w*)"
     r"|no\s+more\s+(?:new\s+)?subagents?"
-    r"|don't\s+(?:create|spawn|delegate)\s+(?:(?:any|more|new)\s+){0,2}subagents?",
+    r"|(?:don't|do\s+not|never)\s+(?:create|spawn|delegate)\s+(?:(?:any|more|new)\s+){0,2}subagents?",
     re.IGNORECASE,
 )
 _SUBAGENT_ALLOW_RE = re.compile(
