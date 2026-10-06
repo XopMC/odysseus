@@ -106,6 +106,33 @@ def test_restart_does_not_reset_provider_failure_budget(workers, monkeypatch):
     assert len(calls) == 1
 
 
+def test_progress_checkpoint_resets_public_streak_but_keeps_lifetime_retries(workers, monkeypatch):
+    _, restarted, factory = workers
+    seed(factory)
+    configure(monkeypatch)
+    with factory.begin() as db:
+        row = db.get(ChatSubagentRun, "child")
+        row.metrics = {"consecutive_provider_failures": 7, "provider_retries": 17}
+        cp = db.query(ChatSubagentEvent).filter_by(kind="context_checkpoint").first()
+        cp.payload = {**cp.payload, "consecutive_provider_failures": 7, "provider_retries": 17}
+
+    async def stream(*args, **kwargs):
+        yield frame("context_checkpoint", messages=args[2][1:] + [
+            {"role": "assistant", "content": "New verified progress"}], compactions=3)
+        yield frame(delta="Verified final result")
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream)
+
+    async def scenario():
+        assert restarted.recover_stale() == 1
+        assert await restarted.resume_recovering() == 1
+        await restarted._tasks["child"]
+        metrics = restarted.get("alice", "qa", "child")["metrics"]
+        assert metrics["consecutive_provider_failures"] == 0
+        assert metrics["provider_retries"] == 17
+        assert restarted.list("alice", "qa")[0]["metrics"]["consecutive_provider_failures"] == 0
+    asyncio.run(scenario())
+
+
 def test_checkpoint_gap_fails_closed_and_keeps_work(workers, monkeypatch):
     first, restarted, factory = workers
     seed(factory)

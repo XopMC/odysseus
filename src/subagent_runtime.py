@@ -1081,6 +1081,7 @@ class SubagentRuntime:
                                         "checkpoint_hash": event.get("ledger_hash"),
                                         "context_compactions": history.context_checkpoint_count,
                                         "effect_ledger_recovery_cycles": ledger_recovery_cycles,
+                                        "consecutive_provider_failures": consecutive_failures,
                                     })
                                 if kind == "rounds_exhausted":
                                     round_slice_exhausted = True
